@@ -163,6 +163,45 @@ class SessionAggregate:
             )
         )
 
+    def record_human_response(
+        self,
+        *,
+        approval_id: str,
+        actor_id: str,
+        decision: str,
+        feedback: str | None,
+    ) -> None:
+        self._require_existing()
+        if self.status is not SessionStatus.WAITING_FOR_HUMAN:
+            status = self.status
+            assert status is not None
+            raise InvalidTransitionError(
+                f"cannot record approval response for Session in {status.value}"
+            )
+        self._raise(
+            NewEvent(
+                type="human.response.recorded",
+                visibility=Visibility.USER,
+                payload={
+                    "approval_id": approval_id,
+                    "actor_id": actor_id,
+                    "decision": decision,
+                    "feedback": feedback,
+                },
+            )
+        )
+        self._raise(
+            NewEvent(
+                type=f"approval.{decision}",
+                visibility=Visibility.USER,
+                payload={
+                    "approval_id": approval_id,
+                    "decision": decision,
+                    "feedback": feedback,
+                },
+            )
+        )
+
     def release_pending_events(self) -> list[NewEvent]:
         events = list(self._pending)
         self._pending.clear()
@@ -186,6 +225,10 @@ class SessionAggregate:
             self.status = SessionStatus.PAUSED
         elif event_type == "approval.requested":
             self.status = SessionStatus.WAITING_FOR_HUMAN
+        elif event_type == "approval.approved":
+            self.status = SessionStatus.RUNNABLE
+        elif event_type == "approval.rejected":
+            self.status = SessionStatus.RUNNABLE
         elif event_type == "run.retry_scheduled":
             self.status = SessionStatus.RETRY_WAIT
         elif event_type == "session.resumed":

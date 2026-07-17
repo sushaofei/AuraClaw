@@ -9,7 +9,12 @@ from auraclaw.config import get_settings
 from auraclaw.contracts.commands import CommandContext
 from auraclaw.contracts.events import Actor
 from auraclaw.infrastructure.memory import InMemoryEventStore
-from auraclaw.infrastructure.postgres import PostgresEventStore, PostgresTaskProjection
+from auraclaw.infrastructure.postgres import (
+    PostgresApprovalProjection,
+    PostgresEventStore,
+    PostgresTaskProjection,
+)
+from auraclaw.projections.approvals import CompositeProjection, InMemoryApprovalProjection
 from auraclaw.projections.relay import OutboxRelay
 from auraclaw.projections.tasks import InMemoryTaskProjection
 
@@ -23,6 +28,7 @@ class RequestIdentity:
 
 Store = InMemoryEventStore | PostgresEventStore
 Projection = InMemoryTaskProjection | PostgresTaskProjection
+ApprovalProjection = InMemoryApprovalProjection | PostgresApprovalProjection
 
 
 @lru_cache
@@ -42,15 +48,25 @@ def get_task_projection() -> Projection:
 
 
 @lru_cache
+def get_approval_projection() -> ApprovalProjection:
+    settings = get_settings()
+    if settings.postgres_enabled:
+        return PostgresApprovalProjection(settings.resolved_database_url)
+    return InMemoryApprovalProjection()
+
+
+@lru_cache
 def get_task_service() -> TaskService:
     projection = get_task_projection()
+    approvals = get_approval_projection()
     event_store = get_event_store()
-    relay = OutboxRelay(event_store, projection)
+    relay = OutboxRelay(event_store, CompositeProjection(projection, approvals))
     return TaskService(
         event_store=event_store,
         relay=relay,
         reader=projection,
         admission=AllowAllAdmissionController(),
+        approvals=approvals,
     )
 
 

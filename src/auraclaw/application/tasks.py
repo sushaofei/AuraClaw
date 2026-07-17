@@ -5,9 +5,11 @@ from uuid import uuid4
 
 from auraclaw.contracts.commands import CommandContext
 from auraclaw.contracts.errors import NotFoundError
+from auraclaw.domain.approval import ApprovalAggregate
 from auraclaw.domain.ports import (
     AdmissionController,
     AppendResult,
+    ApprovalViewReader,
     EventStore,
     OutboxRelayPort,
     SessionSnapshot,
@@ -24,11 +26,13 @@ class TaskService:
         relay: OutboxRelayPort,
         reader: TaskReader,
         admission: AdmissionController,
+        approvals: ApprovalViewReader | None = None,
     ) -> None:
         self._event_store = event_store
         self._relay = relay
         self._reader = reader
         self._admission = admission
+        self._approvals = approvals
 
     async def create_task(self, *, goal: str, context: CommandContext) -> dict[str, Any]:
         await self._admission.admit(goal=goal, context=context)
@@ -131,6 +135,51 @@ class TaskService:
             root_session_id=session.root_session_id,
             session_id=session.session_id,
             run_id=run_id,
+            context=context,
+            events=session.release_pending_events(),
+            command_result=response,
+        )
+        await self._after_append(session, result)
+        return result.command_result
+
+    async def record_approval_response(
+        self,
+        *,
+        session_id: str,
+        approval_id: str,
+        decision: str,
+        feedback: str | None,
+        context: CommandContext,
+    ) -> dict[str, Any]:
+        if self._approvals is None:
+            raise NotFoundError(f"Approval not found: {approval_id}")
+        record = await self._approvals.get(context.tenant_id, approval_id)
+        if record is None or record.session_id != session_id:
+            raise NotFoundError(f"Approval not found: {approval_id}")
+        decided = ApprovalAggregate.respond(
+            record,
+            actor_id=context.actor.id,
+            decision=decision,
+            feedback=feedback,
+        )
+        session = await self._load(context.tenant_id, session_id)
+        session.record_human_response(
+            approval_id=approval_id,
+            actor_id=context.actor.id,
+            decision=decided.status.value,
+            feedback=feedback,
+        )
+        response = {
+            "session_id": session_id,
+            "run_id": session.run_id,
+            "status": session.status.value if session.status else "created",
+            "approval_id": approval_id,
+            "decision": decided.status.value,
+        }
+        result = await self._event_store.append(
+            root_session_id=session.root_session_id,
+            session_id=session.session_id,
+            run_id=session.run_id,
             context=context,
             events=session.release_pending_events(),
             command_result=response,

@@ -144,7 +144,14 @@ class AgentHarness:
         )
 
         for index, call in enumerate(response.tool_calls):
-            await self._run_tool(assignment, response, call, index, sequence)
+            can_continue = await self._run_tool(
+                assignment, response, call, index, sequence
+            )
+            if not can_continue:
+                await self._control.finish_assignment(
+                    self._task_id(assignment), "waiting_for_human"
+                )
+                return
 
         events = await self._session.load(assignment)
         await self._append_once(
@@ -172,7 +179,7 @@ class AgentHarness:
         call: ToolCall,
         index: int,
         sequence: int,
-    ) -> None:
+    ) -> bool:
         events = await self._session.load(assignment)
         completed = next(
             (
@@ -184,7 +191,7 @@ class AgentHarness:
             None,
         )
         if completed is not None:
-            return
+            return True
         await self._append_once(
             assignment,
             events,
@@ -233,6 +240,43 @@ class AgentHarness:
             )
             await self._inject(InjectionPoint.AFTER_TOOL)
         events = await self._session.load(assignment)
+        if result.get("error_code") == "approval_required":
+            metadata = result.get("metadata", {})
+            approval_request = metadata.get("approval_request", {})
+            approval_id = str(approval_request.get("approval_id", call.tool_invocation_id))
+            await self._append_once(
+                assignment,
+                events,
+                "approval.requested",
+                dict(approval_request),
+                identity=approval_id,
+                visibility=Visibility.USER,
+            )
+            events = await self._session.load(assignment)
+            await self._append_once(
+                assignment,
+                events,
+                "tool.call.denied",
+                {
+                    "tool_invocation_id": call.tool_invocation_id,
+                    "name": call.name,
+                    "error_code": "approval_required",
+                    "approval_id": approval_id,
+                },
+                identity=call.tool_invocation_id,
+            )
+            await self._save_checkpoint(
+                assignment,
+                "approval_waiting",
+                {
+                    "response": self._response_to_dict(response),
+                    "tool_index": index,
+                    "tool_invocation_id": call.tool_invocation_id,
+                    "approval_id": approval_id,
+                    "sequence": sequence,
+                },
+            )
+            return False
         await self._append_once(
             assignment,
             events,
@@ -249,6 +293,7 @@ class AgentHarness:
             "model_recorded",
             {"response": self._response_to_dict(response), "sequence": sequence},
         )
+        return True
 
     async def _append_once(
         self,
@@ -266,6 +311,7 @@ class AgentHarness:
                 event.payload.get("run_id") == identity
                 or event.payload.get("model_call_id") == identity
                 or event.payload.get("tool_invocation_id") == identity
+                or event.payload.get("approval_id") == identity
             )
             for event in existing
         ):
@@ -356,6 +402,11 @@ class AgentHarness:
                     "tool_invocation_id": call.tool_invocation_id,
                     "name": call.name,
                     "arguments": call.arguments,
+                    "version": call.version,
+                    "expected_side_effect": call.expected_side_effect,
+                    "approval_id": call.approval_id,
+                    "credential_ref": call.credential_ref,
+                    "idempotency_key": call.idempotency_key,
                 }
                 for call in response.tool_calls
             ],
@@ -376,6 +427,11 @@ class AgentHarness:
                     tool_invocation_id=str(call["tool_invocation_id"]),
                     name=str(call["name"]),
                     arguments=dict(call.get("arguments", {})),
+                    version=str(call.get("version", "1")),
+                    expected_side_effect=str(call.get("expected_side_effect", "read")),
+                    approval_id=call.get("approval_id"),
+                    credential_ref=call.get("credential_ref"),
+                    idempotency_key=call.get("idempotency_key"),
                 )
                 for call in data.get("tool_calls", [])
             ),
