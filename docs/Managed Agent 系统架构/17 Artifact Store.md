@@ -1,0 +1,92 @@
+# Artifact Store
+
+## 定位
+
+Artifact Store 保存不适合进入 Session Event 的大型或二进制产物，包括文件、报告、数据集、补丁、模型输出快照和执行日志。Session 只保存受控 Artifact Reference。
+
+## 核心模块
+
+```text
+Metadata Store
+Object Storage Adapter
+Version / Lineage Manager
+Content Hash / Deduplication
+Tenant / ACL
+Upload / Download Authorization
+Signed URL Issuer
+Malware / Content Scanner
+Encryption / Key Policy
+Lifecycle / Retention
+Garbage Collector
+Audit Trail
+```
+
+## Artifact 元数据
+
+```text
+artifact_id
+tenant_id
+root_session_id / session_id
+type / media_type
+name
+version
+content_hash
+size
+storage_ref
+producer
+lineage_refs
+classification
+acl
+created_at
+retention_until
+```
+
+`storage_ref` 只在可信服务内部使用，外部返回短期受控 URL。
+
+## 写入流程
+
+```text
+Hands / Agent / Delivery Producer
+ -> 申请 Upload
+ -> 写入临时对象
+ -> Hash / Scan / Classification
+ -> 提交不可变 Artifact Version
+ -> Session 追加 artifact.attached(ref)
+```
+
+大型输出不能先写入 Session 再异步搬运，否则会污染 Event Log 并产生双事实源。
+
+## 读取流程
+
+- Task Query：校验 Root/Child 权限后返回短期下载链接。
+- Agent Runtime：根据 Context Policy 挂载或读取指定片段。
+- Result Delivery：组装 Payload 或生成一次性链接。
+- Reviewer：只读访问待审 Artifact 和 Lineage。
+
+## 版本与所有权
+
+- Artifact Version 默认不可变。
+- 并行 Worker 写不同 Artifact 或 Patch，不覆盖共享文件。
+- 合并由 Coordinator/Reviewer 产生新版本并记录 Lineage。
+- 外部可变资源保存 resource id、etag/version 和证据引用。
+
+## 生命周期
+
+- 临时中间产物短期保留。
+- 最终结果与审计证据按 Session 策略保留。
+- 被 Session、Delivery 或 Review 引用的 Artifact 不得提前回收。
+- 删除使用引用计数/标记清理和合规保留检查。
+
+## 安全与观测
+
+- 上传下载全程 tenant scope、加密和审计。
+- 对可执行文件、压缩包和外部内容进行扫描。
+- 敏感 Artifact 不生成可转发的永久链接。
+- 指标：storage bytes、upload/download latency、scan failure、orphan artifact、GC reclaimed、signed URL use。
+
+## 验收条件
+
+- Session Event 中只保存 Artifact Reference。
+- 相同内容可以去重，但 ACL 和引用仍独立校验。
+- Worker 无法覆盖不属于自己的不可变版本。
+- Result Delivery 链接到期后不可继续访问。

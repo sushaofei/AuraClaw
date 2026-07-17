@@ -1,0 +1,118 @@
+from __future__ import annotations
+
+import asyncio
+from collections.abc import Sequence
+from typing import Any
+
+from auraclaw.contracts.events import CanonicalEvent
+from auraclaw.contracts.state import SessionStatus
+
+
+class ProjectionGapError(RuntimeError):
+    pass
+
+
+class InMemoryTaskProjection:
+    """Disposable Control/Result read model used by the first vertical slice."""
+
+    def __init__(self) -> None:
+        self._tasks: dict[tuple[str, str], dict[str, Any]] = {}
+        self._event_ids: set[str] = set()
+        self._lock = asyncio.Lock()
+
+    async def project(self, events: Sequence[CanonicalEvent]) -> None:
+        async with self._lock:
+            for event in events:
+                if event.event_id in self._event_ids:
+                    continue
+                key = (event.tenant_id, event.session_id)
+                current = self._tasks.get(key)
+                current_version = int(current["projection_version"]) if current else 0
+                if event.aggregate_version != current_version + 1:
+                    raise ProjectionGapError(
+                        f"projection gap for {event.session_id}: "
+                        f"expected {current_version + 1}, got {event.aggregate_version}"
+                    )
+                view = dict(current) if current else self._new_view(event)
+                self._apply(view, event)
+                view["projection_version"] = event.aggregate_version
+                view["projected_at"] = event.occurred_at.isoformat()
+                self._tasks[key] = view
+                self._event_ids.add(event.event_id)
+
+    async def get_task(self, tenant_id: str, session_id: str) -> dict[str, Any] | None:
+        task = self._tasks.get((tenant_id, session_id))
+        return dict(task) if task else None
+
+    async def clear(self) -> None:
+        async with self._lock:
+            self._tasks.clear()
+            self._event_ids.clear()
+
+    @staticmethod
+    def _new_view(event: CanonicalEvent) -> dict[str, Any]:
+        return {
+            "tenant_id": event.tenant_id,
+            "session_id": event.session_id,
+            "root_session_id": event.root_session_id,
+            "run_id": event.run_id,
+            "status": SessionStatus.CREATED.value,
+            "progress": 0.0,
+            "current_stage": "admission",
+            "result_summary": None,
+            "result_ref": None,
+            "artifact_refs": [],
+            "error": None,
+            "projection_version": 0,
+        }
+
+    @staticmethod
+    def _apply(view: dict[str, Any], event: CanonicalEvent) -> None:
+        payload = event.payload
+        if event.type == "session.created":
+            view.update(
+                goal=payload["goal"],
+                role=payload.get("role", "root"),
+                parent_session_id=payload.get("parent_session_id"),
+                status=SessionStatus.CREATED.value,
+            )
+        elif event.type == "run.requested":
+            view.update(
+                run_id=payload["run_id"],
+                status=SessionStatus.PENDING.value,
+                current_stage="pending",
+            )
+        elif event.type == "run.scheduled":
+            view.update(status=SessionStatus.RUNNABLE.value, current_stage="scheduling")
+        elif event.type == "run.started":
+            view.update(status=SessionStatus.RUNNING.value, current_stage="running")
+        elif event.type == "session.paused":
+            view.update(status=SessionStatus.PAUSED.value, current_stage="paused")
+        elif event.type == "approval.requested":
+            view.update(
+                status=SessionStatus.WAITING_FOR_HUMAN.value,
+                current_stage="waiting_for_human",
+            )
+        elif event.type == "session.resumed":
+            view.update(
+                run_id=payload["run_id"],
+                status=SessionStatus.PENDING.value,
+                current_stage="pending",
+            )
+        elif event.type == "run.completed":
+            view.update(
+                status=SessionStatus.COMPLETED.value,
+                progress=1.0,
+                current_stage="completed",
+                result_summary=payload.get("result_summary"),
+                result_ref=payload.get("result_ref"),
+                artifact_refs=payload.get("artifact_refs", []),
+            )
+        elif event.type == "run.failed":
+            view.update(
+                status=SessionStatus.FAILED.value,
+                current_stage="failed",
+                error=payload.get("error"),
+            )
+        elif event.type == "run.cancelled":
+            view.update(status=SessionStatus.CANCELLED.value, current_stage="cancelled")
