@@ -198,6 +198,12 @@ class SessionAggregate:
             self.status = SessionStatus.FAILED
         elif event_type == "run.cancelled":
             self.status = SessionStatus.CANCELLED
+        elif event_type == "runtime.failed":
+            self.status = SessionStatus.RETRY_WAIT
+        elif event_type == "runtime.reprovisioned":
+            self.status = SessionStatus.RUNNABLE
+        elif event_type == "run.terminated":
+            self.status = SessionStatus.FAILED
 
     def _raise(self, event: NewEvent) -> None:
         self.apply(event.type, event.payload)

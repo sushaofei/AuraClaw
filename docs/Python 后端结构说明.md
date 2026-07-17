@@ -4,7 +4,7 @@
 
 ## 当前完成范围
 
-第一阶段实现架构中的事实与查询主链：
+当前实现覆盖事实/查询主链与 M2 Managed Runtime 控制链：
 
 ```text
 HTTP Command
@@ -13,6 +13,13 @@ HTTP Command
   -> Canonical Event Store + Transactional Outbox
   -> Task Projection
   -> Query API
+
+Control Projection
+  -> Runnable Queue / Atomic Claim
+  -> Lease + Monotonic Fencing Token
+  -> Orchestrator / Runtime Assignment
+  -> Recoverable Agent Harness
+  -> Session / Model / Tool / Runtime Event Ports
 ```
 
 内存适配器用于快速测试。PostgreSQL 适配器负责 Canonical Event、Aggregate Version、
@@ -35,7 +42,7 @@ api -> application -> domain -> contracts
 - `infrastructure`：Event Store、Outbox 和未来 PostgreSQL 适配器。
 - `projections`：可删除、可重建的查询模型。
 - `api`：鉴权上下文、幂等键、版本前置条件和 HTTP 表示。
-- `runtime`：为后续 Orchestrator、Coordinator、Worker、Reviewer 保留端口。
+- `runtime`：Runtime 端口、fenced client、可恢复 Harness 和 Model Gateway。
 
 ## 与目标架构的对应关系
 
@@ -46,14 +53,21 @@ api -> application -> domain -> contracts
 | Canonical Event / Outbox | `infrastructure/postgres.py` | PostgreSQL 与内存适配器已实现 |
 | Projection / Read Model | `projections/tasks.py`、`infrastructure/postgres.py` | 幂等、gap、checkpoint、重建已实现 |
 | Task Query / Result | `api/routes/tasks.py` | 状态与结果查询已实现 |
-| Control State / Orchestrator | `runtime/ports.py`、SQL Schema | 仅端口/表结构 |
+| Control State | `infrastructure/control_memory.py`、`control_postgres.py` | Queue、Lease、Fencing、Assignment、Heartbeat、Capacity、Checkpoint |
+| Orchestrator | `application/orchestration.py` | watch、claim、schedule、provision、cancel、heartbeat、reconcile |
+| Agent Runtime | `runtime/harness.py`、`runtime/clients.py` | Budget、Deadline、Cancel、Checkpoint 与四类端口 |
+| Model Gateway | `runtime/model_gateway.py` | Provider Adapter、路由和 Gateway 内 Credential 解析 |
 | 其他组件 | 对应设计文档 | 按实施计划继续建设 |
 
-## M1 运维边界
+## M2 运维边界
 
 - API 请求会尝试即时 relay，以提供开发和单进程部署下的快速可见性；可靠恢复仍以
   Transactional Outbox 为准。
 - 独立 Worker 使用 `auraclaw projection relay --watch` 持续消费。
 - `auraclaw projection rebuild [--tenant ...]` 从 Canonical Event Log 重建 Task Read Model。
 - Snapshot 仅优化聚合加载；损坏或缺失时仍可从完整事件历史恢复。
-- 下一阶段实现 Control Store、Lease、Fencing Token、Orchestrator 与 Agent Runtime。
+- Control State Store 与 Canonical Event Store 使用独立 Schema/写入边界，不做跨 Store 事务。
+- Orchestrator 只调度资源，不解析目标、不拆分 Task DAG。
+- Runtime Event Bus 故障不阻止完整模型输出与最终结果写入 Canonical Event Log。
+- Runtime checkpoint、模型调用 ID 和工具调用 ID 都稳定，接管后不会重复产生业务事实；
+  Tool Gateway 的真实外部副作用幂等、审批和 Sandbox 在 M3 完成。

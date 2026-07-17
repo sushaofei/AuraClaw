@@ -22,6 +22,12 @@ KNOWN_TASK_EVENTS = {
     "run.requested",
     "run.scheduled",
     "run.started",
+    "model.output.completed",
+    "tool.call.requested",
+    "tool.call.completed",
+    "runtime.failed",
+    "runtime.reprovisioned",
+    "run.terminated",
     "session.paused",
     "approval.requested",
     "run.retry_scheduled",
@@ -161,3 +167,13 @@ class InMemoryTaskProjection:
             )
         elif event.type == "run.cancelled":
             view.update(status=SessionStatus.CANCELLED.value, current_stage="cancelled")
+        elif event.type == "runtime.failed":
+            view.update(
+                status=SessionStatus.RETRY_WAIT.value,
+                current_stage="runtime_recovery",
+                error=payload.get("error"),
+            )
+        elif event.type == "runtime.reprovisioned":
+            view.update(status=SessionStatus.RUNNABLE.value, current_stage="scheduling")
+        elif event.type == "run.terminated":
+            view.update(status=SessionStatus.FAILED.value, current_stage="terminated")
