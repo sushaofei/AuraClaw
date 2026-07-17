@@ -10,6 +10,8 @@ from auraclaw.api.dependencies import (
 )
 from auraclaw.api.models import (
     AppendMessageRequest,
+    ApprovalCommandResponse,
+    ApprovalResponseRequest,
     CancelTaskRequest,
     CommandResponse,
     CreateTaskRequest,
@@ -183,3 +185,32 @@ async def resume_task(
         operation="resume_task",
     )
     return await service.resume_task(session_id=session_id, context=context)
+
+
+@router.post(
+    "/sessions/{session_id}/approvals/{approval_id}/responses",
+    response_model=ApprovalCommandResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def record_approval_response(
+    session_id: str,
+    approval_id: str,
+    request: ApprovalResponseRequest,
+    identity: Identity,
+    service: TaskServiceDependency,
+    idempotency_key: str = Header(alias="Idempotency-Key", min_length=1),
+    expected_version: int = Header(alias="X-Expected-Version"),
+) -> dict[str, Any]:
+    context = command_context(
+        identity=identity,
+        command_id=idempotency_key,
+        expected_version=expected_version,
+        operation="record_approval_response",
+    )
+    return await service.record_approval_response(
+        session_id=session_id,
+        approval_id=approval_id,
+        decision=request.decision,
+        feedback=request.feedback,
+        context=context,
+    )

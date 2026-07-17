@@ -6,6 +6,7 @@ from typing import Any, Protocol
 
 from auraclaw.contracts.commands import CommandContext
 from auraclaw.contracts.events import CanonicalEvent, NewEvent
+from auraclaw.contracts.tools import ApprovalRecord
 
 
 @dataclass(frozen=True)
@@ -67,3 +68,7 @@ class OutboxRelayPort(Protocol):
 
 class AdmissionController(Protocol):
     async def admit(self, *, goal: str, context: CommandContext) -> None: ...
+
+
+class ApprovalViewReader(Protocol):
+    async def get(self, tenant_id: str, approval_id: str) -> ApprovalRecord | None: ...

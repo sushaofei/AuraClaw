@@ -106,6 +106,11 @@ class ToolCall:
     tool_invocation_id: str
     name: str
     arguments: dict[str, Any]
+    version: str = "1"
+    expected_side_effect: str = "read"
+    approval_id: str | None = None
+    credential_ref: str | None = None
+    idempotency_key: str | None = None
 
 
 @dataclass(frozen=True)

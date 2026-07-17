@@ -25,11 +25,17 @@ KNOWN_TASK_EVENTS = {
     "model.output.completed",
     "tool.call.requested",
     "tool.call.completed",
+    "tool.call.denied",
     "runtime.failed",
     "runtime.reprovisioned",
     "run.terminated",
     "session.paused",
     "approval.requested",
+    "human.response.recorded",
+    "approval.approved",
+    "approval.rejected",
+    "approval.expired",
+    "approval.cancelled",
     "run.retry_scheduled",
     "session.resumed",
     "run.completed",
@@ -144,6 +150,10 @@ class InMemoryTaskProjection:
                 status=SessionStatus.WAITING_FOR_HUMAN.value,
                 current_stage="waiting_for_human",
             )
+        elif event.type == "approval.approved":
+            view.update(status=SessionStatus.RUNNABLE.value, current_stage="scheduling")
+        elif event.type == "approval.rejected":
+            view.update(status=SessionStatus.RUNNABLE.value, current_stage="replanning")
         elif event.type == "session.resumed":
             view.update(
                 run_id=payload["run_id"],

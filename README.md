@@ -4,19 +4,27 @@ AuraClaw 是一个遵循 Managed Agent 架构的纯 Python 后端服务。系统
 Session Event Log 为事实源，以可重建 Projection 提供查询，并把运行时控制、Agent
 Runtime、工具执行和结果交付保持为清晰的逻辑边界。
 
-当前版本已实现 M2 Managed Runtime 与控制平面：
+当前版本已实现 M3 工具、Artifact 与审批安全闭环：
 
 ```text
 Task API -> Session Aggregate -> PostgreSQL Canonical Events + Transactional Outbox
          -> Outbox Relay -> Disposable Projection -> Task Query API
 Control Projection -> Runnable Queue -> Orchestrator -> Lease/Fencing/Assignment
                    -> Recoverable Agent Harness -> Model/Tool/Session Gateway Ports
+Tool Call -> Registry/Schema/Policy -> Approval Digest -> Hands/Credential Proxy
+          -> Result Redaction/Normalization -> Inline Result or Artifact Reference
 ```
 
 Agent Runtime 不读取模型 Provider Secret，也不直接修改 Session 状态。完整模型输出进入
 Canonical Event Log；Token Delta 只发布到可丢弃的 Runtime Event Bus。Runtime 在模型调用前、
 模型完成后、工具执行前、工具执行后均有持久 checkpoint，可由新 fencing token 的 Runtime
 接管。
+
+写入与破坏性工具在没有匹配 `Session + action digest + policy version` 的有效审批时
+fail closed。Human Response 只能通过 Task Gateway 写回 Canonical Event；审批视图可从事件
+重建。Hands 不继承宿主 Secret，Credential Proxy 代 Runtime 使用 `credential_ref`，并在结果
+进入 Session 前执行脱敏。超出内联大小上限的 Tool Result 直接保存为不可变 Artifact，
+Session 只接收 `artifact_ref`。
 
 ## 本地启动
 
@@ -36,6 +44,7 @@ uv run uvicorn auraclaw.main:app --reload
 - `POST /v1/sessions/{session_id}/runs`
 - `POST /v1/sessions/{session_id}/cancel`
 - `POST /v1/sessions/{session_id}/resume`
+- `POST /v1/sessions/{session_id}/approvals/{approval_id}/responses`
 
 写接口要求 `Idempotency-Key`；修改既有 Session 时还要求 `X-Expected-Version`。
 查询支持 `ETag`、`If-None-Match` 和 `min_version`，投影未追上时返回 `202` 与
@@ -59,9 +68,10 @@ uv run uvicorn auraclaw.main:app --reload
 migrations/0001_initial.sql
 migrations/0002_m1_fact_query.sql
 migrations/0003_m2_managed_runtime.sql
+migrations/0004_m3_tool_artifact_approval.sql
 ```
 
-对应的 `.down.sql` 文件提供 M1/M2 Schema 回滚。生产部署应由迁移系统执行这些 SQL，
+对应的 `.down.sql` 文件提供 M1/M2/M3 Schema 回滚。生产部署应由迁移系统执行这些 SQL，
 不应由 API 进程在启动时自动修改 Schema。
 
 Outbox Worker 与投影重建：
@@ -101,11 +111,16 @@ src/auraclaw/
   runtime/         Runtime 端口、Fenced Clients、Harness、Model Gateway
 ```
 
+M3 关键实现位于 `application/tooling.py`、`domain/approval.py`、
+`infrastructure/hands.py`、`infrastructure/artifacts.py`、
+`infrastructure/credentials.py` 和 `projections/approvals.py`。
+
 设计依据见 [Managed Agent 系统架构](docs/Managed%20Agent%20系统架构/00%20Managed%20Agent%20系统架构总览.md)，实施顺序见 [开发方案与实施计划](docs/Managed%20Agent%20开发方案与实施计划.md)。
 
 ## 当前边界
 
 项目保留内存适配器用于快速测试；配置 PostgreSQL 后使用持久 Event Store、Control
-State Store、Snapshot、Command Dedup、Transactional Outbox、Task Read Model、Projector
-Checkpoint 和 Poison Event Queue。M2 的 Tool Client 是受 fencing 保护的执行边界与幂等
-开发适配器；真实 Tool Registry、审批、Sandbox、Credential Proxy 和 Artifact 闭环属于 M3。
+State Store、Snapshot、Command Dedup、Transactional Outbox、Task/Approval Read Model、
+Projector Checkpoint 和 Poison Event Queue。M3 提供本地 Hands Sandbox、内存对象适配器与
+Vault 测试适配器；生产对象存储、企业 Vault 和外部 Connector 通过现有端口接入。Child DAG、
+Coordinator/Worker/Reviewer 协作与评审属于 M4。

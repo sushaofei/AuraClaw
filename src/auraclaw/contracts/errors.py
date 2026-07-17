@@ -48,3 +48,33 @@ class RuntimeCancelledError(AuraClawError):
 class BudgetExceededError(AuraClawError):
     code = "runtime_budget_exceeded"
     status_code = 409
+
+
+class SchemaValidationError(AuraClawError):
+    code = "tool_schema_invalid"
+    status_code = 422
+
+
+class PolicyDeniedError(AuraClawError):
+    code = "policy_denied"
+    status_code = 403
+
+
+class ApprovalValidationError(AuraClawError):
+    code = "approval_invalid"
+    status_code = 409
+
+
+class ArtifactAccessError(AuraClawError):
+    code = "artifact_access_denied"
+    status_code = 403
+
+
+class SandboxViolationError(AuraClawError):
+    code = "sandbox_violation"
+    status_code = 403
+
+
+class CredentialAccessError(AuraClawError):
+    code = "credential_access_denied"
+    status_code = 403

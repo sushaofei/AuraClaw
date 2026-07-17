@@ -15,6 +15,11 @@ class AppendMessageRequest(BaseModel):
     message: str = Field(min_length=1, max_length=100_000)
 
 
+class ApprovalResponseRequest(BaseModel):
+    decision: str = Field(pattern="^(approved|rejected)$")
+    feedback: str | None = Field(default=None, max_length=10_000)
+
+
 class TaskAcceptedResponse(BaseModel):
     session_id: str
     run_id: str
@@ -28,6 +33,11 @@ class CommandResponse(BaseModel):
     session_id: str
     run_id: str | None
     status: str
+
+
+class ApprovalCommandResponse(CommandResponse):
+    approval_id: str
+    decision: str
 
 
 class TaskView(BaseModel):
