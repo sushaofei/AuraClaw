@@ -10,3 +10,4 @@ class CommandContext:
     actor: Actor
     correlation_id: str
     expected_version: int
+    operation: str = "append"

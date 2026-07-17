@@ -9,15 +9,17 @@ from uuid import uuid4
 from auraclaw.contracts.commands import CommandContext
 from auraclaw.contracts.errors import VersionConflictError
 from auraclaw.contracts.events import CanonicalEvent, NewEvent, utc_now
-from auraclaw.domain.ports import AppendResult
+from auraclaw.domain.ports import AppendResult, SessionSnapshot
 
 
-@dataclass(frozen=True)
+@dataclass
 class OutboxRecord:
+    outbox_id: int
     event_id: str
     destination: str
     event: CanonicalEvent
     published: bool = False
+    publish_attempt: int = 0
 
 
 class InMemoryEventStore:
@@ -25,12 +27,40 @@ class InMemoryEventStore:
 
     def __init__(self) -> None:
         self._streams: dict[tuple[str, str], list[CanonicalEvent]] = {}
-        self._commands: dict[tuple[str, str], dict[str, Any]] = {}
+        self._commands: dict[tuple[str, str, str], dict[str, Any]] = {}
         self._outbox: list[OutboxRecord] = []
+        self._snapshots: dict[tuple[str, str], SessionSnapshot] = {}
         self._lock = asyncio.Lock()
 
-    async def load(self, tenant_id: str, session_id: str) -> list[CanonicalEvent]:
-        return list(self._streams.get((tenant_id, session_id), []))
+    async def load(
+        self, tenant_id: str, session_id: str, *, from_version: int = 1
+    ) -> list[CanonicalEvent]:
+        return [
+            event
+            for event in self._streams.get((tenant_id, session_id), [])
+            if event.aggregate_version >= from_version
+        ]
+
+    async def load_all(self, tenant_id: str | None = None) -> list[CanonicalEvent]:
+        events = [
+            event
+            for (stream_tenant, _), stream in self._streams.items()
+            if tenant_id is None or stream_tenant == tenant_id
+            for event in stream
+        ]
+        return sorted(
+            events,
+            key=lambda event: (event.tenant_id, event.session_id, event.aggregate_version),
+        )
+
+    async def get_snapshot(self, tenant_id: str, session_id: str) -> SessionSnapshot | None:
+        return self._snapshots.get((tenant_id, session_id))
+
+    async def save_snapshot(self, snapshot: SessionSnapshot) -> None:
+        async with self._lock:
+            current = self._snapshots.get((snapshot.tenant_id, snapshot.session_id))
+            if current is None or current.aggregate_version <= snapshot.aggregate_version:
+                self._snapshots[(snapshot.tenant_id, snapshot.session_id)] = snapshot
 
     async def append(
         self,
@@ -42,7 +72,7 @@ class InMemoryEventStore:
         events: Sequence[NewEvent],
         command_result: dict[str, Any],
     ) -> AppendResult:
-        command_key = (context.tenant_id, context.command_id)
+        command_key = (context.tenant_id, context.operation, context.command_id)
         stream_key = (context.tenant_id, session_id)
         async with self._lock:
             previous = self._commands.get(command_key)
@@ -79,10 +109,29 @@ class InMemoryEventStore:
             stream.extend(canonical)
             self._commands[command_key] = dict(command_result)
             self._outbox.extend(
-                OutboxRecord(event_id=event.event_id, destination="projection", event=event)
-                for event in canonical
+                OutboxRecord(
+                    outbox_id=len(self._outbox) + offset,
+                    event_id=event.event_id,
+                    destination="projection",
+                    event=event,
+                )
+                for offset, event in enumerate(canonical, start=1)
             )
             return AppendResult(events=canonical, command_result=dict(command_result))
 
     async def pending_outbox(self) -> list[OutboxRecord]:
-        return list(self._outbox)
+        return [record for record in self._outbox if not record.published]
+
+    async def mark_outbox_published(self, outbox_id: int) -> None:
+        async with self._lock:
+            for record in self._outbox:
+                if record.outbox_id == outbox_id:
+                    record.published = True
+                    return
+
+    async def mark_outbox_failed(self, outbox_id: int) -> None:
+        async with self._lock:
+            for record in self._outbox:
+                if record.outbox_id == outbox_id:
+                    record.publish_attempt += 1
+                    return

@@ -12,6 +12,26 @@ class ProjectionGapError(RuntimeError):
     pass
 
 
+class UnsupportedEventError(RuntimeError):
+    pass
+
+
+KNOWN_TASK_EVENTS = {
+    "session.created",
+    "user.message.appended",
+    "run.requested",
+    "run.scheduled",
+    "run.started",
+    "session.paused",
+    "approval.requested",
+    "run.retry_scheduled",
+    "session.resumed",
+    "run.completed",
+    "run.failed",
+    "run.cancelled",
+}
+
+
 class InMemoryTaskProjection:
     """Disposable Control/Result read model used by the first vertical slice."""
 
@@ -19,10 +39,14 @@ class InMemoryTaskProjection:
         self._tasks: dict[tuple[str, str], dict[str, Any]] = {}
         self._event_ids: set[str] = set()
         self._lock = asyncio.Lock()
+        self._poison_events: list[CanonicalEvent] = []
 
     async def project(self, events: Sequence[CanonicalEvent]) -> None:
         async with self._lock:
             for event in events:
+                if event.type not in KNOWN_TASK_EVENTS:
+                    self._poison_events.append(event)
+                    raise UnsupportedEventError(f"unsupported canonical event: {event.type}")
                 if event.event_id in self._event_ids:
                     continue
                 key = (event.tenant_id, event.session_id)
@@ -48,6 +72,27 @@ class InMemoryTaskProjection:
         async with self._lock:
             self._tasks.clear()
             self._event_ids.clear()
+
+    async def poison_events(self) -> list[CanonicalEvent]:
+        async with self._lock:
+            return list(self._poison_events)
+
+    async def rebuild(self, events: Sequence[CanonicalEvent], tenant_id: str | None = None) -> int:
+        async with self._lock:
+            if tenant_id is None:
+                self._tasks.clear()
+                self._event_ids.clear()
+            else:
+                self._tasks = {
+                    key: view for key, view in self._tasks.items() if key[0] != tenant_id
+                }
+                tenant_event_ids = {
+                    event.event_id for event in events if event.tenant_id == tenant_id
+                }
+                self._event_ids.difference_update(tenant_event_ids)
+        selected = [event for event in events if tenant_id is None or event.tenant_id == tenant_id]
+        await self.project(selected)
+        return len(selected)
 
     @staticmethod
     def _new_view(event: CanonicalEvent) -> dict[str, Any]:

@@ -39,6 +39,48 @@ class SessionAggregate:
             aggregate.version = event.aggregate_version
         return aggregate
 
+    @classmethod
+    def from_snapshot(cls, state: dict[str, Any], version: int) -> SessionAggregate:
+        aggregate = cls(
+            session_id=str(state["session_id"]),
+            root_session_id=str(state["root_session_id"]),
+            tenant_id=str(state["tenant_id"]),
+            version=version,
+            status=SessionStatus(str(state["status"])),
+            goal=str(state["goal"]),
+            run_id=state.get("run_id"),
+            parent_session_id=state.get("parent_session_id"),
+            role=str(state.get("role", "root")),
+            result_summary=state.get("result_summary"),
+        )
+        return aggregate
+
+    def replay(self, events: Iterable[CanonicalEvent]) -> None:
+        for event in events:
+            if event.aggregate_version != self.version + 1:
+                raise ValueError(
+                    f"snapshot replay gap: expected {self.version + 1}, "
+                    f"got {event.aggregate_version}"
+                )
+            self.apply(event.type, event.payload)
+            self.version = event.aggregate_version
+
+    def snapshot_state(self) -> dict[str, Any]:
+        status = self.status
+        if status is None:
+            raise InvalidTransitionError("cannot snapshot a Session that does not exist")
+        return {
+            "session_id": self.session_id,
+            "root_session_id": self.root_session_id,
+            "tenant_id": self.tenant_id,
+            "status": status.value,
+            "goal": self.goal,
+            "run_id": self.run_id,
+            "parent_session_id": self.parent_session_id,
+            "role": self.role,
+            "result_summary": self.result_summary,
+        }
+
     def create(self, *, goal: str, run_id: str) -> None:
         if self.version or self.status is not None:
             raise InvalidTransitionError("Session already exists")
@@ -71,6 +113,34 @@ class SessionAggregate:
                 type="run.cancelled",
                 visibility=Visibility.USER,
                 payload={"run_id": self.run_id, "reason": reason},
+            )
+        )
+
+    def append_message(self, *, message: str) -> None:
+        self._require_existing()
+        if self.status in TERMINAL_SESSION_STATUSES:
+            status = self.status
+            assert status is not None
+            raise InvalidTransitionError(f"cannot append message to Session in {status.value}")
+        self._raise(
+            NewEvent(
+                type="user.message.appended",
+                visibility=Visibility.USER,
+                payload={"message": message},
+            )
+        )
+
+    def request_run(self, run_id: str) -> None:
+        self._require_existing()
+        status = self.status
+        assert status is not None
+        if status not in {SessionStatus.CREATED, SessionStatus.PAUSED}:
+            raise InvalidTransitionError(f"cannot request run for Session in {status.value}")
+        self._raise(
+            NewEvent(
+                type="run.requested",
+                visibility=Visibility.USER,
+                payload={"run_id": run_id},
             )
         )
 
