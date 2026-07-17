@@ -41,6 +41,13 @@ KNOWN_TASK_EVENTS = {
     "run.completed",
     "run.failed",
     "run.cancelled",
+    "child.created",
+    "dependency.changed",
+    "child.delegated",
+    "session.handed_off",
+    "child.result_published",
+    "review.completed",
+    "join.completed",
 }
 
 
@@ -119,6 +126,7 @@ class InMemoryTaskProjection:
             "result_summary": None,
             "result_ref": None,
             "artifact_refs": [],
+            "lineage": None,
             "error": None,
             "projection_version": 0,
         }
@@ -133,12 +141,42 @@ class InMemoryTaskProjection:
                 parent_session_id=payload.get("parent_session_id"),
                 status=SessionStatus.CREATED.value,
             )
+        elif event.type == "child.created":
+            dependencies = list(payload.get("dependency_ids", []))
+            view.update(
+                goal=payload["goal"],
+                role=payload["role"],
+                parent_session_id=payload["parent_session_id"],
+                dependency_ids=dependencies,
+                output_contract=payload["output_contract"],
+                owner=None,
+                status="blocked" if dependencies else SessionStatus.RUNNABLE.value,
+                current_stage="blocked" if dependencies else "scheduling",
+            )
         elif event.type == "run.requested":
+            child_status = view.get("status")
             view.update(
                 run_id=payload["run_id"],
-                status=SessionStatus.PENDING.value,
-                current_stage="pending",
+                status=(
+                    child_status
+                    if view.get("role", "root") != "root"
+                    else SessionStatus.PENDING.value
+                ),
+                current_stage=(
+                    view.get("current_stage", "scheduling")
+                    if view.get("role", "root") != "root"
+                    else "pending"
+                ),
             )
+        elif event.type == "dependency.changed":
+            dependencies = list(payload["dependency_ids"])
+            view.update(
+                dependency_ids=dependencies,
+                status="blocked" if dependencies else SessionStatus.RUNNABLE.value,
+                current_stage="blocked" if dependencies else "scheduling",
+            )
+        elif event.type in {"child.delegated", "session.handed_off"}:
+            view.update(owner=payload["owner"])
         elif event.type == "run.scheduled":
             view.update(status=SessionStatus.RUNNABLE.value, current_stage="scheduling")
         elif event.type == "run.started":
@@ -168,6 +206,25 @@ class InMemoryTaskProjection:
                 result_summary=payload.get("result_summary"),
                 result_ref=payload.get("result_ref"),
                 artifact_refs=payload.get("artifact_refs", []),
+                lineage=payload.get("lineage"),
+            )
+        elif event.type == "child.result_published":
+            view.update(
+                status=SessionStatus.COMPLETED.value,
+                progress=1.0,
+                current_stage="completed",
+                result_summary=payload.get("summary"),
+                result_ref=payload.get("result_ref"),
+                artifact_refs=payload.get("artifact_refs", []),
+            )
+        elif event.type == "review.completed":
+            view.update(
+                status=SessionStatus.COMPLETED.value,
+                progress=1.0,
+                current_stage="review_completed",
+                result_summary=payload.get("decision"),
+                result_ref=payload.get("target_result_ref"),
+                lineage={"review": payload},
             )
         elif event.type == "run.failed":
             view.update(

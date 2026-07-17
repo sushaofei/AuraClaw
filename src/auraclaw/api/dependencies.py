@@ -11,10 +11,12 @@ from auraclaw.contracts.events import Actor
 from auraclaw.infrastructure.memory import InMemoryEventStore
 from auraclaw.infrastructure.postgres import (
     PostgresApprovalProjection,
+    PostgresCollaborationProjection,
     PostgresEventStore,
     PostgresTaskProjection,
 )
 from auraclaw.projections.approvals import CompositeProjection, InMemoryApprovalProjection
+from auraclaw.projections.collaboration import InMemoryCollaborationProjection
 from auraclaw.projections.relay import OutboxRelay
 from auraclaw.projections.tasks import InMemoryTaskProjection
 
@@ -29,6 +31,7 @@ class RequestIdentity:
 Store = InMemoryEventStore | PostgresEventStore
 Projection = InMemoryTaskProjection | PostgresTaskProjection
 ApprovalProjection = InMemoryApprovalProjection | PostgresApprovalProjection
+CollaborationProjection = InMemoryCollaborationProjection | PostgresCollaborationProjection
 
 
 @lru_cache
@@ -56,11 +59,23 @@ def get_approval_projection() -> ApprovalProjection:
 
 
 @lru_cache
+def get_collaboration_projection() -> CollaborationProjection:
+    settings = get_settings()
+    if settings.postgres_enabled:
+        return PostgresCollaborationProjection(settings.resolved_database_url)
+    return InMemoryCollaborationProjection()
+
+
+@lru_cache
 def get_task_service() -> TaskService:
     projection = get_task_projection()
     approvals = get_approval_projection()
+    collaboration = get_collaboration_projection()
     event_store = get_event_store()
-    relay = OutboxRelay(event_store, CompositeProjection(projection, approvals))
+    relay = OutboxRelay(
+        event_store,
+        CompositeProjection(projection, approvals, collaboration),
+    )
     return TaskService(
         event_store=event_store,
         relay=relay,

@@ -4,7 +4,7 @@ AuraClaw 是一个遵循 Managed Agent 架构的纯 Python 后端服务。系统
 Session Event Log 为事实源，以可重建 Projection 提供查询，并把运行时控制、Agent
 Runtime、工具执行和结果交付保持为清晰的逻辑边界。
 
-当前版本已实现 M3 工具、Artifact 与审批安全闭环：
+当前版本已实现 M4 多 Agent 协作与独立评审闭环：
 
 ```text
 Task API -> Session Aggregate -> PostgreSQL Canonical Events + Transactional Outbox
@@ -13,6 +13,8 @@ Control Projection -> Runnable Queue -> Orchestrator -> Lease/Fencing/Assignment
                    -> Recoverable Agent Harness -> Model/Tool/Session Gateway Ports
 Tool Call -> Registry/Schema/Policy -> Approval Digest -> Hands/Credential Proxy
           -> Result Redaction/Normalization -> Inline Result or Artifact Reference
+Root Session -> Coordinator -> Child DAG/Contracts -> Runnable Projection
+             -> Worker Result -> Reviewer Evidence/Decision -> Join + Lineage
 ```
 
 Agent Runtime 不读取模型 Provider Secret，也不直接修改 Session 状态。完整模型输出进入
@@ -25,6 +27,12 @@ fail closed。Human Response 只能通过 Task Gateway 写回 Canonical Event；
 重建。Hands 不继承宿主 Secret，Credential Proxy 代 Runtime 使用 `credential_ref`，并在结果
 进入 Session 前执行脱敏。超出内联大小上限的 Tool Result 直接保存为不可变 Artifact，
 Session 只接收 `artifact_ref`。
+
+复杂任务由 Coordinator 通过 Collaboration Service 创建 Root/Child DAG；稳定 `task_key` 保证
+重启不会重复创建相同 Child。服务强制同 tenant/Root、DAG 无环以及深度、宽度、Child 总数和
+预算限制。Worker 只能发布自己拥有的 Child Result，Reviewer 使用独立 Review Session，只能
+发布带证据的三态决策，不能覆盖 Worker Artifact。Join 生成的 Root Result 保存 Child Result、
+Review Evidence 和 Artifact lineage。
 
 ## 本地启动
 
@@ -40,6 +48,7 @@ uv run uvicorn auraclaw.main:app --reload
 - `POST /v1/tasks`
 - `GET /v1/tasks/{session_id}`
 - `GET /v1/tasks/{session_id}/result`
+- `GET /v1/tasks/{session_id}/children`
 - `POST /v1/sessions/{session_id}/messages`
 - `POST /v1/sessions/{session_id}/runs`
 - `POST /v1/sessions/{session_id}/cancel`
@@ -69,9 +78,10 @@ migrations/0001_initial.sql
 migrations/0002_m1_fact_query.sql
 migrations/0003_m2_managed_runtime.sql
 migrations/0004_m3_tool_artifact_approval.sql
+migrations/0005_m4_collaboration_review.sql
 ```
 
-对应的 `.down.sql` 文件提供 M1/M2/M3 Schema 回滚。生产部署应由迁移系统执行这些 SQL，
+对应的 `.down.sql` 文件提供 M1～M4 Schema 回滚。生产部署应由迁移系统执行这些 SQL，
 不应由 API 进程在启动时自动修改 Schema。
 
 Outbox Worker 与投影重建：
@@ -113,14 +123,18 @@ src/auraclaw/
 
 M3 关键实现位于 `application/tooling.py`、`domain/approval.py`、
 `infrastructure/hands.py`、`infrastructure/artifacts.py`、
-`infrastructure/credentials.py` 和 `projections/approvals.py`。
+`infrastructure/credentials.py` 和 `projections/approvals.py`。M4 关键实现位于
+`application/collaboration.py`、`domain/collaboration.py`、
+`contracts/collaboration.py` 和 `projections/collaboration.py`。
 
 设计依据见 [Managed Agent 系统架构](docs/Managed%20Agent%20系统架构/00%20Managed%20Agent%20系统架构总览.md)，实施顺序见 [开发方案与实施计划](docs/Managed%20Agent%20开发方案与实施计划.md)。
 
 ## 当前边界
 
 项目保留内存适配器用于快速测试；配置 PostgreSQL 后使用持久 Event Store、Control
-State Store、Snapshot、Command Dedup、Transactional Outbox、Task/Approval Read Model、
+State Store、Snapshot、Command Dedup、Transactional Outbox、Task/Approval/Collaboration
+Read Model、
 Projector Checkpoint 和 Poison Event Queue。M3 提供本地 Hands Sandbox、内存对象适配器与
-Vault 测试适配器；生产对象存储、企业 Vault 和外部 Connector 通过现有端口接入。Child DAG、
-Coordinator/Worker/Reviewer 协作与评审属于 M4。
+Vault 测试适配器；生产对象存储、企业 Vault 和外部 Connector 通过现有端口接入。M4 提供
+确定性的 Coordinator/Worker/Reviewer 命令与权限边界；具体模型驱动的语义拆分和动态修复
+策略通过现有 Model Gateway 与 Collaboration 端口扩展。
