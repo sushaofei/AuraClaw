@@ -28,3 +28,23 @@ class InvalidTransitionError(AuraClawError):
 class AuthorizationError(AuraClawError):
     code = "authorization_denied"
     status_code = 403
+
+
+class LeaseConflictError(AuraClawError):
+    code = "lease_conflict"
+    status_code = 409
+
+
+class FencingTokenError(AuraClawError):
+    code = "stale_fencing_token"
+    status_code = 409
+
+
+class RuntimeCancelledError(AuraClawError):
+    code = "runtime_cancelled"
+    status_code = 409
+
+
+class BudgetExceededError(AuraClawError):
+    code = "runtime_budget_exceeded"
+    status_code = 409

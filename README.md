@@ -4,12 +4,19 @@ AuraClaw 是一个遵循 Managed Agent 架构的纯 Python 后端服务。系统
 Session Event Log 为事实源，以可重建 Projection 提供查询，并把运行时控制、Agent
 Runtime、工具执行和结果交付保持为清晰的逻辑边界。
 
-当前版本实现 M1 事实核心与查询闭环：
+当前版本已实现 M2 Managed Runtime 与控制平面：
 
 ```text
 Task API -> Session Aggregate -> PostgreSQL Canonical Events + Transactional Outbox
          -> Outbox Relay -> Disposable Projection -> Task Query API
+Control Projection -> Runnable Queue -> Orchestrator -> Lease/Fencing/Assignment
+                   -> Recoverable Agent Harness -> Model/Tool/Session Gateway Ports
 ```
+
+Agent Runtime 不读取模型 Provider Secret，也不直接修改 Session 状态。完整模型输出进入
+Canonical Event Log；Token Delta 只发布到可丢弃的 Runtime Event Bus。Runtime 在模型调用前、
+模型完成后、工具执行前、工具执行后均有持久 checkpoint，可由新 fencing token 的 Runtime
+接管。
 
 ## 本地启动
 
@@ -51,10 +58,11 @@ uv run uvicorn auraclaw.main:app --reload
 ```text
 migrations/0001_initial.sql
 migrations/0002_m1_fact_query.sql
+migrations/0003_m2_managed_runtime.sql
 ```
 
-`0002_m1_fact_query.down.sql` 是 M1 Schema 的回滚脚本。生产部署应由迁移系统执行这些
-SQL，不应由 API 进程在启动时自动修改 Schema。
+对应的 `.down.sql` 文件提供 M1/M2 Schema 回滚。生产部署应由迁移系统执行这些 SQL，
+不应由 API 进程在启动时自动修改 Schema。
 
 Outbox Worker 与投影重建：
 
@@ -90,13 +98,14 @@ src/auraclaw/
   domain/          Session 聚合与状态机
   infrastructure/  Event Store、Outbox 等适配器
   projections/     可重建 Read Model
-  runtime/         Orchestrator/Agent Runtime 端口
+  runtime/         Runtime 端口、Fenced Clients、Harness、Model Gateway
 ```
 
 设计依据见 [Managed Agent 系统架构](docs/Managed%20Agent%20系统架构/00%20Managed%20Agent%20系统架构总览.md)，实施顺序见 [开发方案与实施计划](docs/Managed%20Agent%20开发方案与实施计划.md)。
 
 ## 当前边界
 
-项目保留内存适配器用于快速测试；配置 PostgreSQL 后使用持久 Event Store、Snapshot、
-Command Dedup、Transactional Outbox、Task Read Model、Projector Checkpoint 和 Poison
-Event Queue。M1 不包含 Agent Runtime、Orchestrator、工具执行和模型调用。
+项目保留内存适配器用于快速测试；配置 PostgreSQL 后使用持久 Event Store、Control
+State Store、Snapshot、Command Dedup、Transactional Outbox、Task Read Model、Projector
+Checkpoint 和 Poison Event Queue。M2 的 Tool Client 是受 fencing 保护的执行边界与幂等
+开发适配器；真实 Tool Registry、审批、Sandbox、Credential Proxy 和 Artifact 闭环属于 M3。
