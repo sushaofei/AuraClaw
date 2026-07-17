@@ -37,7 +37,9 @@ class ManagedOrchestrator:
     async def watch(self, tasks: list[dict[str, Any]]) -> int:
         enqueued = 0
         for task in tasks:
-            if task.get("status") != "pending":
+            if task.get("status") not in {"pending", "runnable"}:
+                continue
+            if task.get("runnable") is False:
                 continue
             tenant_id = str(task["tenant_id"])
             session_id = str(task["session_id"])

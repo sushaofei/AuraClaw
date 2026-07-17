@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, Header, Response, status
 from auraclaw.api.dependencies import (
     RequestIdentity,
     command_context,
+    get_collaboration_projection,
     get_task_service,
     request_identity,
 )
@@ -19,10 +20,14 @@ from auraclaw.api.models import (
     TaskView,
 )
 from auraclaw.application.tasks import TaskService
+from auraclaw.domain.ports import CollaborationReader
 
 router = APIRouter(prefix="/v1", tags=["tasks"])
 Identity = Annotated[RequestIdentity, Depends(request_identity)]
 TaskServiceDependency = Annotated[TaskService, Depends(get_task_service)]
+CollaborationDependency = Annotated[
+    CollaborationReader, Depends(get_collaboration_projection)
+]
 
 
 @router.post("/tasks", response_model=TaskAcceptedResponse, status_code=status.HTTP_202_ACCEPTED)
@@ -62,6 +67,16 @@ async def get_task(
     if if_none_match == etag and projection_is_fresh:
         response.status_code = status.HTTP_304_NOT_MODIFIED
     return task
+
+
+@router.get("/tasks/{session_id}/children")
+async def list_children(
+    session_id: str,
+    identity: Identity,
+    collaboration: CollaborationDependency,
+) -> dict[str, Any]:
+    children = await collaboration.list_children(identity.tenant_id, session_id)
+    return {"root_session_id": session_id, "children": children}
 
 
 @router.get("/tasks/{session_id}/result")

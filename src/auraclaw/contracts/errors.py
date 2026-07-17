@@ -78,3 +78,8 @@ class SandboxViolationError(AuraClawError):
 class CredentialAccessError(AuraClawError):
     code = "credential_access_denied"
     status_code = 403
+
+
+class CollaborationValidationError(AuraClawError):
+    code = "collaboration_invalid"
+    status_code = 409

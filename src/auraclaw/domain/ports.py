@@ -56,6 +56,18 @@ class TaskReader(Protocol):
     async def get_task(self, tenant_id: str, session_id: str) -> dict[str, Any] | None: ...
 
 
+class CollaborationReader(Protocol):
+    async def get(self, tenant_id: str, session_id: str) -> dict[str, Any] | None: ...
+
+    async def list_children(
+        self, tenant_id: str, root_session_id: str
+    ) -> list[dict[str, Any]]: ...
+
+    async def list_runnable(
+        self, tenant_id: str, root_session_id: str
+    ) -> list[dict[str, Any]]: ...
+
+
 class ProjectionRebuilder(Protocol):
     async def rebuild(
         self, events: Sequence[CanonicalEvent], tenant_id: str | None = None

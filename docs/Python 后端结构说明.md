@@ -69,15 +69,21 @@ api -> application -> domain -> contracts
 | Artifact Store | `infrastructure/artifacts.py` | Hash、去重、不可变版本、lineage、ACL 和短期下载令牌 |
 | Policy / Approval | `domain/approval.py`、`projections/approvals.py` | Action Digest、Aggregate、可重建 View、Human Response |
 | Credential Proxy | `infrastructure/credentials.py` | credential_ref、scope、撤销、代调用和递归脱敏 |
-| Collaboration | 对应设计文档 | M4 建设 |
+| Collaboration | `application/collaboration.py`、`domain/collaboration.py`、`projections/collaboration.py` | Child DAG、合同、委派、交接、Join、Runnable 与 Review |
 
-## M2/M3 运维与安全边界
+## M2/M3/M4 运维与安全边界
 
 - API 请求会尝试即时 relay，以提供开发和单进程部署下的快速可见性；可靠恢复仍以
   Transactional Outbox 为准。
 - 独立 Worker 使用 `auraclaw projection relay --watch` 持续消费。
 - `auraclaw projection rebuild [--tenant ...]` 从 Canonical Event Log 重建 Task Read Model。
 - Snapshot 仅优化聚合加载；损坏或缺失时仍可从完整事件历史恢复。
+- Collaboration Aggregate 从同一 Root 下的 Canonical Session Events 重建；
+  `projection.collaboration_view` 可删除并重放恢复。
+- Coordinator 只调用 Collaboration Service，不直接启动 Runtime；Orchestrator 可消费
+  Collaboration Projection 的 runnable Child，但不参与语义拆分。
+- Worker 写自己的 Child Result；Reviewer 写独立 Review Session 和证据决策，不覆盖 Worker
+  Artifact。Root Join 保存 Child/Review/Artifact lineage。
 - Control State Store 与 Canonical Event Store 使用独立 Schema/写入边界，不做跨 Store 事务。
 - Orchestrator 只调度资源，不解析目标、不拆分 Task DAG。
 - Runtime Event Bus 故障不阻止完整模型输出与最终结果写入 Canonical Event Log。

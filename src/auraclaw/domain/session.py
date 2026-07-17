@@ -21,6 +21,11 @@ class SessionAggregate:
     parent_session_id: str | None = None
     role: str = "root"
     result_summary: str | None = None
+    result_ref: str | None = None
+    artifact_refs: list[str] = field(default_factory=list)
+    dependency_ids: list[str] = field(default_factory=list)
+    output_contract: dict[str, Any] = field(default_factory=dict)
+    owner: str | None = None
     _pending: list[NewEvent] = field(default_factory=list, repr=False)
 
     @classmethod
@@ -52,6 +57,11 @@ class SessionAggregate:
             parent_session_id=state.get("parent_session_id"),
             role=str(state.get("role", "root")),
             result_summary=state.get("result_summary"),
+            result_ref=state.get("result_ref"),
+            artifact_refs=list(state.get("artifact_refs", [])),
+            dependency_ids=list(state.get("dependency_ids", [])),
+            output_contract=dict(state.get("output_contract", {})),
+            owner=state.get("owner"),
         )
         return aggregate
 
@@ -79,6 +89,11 @@ class SessionAggregate:
             "parent_session_id": self.parent_session_id,
             "role": self.role,
             "result_summary": self.result_summary,
+            "result_ref": self.result_ref,
+            "artifact_refs": list(self.artifact_refs),
+            "dependency_ids": list(self.dependency_ids),
+            "output_contract": dict(self.output_contract),
+            "owner": self.owner,
         }
 
     def create(self, *, goal: str, run_id: str) -> None:
@@ -214,9 +229,20 @@ class SessionAggregate:
             self.parent_session_id = payload.get("parent_session_id")
             self.role = str(payload.get("role", "root"))
             self.status = SessionStatus.CREATED
+        elif event_type == "child.created":
+            self.goal = str(payload["goal"])
+            self.root_session_id = str(payload.get("root_session_id", self.root_session_id))
+            self.parent_session_id = str(payload["parent_session_id"])
+            self.role = str(payload["role"])
+            self.dependency_ids = list(payload.get("dependency_ids", []))
+            self.output_contract = dict(payload.get("output_contract", {}))
+            self.status = (
+                SessionStatus.PENDING if self.dependency_ids else SessionStatus.RUNNABLE
+            )
         elif event_type == "run.requested":
             self.run_id = str(payload["run_id"])
-            self.status = SessionStatus.PENDING
+            if self.role == "root":
+                self.status = SessionStatus.PENDING
         elif event_type == "run.scheduled":
             self.status = SessionStatus.RUNNABLE
         elif event_type == "run.started":
@@ -236,6 +262,24 @@ class SessionAggregate:
             self.status = SessionStatus.PENDING
         elif event_type == "run.completed":
             self.result_summary = payload.get("result_summary")
+            self.result_ref = payload.get("result_ref")
+            self.artifact_refs = list(payload.get("artifact_refs", []))
+            self.status = SessionStatus.COMPLETED
+        elif event_type == "dependency.changed":
+            self.dependency_ids = list(payload["dependency_ids"])
+            self.status = (
+                SessionStatus.PENDING if self.dependency_ids else SessionStatus.RUNNABLE
+            )
+        elif event_type in {"child.delegated", "session.handed_off"}:
+            self.owner = str(payload["owner"])
+        elif event_type == "child.result_published":
+            self.result_summary = payload.get("summary")
+            self.result_ref = payload.get("result_ref")
+            self.artifact_refs = list(payload.get("artifact_refs", []))
+            self.status = SessionStatus.COMPLETED
+        elif event_type == "review.completed":
+            self.result_summary = payload.get("decision")
+            self.result_ref = payload.get("target_result_ref")
             self.status = SessionStatus.COMPLETED
         elif event_type == "run.failed":
             self.status = SessionStatus.FAILED
