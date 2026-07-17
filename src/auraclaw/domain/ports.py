@@ -15,8 +15,25 @@ class AppendResult:
     deduplicated: bool = False
 
 
+@dataclass(frozen=True)
+class SessionSnapshot:
+    tenant_id: str
+    session_id: str
+    aggregate_version: int
+    schema_version: int
+    state: dict[str, Any]
+
+
 class EventStore(Protocol):
-    async def load(self, tenant_id: str, session_id: str) -> list[CanonicalEvent]: ...
+    async def load(
+        self, tenant_id: str, session_id: str, *, from_version: int = 1
+    ) -> list[CanonicalEvent]: ...
+
+    async def load_all(self, tenant_id: str | None = None) -> list[CanonicalEvent]: ...
+
+    async def get_snapshot(self, tenant_id: str, session_id: str) -> SessionSnapshot | None: ...
+
+    async def save_snapshot(self, snapshot: SessionSnapshot) -> None: ...
 
     async def append(
         self,
@@ -36,3 +53,17 @@ class ProjectionWriter(Protocol):
 
 class TaskReader(Protocol):
     async def get_task(self, tenant_id: str, session_id: str) -> dict[str, Any] | None: ...
+
+
+class ProjectionRebuilder(Protocol):
+    async def rebuild(
+        self, events: Sequence[CanonicalEvent], tenant_id: str | None = None
+    ) -> int: ...
+
+
+class OutboxRelayPort(Protocol):
+    async def relay_once(self, *, limit: int = 100) -> int: ...
+
+
+class AdmissionController(Protocol):
+    async def admit(self, *, goal: str, context: CommandContext) -> None: ...

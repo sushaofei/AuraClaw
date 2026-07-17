@@ -9,6 +9,7 @@ from auraclaw.api.dependencies import (
     request_identity,
 )
 from auraclaw.api.models import (
+    AppendMessageRequest,
     CancelTaskRequest,
     CommandResponse,
     CreateTaskRequest,
@@ -27,12 +28,13 @@ async def create_task(
     request: CreateTaskRequest,
     identity: Identity,
     service: TaskServiceDependency,
-    idempotency_key: str = Header(alias="Idempotency-Key"),
+    idempotency_key: str = Header(alias="Idempotency-Key", min_length=1),
 ) -> dict[str, Any]:
     context = command_context(
         identity=identity,
         command_id=idempotency_key,
         expected_version=0,
+        operation="create_task",
     )
     return await service.create_task(goal=request.goal, context=context)
 
@@ -44,12 +46,19 @@ async def get_task(
     identity: Identity,
     service: TaskServiceDependency,
     min_version: int | None = None,
+    if_none_match: str | None = Header(default=None, alias="If-None-Match"),
 ) -> dict[str, Any]:
     task = await service.get_task(tenant_id=identity.tenant_id, session_id=session_id)
     if min_version is not None and int(task["projection_version"]) < min_version:
         response.status_code = status.HTTP_202_ACCEPTED
         response.headers["Retry-After"] = "1"
-    response.headers["ETag"] = f'W/"{task["projection_version"]}"'
+    etag = f'W/"{task["projection_version"]}"'
+    response.headers["ETag"] = etag
+    projection_is_fresh = min_version is None or int(task["projection_version"]) >= min_version
+    if projection_is_fresh and task["status"] not in {"completed", "failed", "cancelled"}:
+        response.headers["Retry-After"] = "2"
+    if if_none_match == etag and projection_is_fresh:
+        response.status_code = status.HTTP_304_NOT_MODIFIED
     return task
 
 
@@ -59,11 +68,19 @@ async def get_result(
     response: Response,
     identity: Identity,
     service: TaskServiceDependency,
+    min_version: int | None = None,
+    if_none_match: str | None = Header(default=None, alias="If-None-Match"),
 ) -> dict[str, Any]:
     task = await service.get_task(tenant_id=identity.tenant_id, session_id=session_id)
-    if task["status"] not in {"completed", "failed", "cancelled"}:
+    projection_is_fresh = min_version is None or int(task["projection_version"]) >= min_version
+    result_is_ready = task["status"] in {"completed", "failed", "cancelled"}
+    if not projection_is_fresh or not result_is_ready:
         response.status_code = status.HTTP_202_ACCEPTED
         response.headers["Retry-After"] = "2"
+    etag = f'W/"{task["projection_version"]}"'
+    response.headers["ETag"] = etag
+    if if_none_match == etag and projection_is_fresh and result_is_ready:
+        response.status_code = status.HTTP_304_NOT_MODIFIED
     return {
         "session_id": session_id,
         "run_id": task["run_id"],
@@ -77,6 +94,51 @@ async def get_result(
 
 
 @router.post(
+    "/sessions/{session_id}/messages",
+    response_model=CommandResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def append_message(
+    session_id: str,
+    request: AppendMessageRequest,
+    identity: Identity,
+    service: TaskServiceDependency,
+    idempotency_key: str = Header(alias="Idempotency-Key", min_length=1),
+    expected_version: int = Header(alias="X-Expected-Version"),
+) -> dict[str, Any]:
+    context = command_context(
+        identity=identity,
+        command_id=idempotency_key,
+        expected_version=expected_version,
+        operation="append_message",
+    )
+    return await service.append_message(
+        session_id=session_id, message=request.message, context=context
+    )
+
+
+@router.post(
+    "/sessions/{session_id}/runs",
+    response_model=CommandResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def request_run(
+    session_id: str,
+    identity: Identity,
+    service: TaskServiceDependency,
+    idempotency_key: str = Header(alias="Idempotency-Key", min_length=1),
+    expected_version: int = Header(alias="X-Expected-Version"),
+) -> dict[str, Any]:
+    context = command_context(
+        identity=identity,
+        command_id=idempotency_key,
+        expected_version=expected_version,
+        operation="request_run",
+    )
+    return await service.request_run(session_id=session_id, context=context)
+
+
+@router.post(
     "/sessions/{session_id}/cancel",
     response_model=CommandResponse,
     status_code=status.HTTP_202_ACCEPTED,
@@ -86,13 +148,14 @@ async def cancel_task(
     request: CancelTaskRequest,
     identity: Identity,
     service: TaskServiceDependency,
-    idempotency_key: str = Header(alias="Idempotency-Key"),
+    idempotency_key: str = Header(alias="Idempotency-Key", min_length=1),
     expected_version: int = Header(alias="X-Expected-Version"),
 ) -> dict[str, Any]:
     context = command_context(
         identity=identity,
         command_id=idempotency_key,
         expected_version=expected_version,
+        operation="cancel_task",
     )
     return await service.cancel_task(
         session_id=session_id,
@@ -110,12 +173,13 @@ async def resume_task(
     session_id: str,
     identity: Identity,
     service: TaskServiceDependency,
-    idempotency_key: str = Header(alias="Idempotency-Key"),
+    idempotency_key: str = Header(alias="Idempotency-Key", min_length=1),
     expected_version: int = Header(alias="X-Expected-Version"),
 ) -> dict[str, Any]:
     context = command_context(
         identity=identity,
         command_id=idempotency_key,
         expected_version=expected_version,
+        operation="resume_task",
     )
     return await service.resume_task(session_id=session_id, context=context)

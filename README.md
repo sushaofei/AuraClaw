@@ -4,11 +4,11 @@ AuraClaw 是一个遵循 Managed Agent 架构的纯 Python 后端服务。系统
 Session Event Log 为事实源，以可重建 Projection 提供查询，并把运行时控制、Agent
 Runtime、工具执行和结果交付保持为清晰的逻辑边界。
 
-当前版本完成第一条后端竖切链路：
+当前版本实现 M1 事实核心与查询闭环：
 
 ```text
-Task API -> Session Aggregate -> Canonical Events + Outbox
-         -> Projection -> Task Query API
+Task API -> Session Aggregate -> PostgreSQL Canonical Events + Transactional Outbox
+         -> Outbox Relay -> Disposable Projection -> Task Query API
 ```
 
 ## 本地启动
@@ -24,8 +24,53 @@ uv run uvicorn auraclaw.main:app --reload
 - `GET /health/ready`
 - `POST /v1/tasks`
 - `GET /v1/tasks/{session_id}`
+- `GET /v1/tasks/{session_id}/result`
+- `POST /v1/sessions/{session_id}/messages`
+- `POST /v1/sessions/{session_id}/runs`
 - `POST /v1/sessions/{session_id}/cancel`
 - `POST /v1/sessions/{session_id}/resume`
+
+写接口要求 `Idempotency-Key`；修改既有 Session 时还要求 `X-Expected-Version`。
+查询支持 `ETag`、`If-None-Match` 和 `min_version`，投影未追上时返回 `202` 与
+`Retry-After`。
+
+## PostgreSQL
+
+存储配置支持两种形式：
+
+- `AURACLAW_DATABASE_URL=postgresql+asyncpg://...`
+- 现有环境的 `DB_HOST`、`DB_PORT`、`DB_USER`、`DB_PWD`、`DB_NAME_DEV`、
+  `DB_NAME_PRO`（旧 `DB_NAME` 仍兼容）
+
+当存在完整 `DB_*` 配置时默认启用 PostgreSQL；可设置
+`AURACLAW_STORAGE_BACKEND=memory` 强制使用开发内存适配器。首次启动前，按顺序应用：
+
+`AURACLAW_ENV=development/test` 选择 `DB_NAME_DEV`，`production/prod` 选择
+`DB_NAME_PRO`。
+
+```text
+migrations/0001_initial.sql
+migrations/0002_m1_fact_query.sql
+```
+
+`0002_m1_fact_query.down.sql` 是 M1 Schema 的回滚脚本。生产部署应由迁移系统执行这些
+SQL，不应由 API 进程在启动时自动修改 Schema。
+
+Outbox Worker 与投影重建：
+
+```bash
+uv run auraclaw projection relay --watch
+uv run auraclaw projection rebuild
+uv run auraclaw projection rebuild --tenant tenant_1
+```
+
+重建只读取 Canonical Event Log；Read Model 和 checkpoint 可以删除后恢复。真实
+PostgreSQL 集成测试使用独立测试库：
+
+```bash
+# 默认使用 .env 的 DB_NAME_DEV
+uv run pytest tests/integration/test_postgres_m1.py
+```
 
 开发检查：
 
@@ -52,7 +97,6 @@ src/auraclaw/
 
 ## 当前边界
 
-默认存储适配器为内存实现，用于验证领域契约与 API。它保留 Event Store、Outbox、
-Projection 的独立接口，但不具备进程重启持久性。PostgreSQL 表结构已放在
-`migrations/0001_initial.sql`，下一阶段将实现生产适配器、异步 Outbox Relay 和
-Projection Worker。
+项目保留内存适配器用于快速测试；配置 PostgreSQL 后使用持久 Event Store、Snapshot、
+Command Dedup、Transactional Outbox、Task Read Model、Projector Checkpoint 和 Poison
+Event Queue。M1 不包含 Agent Runtime、Orchestrator、工具执行和模型调用。

@@ -11,6 +11,10 @@ class CancelTaskRequest(BaseModel):
     reason: str = Field(default="cancelled by user", max_length=2_000)
 
 
+class AppendMessageRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=100_000)
+
+
 class TaskAcceptedResponse(BaseModel):
     session_id: str
     run_id: str
