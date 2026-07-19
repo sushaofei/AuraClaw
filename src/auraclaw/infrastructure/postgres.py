@@ -17,6 +17,7 @@ from auraclaw.contracts.state import Visibility
 from auraclaw.contracts.tools import ApprovalRecord, ApprovalStatus, RiskLevel
 from auraclaw.domain.collaboration import CollaborationAggregate
 from auraclaw.domain.ports import AppendResult, SessionSnapshot
+from auraclaw.infrastructure.memory import DELIVERY_TRIGGER_EVENTS
 from auraclaw.projections.approvals import APPROVAL_EVENTS
 from auraclaw.projections.collaboration import COLLABORATION_EVENTS
 from auraclaw.projections.tasks import (
@@ -258,6 +259,13 @@ class PostgresEventStore(_LazyPool):
                     event.event_id,
                     _json(event.as_dict()),
                 )
+                if event.type in DELIVERY_TRIGGER_EVENTS:
+                    await connection.execute(
+                        """INSERT INTO session_core.outbox (event_id, destination, payload)
+                        VALUES ($1, 'delivery', $2::jsonb)""",
+                        event.event_id,
+                        _json(event.as_dict()),
+                    )
 
             new_version = context.expected_version + len(canonical)
             await connection.execute(
@@ -286,6 +294,25 @@ class PostgresEventStore(_LazyPool):
             FROM session_core.outbox o
             JOIN session_core.canonical_event e ON e.event_id = o.event_id
             WHERE o.destination = 'projection' AND o.published_at IS NULL
+              AND o.next_attempt_at <= now()
+            ORDER BY o.outbox_id LIMIT 100"""
+        )
+        return [
+            PostgresOutboxRecord(
+                outbox_id=int(row["outbox_id"]),
+                event_id=str(row["event_id"]),
+                event=_event_from_record(row),
+            )
+            for row in rows
+        ]
+
+    async def pending_delivery_outbox(self) -> list[PostgresOutboxRecord]:
+        pool = await self.pool()
+        rows = await pool.fetch(
+            """SELECT o.outbox_id, o.event_id, e.*
+            FROM session_core.outbox o
+            JOIN session_core.canonical_event e ON e.event_id = o.event_id
+            WHERE o.destination = 'delivery' AND o.published_at IS NULL
               AND o.next_attempt_at <= now()
             ORDER BY o.outbox_id LIMIT 100"""
         )
@@ -367,15 +394,21 @@ class PostgresTaskProjection(_LazyPool):
                     """INSERT INTO projection.task_view
                     (tenant_id, session_id, root_session_id, run_id, status, goal, role,
                      parent_session_id, progress, current_stage, result_summary, result_ref,
-                     artifact_refs, error, source_version, source_event_id, projected_at)
+                     artifact_refs, error, delivery_status, delivery_id,
+                     delivery_attempt_count, delivery_response_summary,
+                     source_version, source_event_id, projected_at)
                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13::jsonb,
-                            $14::jsonb,$15,$16,$17)
+                            $14::jsonb,$15,$16,$17,$18,$19,$20,$21)
                     ON CONFLICT (tenant_id, session_id) DO UPDATE SET
                       run_id=EXCLUDED.run_id, status=EXCLUDED.status, goal=EXCLUDED.goal,
                       role=EXCLUDED.role, parent_session_id=EXCLUDED.parent_session_id,
                       progress=EXCLUDED.progress, current_stage=EXCLUDED.current_stage,
                       result_summary=EXCLUDED.result_summary, result_ref=EXCLUDED.result_ref,
                       artifact_refs=EXCLUDED.artifact_refs, error=EXCLUDED.error,
+                      delivery_status=EXCLUDED.delivery_status,
+                      delivery_id=EXCLUDED.delivery_id,
+                      delivery_attempt_count=EXCLUDED.delivery_attempt_count,
+                      delivery_response_summary=EXCLUDED.delivery_response_summary,
                       source_version=EXCLUDED.source_version,
                       source_event_id=EXCLUDED.source_event_id,
                       projected_at=EXCLUDED.projected_at""",
@@ -393,6 +426,10 @@ class PostgresTaskProjection(_LazyPool):
                     _json(view.get("result_ref")),
                     _json(view.get("artifact_refs", [])),
                     _json(view.get("error")),
+                    view.get("delivery_status"),
+                    view.get("delivery_id"),
+                    view.get("delivery_attempt_count", 0),
+                    view.get("delivery_response_summary"),
                     event.aggregate_version,
                     event.event_id,
                     event.occurred_at,
@@ -431,6 +468,10 @@ class PostgresTaskProjection(_LazyPool):
             "result_ref": _decode_json(row["result_ref"]),
             "artifact_refs": list(_decode_json(row["artifact_refs"])),
             "error": _decode_json(row["error"]),
+            "delivery_status": row["delivery_status"],
+            "delivery_id": row["delivery_id"],
+            "delivery_attempt_count": int(row["delivery_attempt_count"]),
+            "delivery_response_summary": row["delivery_response_summary"],
             "projection_version": int(row["source_version"]),
             "projected_at": row["projected_at"].isoformat(),
         }

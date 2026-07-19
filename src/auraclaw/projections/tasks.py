@@ -48,6 +48,12 @@ KNOWN_TASK_EVENTS = {
     "child.result_published",
     "review.completed",
     "join.completed",
+    "parent.result.received",
+    "delivery.attempting",
+    "delivery.retrying",
+    "delivery.succeeded",
+    "delivery.failed",
+    "delivery.dead_lettered",
 }
 
 
@@ -128,6 +134,10 @@ class InMemoryTaskProjection:
             "artifact_refs": [],
             "lineage": None,
             "error": None,
+            "delivery_status": None,
+            "delivery_id": None,
+            "delivery_attempt_count": 0,
+            "delivery_response_summary": None,
             "projection_version": 0,
         }
 
@@ -244,3 +254,10 @@ class InMemoryTaskProjection:
             view.update(status=SessionStatus.RUNNABLE.value, current_stage="scheduling")
         elif event.type == "run.terminated":
             view.update(status=SessionStatus.FAILED.value, current_stage="terminated")
+        elif event.type.startswith("delivery."):
+            view.update(
+                delivery_status=payload.get("status"),
+                delivery_id=payload.get("delivery_id"),
+                delivery_attempt_count=payload.get("attempt_count", 0),
+                delivery_response_summary=payload.get("response_summary"),
+            )

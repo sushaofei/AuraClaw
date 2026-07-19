@@ -4,7 +4,7 @@
 
 ## 当前完成范围
 
-当前实现覆盖事实/查询主链、M2 Managed Runtime 控制链与 M3 安全行动链：
+当前实现覆盖事实/查询、Managed Runtime、安全行动、多 Agent 协作和 M5 实时/交付链：
 
 ```text
 HTTP Command
@@ -27,6 +27,17 @@ Tool Invocation
   -> Hands Sandbox or Credential Proxy
   -> Secret Redaction / Result Normalizer
   -> Inline Result or Immutable Artifact Reference
+
+Runtime Event Producer SDK
+  -> Kafka Runtime Topic / at-least-once
+  -> Shared Streaming Ingestor / Replay Buffer
+  -> Tenant-authorized SSE / Last-Event-ID / Backpressure
+
+Canonical terminal event + Transactional Delivery Outbox
+  -> Idempotent PostgreSQL Delivery Job
+  -> Webhook or Parent Session Sink
+  -> Retry / Circuit Breaker / DLQ / Attempt History
+  -> delivery.* Canonical Event -> Task Query Projection
 ```
 
 内存适配器用于快速测试。PostgreSQL 适配器负责 Canonical Event、Aggregate Version、
@@ -70,8 +81,11 @@ api -> application -> domain -> contracts
 | Policy / Approval | `domain/approval.py`、`projections/approvals.py` | Action Digest、Aggregate、可重建 View、Human Response |
 | Credential Proxy | `infrastructure/credentials.py` | credential_ref、scope、撤销、代调用和递归脱敏 |
 | Collaboration | `application/collaboration.py`、`domain/collaboration.py`、`projections/collaboration.py` | Child DAG、合同、委派、交接、Join、Runnable 与 Review |
+| Runtime Event Bus | `infrastructure/runtime_events.py` | Producer SDK、Kafka、sequence、visibility、大小限制、Token 合并 |
+| Streaming Gateway | `application/streaming.py`、`api/routes/streams.py` | 租户授权、SSE、公开 Cursor、重放、过期回退和有界背压 |
+| Result Delivery | `application/delivery.py`、`infrastructure/delivery.py` | Outbox、持久 Job、Webhook/Parent Sink、签名、重试、Circuit、DLQ |
 
-## M2/M3/M4 运维与安全边界
+## M2～M5 运维与安全边界
 
 - API 请求会尝试即时 relay，以提供开发和单进程部署下的快速可见性；可靠恢复仍以
   Transactional Outbox 为准。
@@ -87,6 +101,15 @@ api -> application -> domain -> contracts
 - Control State Store 与 Canonical Event Store 使用独立 Schema/写入边界，不做跨 Store 事务。
 - Orchestrator 只调度资源，不解析目标、不拆分 Task DAG。
 - Runtime Event Bus 故障不阻止完整模型输出与最终结果写入 Canonical Event Log。
+- Kafka Offset 仅用于 Streaming Ingestor 恢复；浏览器只使用 `session_id:sequence`，超出保留期
+  时收到明确 Query 回退信号。关闭 SSE 不等于取消 Session。
+- Streaming Gateway 使用共享 Consumer 和每连接有界队列，慢客户端不阻塞 Runtime、Kafka
+  Partition 或其他订阅者；`secret` visibility 事件不能进入重放缓冲。
+- 可靠通知只由 Canonical Event 的 delivery Outbox 触发，不扫描 Session 状态猜测任务完成。
+  稳定 `delivery_id`、唯一 `(event_id, sink_id)` 和 Attempt History 保证服务重启/重复 Outbox
+  不重复业务交付；429/5xx/timeout 重试，耗尽进入 DLQ。
+- Webhook 使用 timestamp + HMAC-SHA256 和稳定 Idempotency-Key；Job/Sink 只保存受控目标与
+  `credential_ref`，Secret 不写入 Event、Job、响应摘要或 Runtime Event。
 - Runtime checkpoint、模型调用 ID 和工具调用 ID 都稳定，接管后不会重复产生业务事实；
   Tool Gateway 进一步以 tenant-scoped idempotency key 阻止重复外部副作用。
 - `write-with-approval` 与 `destructive/admin` 权限默认 fail closed；批准绑定 Session、动作摘要

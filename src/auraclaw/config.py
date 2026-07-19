@@ -24,6 +24,13 @@ class Settings(BaseSettings):
     db_name_dev: str | None = Field(default=None, validation_alias="DB_NAME_DEV")
     db_name_pro: str | None = Field(default=None, validation_alias="DB_NAME_PRO")
     artifact_root: Path = Path(".data/artifacts")
+    runtime_event_backend: Literal["auto", "memory", "kafka"] = "auto"
+    kafka_host: str | None = Field(default=None, validation_alias="KAFKA_HOST")
+    kafka_port: int = Field(default=9092, validation_alias="KAFKA_PORT")
+    kafka_runtime_topic: str = "managed-agent.runtime-events"
+    kafka_streaming_group: str = "streaming-ingestor"
+    runtime_event_retention_events: int = 1_000
+    stream_connection_queue_size: int = 128
 
     @property
     def resolved_database_url(self) -> str:
@@ -50,6 +57,18 @@ class Settings(BaseSettings):
         if self.storage_backend == "postgres":
             return True
         return bool(self.db_host and self.db_user and self.selected_database_name)
+
+    @property
+    def kafka_enabled(self) -> bool:
+        if self.runtime_event_backend == "memory":
+            return False
+        if self.runtime_event_backend == "kafka":
+            return True
+        return self.kafka_host is not None
+
+    @property
+    def kafka_bootstrap_servers(self) -> str:
+        return f"{self.kafka_host or '127.0.0.1'}:{self.kafka_port}"
 
 
 @lru_cache

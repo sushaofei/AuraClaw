@@ -4,7 +4,7 @@ AuraClaw 是一个遵循 Managed Agent 架构的纯 Python 后端服务。系统
 Session Event Log 为事实源，以可重建 Projection 提供查询，并把运行时控制、Agent
 Runtime、工具执行和结果交付保持为清晰的逻辑边界。
 
-当前版本已实现 M4 多 Agent 协作与独立评审闭环：
+当前版本已实现 M5 实时体验与可靠结果交付闭环：
 
 ```text
 Task API -> Session Aggregate -> PostgreSQL Canonical Events + Transactional Outbox
@@ -15,6 +15,10 @@ Tool Call -> Registry/Schema/Policy -> Approval Digest -> Hands/Credential Proxy
           -> Result Redaction/Normalization -> Inline Result or Artifact Reference
 Root Session -> Coordinator -> Child DAG/Contracts -> Runnable Projection
              -> Worker Result -> Reviewer Evidence/Decision -> Join + Lineage
+Agent/Tool/Orchestrator -> Runtime Event Producer SDK -> Kafka
+                        -> Streaming Ingestor/Replay -> Authorized SSE Client
+Canonical terminal event -> Transactional Outbox -> Durable Delivery Job
+                         -> Webhook/Parent Session -> Retry/Circuit/DLQ -> Query View
 ```
 
 Agent Runtime 不读取模型 Provider Secret，也不直接修改 Session 状态。完整模型输出进入
@@ -49,6 +53,7 @@ uv run uvicorn auraclaw.main:app --reload
 - `GET /v1/tasks/{session_id}`
 - `GET /v1/tasks/{session_id}/result`
 - `GET /v1/tasks/{session_id}/children`
+- `GET /v1/streams/{session_id}`（SSE，支持 `Last-Event-ID`）
 - `POST /v1/sessions/{session_id}/messages`
 - `POST /v1/sessions/{session_id}/runs`
 - `POST /v1/sessions/{session_id}/cancel`
@@ -58,6 +63,25 @@ uv run uvicorn auraclaw.main:app --reload
 写接口要求 `Idempotency-Key`；修改既有 Session 时还要求 `X-Expected-Version`。
 查询支持 `ETag`、`If-None-Match` 和 `min_version`，投影未追上时返回 `202` 与
 `Retry-After`。
+
+SSE 连接关闭或 Streaming Gateway 重启不会取消任务。客户端重连时使用公开
+`session_id:sequence` 游标；游标仍在保留窗口内时补齐事件，过期时收到 `stream.reset` 并回退
+Task Query API。Kafka Offset 只在 Gateway 内部使用，不暴露给客户端。每个连接使用有界队列，
+慢连接不会阻塞 Runtime 或 Kafka 分区；Runtime Event Bus 不可用时 Canonical 结果仍正常提交。
+
+## Kafka 与可靠结果交付
+
+配置 `KAFKA_HOST`、`KAFKA_PORT` 后，`AURACLAW_RUNTIME_EVENT_BACKEND=auto` 自动使用 Kafka；
+强制本地内存模式可设为 `memory`。Runtime Event Producer SDK 负责 sequence、visibility、消息
+大小、敏感字段拦截和 Token Delta 合并。服务级 `streaming-ingestor` Consumer Group 将消息送入
+Gateway 的短期 Replay Buffer，不为每个浏览器创建 Kafka Consumer。
+
+最终通知不依赖 Kafka。`run.completed`、`run.failed`、`run.cancelled`、`approval.requested` 和
+`child.result_published` 在 Canonical Event 事务内额外写入 `delivery` Outbox。Delivery Worker
+按 Sink 创建稳定 `delivery_id` 的持久 Job，支持 Webhook HMAC 签名、Parent Session Sink、
+指数退避、Circuit Breaker、DLQ 和 Manual Redelivery；投递状态作为 `delivery.*` Canonical
+Event 回写，并通过 Task/Result Query 的 `delivery_status`、`delivery_id`、attempt count 与响应
+摘要查询。Sink 只保存 `credential_ref`，Job 不保存 Secret。
 
 ## PostgreSQL
 
@@ -79,9 +103,10 @@ migrations/0002_m1_fact_query.sql
 migrations/0003_m2_managed_runtime.sql
 migrations/0004_m3_tool_artifact_approval.sql
 migrations/0005_m4_collaboration_review.sql
+migrations/0006_m5_streaming_delivery.sql
 ```
 
-对应的 `.down.sql` 文件提供 M1～M4 Schema 回滚。生产部署应由迁移系统执行这些 SQL，
+对应的 `.down.sql` 文件提供 M1～M5 Schema 回滚。生产部署应由迁移系统执行这些 SQL，
 不应由 API 进程在启动时自动修改 Schema。
 
 Outbox Worker 与投影重建：
@@ -119,6 +144,7 @@ src/auraclaw/
   infrastructure/  Event Store、Outbox 等适配器
   projections/     可重建 Read Model
   runtime/         Runtime 端口、Fenced Clients、Harness、Model Gateway
+  delivery/        逻辑边界由 application/delivery 与 infrastructure/delivery 实现
 ```
 
 M3 关键实现位于 `application/tooling.py`、`domain/approval.py`、
@@ -126,6 +152,8 @@ M3 关键实现位于 `application/tooling.py`、`domain/approval.py`、
 `infrastructure/credentials.py` 和 `projections/approvals.py`。M4 关键实现位于
 `application/collaboration.py`、`domain/collaboration.py`、
 `contracts/collaboration.py` 和 `projections/collaboration.py`。
+M5 关键实现位于 `infrastructure/runtime_events.py`、`application/streaming.py`、
+`api/routes/streams.py`、`application/delivery.py` 与 `infrastructure/delivery.py`。
 
 设计依据见 [Managed Agent 系统架构](docs/Managed%20Agent%20系统架构/00%20Managed%20Agent%20系统架构总览.md)，实施顺序见 [开发方案与实施计划](docs/Managed%20Agent%20开发方案与实施计划.md)。
 
@@ -136,5 +164,6 @@ State Store、Snapshot、Command Dedup、Transactional Outbox、Task/Approval/Co
 Read Model、
 Projector Checkpoint 和 Poison Event Queue。M3 提供本地 Hands Sandbox、内存对象适配器与
 Vault 测试适配器；生产对象存储、企业 Vault 和外部 Connector 通过现有端口接入。M4 提供
-确定性的 Coordinator/Worker/Reviewer 命令与权限边界；具体模型驱动的语义拆分和动态修复
-策略通过现有 Model Gateway 与 Collaboration 端口扩展。
+确定性的 Coordinator/Worker/Reviewer 命令与权限边界。M5 提供 Kafka 和 PostgreSQL 生产
+适配器、内存测试适配器以及 Webhook/Parent Session Sink；生产 Credential Proxy/Vault、内部
+跨实例 PubSub 和通知渠道 Adapter 继续通过现有端口扩展。

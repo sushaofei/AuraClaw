@@ -106,6 +106,10 @@ async def get_result(
         "result_ref": task["result_ref"],
         "artifact_refs": task["artifact_refs"],
         "error": task["error"],
+        "delivery_status": task.get("delivery_status"),
+        "delivery_id": task.get("delivery_id"),
+        "delivery_attempt_count": task.get("delivery_attempt_count", 0),
+        "delivery_response_summary": task.get("delivery_response_summary"),
         "projection_version": task["projection_version"],
     }
 

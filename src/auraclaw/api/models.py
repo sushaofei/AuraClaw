@@ -53,6 +53,10 @@ class TaskView(BaseModel):
     result_ref: str | None
     artifact_refs: list[Any]
     error: dict[str, Any] | None
+    delivery_status: str | None = None
+    delivery_id: str | None = None
+    delivery_attempt_count: int = 0
+    delivery_response_summary: str | None = None
     projection_version: int
     projected_at: str
 
