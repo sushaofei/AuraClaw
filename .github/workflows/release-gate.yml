@@ -1,0 +1,27 @@
+name: release-gate
+
+on:
+  pull_request:
+  push:
+
+jobs:
+  quality-and-reliability:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Install
+        run: uv sync --extra dev --locked
+      - name: Static quality gates
+        run: |
+          uv run ruff check .
+          uv run mypy src/auraclaw
+      - name: Automated architecture and reliability coverage
+        run: uv run pytest
+        env:
+          AURACLAW_STORAGE_BACKEND: memory
+          AURACLAW_RUNTIME_EVENT_BACKEND: memory
+      - name: Release artifacts and secret scan
+        run: uv run python scripts/release_gate.py

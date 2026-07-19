@@ -4,12 +4,17 @@ from uuid import uuid4
 
 from fastapi import Header
 
+from auraclaw.application.observability import ObservabilityProjector, ObservabilityService
 from auraclaw.application.streaming import StreamingGateway
 from auraclaw.application.tasks import AllowAllAdmissionController, TaskService
 from auraclaw.config import get_settings
 from auraclaw.contracts.commands import CommandContext
 from auraclaw.contracts.events import Actor
 from auraclaw.infrastructure.memory import InMemoryEventStore
+from auraclaw.infrastructure.observability import (
+    InMemoryObservabilityStore,
+    PostgresObservabilityStore,
+)
 from auraclaw.infrastructure.postgres import (
     PostgresApprovalProjection,
     PostgresCollaborationProjection,
@@ -38,6 +43,7 @@ Store = InMemoryEventStore | PostgresEventStore
 Projection = InMemoryTaskProjection | PostgresTaskProjection
 ApprovalProjection = InMemoryApprovalProjection | PostgresApprovalProjection
 CollaborationProjection = InMemoryCollaborationProjection | PostgresCollaborationProjection
+ObservabilityStore = InMemoryObservabilityStore | PostgresObservabilityStore
 
 
 @lru_cache
@@ -80,7 +86,12 @@ def get_task_service() -> TaskService:
     event_store = get_event_store()
     relay = OutboxRelay(
         event_store,
-        CompositeProjection(projection, approvals, collaboration),
+        CompositeProjection(
+            projection,
+            approvals,
+            collaboration,
+            ObservabilityProjector(get_observability_service()),
+        ),
     )
     return TaskService(
         event_store=event_store,
@@ -127,6 +138,19 @@ def get_streaming_ingestor() -> KafkaStreamingIngestor | None:
 @lru_cache
 def get_streaming_gateway() -> StreamingGateway:
     return StreamingGateway(reader=get_task_projection(), bus=get_runtime_replay_bus())
+
+
+@lru_cache
+def get_observability_store() -> ObservabilityStore:
+    settings = get_settings()
+    if settings.postgres_enabled:
+        return PostgresObservabilityStore(settings.resolved_database_url)
+    return InMemoryObservabilityStore()
+
+
+@lru_cache
+def get_observability_service() -> ObservabilityService:
+    return ObservabilityService(get_observability_store(), get_event_store())
 
 
 async def request_identity(

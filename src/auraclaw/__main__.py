@@ -5,6 +5,7 @@ import uvicorn
 
 from auraclaw.application.maintenance import ProjectionMaintenanceService
 from auraclaw.config import get_settings
+from auraclaw.infrastructure.operations import PostgresOperationsStore
 from auraclaw.infrastructure.postgres import PostgresEventStore, PostgresTaskProjection
 from auraclaw.projections.relay import OutboxRelay
 
@@ -37,6 +38,44 @@ async def _run_projection_command(
         await projector.close()
 
 
+async def _run_operations_command(
+    action: str,
+    tenant_id: str | None,
+    *,
+    queue: str | None = None,
+    item_id: str | None = None,
+) -> None:
+    settings = get_settings()
+    if not settings.postgres_enabled:
+        raise SystemExit("operations maintenance requires PostgreSQL storage configuration")
+    store = PostgresOperationsStore(settings.resolved_database_url)
+    try:
+        if action == "status":
+            summary = await store.failure_queue_summary(tenant_id)
+            print(
+                "operations status "
+                f"projection_outbox_pending={summary.projection_outbox_pending} "
+                f"projection_poison={summary.projection_poison} "
+                f"delivery_dlq={summary.delivery_dlq}"
+            )
+        elif action == "retention":
+            deleted = await store.apply_retention()
+            retention_summary = " ".join(
+                f"{key}={value}" for key, value in deleted.items()
+            )
+            print(f"operations retention {retention_summary}")
+        else:
+            if tenant_id is None or queue is None or item_id is None:
+                raise SystemExit("redrive requires --tenant, --queue and --item-id")
+            if queue == "projection":
+                changed = await store.redrive_projection_poison(tenant_id, item_id)
+            else:
+                changed = await store.redrive_delivery(tenant_id, item_id)
+            print(f"operations redrive queue={queue} item_id={item_id} changed={changed}")
+    finally:
+        await store.close()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="auraclaw")
     subcommands = parser.add_subparsers(dest="command")
@@ -46,11 +85,26 @@ def main() -> None:
     projection.add_argument("--tenant")
     projection.add_argument("--watch", action="store_true")
     projection.add_argument("--interval", type=float, default=1.0)
+    operations = subcommands.add_parser("operations")
+    operations.add_argument("action", choices=("status", "retention", "redrive"))
+    operations.add_argument("--tenant")
+    operations.add_argument("--queue", choices=("projection", "delivery"))
+    operations.add_argument("--item-id")
     args = parser.parse_args()
     if args.command == "projection":
         asyncio.run(
             _run_projection_command(
                 args.action, args.tenant, watch=args.watch, interval=args.interval
+            )
+        )
+        return
+    if args.command == "operations":
+        asyncio.run(
+            _run_operations_command(
+                args.action,
+                args.tenant,
+                queue=args.queue,
+                item_id=args.item_id,
             )
         )
         return
