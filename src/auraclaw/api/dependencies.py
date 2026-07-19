@@ -4,6 +4,7 @@ from uuid import uuid4
 
 from fastapi import Header
 
+from auraclaw.application.streaming import StreamingGateway
 from auraclaw.application.tasks import AllowAllAdmissionController, TaskService
 from auraclaw.config import get_settings
 from auraclaw.contracts.commands import CommandContext
@@ -14,6 +15,11 @@ from auraclaw.infrastructure.postgres import (
     PostgresCollaborationProjection,
     PostgresEventStore,
     PostgresTaskProjection,
+)
+from auraclaw.infrastructure.runtime_events import (
+    KafkaRuntimeEventProducer,
+    KafkaStreamingIngestor,
+    ReplayRuntimeEventBus,
 )
 from auraclaw.projections.approvals import CompositeProjection, InMemoryApprovalProjection
 from auraclaw.projections.collaboration import InMemoryCollaborationProjection
@@ -83,6 +89,44 @@ def get_task_service() -> TaskService:
         admission=AllowAllAdmissionController(),
         approvals=approvals,
     )
+
+
+@lru_cache
+def get_runtime_replay_bus() -> ReplayRuntimeEventBus:
+    settings = get_settings()
+    return ReplayRuntimeEventBus(
+        retention_events=settings.runtime_event_retention_events,
+        connection_queue_size=settings.stream_connection_queue_size,
+    )
+
+
+@lru_cache
+def get_runtime_event_producer() -> KafkaRuntimeEventProducer | ReplayRuntimeEventBus:
+    settings = get_settings()
+    if settings.kafka_enabled:
+        return KafkaRuntimeEventProducer(
+            settings.kafka_bootstrap_servers,
+            topic=settings.kafka_runtime_topic,
+        )
+    return get_runtime_replay_bus()
+
+
+@lru_cache
+def get_streaming_ingestor() -> KafkaStreamingIngestor | None:
+    settings = get_settings()
+    if not settings.kafka_enabled:
+        return None
+    return KafkaStreamingIngestor(
+        settings.kafka_bootstrap_servers,
+        topic=settings.kafka_runtime_topic,
+        group_id=settings.kafka_streaming_group,
+        target=get_runtime_replay_bus(),
+    )
+
+
+@lru_cache
+def get_streaming_gateway() -> StreamingGateway:
+    return StreamingGateway(reader=get_task_projection(), bus=get_runtime_replay_bus())
 
 
 async def request_identity(

@@ -11,6 +11,14 @@ from auraclaw.contracts.errors import VersionConflictError
 from auraclaw.contracts.events import CanonicalEvent, NewEvent, utc_now
 from auraclaw.domain.ports import AppendResult, SessionSnapshot
 
+DELIVERY_TRIGGER_EVENTS = {
+    "run.completed",
+    "run.failed",
+    "run.cancelled",
+    "approval.requested",
+    "child.result_published",
+}
+
 
 @dataclass
 class OutboxRecord:
@@ -108,19 +116,39 @@ class InMemoryEventStore:
             # These writes are one critical section here and one DB transaction in production.
             stream.extend(canonical)
             self._commands[command_key] = dict(command_result)
-            self._outbox.extend(
-                OutboxRecord(
-                    outbox_id=len(self._outbox) + offset,
-                    event_id=event.event_id,
-                    destination="projection",
-                    event=event,
+            for stored_event in canonical:
+                self._outbox.append(
+                    OutboxRecord(
+                        outbox_id=len(self._outbox) + 1,
+                        event_id=stored_event.event_id,
+                        destination="projection",
+                        event=stored_event,
+                    )
                 )
-                for offset, event in enumerate(canonical, start=1)
-            )
+                if stored_event.type in DELIVERY_TRIGGER_EVENTS:
+                    self._outbox.append(
+                        OutboxRecord(
+                            outbox_id=len(self._outbox) + 1,
+                            event_id=stored_event.event_id,
+                            destination="delivery",
+                            event=stored_event,
+                        )
+                    )
             return AppendResult(events=canonical, command_result=dict(command_result))
 
     async def pending_outbox(self) -> list[OutboxRecord]:
-        return [record for record in self._outbox if not record.published]
+        return [
+            record
+            for record in self._outbox
+            if not record.published and record.destination == "projection"
+        ]
+
+    async def pending_delivery_outbox(self) -> list[OutboxRecord]:
+        return [
+            record
+            for record in self._outbox
+            if not record.published and record.destination == "delivery"
+        ]
 
     async def mark_outbox_published(self, outbox_id: int) -> None:
         async with self._lock:
