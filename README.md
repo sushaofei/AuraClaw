@@ -4,7 +4,7 @@ AuraClaw 是一个遵循 Managed Agent 架构的纯 Python 后端服务。系统
 Session Event Log 为事实源，以可重建 Projection 提供查询，并把运行时控制、Agent
 Runtime、工具执行和结果交付保持为清晰的逻辑边界。
 
-当前版本已实现 M5 实时体验与可靠结果交付闭环：
+当前版本已实现 M6 可靠性、观测与发布门禁：
 
 ```text
 Task API -> Session Aggregate -> PostgreSQL Canonical Events + Transactional Outbox
@@ -19,6 +19,8 @@ Agent/Tool/Orchestrator -> Runtime Event Producer SDK -> Kafka
                         -> Streaming Ingestor/Replay -> Authorized SSE Client
 Canonical terminal event -> Transactional Outbox -> Durable Delivery Job
                          -> Webhook/Parent Session -> Retry/Circuit/DLQ -> Query View
+All components -> Trace/Metrics/Structured Logs/Audit -> Session Timeline + Alerts
+Operations -> Retention/Artifact GC/Poison + Delivery DLQ Redrive -> Release Gate
 ```
 
 Agent Runtime 不读取模型 Provider Secret，也不直接修改 Session 状态。完整模型输出进入
@@ -59,6 +61,8 @@ uv run uvicorn auraclaw.main:app --reload
 - `POST /v1/sessions/{session_id}/cancel`
 - `POST /v1/sessions/{session_id}/resume`
 - `POST /v1/sessions/{session_id}/approvals/{approval_id}/responses`
+- `GET /v1/operations/sessions/{session_id}/timeline`
+- `GET /v1/operations/metrics`
 
 写接口要求 `Idempotency-Key`；修改既有 Session 时还要求 `X-Expected-Version`。
 查询支持 `ETag`、`If-None-Match` 和 `min_version`，投影未追上时返回 `202` 与
@@ -104,9 +108,10 @@ migrations/0003_m2_managed_runtime.sql
 migrations/0004_m3_tool_artifact_approval.sql
 migrations/0005_m4_collaboration_review.sql
 migrations/0006_m5_streaming_delivery.sql
+migrations/0007_m6_observability_reliability.sql
 ```
 
-对应的 `.down.sql` 文件提供 M1～M5 Schema 回滚。生产部署应由迁移系统执行这些 SQL，
+对应的 `.down.sql` 文件提供 M1～M6 Schema 回滚。生产部署应由迁移系统执行这些 SQL，
 不应由 API 进程在启动时自动修改 Schema。
 
 Outbox Worker 与投影重建：
@@ -115,6 +120,11 @@ Outbox Worker 与投影重建：
 uv run auraclaw projection relay --watch
 uv run auraclaw projection rebuild
 uv run auraclaw projection rebuild --tenant tenant_1
+uv run auraclaw operations status --tenant tenant_1
+uv run auraclaw operations retention
+uv run auraclaw operations redrive --tenant tenant_1 --queue projection --item-id EVENT_ID
+uv run auraclaw operations redrive --tenant tenant_1 --queue delivery --item-id DELIVERY_ID
+uv run python scripts/release_gate.py
 ```
 
 重建只读取 Canonical Event Log；Read Model 和 checkpoint 可以删除后恢复。真实
@@ -154,6 +164,10 @@ M3 关键实现位于 `application/tooling.py`、`domain/approval.py`、
 `contracts/collaboration.py` 和 `projections/collaboration.py`。
 M5 关键实现位于 `infrastructure/runtime_events.py`、`application/streaming.py`、
 `api/routes/streams.py`、`application/delivery.py` 与 `infrastructure/delivery.py`。
+M6 关键实现位于 `contracts/observability.py`、`application/observability.py`、
+`infrastructure/observability.py`、`infrastructure/operations.py` 和
+`api/routes/operations.py`。SLO、故障处置、数据保留和灰度回滚见
+[M6 运维与灰度发布 Runbook](docs/M6%20运维与灰度发布%20Runbook.md)。
 
 设计依据见 [Managed Agent 系统架构](docs/Managed%20Agent%20系统架构/00%20Managed%20Agent%20系统架构总览.md)，实施顺序见 [开发方案与实施计划](docs/Managed%20Agent%20开发方案与实施计划.md)。
 
@@ -166,4 +180,6 @@ Projector Checkpoint 和 Poison Event Queue。M3 提供本地 Hands Sandbox、�
 Vault 测试适配器；生产对象存储、企业 Vault 和外部 Connector 通过现有端口接入。M4 提供
 确定性的 Coordinator/Worker/Reviewer 命令与权限边界。M5 提供 Kafka 和 PostgreSQL 生产
 适配器、内存测试适配器以及 Webhook/Parent Session Sink；生产 Credential Proxy/Vault、内部
-跨实例 PubSub 和通知渠道 Adapter 继续通过现有端口扩展。
+跨实例 PubSub 和通知渠道 Adapter 继续通过现有端口扩展。M6 提供持久 Observability/Audit
+Schema、主动告警、租户隔离 Timeline、Telemetry 保留和失败队列运维；外部 Trace Collector、
+Metrics Pipeline 和 Alert Receiver 通过同一观测端口接入。
