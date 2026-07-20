@@ -4,6 +4,92 @@ AuraClaw 是一个遵循 Managed Agent 架构的纯 Python 后端服务。系统
 Session Event Log 为事实源，以可重建 Projection 提供查询，并把运行时控制、Agent
 Runtime、工具执行和结果交付保持为清晰的逻辑边界。
 
+## 设计哲学
+
+AuraClaw 不是把 CLI Agent 主循环包装成 HTTP 服务，而是把**长期任务**建模为由持久事实、
+派生视图、运行时控制、Agent Runtime、工具执行和交付平面共同组成的**受管分布式系统**。
+「Managed Agent」中的 Managed 指：Agent 的推理能力是可替换的计算资源；任务的 lifecycle、
+状态、协作、安全与交付由系统基础设施负责。
+
+### 核心命题
+
+> Agent 是可替换的计算单元；任务是不可丢失的业务实体。
+
+OpenClaw 类系统的典型痛点——Agent 主循环与特定运行时强耦合、配置/会话状态全局散落、
+工具与 Gateway 双向依赖、渠道与内核混在同一仓库——根因都是**把常驻 Agent 进程当作系统本身**。
+AuraClaw 的回应是：让 LLM 专注语义推理与判断，把记忆、协议治理和流程编排外化为可管基础设施。
+
+### 三重外化
+
+| 外化维度 | 外化对象 | 工程映射 |
+|---|---|---|
+| 状态外化 → 记忆 | 跨越时间的执行状态 | Canonical Session Event Log + 可重建 Projection |
+| 交互外化 → 协议 | 跨边界的调用、权限、生命周期 | `contracts/` 命令/事件信封 + Gateway 边界 |
+| 经验外化 → 技能 | 流程化 know-how（怎么做、怎么选、不能做什么） | Coordinator/Worker/Reviewer 角色合同 + Tool Gateway + Policy |
+
+上下文是 LLM 的「内存」，记忆是系统的「硬盘」。优质记忆系统的目标，是在正确的时间把
+正确的历史切片呈现给模型——让算力用在推理上，而不是浪费在回忆上。
+
+### 事实与视图的分离
+
+| 数据 | 角色 | 是否可重建 |
+|---|---|---|
+| Canonical Session Event Log | 唯一业务事实源 | 否 |
+| Read Model Store（Control、Collaboration、Result、Approval） | 查询副本 | 是，可随时全量重建 |
+| Control State Store（租约、心跳、队列） | 短期运行控制 | 部分可恢复 |
+| Runtime Event Bus（Token Delta、进度通知） | 实时观测 | 不保证长期存在 |
+
+关键边界：
+
+- **Runtime 状态不直接修改 Session 业务事实**；生命周期变化通过 Canonical Event 回写。
+- **Runtime Event 流不是结果交付保证**；完成通知由持久 Outbox 驱动的 Result Delivery 负责。
+- **Streaming Gateway 只推送通知，不接收改变任务状态的命令**。
+
+网页断线不会取消任务；重连可恢复可见事件；Delivery Worker 重启后不丢失完成通知。
+
+### 职责边界
+
+| 组件 | 回答的问题 | 明确不做 |
+|---|---|---|
+| Coordinator | 任务如何语义拆分？子任务依赖如何组织？ | 不管理租约、不参与基础设施调度 |
+| Orchestrator | 哪个 Session 由哪个 Runtime 在什么资源上运行？ | 不判断任务语义、不拆分 DAG |
+| Agent Runtime | 在给定 Role Profile 下执行推理循环 | 不直接写 Session 事实、不读 Secret |
+| Tool Gateway | 工具调用的权限、审批、幂等、路由 | 不拥有业务状态 |
+
+语义决策与资源调度分离，使 Prompt 策略演进与调度/恢复机制演进可以独立进行。
+
+### 安全与治理
+
+安全治理是架构前提，而非事后补丁：
+
+- Model、Tool、Credential 均通过 Gateway 访问；Runtime 永远不读 Secret。
+- 高风险工具审批绑定 `Session + action digest + policy version`，不可跨动作复用。
+- 所有写入携带 tenant、command id、expected version、actor、correlation/causation。
+- 概率性 LLM 推理须用确定性系统机制约束其外部副作用。
+
+### 工程原则
+
+MVP 采用「模块化单体 + 独立 Worker + PostgreSQL」，**逻辑边界不能因合并部署而消失**：
+
+```text
+api → application → domain → contracts
+              ↓           ↑
+     infrastructure / projections / runtime
+```
+
+- `domain` 与 `contracts` 不含 FastAPI 或基础设施依赖。
+- 单一写入者、独立 Schema、无跨域外键、无跨边界事务。
+- 适配器通过同一契约测试；业务代码不绑定特定中间件。
+
+架构完成标准以**可恢复性**定义：任一 Brain/Hands/Orchestrator 实例死亡后任务可从 Session
+恢复；相同幂等键不重复创建 Root Session 或外部副作用；Projection 可从 Event Log 全量重建。
+
+深入设计见 [Managed Agent 系统架构总览](docs/Managed%20Agent%20系统架构/00%20Managed%20Agent%20系统架构总览.md)、
+[开发方案与实施计划](docs/Managed%20Agent%20开发方案与实施计划.md) 与
+[架构代码梳理](docs/Managed%20Agent%20架构代码梳理.md)。
+
+## 架构概览
+
 当前版本已实现 M7 前端测试与监控工作台及 M7.1 协议测试页面：
 
 ```text
@@ -195,8 +281,6 @@ M5 关键实现位于 `infrastructure/kafka/runtime_events.py`、
 `infrastructure/persistence/postgres_operations_store.py` 和
 `api/routes/operations.py`。SLO、故障处置、数据保留和灰度回滚见
 [M6 运维与灰度发布 Runbook](docs/M6%20运维与灰度发布%20Runbook.md)。
-
-设计依据见 [Managed Agent 系统架构](docs/Managed%20Agent%20系统架构/00%20Managed%20Agent%20系统架构总览.md)，实施顺序见 [开发方案与实施计划](docs/Managed%20Agent%20开发方案与实施计划.md)。
 
 ## 当前边界
 
