@@ -9,16 +9,19 @@ from uuid import uuid4
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import RequestResponseEndpoint
+from starlette.middleware.cors import CORSMiddleware
 from starlette.responses import Response
 
 from auraclaw import __version__
 from auraclaw.api.dependencies import (
+    build_development_runtime_worker,
     get_observability_service,
     get_runtime_event_producer,
     get_runtime_replay_bus,
     get_streaming_ingestor,
 )
 from auraclaw.api.routes import router
+from auraclaw.config import get_settings
 from auraclaw.contracts.errors import AuraClawError
 from auraclaw.contracts.observability import TraceContext
 from auraclaw.infrastructure.observability import StructuredLogger
@@ -26,7 +29,10 @@ from auraclaw.infrastructure.observability import StructuredLogger
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    settings = get_settings()
     ingestor = get_streaming_ingestor()
+    development_worker = None
+    development_worker_task: asyncio.Task[None] | None = None
     app.state.runtime_event_bus_ready = ingestor is None
     if ingestor is not None:
         try:
@@ -35,7 +41,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         except Exception:
             # Streaming is best-effort; Canonical Session APIs must remain available.
             app.state.runtime_event_bus_ready = False
+    if settings.development_runtime_active:
+        development_worker = build_development_runtime_worker()
+        development_worker_task = asyncio.create_task(development_worker.run())
     yield
+    if development_worker is not None and development_worker_task is not None:
+        await development_worker.stop()
+        with suppress(Exception):
+            await asyncio.wait_for(development_worker_task, timeout=10)
     if ingestor is not None:
         with suppress(Exception):
             await asyncio.wait_for(ingestor.close(), timeout=10)
@@ -48,12 +61,30 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 def create_app() -> FastAPI:
+    settings = get_settings()
     app = FastAPI(
         title="AuraClaw Managed Agent API",
         version=__version__,
         description="Canonical-event-driven Managed Agent backend",
         lifespan=lifespan,
     )
+    if settings.allowed_cors_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=settings.allowed_cors_origins,
+            allow_methods=["GET", "POST", "OPTIONS"],
+            allow_headers=[
+                "Content-Type",
+                "Idempotency-Key",
+                "If-None-Match",
+                "Last-Event-ID",
+                "X-Actor-ID",
+                "X-Correlation-ID",
+                "X-Expected-Version",
+                "X-Tenant-ID",
+            ],
+            expose_headers=["ETag", "Retry-After", "traceparent"],
+        )
     app.include_router(router)
     structured_logger = StructuredLogger()
 

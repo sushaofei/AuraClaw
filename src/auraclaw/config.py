@@ -31,6 +31,10 @@ class Settings(BaseSettings):
     kafka_streaming_group: str = "streaming-ingestor"
     runtime_event_retention_events: int = 1_000
     stream_connection_queue_size: int = 128
+    cors_allow_origins: str = ""
+    development_runtime_enabled: bool = True
+    development_runtime_poll_interval: float = 0.05
+    development_stream_delay: float = 0.08
 
     @property
     def resolved_database_url(self) -> str:
@@ -69,6 +73,26 @@ class Settings(BaseSettings):
     @property
     def kafka_bootstrap_servers(self) -> str:
         return f"{self.kafka_host or '127.0.0.1'}:{self.kafka_port}"
+
+    @property
+    def allowed_cors_origins(self) -> list[str]:
+        configured = [
+            origin.strip() for origin in self.cors_allow_origins.split(",") if origin.strip()
+        ]
+        if configured:
+            return configured
+        if self.env.lower() in {"development", "dev"}:
+            return ["http://127.0.0.1:3000", "http://localhost:3000"]
+        return []
+
+    @property
+    def development_runtime_active(self) -> bool:
+        return (
+            self.development_runtime_enabled
+            and self.env.lower() in {"development", "dev"}
+            and not self.postgres_enabled
+            and not self.kafka_enabled
+        )
 
 
 @lru_cache

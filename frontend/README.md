@@ -18,11 +18,16 @@ npm ci
 AURACLAW_DEV_API_TARGET=http://127.0.0.1:8000 npm run dev
 ```
 
-打开开发服务器输出的地址，在页面顶部将 API 地址设为当前站点 Origin 加 `/auraclaw-api`，再配置 tenant 和 actor。该路径只在设置了 `AURACLAW_DEV_API_TARGET` 的本地开发服务器中代理到后端。后端默认可通过以下命令启动：
+打开开发服务器输出的地址，在页面顶部将 API 地址设为当前站点 Origin 加 `/auraclaw-api`，再配置 tenant 和 actor。该路径只在设置了 `AURACLAW_DEV_API_TARGET` 的本地开发服务器中代理到后端。后端用于真实 Streaming 联调时通过以下命令启动：
 
 ```bash
+AURACLAW_STORAGE_BACKEND=memory \
+AURACLAW_RUNTIME_EVENT_BACKEND=memory \
 uv run uvicorn auraclaw.main:app --reload
 ```
+
+该模式会实际完成任务并发布多个 SSE delta。若 API 使用 PostgreSQL/Kafka 配置，则应另行部署
+Orchestrator/Runtime worker；仅启动 API 不会伪造模型结果。
 
 ## 构建与测试
 
@@ -36,7 +41,7 @@ npm run lint
 
 应用构建为静态前端资源，可与 AuraClaw API 同源部署，也可通过反向代理转发 `/v1` 和 `/health`。API Base URL 可在页面运行时配置，非敏感配置和最近 Session ID 保存在当前浏览器。
 
-跨域直连需要 AuraClaw 服务预先允许页面 Origin，以及 `GET`、`POST`、`Content-Type`、`X-Tenant-ID`、`X-Actor-ID`、`X-Correlation-ID`、`Idempotency-Key`、`X-Expected-Version`、`If-None-Match` 和 `Last-Event-ID` 等请求头。当前后端没有默认启用 CORS；推荐本地开发代理或同源反向代理，禁止通过关闭浏览器安全策略绕过。
+跨域直连需要 AuraClaw 服务允许页面 Origin，以及 `GET`、`POST`、`Content-Type`、`X-Tenant-ID`、`X-Actor-ID`、`X-Correlation-ID`、`Idempotency-Key`、`X-Expected-Version`、`If-None-Match` 和 `Last-Event-ID` 等请求头。本地 `3000` 端口来源默认允许；额外来源通过逗号分隔的 `AURACLAW_CORS_ALLOW_ORIGINS` 配置。生产仍推荐同源反向代理，禁止通过关闭浏览器安全策略绕过。
 
 ## SSE 排障
 

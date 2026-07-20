@@ -5,11 +5,13 @@ from uuid import uuid4
 from fastapi import Header
 
 from auraclaw.application.observability import ObservabilityProjector, ObservabilityService
+from auraclaw.application.orchestration import LocalRuntimeProvisioner, ManagedOrchestrator
 from auraclaw.application.streaming import StreamingGateway
 from auraclaw.application.tasks import AllowAllAdmissionController, TaskService
 from auraclaw.config import get_settings
 from auraclaw.contracts.commands import CommandContext
 from auraclaw.contracts.events import Actor
+from auraclaw.infrastructure.control_memory import InMemoryControlStateStore
 from auraclaw.infrastructure.memory import InMemoryEventStore
 from auraclaw.infrastructure.observability import (
     InMemoryObservabilityStore,
@@ -30,6 +32,13 @@ from auraclaw.projections.approvals import CompositeProjection, InMemoryApproval
 from auraclaw.projections.collaboration import InMemoryCollaborationProjection
 from auraclaw.projections.relay import OutboxRelay
 from auraclaw.projections.tasks import InMemoryTaskProjection
+from auraclaw.runtime.clients import FencedSessionClient, FencedToolClient, IdempotentToolClient
+from auraclaw.runtime.development import (
+    DelayedRuntimeEventPublisher,
+    DevelopmentModelClient,
+    DevelopmentRuntimeWorker,
+)
+from auraclaw.runtime.harness import AgentHarness
 
 
 @dataclass(frozen=True)
@@ -138,6 +147,52 @@ def get_streaming_ingestor() -> KafkaStreamingIngestor | None:
 @lru_cache
 def get_streaming_gateway() -> StreamingGateway:
     return StreamingGateway(reader=get_task_projection(), bus=get_runtime_replay_bus())
+
+
+def build_development_runtime_worker() -> DevelopmentRuntimeWorker:
+    settings = get_settings()
+    event_store = get_event_store()
+    projection = get_task_projection()
+    if not isinstance(event_store, InMemoryEventStore) or not isinstance(
+        projection, InMemoryTaskProjection
+    ):
+        raise RuntimeError("development runtime requires in-memory storage")
+    control = InMemoryControlStateStore()
+    session = FencedSessionClient(event_store, control)
+    publisher = DelayedRuntimeEventPublisher(
+        get_runtime_event_producer().publish,
+        delta_delay=settings.development_stream_delay,
+    )
+    relay = OutboxRelay(
+        event_store,
+        CompositeProjection(
+            projection,
+            get_approval_projection(),
+            get_collaboration_projection(),
+            ObservabilityProjector(get_observability_service()),
+        ),
+    )
+    orchestrator = ManagedOrchestrator(
+        orchestrator_id="development-orchestrator",
+        control_store=control,
+        session=session,
+        provisioner=LocalRuntimeProvisioner("development"),
+    )
+    harness = AgentHarness(
+        control_store=control,
+        session=session,
+        model=DevelopmentModelClient(),
+        tools=FencedToolClient(IdempotentToolClient(), control),
+        runtime_events=publisher,
+    )
+    return DevelopmentRuntimeWorker(
+        event_store=event_store,
+        reader=projection,
+        relay=relay,
+        orchestrator=orchestrator,
+        harness=harness,
+        poll_interval=settings.development_runtime_poll_interval,
+    )
 
 
 @lru_cache
