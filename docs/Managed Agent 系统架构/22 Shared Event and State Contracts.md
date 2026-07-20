@@ -63,21 +63,20 @@
 }
 ```
 
-Runtime Event 使用 `root_session_id` 或 `session_id` 作为分区键。`sequence` 只保证一个 Stream 范围内的显示顺序，不能代替 Canonical `aggregate_version`。
+Runtime Event 使用 `root_session_id` 或 `session_id` 作为分区键。`sequence` 在同一 Session Stream 的多个 Run 间单调递增，只保证显示顺序，不能代替 Canonical `aggregate_version`；轮次边界由 `run_id` 表达。
 
 ## Session 状态
 
 ```text
 created
-  -> pending
-  -> runnable
-  -> running
-  -> waiting_for_human | paused | retry_wait
-  -> runnable
-  -> completed | failed | cancelled
+  -> pending -> runnable -> running
+  -> waiting_for_human | paused | retry_wait -> runnable
+  -> ready
+  -> pending                 新 Run
+  -> closed                  显式终结 Session
 ```
 
-状态转换只能由 Canonical Events 推导。Control State Store 的实例状态不能直接修改业务 Session 状态。
+Run 状态独立为 `pending -> runnable -> running -> completed | failed | cancelled`，等待、暂停和重试状态同样由 Run 事件推导。`run.completed / failed / cancelled` 使 Root Session 回到 `ready`，不再隐式终结 Session。状态转换只能由 Canonical Events 推导。Control State Store 的实例状态不能直接修改业务 Session 状态。
 
 ## Child Session 状态与依赖
 

@@ -14,6 +14,7 @@ from auraclaw.api.models import (
     ApprovalCommandResponse,
     ApprovalResponseRequest,
     CancelTaskRequest,
+    CloseSessionRequest,
     CommandResponse,
     CreateTaskRequest,
     TaskAcceptedResponse,
@@ -60,7 +61,7 @@ async def get_task(
     etag = f'W/"{task["projection_version"]}"'
     response.headers["ETag"] = etag
     projection_is_fresh = min_version is None or int(task["projection_version"]) >= min_version
-    if projection_is_fresh and task["status"] not in {"completed", "failed", "cancelled"}:
+    if projection_is_fresh and task["run_status"] not in {"completed", "failed", "cancelled"}:
         response.headers["Retry-After"] = "2"
     if if_none_match == etag and projection_is_fresh:
         response.status_code = status.HTTP_304_NOT_MODIFIED
@@ -164,6 +165,32 @@ async def cancel_task(
         operation="cancel_task",
     )
     return await service.cancel_task(
+        session_id=session_id,
+        reason=request.reason,
+        context=context,
+    )
+
+
+@router.post(
+    "/sessions/{session_id}/close",
+    response_model=CommandResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def close_session(
+    session_id: str,
+    request: CloseSessionRequest,
+    identity: Identity,
+    service: TaskCommandDependency,
+    idempotency_key: str = Header(alias="Idempotency-Key", min_length=1),
+    expected_version: int = Header(alias="X-Expected-Version"),
+) -> dict[str, Any]:
+    context = command_context(
+        identity=identity,
+        command_id=idempotency_key,
+        expected_version=expected_version,
+        operation="close_session",
+    )
+    return await service.close_session(
         session_id=session_id,
         reason=request.reason,
         context=context,

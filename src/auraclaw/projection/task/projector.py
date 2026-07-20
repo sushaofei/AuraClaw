@@ -5,7 +5,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from auraclaw.contracts.events import CanonicalEvent
-from auraclaw.contracts.state import SessionStatus
+from auraclaw.contracts.state import RunStatus, SessionStatus
 
 
 class ProjectionGapError(RuntimeError):
@@ -38,6 +38,7 @@ KNOWN_TASK_EVENTS = {
     "approval.cancelled",
     "run.retry_scheduled",
     "session.resumed",
+    "session.closed",
     "run.completed",
     "run.failed",
     "run.cancelled",
@@ -127,6 +128,7 @@ class InMemoryTaskProjection:
             "root_session_id": event.root_session_id,
             "run_id": event.run_id,
             "status": SessionStatus.CREATED.value,
+            "run_status": None,
             "progress": 0.0,
             "current_stage": "admission",
             "result_summary": None,
@@ -177,6 +179,16 @@ class InMemoryTaskProjection:
                     if view.get("role", "root") != "root"
                     else "pending"
                 ),
+                run_status=RunStatus.PENDING.value,
+                progress=0.0,
+                result_summary=None,
+                result_ref=None,
+                artifact_refs=[],
+                error=None,
+                delivery_status=None,
+                delivery_id=None,
+                delivery_attempt_count=0,
+                delivery_response_summary=None,
             )
         elif event.type == "dependency.changed":
             dependencies = list(payload["dependency_ids"])
@@ -188,29 +200,56 @@ class InMemoryTaskProjection:
         elif event.type in {"child.delegated", "session.handed_off"}:
             view.update(owner=payload["owner"])
         elif event.type == "run.scheduled":
-            view.update(status=SessionStatus.RUNNABLE.value, current_stage="scheduling")
+            view.update(
+                status=SessionStatus.RUNNABLE.value,
+                run_status=RunStatus.RUNNABLE.value,
+                current_stage="scheduling",
+            )
         elif event.type == "run.started":
-            view.update(status=SessionStatus.RUNNING.value, current_stage="running")
+            view.update(
+                status=SessionStatus.RUNNING.value,
+                run_status=RunStatus.RUNNING.value,
+                current_stage="running",
+            )
         elif event.type == "session.paused":
-            view.update(status=SessionStatus.PAUSED.value, current_stage="paused")
+            view.update(
+                status=SessionStatus.PAUSED.value,
+                run_status=RunStatus.PAUSED.value,
+                current_stage="paused",
+            )
         elif event.type == "approval.requested":
             view.update(
                 status=SessionStatus.WAITING_FOR_HUMAN.value,
+                run_status=RunStatus.WAITING_FOR_HUMAN.value,
                 current_stage="waiting_for_human",
             )
         elif event.type == "approval.approved":
-            view.update(status=SessionStatus.RUNNABLE.value, current_stage="scheduling")
+            view.update(
+                status=SessionStatus.RUNNABLE.value,
+                run_status=RunStatus.RUNNABLE.value,
+                current_stage="scheduling",
+            )
         elif event.type == "approval.rejected":
-            view.update(status=SessionStatus.RUNNABLE.value, current_stage="replanning")
+            view.update(
+                status=SessionStatus.RUNNABLE.value,
+                run_status=RunStatus.RUNNABLE.value,
+                current_stage="replanning",
+            )
         elif event.type == "session.resumed":
             view.update(
                 run_id=payload["run_id"],
                 status=SessionStatus.PENDING.value,
+                run_status=RunStatus.PENDING.value,
                 current_stage="pending",
             )
         elif event.type == "run.completed":
             view.update(
-                status=SessionStatus.COMPLETED.value,
+                status=(
+                    SessionStatus.READY.value
+                    if view.get("role", "root") == "root"
+                    else SessionStatus.COMPLETED.value
+                ),
+                run_status=RunStatus.COMPLETED.value,
                 progress=1.0,
                 current_stage="completed",
                 result_summary=payload.get("result_summary"),
@@ -221,6 +260,7 @@ class InMemoryTaskProjection:
         elif event.type == "child.result_published":
             view.update(
                 status=SessionStatus.COMPLETED.value,
+                run_status=RunStatus.COMPLETED.value,
                 progress=1.0,
                 current_stage="completed",
                 result_summary=payload.get("summary"),
@@ -230,6 +270,7 @@ class InMemoryTaskProjection:
         elif event.type == "review.completed":
             view.update(
                 status=SessionStatus.COMPLETED.value,
+                run_status=RunStatus.COMPLETED.value,
                 progress=1.0,
                 current_stage="review_completed",
                 result_summary=payload.get("decision"),
@@ -238,23 +279,53 @@ class InMemoryTaskProjection:
             )
         elif event.type == "run.failed":
             view.update(
-                status=SessionStatus.FAILED.value,
+                status=(
+                    SessionStatus.READY.value
+                    if view.get("role", "root") == "root"
+                    else SessionStatus.FAILED.value
+                ),
+                run_status=RunStatus.FAILED.value,
                 current_stage="failed",
                 error=payload.get("error"),
             )
         elif event.type == "run.cancelled":
-            view.update(status=SessionStatus.CANCELLED.value, current_stage="cancelled")
+            view.update(
+                status=(
+                    SessionStatus.READY.value
+                    if view.get("role", "root") == "root"
+                    else SessionStatus.CANCELLED.value
+                ),
+                run_status=RunStatus.CANCELLED.value,
+                current_stage="cancelled",
+            )
         elif event.type == "runtime.failed":
             view.update(
                 status=SessionStatus.RETRY_WAIT.value,
+                run_status=RunStatus.RETRY_WAIT.value,
                 current_stage="runtime_recovery",
                 error=payload.get("error"),
             )
         elif event.type == "runtime.reprovisioned":
-            view.update(status=SessionStatus.RUNNABLE.value, current_stage="scheduling")
+            view.update(
+                status=SessionStatus.RUNNABLE.value,
+                run_status=RunStatus.RUNNABLE.value,
+                current_stage="scheduling",
+            )
         elif event.type == "run.terminated":
-            view.update(status=SessionStatus.FAILED.value, current_stage="terminated")
+            view.update(
+                status=(
+                    SessionStatus.READY.value
+                    if view.get("role", "root") == "root"
+                    else SessionStatus.FAILED.value
+                ),
+                run_status=RunStatus.FAILED.value,
+                current_stage="terminated",
+            )
+        elif event.type == "session.closed":
+            view.update(status=SessionStatus.CLOSED.value, current_stage="closed")
         elif event.type.startswith("delivery."):
+            if event.run_id != view.get("run_id"):
+                return
             view.update(
                 delivery_status=payload.get("status"),
                 delivery_id=payload.get("delivery_id"),

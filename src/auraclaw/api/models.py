@@ -11,6 +11,10 @@ class CancelTaskRequest(BaseModel):
     reason: str = Field(default="cancelled by user", max_length=2_000)
 
 
+class CloseSessionRequest(BaseModel):
+    reason: str = Field(default="closed by user", max_length=2_000)
+
+
 class AppendMessageRequest(BaseModel):
     message: str = Field(min_length=1, max_length=100_000)
 
@@ -33,6 +37,7 @@ class CommandResponse(BaseModel):
     session_id: str
     run_id: str | None
     status: str
+    run_status: str | None = None
 
 
 class ApprovalCommandResponse(CommandResponse):
@@ -46,6 +51,7 @@ class TaskView(BaseModel):
     root_session_id: str
     run_id: str | None
     status: str
+    run_status: str | None = None
     goal: str
     progress: float
     current_stage: str

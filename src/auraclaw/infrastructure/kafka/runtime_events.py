@@ -93,7 +93,9 @@ class RuntimeEventProducerSDK:
         self._publisher = publisher
         self._max_event_bytes = max_event_bytes
         self._delta_flush_bytes = delta_flush_bytes
-        self._sequences: dict[tuple[str, str, str], int] = defaultdict(int)
+        # Public SSE cursors are Session-scoped, so sequences must remain monotonic
+        # when a Session starts a second or later Run.
+        self._sequences: dict[tuple[str, str], int] = defaultdict(int)
         self._deltas: dict[tuple[str, str, str], str] = defaultdict(str)
         self._lock = asyncio.Lock()
 
@@ -155,14 +157,15 @@ class RuntimeEventProducerSDK:
         visibility: str,
         durable: bool,
     ) -> RuntimeEvent:
-        self._sequences[key] += 1
+        sequence_key = (key[0], key[1])
+        self._sequences[sequence_key] += 1
         event = RuntimeEvent(
             event_id=f"rte_{uuid4().hex}",
             tenant_id=key[0],
             root_session_id=root_session_id,
             session_id=key[1],
             run_id=key[2],
-            sequence=self._sequences[key],
+            sequence=self._sequences[sequence_key],
             type=event_type,
             timestamp=datetime.now(UTC),
             payload=payload,
@@ -171,7 +174,7 @@ class RuntimeEventProducerSDK:
         )
         encoded = json.dumps(runtime_event_dict(event), separators=(",", ":")).encode()
         if len(encoded) > self._max_event_bytes:
-            self._sequences[key] -= 1
+            self._sequences[sequence_key] -= 1
             raise RuntimeEventRejectedError("runtime event exceeds configured size limit")
         await self._publisher.publish(event)
         return event

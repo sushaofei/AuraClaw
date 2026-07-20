@@ -73,7 +73,10 @@ class AgentHarness:
             identity=assignment.run_id,
         )
         events = await self._session.load(assignment)
-        if any(event.type == "run.completed" for event in events):
+        if any(
+            event.type == "run.completed" and event.run_id == assignment.run_id
+            for event in events
+        ):
             await self._control.finish_assignment(self._task_id(assignment), "completed")
             return
 
@@ -385,6 +388,8 @@ class AgentHarness:
                 messages.append({"role": "user", "content": event.payload.get("goal", "")})
             elif event.type == "user.message.appended":
                 messages.append({"role": "user", "content": event.payload.get("message", "")})
+            elif event.type == "model.output.completed":
+                messages.append({"role": "assistant", "content": event.payload.get("output", "")})
         return tuple(messages)
 
     @staticmethod

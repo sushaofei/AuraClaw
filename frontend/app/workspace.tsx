@@ -36,7 +36,8 @@ const CRITICAL_METRICS = new Set([
   "tool.side_effect_unknown.count",
   "delivery.dlq.count",
 ]);
-const TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled"]);
+const TERMINAL_RUN_STATUSES = new Set(["completed", "failed", "cancelled"]);
+const TERMINAL_SESSION_STATUSES = new Set(["closed"]);
 const PANELS = new Set(["chat", "create", "task", "stream", "timeline", "metrics", "history"]);
 
 function asJson(value: unknown): Json {
@@ -281,7 +282,7 @@ export function AuraClawConsole() {
       const delay = retryAfterMs(response.headers.get("retry-after"));
       setResultPollMs(delay);
       const resultStatus = String(nextResult?.status ?? result?.status ?? "");
-      if (response.status !== 202 && TERMINAL_STATUSES.has(resultStatus)) setResultAutoPoll(false);
+      if (response.status !== 202 && TERMINAL_RUN_STATUSES.has(resultStatus)) setResultAutoPoll(false);
       if (!quiet) {
         if (response.status === 304) setNotice("Result 未变化，已命中 ETag 缓存");
         else setNotice(response.status === 202 ? `结果尚未就绪，将在 ${Math.round(delay / 1000)} 秒后重试` : "结果已加载");
@@ -396,16 +397,19 @@ export function AuraClawConsole() {
     setBusy("chat-send");
     try {
       let targetSessionId = sessionId;
-      if (!targetSessionId || !task || TERMINAL_STATUSES.has(String(task.status ?? ""))) {
-        const continuesAfterTerminal = Boolean(targetSessionId && task && TERMINAL_STATUSES.has(String(task.status ?? "")));
+      let currentTask = task;
+      if (targetSessionId && (!currentTask || String(currentTask.session_id ?? "") !== targetSessionId)) {
+        currentTask = await loadTask(true, targetSessionId);
+      }
+      if (!targetSessionId || (currentTask && TERMINAL_SESSION_STATUSES.has(String(currentTask.status ?? "")))) {
+        const continuesAfterTerminal = Boolean(targetSessionId && currentTask && TERMINAL_SESSION_STATUSES.has(String(currentTask.status ?? "")));
         const created = await createTask(query, "chat");
         if (!created) return;
         targetSessionId = created.id;
         if (continuesAfterTerminal) {
-          setChatMessages((current) => [...current, { id: createCommandId("chat-system"), role: "system", content: "上一 Session 已进入终态；当前公开 API 不允许向终态 Session 追加消息，本次追问已创建新的 Session。" }]);
+          setChatMessages((current) => [...current, { id: createCommandId("chat-system"), role: "system", content: "上一 Session 已显式关闭，本次问题已创建新的 Session。" }]);
         }
       } else {
-        const currentTask = task ?? await loadTask(true, targetSessionId);
         const expectedVersion = Number(currentTask?.projection_version ?? 0);
         await api(`/v1/sessions/${encodeURIComponent(targetSessionId)}/messages`, {
           method: "POST",
@@ -477,8 +481,8 @@ export function AuraClawConsole() {
       try {
         const nextTask = await loadTask(true);
         const currentTask = nextTask ?? task;
-        const status = String(currentTask?.status ?? "");
-        if (!TERMINAL_STATUSES.has(status)) {
+        const status = String(currentTask?.run_status ?? "");
+        if (!TERMINAL_RUN_STATUSES.has(status)) {
           if (!cancelled) timer = window.setTimeout(() => void pollUntilTerminal(), resultPollMs);
           return;
         }
@@ -508,6 +512,7 @@ export function AuraClawConsole() {
   const visibleMetrics = useMemo(() => metricSeries(metrics as Array<{ name: string; observed_at: string; value: number }>).filter((series) => !metricQuery || series.name.toLowerCase().includes(metricQuery.toLowerCase())), [metricQuery, metrics]);
   const progress = Number(task?.progress ?? 0);
   const taskStatus = String(task?.status ?? "未加载");
+  const runStatus = String(task?.run_status ?? "未加载");
   const streamedAnswer = [...chatMessages].reverse().find((item) => item.role === "assistant")?.content ?? "";
   const finalAnswer = resultText(chatResult);
   const answerMismatch = Boolean(streamedAnswer && finalAnswer && streamedAnswer.trim() !== finalAnswer.trim());
@@ -558,7 +563,7 @@ export function AuraClawConsole() {
                 </section>
                 <aside className="chat-inspector">
                   <article className="subpanel"><div className="subpanel-title"><h2>权威结果核对</h2><span className={`pill ${statusTone(chatResult?.status ?? chatStatus)}`}>{String(chatResult?.status ?? chatStatus)}</span></div>{chatResult ? <><div className={`consistency-note ${answerMismatch ? "mismatch" : "match"}`}><strong>{answerMismatch ? "流式内容与 Result 存在差异" : "流式内容与 Result 已核对"}</strong><p>{answerMismatch ? "最终回答以 Result API 为准。" : "Result 是任务完成与交付的事实来源。"}</p></div><div className="answer-block"><small>FINAL RESULT</small><p>{finalAnswer || "结果没有文本摘要，请查看结构化 JSON。"}</p></div><button className="copy-button" onClick={() => void copyJson(chatResult)}>复制脱敏 Result</button><JsonBlock value={chatResult} /></> : <EmptyState title="等待最终 Result" detail="页面会轮询 Task View，并按 Retry-After 获取最终结果。" />}</article>
-                  <article className="subpanel protocol-facts"><div className="subpanel-title"><h2>当前协议状态</h2><span>canonical first</span></div><dl><div><dt>Session</dt><dd>{sessionId || "—"}</dd></div><div><dt>Task</dt><dd>{taskStatus}</dd></div><div><dt>Event cursor</dt><dd>{streamCursor || "—"}</dd></div><div><dt>Streamed chars</dt><dd>{streamedAnswer.length}</dd></div></dl></article>
+                  <article className="subpanel protocol-facts"><div className="subpanel-title"><h2>当前协议状态</h2><span>canonical first</span></div><dl><div><dt>Session</dt><dd>{sessionId || "—"}</dd></div><div><dt>Session status</dt><dd>{taskStatus}</dd></div><div><dt>Run status</dt><dd>{runStatus}</dd></div><div><dt>Event cursor</dt><dd>{streamCursor || "—"}</dd></div><div><dt>Streamed chars</dt><dd>{streamedAnswer.length}</dd></div></dl></article>
                 </aside>
               </div>
               {chatRawOpen && <article className="subpanel"><div className="subpanel-title"><h2>Runtime Event 原始视图</h2><span>{events.length} events</span></div>{events.length ? <div className="event-list compact-events">{events.toReversed().map((entry) => <details className={`event-row ${entry.event === "stream.reset" ? "reset" : ""}`} key={entry.id}><summary><span className="sequence">{entry.id}</span><strong>{entry.event}</strong>{entry.replay && <span className="pill warn">replay</span>}<time>{displayTime(entry.receivedAt)}</time></summary><JsonBlock value={entry.data} /></details>)}</div> : <EmptyState title="暂无事件" detail="发送问题或恢复 Session 后会自动连接。" />}</article>}
@@ -573,7 +578,7 @@ export function AuraClawConsole() {
               <div className="session-locator"><label className="field grow"><span>打开已有 Session</span><input value={sessionId} onChange={(e) => { setSessionId(e.target.value); setTask(null); setResult(null); setResultEtag(""); taskEtag.current = ""; }} placeholder="ses_..." /></label><button className="button" onClick={() => void Promise.all([loadTask(), loadResult()]).then(() => setResultAutoPoll(true))} disabled={!sessionId.trim()}>打开任务</button><button className="button" onClick={() => navigatePanel("task")} disabled={!task}>Session 详情</button></div>
               <div className="protocol-grid">
                 <article className="protocol-column"><header><span>01</span><div><small>REQUEST</small><h2>Query</h2></div>{createRequest && <button className="copy-button" onClick={() => void copyJson(createRequest)}>复制</button>}</header>{createRequest ? <><div className="protocol-summary"><strong>POST /v1/tasks</strong><span>202 Accepted</span></div><JsonBlock value={createRequest} />{createResponse && <><h3>创建响应</h3><JsonBlock value={createResponse} /></>}</> : <EmptyState title="尚未提交 Query" detail="填写目标并提交；实际脱敏请求会显示在这里。" />}</article>
-                <article className="protocol-column"><header><span>02</span><div><small>AUTHORITATIVE VIEW</small><h2>Task</h2></div>{task && <button className="copy-button" onClick={() => void copyJson(task)}>复制</button>}</header>{task ? <><div className="task-phase"><span className={`health-dot ${statusTone(task.status)}`} /><div><strong>{String(task.status ?? "unknown")}</strong><small>{String(task.current_stage ?? "—")} · projection v{String(task.projection_version ?? "—")}</small></div></div><dl className="protocol-dl"><div><dt>Session</dt><dd>{String(task.session_id ?? sessionId)}</dd></div><div><dt>Run</dt><dd>{String(task.run_id ?? "—")}</dd></div><div><dt>Progress</dt><dd>{Math.round(Number(task.progress ?? 0) * 100)}%</dd></div><div><dt>Delivery</dt><dd>{String(task.delivery_status ?? "not configured")}</dd></div></dl><JsonBlock value={task} /></> : <EmptyState title="等待 Task View" detail="提交 Query 或通过 Session ID 打开任务。" />}</article>
+                <article className="protocol-column"><header><span>02</span><div><small>AUTHORITATIVE VIEW</small><h2>Task</h2></div>{task && <button className="copy-button" onClick={() => void copyJson(task)}>复制</button>}</header>{task ? <><div className="task-phase"><span className={`health-dot ${statusTone(task.run_status ?? task.status)}`} /><div><strong>Session {String(task.status ?? "unknown")} · Run {String(task.run_status ?? "unknown")}</strong><small>{String(task.current_stage ?? "—")} · projection v{String(task.projection_version ?? "—")}</small></div></div><dl className="protocol-dl"><div><dt>Session</dt><dd>{String(task.session_id ?? sessionId)}</dd></div><div><dt>Run</dt><dd>{String(task.run_id ?? "—")}</dd></div><div><dt>Progress</dt><dd>{Math.round(Number(task.progress ?? 0) * 100)}%</dd></div><div><dt>Delivery</dt><dd>{String(task.delivery_status ?? "not configured")}</dd></div></dl><JsonBlock value={task} /></> : <EmptyState title="等待 Task View" detail="提交 Query 或通过 Session ID 打开任务。" />}</article>
                 <article className="protocol-column result-column"><header><span>03</span><div><small>CONDITIONAL GET</small><h2>Result</h2></div>{result && <button className="copy-button" onClick={() => void copyJson(result)}>复制</button>}</header><div className="cache-strip"><span>ETag <code>{resultEtag || "—"}</code></span><span>next {Math.round(resultPollMs / 1000)}s</span></div>{result ? <><div className="task-phase"><span className={`health-dot ${statusTone(result.status)}`} /><div><strong>{String(result.status ?? "unknown")}</strong><small>{resultText(result) || "结构化结果"}</small></div></div><JsonBlock value={result} /></> : <EmptyState title="等待 Result" detail="处理中返回 202；完成后使用 ETag 避免重复下载。" />}</article>
               </div>
             </div>
@@ -592,7 +597,7 @@ export function AuraClawConsole() {
                     <article className="stat-card"><small>Delivery</small><strong>{String(task.delivery_status ?? "not configured")}</strong><p>{String(task.delivery_attempt_count ?? 0)} attempts</p></article>
                   </div>
                   <div className="command-grid">
-                    <article className="subpanel"><div className="subpanel-title"><h2>Session commands</h2><span>expected v{String(task.projection_version ?? 0)}</span></div><label className="field"><span>追加消息</span><textarea value={message} onChange={(e) => setMessage(e.target.value)} placeholder="为当前 Session 补充上下文" rows={3} /></label><div className="button-row"><button className="button primary" disabled={!message.trim()} onClick={() => void command("append-message", `/v1/sessions/${sessionId}/messages`, { message }).then(() => setMessage(""))}>追加消息</button><button className="button" onClick={() => void command("request-run", `/v1/sessions/${sessionId}/runs`)}>请求运行</button><button className="button danger" onClick={() => void command("cancel", `/v1/sessions/${sessionId}/cancel`, { reason: "cancelled from operations console" }, "确认取消任务？")}>取消</button><button className="button" onClick={() => void command("resume", `/v1/sessions/${sessionId}/resume`, undefined, "确认恢复任务？")}>恢复</button></div></article>
+                    <article className="subpanel"><div className="subpanel-title"><h2>Session commands</h2><span>expected v{String(task.projection_version ?? 0)}</span></div><label className="field"><span>追加消息</span><textarea value={message} onChange={(e) => setMessage(e.target.value)} placeholder="为当前 Session 补充上下文" rows={3} /></label><div className="button-row"><button className="button primary" disabled={!message.trim()} onClick={() => void command("append-message", `/v1/sessions/${sessionId}/messages`, { message }).then(() => setMessage(""))}>追加消息</button><button className="button" onClick={() => void command("request-run", `/v1/sessions/${sessionId}/runs`)}>请求运行</button><button className="button danger" onClick={() => void command("cancel", `/v1/sessions/${sessionId}/cancel`, { reason: "cancelled from operations console" }, "确认取消当前 Run？")}>取消 Run</button><button className="button" onClick={() => void command("resume", `/v1/sessions/${sessionId}/resume`, undefined, "确认恢复任务？")}>恢复</button><button className="button danger" onClick={() => void command("close", `/v1/sessions/${sessionId}/close`, { reason: "closed from operations console" }, "确认永久关闭 Session？")}>关闭 Session</button></div></article>
                     <article className="subpanel"><div className="subpanel-title"><h2>Approval response</h2><span>known ID only</span></div><label className="field"><span>Approval ID</span><input value={approvalId} onChange={(e) => setApprovalId(e.target.value)} placeholder="approval_..." /></label><label className="field"><span>反馈（可选）</span><input value={approvalFeedback} onChange={(e) => setApprovalFeedback(e.target.value)} /></label><div className="button-row"><button className="button approve" disabled={!approvalId} onClick={() => void command("approve", `/v1/sessions/${sessionId}/approvals/${approvalId}/responses`, { decision: "approved", feedback: approvalFeedback || null }, "确认批准该操作？")}>批准</button><button className="button danger" disabled={!approvalId} onClick={() => void command("reject", `/v1/sessions/${sessionId}/approvals/${approvalId}/responses`, { decision: "rejected", feedback: approvalFeedback || null }, "确认拒绝该操作？")}>拒绝</button></div></article>
                   </div>
                   <div className="button-row"><button className="button" onClick={() => void loadResult()}>查询结果</button><button className="button" onClick={() => void loadChildren()}>加载 Child Sessions</button><button className="button" onClick={() => void loadTimeline()}>打开 Timeline</button><button className="button" onClick={() => void startStream()} disabled={streamState === "live" || streamState === "connecting"}>连接实时流</button></div>

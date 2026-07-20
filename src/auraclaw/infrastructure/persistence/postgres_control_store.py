@@ -227,6 +227,17 @@ class PostgresControlStateStore(_LazyPool):
     async def finish_assignment(self, task_id: str, outcome: str) -> None:
         pool = await self.pool()
         async with pool.acquire() as connection, connection.transaction():
+            if outcome in {"completed", "failed", "cancelled"}:
+                await connection.execute(
+                    """DELETE FROM control.runtime_lease AS lease
+                    USING control.assignment AS assignment
+                    WHERE assignment.task_id=$1
+                      AND lease.resource_id=(
+                        'session:' || assignment.tenant_id || ':' || assignment.session_id
+                      )
+                      AND lease.lease_id=assignment.lease_id""",
+                    task_id,
+                )
             await connection.execute(
                 """UPDATE control.assignment SET assignment_status=$2, completed_at=now()
                 WHERE task_id=$1""",

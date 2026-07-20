@@ -18,6 +18,7 @@ from auraclaw.composition.providers import (
 )
 from auraclaw.config import Settings, get_settings
 from auraclaw.main import create_app
+from auraclaw.runtime.harness import AgentHarness
 
 
 def _clear_dependencies() -> None:
@@ -71,7 +72,7 @@ def test_development_runtime_supports_external_development_backends() -> None:
     assert settings.development_runtime_active is False
 
 
-def test_development_runtime_completes_task_and_replays_multiple_deltas() -> None:
+def test_development_runtime_supports_three_runs_in_one_session() -> None:
     settings = get_settings()
     previous = {
         "env": settings.env,
@@ -101,18 +102,50 @@ def test_development_runtime_completes_task_and_replays_multiple_deltas() -> Non
             )
             assert created.status_code == 202
             session_id = created.json()["session_id"]
+            run_ids = [created.json()["run_id"]]
 
-            deadline = time.monotonic() + 2
-            task = None
-            while time.monotonic() < deadline:
-                task = client.get(
+            def wait_for_run(run_id: str) -> dict[str, object]:
+                deadline = time.monotonic() + 2
+                task: dict[str, object] = {}
+                while time.monotonic() < deadline:
+                    task = client.get(
+                        f"/v1/tasks/{session_id}", headers={"X-Tenant-ID": "tenant-m7"}
+                    ).json()
+                    if task["run_id"] == run_id and task["run_status"] == "completed":
+                        return task
+                    time.sleep(0.01)
+                raise AssertionError(f"Run did not complete: {run_id}; last task={task}")
+
+            task = wait_for_run(run_ids[0])
+            for index, message in enumerate(("请继续说明", "最后总结一下"), start=2):
+                appended = client.post(
+                    f"/v1/sessions/{session_id}/messages",
+                    headers={
+                        "Idempotency-Key": f"m7-message-{index}",
+                        "X-Tenant-ID": "tenant-m7",
+                        "X-Expected-Version": str(task["projection_version"]),
+                    },
+                    json={"message": message},
+                )
+                assert appended.status_code == 202
+                after_message = client.get(
                     f"/v1/tasks/{session_id}", headers={"X-Tenant-ID": "tenant-m7"}
                 ).json()
-                if task["status"] == "completed":
-                    break
-                time.sleep(0.01)
+                requested = client.post(
+                    f"/v1/sessions/{session_id}/runs",
+                    headers={
+                        "Idempotency-Key": f"m7-run-{index}",
+                        "X-Tenant-ID": "tenant-m7",
+                        "X-Expected-Version": str(after_message["projection_version"]),
+                    },
+                )
+                assert requested.status_code == 202
+                assert requested.json()["session_id"] == session_id
+                run_ids.append(requested.json()["run_id"])
+                task = wait_for_run(run_ids[-1])
 
-            assert task is not None and task["status"] == "completed"
+            assert task["status"] == "ready"
+            assert len(set(run_ids)) == 3
             result = client.get(
                 f"/v1/tasks/{session_id}/result",
                 headers={"X-Tenant-ID": "tenant-m7"},
@@ -122,10 +155,26 @@ def test_development_runtime_completes_task_and_replays_multiple_deltas() -> Non
             deltas = [
                 event.payload["delta"]
                 for event in events
-                if event.type == "model.output.delta"
+                if event.type == "model.output.delta" and event.run_id == run_ids[-1]
             ]
             assert len(deltas) > 1
             assert "".join(deltas) == result.json()["result_summary"]
+            assert result.json()["run_id"] == run_ids[-1]
+            assert result.json()["status"] == "completed"
+            assert result.json()["session_status"] == "ready"
+            sequences = [event.sequence for event in events]
+            assert sequences == sorted(set(sequences))
+
+            canonical = asyncio.run(get_event_store().load("tenant-m7", session_id))
+            messages = AgentHarness._build_messages(canonical)
+            assert [message["role"] for message in messages] == [
+                "user",
+                "assistant",
+                "user",
+                "assistant",
+                "user",
+                "assistant",
+            ]
     finally:
         for key, value in previous.items():
             setattr(settings, key, value)

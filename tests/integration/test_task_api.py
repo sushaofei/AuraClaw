@@ -26,7 +26,7 @@ def setup_function() -> None:
     get_approval_projection.cache_clear()
 
 
-def test_create_query_and_cancel_task() -> None:
+def test_cancelled_run_leaves_root_session_ready_and_session_can_be_closed() -> None:
     with TestClient(create_app()) as client:
         created = client.post(
             "/v1/tasks",
@@ -59,8 +59,33 @@ def test_create_query_and_cancel_task() -> None:
         assert cancelled.status_code == 202
 
         final = client.get(f"/v1/tasks/{session_id}", headers={"X-Tenant-ID": "tenant-1"})
-        assert final.json()["status"] == "cancelled"
+        assert final.json()["status"] == "ready"
+        assert final.json()["run_status"] == "cancelled"
         assert final.json()["projection_version"] == 3
+
+        closed = client.post(
+            f"/v1/sessions/{session_id}/close",
+            headers={
+                "Idempotency-Key": "cmd-close-1",
+                "X-Tenant-ID": "tenant-1",
+                "X-Expected-Version": "3",
+            },
+            json={"reason": "conversation finished"},
+        )
+        assert closed.status_code == 202
+        assert closed.json()["status"] == "closed"
+
+        rejected = client.post(
+            f"/v1/sessions/{session_id}/messages",
+            headers={
+                "Idempotency-Key": "append-after-close",
+                "X-Tenant-ID": "tenant-1",
+                "X-Expected-Version": "4",
+            },
+            json={"message": "too late"},
+        )
+        assert rejected.status_code == 409
+        assert rejected.json()["code"] == "invalid_transition"
 
 
 def test_create_is_idempotent() -> None:

@@ -80,6 +80,13 @@ def test_runtime_producer_sequences_coalesces_redacts_and_limits_events() -> Non
         assert second is not None
         assert first.sequence == 1 and first.payload == {"delta": "abcde"}
         assert second.sequence == 2 and second.payload["secret"] == "[REDACTED]"
+        next_run = await producer.publish(
+            **{**common, "run_id": "run-m5-2"},
+            event_type="model.output.delta",
+            payload={"delta": "second run"},
+            visibility="user",
+        )
+        assert next_run is not None and next_run.sequence == 3
         with pytest.raises(RuntimeEventRejectedError, match="secret runtime"):
             await producer.publish(
                 **common,
