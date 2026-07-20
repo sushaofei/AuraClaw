@@ -169,25 +169,30 @@ uv run pytest
 
 ```text
 src/auraclaw/
-  api/             HTTP 接入与查询边界
-  application/     用例编排，不保存事实
-  contracts/       跨模块事件、状态和错误契约
-  domain/          Session 聚合与状态机
-  infrastructure/  Event Store、Outbox 等适配器
-  projections/     可重建 Read Model
-  runtime/         Runtime 端口、Fenced Clients、Harness、Model Gateway
-  delivery/        逻辑边界由 application/delivery 与 infrastructure/delivery 实现
+  api/             薄 HTTP transport、DTO 与 dependency tokens
+  gateways/        Task Command、Query 与 Streaming 接入边界
+  session/         Session / Collaboration 写侧应用服务
+  projection/      可重建 Read Model、Relay 与维护服务
+  control/         Orchestrator 与 Control ports
+  runtime/         Runtime ports、Fenced Clients、Harness、Model Gateway
+  action/          Tool Gateway、Policy 与 Action ports
+  delivery/        Delivery Worker 与 ports
+  observability/   Trace / Audit / Ops 应用服务
+  infrastructure/  持久化、投影、Kafka、Hands、Credential 等适配器
+  composition/     API、CLI 与开发 Runtime 的唯一装配根
+  contracts/       跨模块稳定契约
+  domain/          Session、Collaboration、Approval 聚合与规则
 ```
 
-M3 关键实现位于 `application/tooling.py`、`domain/approval.py`、
-`infrastructure/hands.py`、`infrastructure/artifacts.py`、
-`infrastructure/credentials.py` 和 `projections/approvals.py`。M4 关键实现位于
-`application/collaboration.py`、`domain/collaboration.py`、
-`contracts/collaboration.py` 和 `projections/collaboration.py`。
-M5 关键实现位于 `infrastructure/runtime_events.py`、`application/streaming.py`、
-`api/routes/streams.py`、`application/delivery.py` 与 `infrastructure/delivery.py`。
-M6 关键实现位于 `contracts/observability.py`、`application/observability.py`、
-`infrastructure/observability.py`、`infrastructure/operations.py` 和
+M3 关键实现位于 `action/`、`domain/approval.py`、`infrastructure/hands/`、
+`infrastructure/artifacts/`、`infrastructure/credentials/` 和 `projection/approval/`。
+M4 关键实现位于 `session/collaboration_service.py`、`domain/collaboration.py`、
+`contracts/collaboration.py` 和 `projection/collaboration/`。
+M5 关键实现位于 `infrastructure/kafka/runtime_events.py`、
+`gateways/streaming/gateway.py`、`api/routes/streams.py`、`delivery/worker.py` 与
+`infrastructure/delivery/`。M6 关键实现位于 `contracts/observability.py`、
+`observability/`、`infrastructure/observability/`、
+`infrastructure/persistence/postgres_operations_store.py` 和
 `api/routes/operations.py`。SLO、故障处置、数据保留和灰度回滚见
 [M6 运维与灰度发布 Runbook](docs/M6%20运维与灰度发布%20Runbook.md)。
 

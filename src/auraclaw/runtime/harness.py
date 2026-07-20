@@ -13,15 +13,13 @@ from auraclaw.contracts.errors import (
 )
 from auraclaw.contracts.events import NewEvent
 from auraclaw.contracts.state import Visibility
+from auraclaw.control.ports import ControlStateStore, RuntimeAssignment, RuntimeCheckpoint
 from auraclaw.runtime.clients import assignment_resource_id
 from auraclaw.runtime.ports import (
-    ControlStateStore,
     ModelClient,
     ModelPolicy,
     ModelRequest,
     ModelResponse,
-    RuntimeAssignment,
-    RuntimeCheckpoint,
     RuntimeEvent,
     RuntimeEventPublisher,
     SessionClient,

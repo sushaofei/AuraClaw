@@ -11,7 +11,7 @@ from auraclaw.contracts.delivery import ResultSinkConfig, SinkResponse
 from auraclaw.contracts.events import Actor, CanonicalEvent
 from auraclaw.contracts.state import Visibility
 from auraclaw.infrastructure.delivery import PostgresDeliveryJobStore
-from auraclaw.infrastructure.postgres import _asyncpg_url
+from auraclaw.infrastructure.persistence.postgres_common import asyncpg_url as _asyncpg_url
 
 SETTINGS = get_settings()
 DATABASE_URL = _asyncpg_url(SETTINGS.resolved_database_url) if SETTINGS.postgres_enabled else None

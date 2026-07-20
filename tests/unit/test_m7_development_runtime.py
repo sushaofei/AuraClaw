@@ -3,7 +3,7 @@ import time
 
 from fastapi.testclient import TestClient
 
-from auraclaw.api.dependencies import (
+from auraclaw.composition.providers import (
     get_approval_projection,
     get_collaboration_projection,
     get_event_store,

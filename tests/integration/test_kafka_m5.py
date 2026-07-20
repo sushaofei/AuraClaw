@@ -5,7 +5,7 @@ from uuid import uuid4
 import pytest
 
 from auraclaw.config import get_settings
-from auraclaw.infrastructure.runtime_events import (
+from auraclaw.infrastructure.kafka.runtime_events import (
     KafkaRuntimeEventProducer,
     KafkaStreamingIngestor,
     ReplayRuntimeEventBus,

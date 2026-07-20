@@ -4,8 +4,6 @@ from typing import Any
 
 import pytest
 
-from auraclaw.application.collaboration import CollaborationService
-from auraclaw.application.tasks import AllowAllAdmissionController, TaskService
 from auraclaw.contracts.collaboration import (
     ChildResult,
     ChildSpec,
@@ -18,11 +16,14 @@ from auraclaw.contracts.collaboration import (
 from auraclaw.contracts.commands import CommandContext
 from auraclaw.contracts.errors import AuthorizationError, CollaborationValidationError
 from auraclaw.contracts.events import Actor
-from auraclaw.infrastructure.memory import InMemoryEventStore
-from auraclaw.projections.approvals import CompositeProjection
-from auraclaw.projections.collaboration import InMemoryCollaborationProjection
-from auraclaw.projections.relay import OutboxRelay
-from auraclaw.projections.tasks import InMemoryTaskProjection
+from auraclaw.gateways.task.admission import AllowAllAdmissionController
+from auraclaw.infrastructure.persistence.memory_event_store import InMemoryEventStore
+from auraclaw.projection.approval.projector import CompositeProjection
+from auraclaw.projection.collaboration.projector import InMemoryCollaborationProjection
+from auraclaw.projection.relay import OutboxRelay
+from auraclaw.projection.task.projector import InMemoryTaskProjection
+from auraclaw.session.collaboration_service import CollaborationService
+from auraclaw.session.task_service import TaskService
 
 
 class M4Harness:

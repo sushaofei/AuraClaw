@@ -3,7 +3,7 @@ from datetime import UTC, datetime, timedelta
 
 from fastapi.testclient import TestClient
 
-from auraclaw.api.dependencies import (
+from auraclaw.composition.providers import (
     get_approval_projection,
     get_event_store,
     get_task_projection,
@@ -13,7 +13,7 @@ from auraclaw.config import get_settings
 from auraclaw.contracts.commands import CommandContext
 from auraclaw.contracts.events import Actor, NewEvent
 from auraclaw.main import create_app
-from auraclaw.projections.approvals import CompositeProjection
+from auraclaw.projection.approval.projector import CompositeProjection
 
 
 def setup_function() -> None:

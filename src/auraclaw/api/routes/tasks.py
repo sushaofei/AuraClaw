@@ -5,8 +5,8 @@ from fastapi import APIRouter, Depends, Header, Response, status
 from auraclaw.api.dependencies import (
     RequestIdentity,
     command_context,
-    get_collaboration_projection,
-    get_task_service,
+    get_task_command_gateway,
+    get_task_query_service,
     request_identity,
 )
 from auraclaw.api.models import (
@@ -19,22 +19,20 @@ from auraclaw.api.models import (
     TaskAcceptedResponse,
     TaskView,
 )
-from auraclaw.application.tasks import TaskService
-from auraclaw.domain.ports import CollaborationReader
+from auraclaw.gateways.query.reader import TaskQueryService
+from auraclaw.gateways.task.commands import TaskCommandGateway
 
 router = APIRouter(prefix="/v1", tags=["tasks"])
 Identity = Annotated[RequestIdentity, Depends(request_identity)]
-TaskServiceDependency = Annotated[TaskService, Depends(get_task_service)]
-CollaborationDependency = Annotated[
-    CollaborationReader, Depends(get_collaboration_projection)
-]
+TaskCommandDependency = Annotated[TaskCommandGateway, Depends(get_task_command_gateway)]
+TaskQueryDependency = Annotated[TaskQueryService, Depends(get_task_query_service)]
 
 
 @router.post("/tasks", response_model=TaskAcceptedResponse, status_code=status.HTTP_202_ACCEPTED)
 async def create_task(
     request: CreateTaskRequest,
     identity: Identity,
-    service: TaskServiceDependency,
+    service: TaskCommandDependency,
     idempotency_key: str = Header(alias="Idempotency-Key", min_length=1),
 ) -> dict[str, Any]:
     context = command_context(
@@ -51,11 +49,11 @@ async def get_task(
     session_id: str,
     response: Response,
     identity: Identity,
-    service: TaskServiceDependency,
+    query: TaskQueryDependency,
     min_version: int | None = None,
     if_none_match: str | None = Header(default=None, alias="If-None-Match"),
 ) -> dict[str, Any]:
-    task = await service.get_task(tenant_id=identity.tenant_id, session_id=session_id)
+    task = await query.get_task(tenant_id=identity.tenant_id, session_id=session_id)
     if min_version is not None and int(task["projection_version"]) < min_version:
         response.status_code = status.HTTP_202_ACCEPTED
         response.headers["Retry-After"] = "1"
@@ -73,9 +71,9 @@ async def get_task(
 async def list_children(
     session_id: str,
     identity: Identity,
-    collaboration: CollaborationDependency,
+    query: TaskQueryDependency,
 ) -> dict[str, Any]:
-    children = await collaboration.list_children(identity.tenant_id, session_id)
+    children = await query.list_children(identity.tenant_id, session_id)
     return {"root_session_id": session_id, "children": children}
 
 
@@ -84,34 +82,21 @@ async def get_result(
     session_id: str,
     response: Response,
     identity: Identity,
-    service: TaskServiceDependency,
+    query: TaskQueryDependency,
     min_version: int | None = None,
     if_none_match: str | None = Header(default=None, alias="If-None-Match"),
 ) -> dict[str, Any]:
-    task = await service.get_task(tenant_id=identity.tenant_id, session_id=session_id)
-    projection_is_fresh = min_version is None or int(task["projection_version"]) >= min_version
-    result_is_ready = task["status"] in {"completed", "failed", "cancelled"}
+    result = await query.get_result(tenant_id=identity.tenant_id, session_id=session_id)
+    projection_is_fresh = min_version is None or int(result["projection_version"]) >= min_version
+    result_is_ready = result["status"] in {"completed", "failed", "cancelled"}
     if not projection_is_fresh or not result_is_ready:
         response.status_code = status.HTTP_202_ACCEPTED
         response.headers["Retry-After"] = "2"
-    etag = f'W/"{task["projection_version"]}"'
+    etag = f'W/"{result["projection_version"]}"'
     response.headers["ETag"] = etag
     if if_none_match == etag and projection_is_fresh and result_is_ready:
         response.status_code = status.HTTP_304_NOT_MODIFIED
-    return {
-        "session_id": session_id,
-        "run_id": task["run_id"],
-        "status": task["status"],
-        "result_summary": task["result_summary"],
-        "result_ref": task["result_ref"],
-        "artifact_refs": task["artifact_refs"],
-        "error": task["error"],
-        "delivery_status": task.get("delivery_status"),
-        "delivery_id": task.get("delivery_id"),
-        "delivery_attempt_count": task.get("delivery_attempt_count", 0),
-        "delivery_response_summary": task.get("delivery_response_summary"),
-        "projection_version": task["projection_version"],
-    }
+    return result
 
 
 @router.post(
@@ -123,7 +108,7 @@ async def append_message(
     session_id: str,
     request: AppendMessageRequest,
     identity: Identity,
-    service: TaskServiceDependency,
+    service: TaskCommandDependency,
     idempotency_key: str = Header(alias="Idempotency-Key", min_length=1),
     expected_version: int = Header(alias="X-Expected-Version"),
 ) -> dict[str, Any]:
@@ -146,7 +131,7 @@ async def append_message(
 async def request_run(
     session_id: str,
     identity: Identity,
-    service: TaskServiceDependency,
+    service: TaskCommandDependency,
     idempotency_key: str = Header(alias="Idempotency-Key", min_length=1),
     expected_version: int = Header(alias="X-Expected-Version"),
 ) -> dict[str, Any]:
@@ -168,7 +153,7 @@ async def cancel_task(
     session_id: str,
     request: CancelTaskRequest,
     identity: Identity,
-    service: TaskServiceDependency,
+    service: TaskCommandDependency,
     idempotency_key: str = Header(alias="Idempotency-Key", min_length=1),
     expected_version: int = Header(alias="X-Expected-Version"),
 ) -> dict[str, Any]:
@@ -193,7 +178,7 @@ async def cancel_task(
 async def resume_task(
     session_id: str,
     identity: Identity,
-    service: TaskServiceDependency,
+    service: TaskCommandDependency,
     idempotency_key: str = Header(alias="Idempotency-Key", min_length=1),
     expected_version: int = Header(alias="X-Expected-Version"),
 ) -> dict[str, Any]:
@@ -216,7 +201,7 @@ async def record_approval_response(
     approval_id: str,
     request: ApprovalResponseRequest,
     identity: Identity,
-    service: TaskServiceDependency,
+    service: TaskCommandDependency,
     idempotency_key: str = Header(alias="Idempotency-Key", min_length=1),
     expected_version: int = Header(alias="X-Expected-Version"),
 ) -> dict[str, Any]:

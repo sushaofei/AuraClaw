@@ -8,14 +8,14 @@ import pytest
 
 from auraclaw.config import get_settings
 from auraclaw.contracts.errors import FencingTokenError
-from auraclaw.infrastructure.control_postgres import PostgresControlStateStore
-from auraclaw.infrastructure.postgres import _asyncpg_url
-from auraclaw.runtime.ports import (
+from auraclaw.control.ports import (
     RunnableItem,
     RuntimeAssignment,
     RuntimeCheckpoint,
     RuntimeInstance,
 )
+from auraclaw.infrastructure.persistence.postgres_common import asyncpg_url as _asyncpg_url
+from auraclaw.infrastructure.persistence.postgres_control_store import PostgresControlStateStore
 
 SETTINGS = get_settings()
 DATABASE_URL = _asyncpg_url(SETTINGS.resolved_database_url) if SETTINGS.postgres_enabled else None

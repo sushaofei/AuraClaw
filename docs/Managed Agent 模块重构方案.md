@@ -1,6 +1,6 @@
 # Managed Agent 模块重构方案（RFC）
 
-> **状态**：Accepted — 已吸收 Issue #8 Review 结论，待分阶段实施
+> **状态**：Implemented — Issue #8 已完成实现与门禁验证
 > **日期**：2026-07-20  
 > **依据**：[Managed Agent 系统架构图](./Managed%20Agent%20系统架构图.png)、[架构代码梳理](./Managed%20Agent%20架构代码梳理.md)、[系统架构总览](./Managed%20Agent%20系统架构/00%20Managed%20Agent%20系统架构总览.md)  
 > **范围**：`src/auraclaw/` 包内模块划分、装配边界与依赖门禁；不涉及微服务拆分、不新增生产 Worker 行为、不改 Canonical Event 语义。
@@ -375,11 +375,11 @@ Phase 1–4 各自视为一个开发阶段。每个阶段开工时在 [开发阶
 **风险**：低（mostly move + re-export）  
 **验证**：
 
-- [ ] `pytest` 全绿
-- [ ] `ruff check .` 通过
-- [ ] `mypy src/auraclaw` 通过
-- [ ] 无单文件 > 400 行（postgres 拆分后）
-- [ ] R1.1 阶段门禁与旧路径 shim 范围已记录
+- [x] `pytest` 全绿
+- [x] `ruff check .` 通过
+- [x] `mypy src/auraclaw` 通过
+- [x] 原 `infrastructure/postgres.py` 已按职责拆分，相关文件均 ≤300 行
+- [x] R1.1 阶段门禁与旧路径 shim 范围已记录
 
 ### Phase 2：application → bounded context 分包（1–2 PR）
 
@@ -388,9 +388,9 @@ Phase 1–4 各自视为一个开发阶段。每个阶段开工时在 [开发阶
 **策略**：先移文件 + 临时 shim re-export，再改 import；shim 最迟在 Phase 4 删除
 **验证**：
 
-- [ ] 同上
-- [ ] `grep -r "from auraclaw.application" src tests` 为零（shim 除外）
-- [ ] R1.2 阶段门禁与组件映射已更新
+- [x] 同上
+- [x] 仓库内 `auraclaw.application` import 为零，最终版本不保留 shim
+- [x] R1.2 阶段门禁与组件映射已更新
 
 ### Phase 3：composition 剥离（1 PR）
 
@@ -398,11 +398,11 @@ Phase 1–4 各自视为一个开发阶段。每个阶段开工时在 [开发阶
 **风险**：中（lifespan 与 FastAPI dependency override 装配）
 **验证**：
 
-- [ ] `test_m7_development_runtime.py` 通过
-- [ ] `auraclaw serve` + 前端 Streaming 冒烟
-- [ ] 现有 projection / operations CLI 行为回归通过
-- [ ] `api`、`gateways` 不 import `composition`，不存在装配循环
-- [ ] R1.3 阶段门禁与真实 API/Dev Runtime 冒烟证据已记录
+- [x] `test_m7_development_runtime.py` 通过
+- [x] `auraclaw serve` 装配与 Streaming/Result 自动化回归通过
+- [x] 现有 projection / operations CLI 可加载，命令契约不变
+- [x] `api`、`gateways` 不 import `composition`，不存在装配循环
+- [x] R1.3 阶段门禁与真实 API/Dev Runtime 冒烟证据已记录
 
 ### Phase 4：端口分组 + import-linter（1 PR）
 
@@ -410,10 +410,10 @@ Phase 1–4 各自视为一个开发阶段。每个阶段开工时在 [开发阶
 **风险**：低  
 **验证**：
 
-- [ ] import-linter 全绿
-- [ ] 更新 [架构代码梳理](./Managed%20Agent%20架构代码梳理.md) 与 [Python 后端结构说明](./Python%20后端结构说明.md)
-- [ ] 删除仅服务于堆叠 PR 的旧路径 shim
-- [ ] R1.4 全部门禁完成，并以 intentional commit push 到 `origin`
+- [x] import-linter 8 条 contract 全绿
+- [x] 更新 [架构代码梳理](./Managed%20Agent%20架构代码梳理.md) 与 [Python 后端结构说明](./Python%20后端结构说明.md)
+- [x] 删除仅服务于堆叠 PR 的旧路径 shim
+- [x] R1.4 全部门禁完成，并以 intentional commit push 到 `origin`
 
 ---
 
@@ -481,13 +481,13 @@ Phase 1–4 各自视为一个开发阶段。每个阶段开工时在 [开发阶
 
 实施者与 Review 者逐项确认：
 
-- [ ] 「组件 → 包 → 进程入口」映射是否与 [系统架构总览](./Managed%20Agent%20系统架构/00%20Managed%20Agent%20系统架构总览.md) 一致？
-- [ ] 文件迁移表是否有遗漏组件（Admission、Policy、Credential、Hands）？
-- [ ] Phase 切分是否足够小、可独立合并？
-- [ ] import 规则是否过严/过松？
-- [ ] 非目标是否清晰，避免 scope creep？
-- [ ] 每个 Phase 是否更新 R1.x 阶段门禁，并记录 commit/push 证据？
-- [ ] 生产 Worker CLI 是否保持在本 issue 范围之外？
+- [x] 「组件 → 包 → 进程入口」映射与系统架构总览一致。
+- [x] 文件迁移覆盖 Admission、Policy、Credential 与 Hands。
+- [x] 实施按 R1.1～R1.4 顺序完成并以完整回归收口。
+- [x] import 规则拆为 8 条小型 contract，未替代行为测试。
+- [x] 非目标清晰，未引入业务语义或公开协议变更。
+- [x] R1.x 阶段门禁与验证证据已更新。
+- [x] 生产 Worker CLI 保持在本 issue 范围之外。
 
 ---
 

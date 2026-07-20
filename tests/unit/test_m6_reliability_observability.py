@@ -7,30 +7,31 @@ from time import perf_counter
 import pytest
 from fastapi.testclient import TestClient
 
-from auraclaw.api.dependencies import (
+from auraclaw.composition.providers import (
     get_event_store,
     get_observability_service,
     get_observability_store,
     get_task_projection,
     get_task_service,
 )
-from auraclaw.application.observability import ObservabilityProjector, ObservabilityService
-from auraclaw.application.tasks import AllowAllAdmissionController, TaskService
 from auraclaw.config import get_settings
 from auraclaw.contracts.commands import CommandContext
 from auraclaw.contracts.events import Actor
 from auraclaw.contracts.observability import TraceContext
-from auraclaw.infrastructure.artifacts import ArtifactStore, InMemoryObjectStorage
-from auraclaw.infrastructure.memory import InMemoryEventStore
-from auraclaw.infrastructure.observability import (
+from auraclaw.gateways.task.admission import AllowAllAdmissionController
+from auraclaw.infrastructure.artifacts.store import ArtifactStore, InMemoryObjectStorage
+from auraclaw.infrastructure.observability.stores import (
     InMemoryObservabilityStore,
     StructuredLogger,
-    contains_sensitive,
 )
+from auraclaw.infrastructure.persistence.memory_event_store import InMemoryEventStore
 from auraclaw.main import create_app
-from auraclaw.projections.approvals import CompositeProjection
-from auraclaw.projections.relay import OutboxRelay
-from auraclaw.projections.tasks import InMemoryTaskProjection
+from auraclaw.observability.redaction import contains_sensitive
+from auraclaw.observability.service import ObservabilityProjector, ObservabilityService
+from auraclaw.projection.approval.projector import CompositeProjection
+from auraclaw.projection.relay import OutboxRelay
+from auraclaw.projection.task.projector import InMemoryTaskProjection
+from auraclaw.session.task_service import TaskService
 
 
 async def _task() -> tuple[str, InMemoryEventStore, InMemoryTaskProjection]:
