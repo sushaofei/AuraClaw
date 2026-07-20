@@ -4,7 +4,7 @@ AuraClaw 是一个遵循 Managed Agent 架构的纯 Python 后端服务。系统
 Session Event Log 为事实源，以可重建 Projection 提供查询，并把运行时控制、Agent
 Runtime、工具执行和结果交付保持为清晰的逻辑边界。
 
-当前版本已实现 M6 可靠性、观测与发布门禁：
+当前版本已实现 M7 前端测试与监控工作台：
 
 ```text
 Task API -> Session Aggregate -> PostgreSQL Canonical Events + Transactional Outbox
@@ -21,6 +21,7 @@ Canonical terminal event -> Transactional Outbox -> Durable Delivery Job
                          -> Webhook/Parent Session -> Retry/Circuit/DLQ -> Query View
 All components -> Trace/Metrics/Structured Logs/Audit -> Session Timeline + Alerts
 Operations -> Retention/Artifact GC/Poison + Delivery DLQ Redrive -> Release Gate
+Browser SPA -> Task/Result APIs + Authorized SSE + Session Timeline + Metrics
 ```
 
 Agent Runtime 不读取模型 Provider Secret，也不直接修改 Session 状态。完整模型输出进入
@@ -46,6 +47,19 @@ Review Evidence 和 Artifact lineage。
 uv sync --extra dev
 uv run uvicorn auraclaw.main:app --reload
 ```
+
+另开终端启动独立前端工作台：
+
+```bash
+cd frontend
+npm ci
+npm run dev
+```
+
+前端只调用公开 HTTP/SSE API，支持任务创建与控制、父子 Session、审批响应、断线回放、
+Timeline、Metrics 和脱敏请求历史。默认 API 地址为 `http://127.0.0.1:8000`，也可在页面运行时
+配置。跨域部署需要后端或反向代理明确允许所需 Origin、Methods 和 Headers；详细说明见
+[frontend/README.md](frontend/README.md)。
 
 服务启动后可访问：
 
