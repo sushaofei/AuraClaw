@@ -2,11 +2,11 @@
 
 > 依据 [Managed Agent 系统架构图](./Managed%20Agent%20系统架构图.png) 与 `docs/Managed Agent 系统架构/`，对当前 `src/auraclaw/` 代码做组件级映射。  
 > 分析范围：纯 Python Managed Agent 后端（FastAPI）；前端工作台仅作 API Client 引用。  
-> 梳理日期：2026-07-20（Issue #8 模块边界重构完成）。
+> 梳理日期：2026-07-20（[Issue #8](https://github.com/sushaofei/AuraClaw/issues/8) 模块边界重构完成，`2c95537`）。
 
 ## 一句话总结
 
-AuraClaw 是以 **Canonical Session Event Log** 为唯一任务事实源的模块化单体：HTTP 进程已装配 Task/Query/Streaming/Observability；**开发环境**额外在进程内启动 `DevelopmentRuntimeWorker`，经 Orchestrator + AgentHarness 产出真实 SSE 增量与终态 Result。生产路径下 Orchestrator、Agent Runtime、Tool Gateway、Result Delivery 仍以应用库和测试为主，仅 Projection 已有常驻 CLI；逻辑边界与架构图对齐，部署上尚未拆成独立 Worker 进程。
+AuraClaw 是以 **Canonical Session Event Log** 为唯一任务事实源的模块化单体：HTTP 经 `gateways/` 接入，`composition/` 统一装配；**开发环境**在 `composition/api.py` lifespan 内启动 `DevelopmentRuntimeWorker`，经 Orchestrator + AgentHarness 产出真实 SSE 增量与终态 Result。`application/`、`projections/`、`domain/ports.py` 已移除；生产 Runtime / Delivery Worker CLI 仍待独立 feature。
 
 ---
 
@@ -21,18 +21,51 @@ AuraClaw 是以 **Canonical Session Event Log** 为唯一任务事实源的模�
 | **存储** | 内存适配器（测试/本地）或 PostgreSQL（生产） |
 | **实时总线** | 内存 Replay Buffer 或 Kafka `managed-agent.runtime-events` |
 | **开发联调** | `DevelopmentRuntimeWorker`（dev 环境进程内）、CORS 默认放行 `localhost:3000` |
+| **质量门禁** | `ruff` + `mypy` + `pytest` + `lint-imports`（`pyproject.toml` `[tool.importlinter]`） |
 | **不包含** | 生产云厂商 Model SDK、企业 Vault/KMS、S3 Artifact、远程容器 Hands |
 
 当前依赖方向（由 import-linter 持续执行）：
 
 ```text
-entrypoint → composition → api → gateways
-                    ├→ infrastructure
-                    └→ session / projection / control / runtime / action / delivery
-                                      └→ domain → contracts
+entrypoint (main / __main__)
+    → composition (providers / api / cli / adapters)
+        → api → gateways → session | projection | control | runtime | action | delivery | observability
+                                    └→ domain → contracts
+        → infrastructure（仅由 composition 选择具体适配器）
 ```
 
-Issue #8 已按 [Managed Agent 模块重构方案](./Managed%20Agent%20模块重构方案.md) 落地：entrypoint 经 `composition` 组装 `api`、gateways、业务包和 infrastructure adapters；`api`/gateways 不反向导入 composition 或 infrastructure。包与部署单元不追求 1:1，而通过「组件 → 主归属包 → 进程入口」矩阵保持可追踪。
+**硬规则**（与 `AGENTS.md` 一致）：
+
+- `api`、`gateways` 不 import `composition` 或 `infrastructure`
+- `gateways.query` / `gateways.streaming` 不 import `session.task_service` / `session.collaboration_service`
+- `projection.{task,approval,collaboration}` 不 import `infrastructure`
+- 业务包不 import `composition`；`infrastructure` 不 import `api` / `gateways` / `composition`
+
+Issue #8 已按 [Managed Agent 模块重构方案](./Managed%20Agent%20模块重构方案.md) 落地：包与部署单元通过「组件 → 主归属包 → 进程入口」矩阵保持可追踪，不强制目录与进程 1:1。
+
+### 2.1 重构前后路径对照（主要迁移）
+
+| 重构前 | 重构后 |
+|---|---|
+| `application/tasks.py` | `session/task_service.py` |
+| `application/collaboration.py` | `session/collaboration_service.py` |
+| `application/orchestration.py` | `control/orchestrator.py` |
+| `application/streaming.py` | `gateways/streaming/gateway.py` |
+| `application/tooling.py` | `action/tool_gateway.py` + `action/policy.py` |
+| `application/delivery.py` | `delivery/worker.py` |
+| `application/observability.py` | `observability/service.py` |
+| `application/maintenance.py` | `projection/maintenance.py` |
+| `projections/{tasks,approvals,collaboration}.py` | `projection/{task,approval,collaboration}/projector.py` |
+| `projections/relay.py` | `projection/relay.py` |
+| `domain/ports.py`（EventStore） | `session/ports.py` |
+| `domain/ports.py`（TaskReader 等） | `projection/ports.py` |
+| `runtime/ports.py`（Control） | `control/ports.py` |
+| `runtime/development.py` | `composition/adapters/development_worker.py` |
+| `infrastructure/postgres.py` | `infrastructure/persistence/postgres_event_store.py` + `infrastructure/projection/postgres_*_store.py` |
+| `infrastructure/{hands,credentials,delivery,observability,runtime_events}.py` | `infrastructure/{hands,credentials,delivery,observability,kafka}/` 子包 |
+| `api/dependencies.py`（DI 装配） | `composition/providers.py` + `composition/api.py`（`dependency_overrides`） |
+| `main.py`（FastAPI 工厂） | `composition/api.py`；`main.py` 仅 re-export |
+| `__main__.py`（CLI） | `composition/cli.py`；`__main__.py` 仅 wrapper |
 
 ---
 
@@ -100,8 +133,9 @@ Issue #8 已按 [Managed Agent 模块重构方案](./Managed%20Agent%20模块重
 | 项 | 内容 |
 |---|---|
 | **架构角色** | Web/API/Timer 请求 → Session Command；幂等、租户、版本前置条件 |
-| **主路径** | `api/routes/tasks.py`、`api/dependencies.py`、`gateways/task/`、`gateways/query/` |
-| **关键类型** | `TaskService`、`AllowAllAdmissionController` |
+| **主路径** | `api/routes/tasks.py`、`gateways/task/commands.py`、`gateways/task/admission.py`、`gateways/query/reader.py` |
+| **关键类型** | `TaskCommandGateway`（命令）、`TaskQueryService`（查询）、`AllowAllAdmissionController` |
+| **写侧委托** | `TaskCommandGateway` → `session/task_service.TaskService` |
 | **状态** | **部分实现**（命令边界完整；Admission 为放行桩） |
 | **HTTP** | 见 §5 |
 | **缺口** | 无真实身份认证/配额；`AllowAllAdmissionController.admit` 为空实现 |
@@ -123,7 +157,7 @@ Issue #8 已按 [Managed Agent 模块重构方案](./Managed%20Agent%20模块重
 | 项 | 内容 |
 |---|---|
 | **架构角色** | Transactional Outbox → 幂等投影；可删除重建 |
-| **主路径** | `projection/relay.py`、`projection/{task,approval,collaboration}/projector.py`、`projection/maintenance.py` |
+| **主路径** | 投影规则：`projection/{task,approval,collaboration}/projector.py`；PG 存储：`infrastructure/projection/postgres_*_store.py` |
 | **关键类型** | `OutboxRelay`、`InMemoryTaskProjection` / `PostgresTaskProjection`、`CompositeProjection`、`ProjectionMaintenanceService` |
 | **状态** | **已实现** |
 | **运维** | `auraclaw projection relay [--watch]`、`auraclaw projection rebuild` |
@@ -134,8 +168,8 @@ Issue #8 已按 [Managed Agent 模块重构方案](./Managed%20Agent%20模块重
 | 项 | 内容 |
 |---|---|
 | **架构角色** | 可丢弃查询副本（Task / Approval / Collaboration / Observability 视图） |
-| **主路径** | 同上 Projection + `Postgres*Projection` |
-| **端口** | `TaskReader`、`CollaborationReader`、`ApprovalViewReader` |
+| **主路径** | `projection/{task,approval,collaboration}/projector.py` + `infrastructure/projection/postgres_*_store.py` |
+| **端口** | `projection/ports.py`：`TaskReader`、`CollaborationReader`、`ApprovalViewReader`、`ProjectionWriter` |
 | **状态** | **已实现**（memory + postgres） |
 | **缺口** | 无独立 ES/CDB 读副本；与写库同 PG 时靠 schema 隔离 |
 
@@ -144,9 +178,9 @@ Issue #8 已按 [Managed Agent 模块重构方案](./Managed%20Agent%20模块重
 | 项 | 内容 |
 |---|---|
 | **架构角色** | 只读任务状态与终态结果；支持 ETag / `min_version` |
-| **主路径** | `api/routes/tasks.py`（`get_task` / `get_result` / `list_children`） |
+| **主路径** | `gateways/query/reader.py`（`TaskQueryService`）、`api/routes/tasks.py` |
 | **状态** | **已实现** |
-| **说明** | 只读 Projection，不直读 Event Log |
+| **说明** | Query 只读 `projection/ports`；经 import-linter 禁止直连 `session/task_service` |
 
 ### 3.6 Runtime Event Bus
 
@@ -189,7 +223,7 @@ Issue #8 已按 [Managed Agent 模块重构方案](./Managed%20Agent%20模块重
 | **关键类型** | `ManagedOrchestrator`、`LocalRuntimeProvisioner` |
 | **状态** | **已实现**（库级）；**dev 环境经 `DevelopmentRuntimeWorker` 接入 HTTP 进程** |
 | **端口** | `watch`、`schedule_once`、`cancel`、`heartbeat`、`reconcile` |
-| **开发装配** | `api/dependencies.py` → `build_development_runtime_worker()` → `ManagedOrchestrator` + `LocalRuntimeProvisioner("development")` |
+| **开发装配** | `composition/providers.py` → `build_development_runtime_worker()` → `ManagedOrchestrator` + `LocalRuntimeProvisioner("development")` |
 | **缺口** | 生产无独立 orchestrator worker 入口；Provisioner 为本地计数式 |
 
 ### 3.10 Control State Store
@@ -232,7 +266,8 @@ Issue #8 已按 [Managed Agent 模块重构方案](./Managed%20Agent%20模块重
 |---|---|
 | **架构角色** | 工具发现、Schema、权限、审批、幂等、取消、结果规范化；可视为 MCP 风格边界 |
 | **主路径** | `action/tool_gateway.py`、`action/policy.py`、`action/ports.py`、`contracts/tools.py` |
-| **关键类型** | `ToolRegistry`、`JsonSchemaValidator`、`PolicyEngine`、`ToolGateway`、`GatewayToolClient` |
+| **关键类型** | `ToolRegistry`、`JsonSchemaValidator`、`PolicyEngine`、`ToolGateway`；Runtime 侧经 `GatewayToolClient`（`runtime/clients.py`） |
+| **Action 端口** | `action/ports.py`：`HandsExecutor`、`CredentialInvoker`、`ArtifactWriter`（由 composition 注入 infra 实现） |
 | **状态** | **已实现**（库级）；未挂 HTTP |
 | **分发** | Hands（本地行动）或 Credential Proxy（代持凭证调用） |
 
@@ -251,7 +286,7 @@ Issue #8 已按 [Managed Agent 模块重构方案](./Managed%20Agent%20模块重
 | 项 | 内容 |
 |---|---|
 | **架构角色** | 大结果/文件不可变对象 + lineage + ACL + 短期下载令牌 |
-| **主路径** | `infrastructure/artifacts/store.py`、`contracts/tools.py`（`ArtifactRef`） |
+| **主路径** | `infrastructure/artifacts/store.py`（`ArtifactStore` 实现 `ArtifactWriter`）、`contracts/tools.py` |
 | **关键类型** | `ArtifactStore`、`InMemoryObjectStorage` |
 | **状态** | **部分实现** |
 | **缺口** | 无 S3/文件系统适配器；`Settings.artifact_root` 已声明但未接到 `ArtifactStore` |
@@ -324,9 +359,9 @@ Issue #8 已按 [Managed Agent 模块重构方案](./Managed%20Agent%20模块重
 
 ```text
 POST /v1/tasks
-  → TaskService.create_task
+  → TaskCommandGateway.create_task
   → AllowAllAdmissionController.admit
-  → SessionAggregate.create
+  → TaskService → SessionAggregate.create
   → EventStore.append（+ Transactional Outbox）
   → save_snapshot
   → OutboxRelay.relay_once
@@ -335,12 +370,14 @@ POST /v1/tasks
   → 202 TaskAcceptedResponse（含 status / result / stream URL）
 ```
 
+HTTP 依赖注入：`api/routes` → abstract tokens（`api/dependencies.py`）→ `composition/api.py` 的 `dependency_overrides` → `composition/providers.py`。
+
 ### 4.2 查询
 
 ```text
 GET /v1/tasks/{id} | /result | /children
-  → TaskService.get_task | CollaborationReader.list_children
-  → Task / Collaboration Read Model
+  → TaskQueryService.get_task | get_result | list_children
+  → projection/ports（TaskReader / CollaborationReader）
 ```
 
 ### 4.3 实时推送
@@ -433,7 +470,7 @@ ReviewerRole → publish_review（独立 Review Session，不覆盖 Worker Artif
 
 鉴权/幂等 Header：`X-Tenant-ID`、`X-Actor-ID`、`Idempotency-Key`、`X-Expected-Version`。
 
-**CORS（开发）**：`env=development/dev` 时默认允许 `http://127.0.0.1:3000` 与 `http://localhost:3000`；其他来源通过 `AURACLAW_CORS_ALLOW_ORIGINS`（逗号分隔）配置。`main.py` 中 `CORSMiddleware` 暴露 `ETag`、`Retry-After`、`traceparent`。
+**CORS（开发）**：`env=development/dev` 时默认允许 `http://127.0.0.1:3000` 与 `http://localhost:3000`；其他来源通过 `AURACLAW_CORS_ALLOW_ORIGINS`（逗号分隔）配置。`composition/api.py` 中 `CORSMiddleware` 暴露 `ETag`、`Retry-After`、`traceparent`。
 
 ---
 
@@ -443,13 +480,13 @@ ReviewerRole → publish_review（独立 Review Session，不覆盖 Worker Artif
 
 | 数据面 | Memory | Postgres | Kafka |
 |---|---|---|---|
-| Canonical Event / Outbox / Snapshot | `InMemoryEventStore` | `PostgresEventStore` | — |
-| Task / Approval / Collaboration RM | `InMemory*Projection` | `Postgres*Projection` | — |
-| Control State | `InMemoryControlStateStore` | `PostgresControlStateStore` | — |
-| Delivery Jobs | `InMemoryDeliveryJobStore` | `PostgresDeliveryJobStore` | — |
-| Observability / Ops | `InMemoryObservabilityStore` | `PostgresObservabilityStore` / `PostgresOperationsStore` | — |
-| Runtime Events | `ReplayRuntimeEventBus` | — | Producer + StreamingIngestor |
-| Artifact / Vault | 内存 | — | — |
+| Canonical Event / Outbox / Snapshot | `infrastructure/persistence/memory_event_store` | `infrastructure/persistence/postgres_event_store` | — |
+| Task / Approval / Collaboration RM | `projection/*/projector`（内存实现） | `infrastructure/projection/postgres_*_store` | — |
+| Control State | `infrastructure/persistence/memory_control_store` | `infrastructure/persistence/postgres_control_store` | — |
+| Delivery Jobs | `infrastructure/delivery/memory_job_store` | `infrastructure/delivery/postgres_job_store` | — |
+| Observability / Ops | `infrastructure/observability/stores`（内存） | 同上 + `infrastructure/persistence/postgres_operations_store` | — |
+| Runtime Events | `infrastructure/kafka/runtime_events.ReplayRuntimeEventBus` | — | Producer + StreamingIngestor |
+| Artifact / Vault | `infrastructure/artifacts/store`（内存对象） | — | — |
 
 | 配置键 | 行为 |
 |---|---|
@@ -461,14 +498,28 @@ ReviewerRole → publish_review（独立 Review Session，不覆盖 Worker Artif
 | `development_stream_delay` | 开发 delta 发布间隔（默认 `0.08`s），便于浏览器观察多段 SSE |
 | `cors_allow_origins` | 逗号分隔 Origin；dev 未配置时默认放行本地前端 `3000` 端口 |
 
-装配点：`composition/providers.py`（`lru_cache` 单例按开关选择实现）；`api/dependencies.py` 只保留抽象 dependency tokens。
+装配点：`composition/providers.py`（`lru_cache` 单例按开关选择实现）；`composition/api.py` 通过 `app.dependency_overrides` 绑定 `api/dependencies.py` 中的抽象 token。
+
+### 6.1 import-linter 契约（节选）
+
+| 契约名 | 约束 |
+|---|---|
+| Contracts are framework independent | `contracts` 不依赖任何业务/infra 包 |
+| Domain only depends on contracts | `domain` 仅依赖 `contracts` |
+| API is transport only | `api` 不 import `composition` / `infrastructure` |
+| Gateways do not select adapters | `gateways` 不 import `composition` / `infrastructure` |
+| Read gateways do not call Session write services | `gateways.query` / `gateways.streaming` 不 import `session.*_service` |
+| Projection rules are adapter independent | `projection.{task,approval,collaboration}` 不 import `infrastructure` |
+| Business packages do not import composition | session / projection / control / runtime / action / delivery / observability 不 import `composition` |
+
+本地执行：`uv run lint-imports`。
 
 ---
 
 ## 7. CLI 与进程边界
 
 ```text
-auraclaw serve                                          # uvicorn auraclaw.main:app
+auraclaw serve                    # composition/cli.py → uvicorn auraclaw.main:app
 auraclaw projection relay [--tenant] [--watch] [--interval]
 auraclaw projection rebuild [--tenant]
 auraclaw operations status [--tenant]
@@ -476,12 +527,12 @@ auraclaw operations retention
 auraclaw operations redrive --tenant --queue {projection|delivery} --item-id ...
 ```
 
-| 架构组件 | 是否在 `create_app` lifespan 常驻 |
+| 架构组件 | 是否在 `composition/api.py` lifespan 常驻 |
 |---|---|
 | Task / Query / Streaming / Observability HTTP | ✅ |
 | Kafka Streaming Ingestor（若启用） | ✅（best-effort；失败不阻断 Canonical API） |
 | **DevelopmentRuntimeWorker**（dev 且 `development_runtime_active`） | ✅ |
-| Projection Relay Worker | ❌ CLI `projection relay --watch` |
+| Projection Relay Worker | ❌ CLI `projection relay --watch` → `composition/cli.py` |
 | Orchestrator / AgentHarness 循环（**生产**） | ❌ 库 + 测试 |
 | Result Delivery Worker | ❌ 库 + 测试 |
 | Tool Gateway / Model Gateway（**生产**） | ❌ 库（由 Harness 组装） |
@@ -510,36 +561,53 @@ auraclaw operations redrive --tenant --queue {projection|delivery} --item-id ...
 
 ```text
 src/auraclaw/
-├── main.py                 # 稳定 ASGI 导出
-├── __main__.py             # 稳定 CLI wrapper
-├── config.py               # Settings
+├── main.py                 # 稳定 ASGI 导出（→ composition/api.py）
+├── __main__.py             # 稳定 CLI wrapper（→ composition/cli.py）
+├── config.py
 ├── api/
-│   ├── dependencies.py     # 身份/Header/命令上下文/抽象 dependency tokens
-│   ├── models.py           # HTTP DTO
+│   ├── dependencies.py     # RequestIdentity / command_context / 抽象 dependency tokens
+│   ├── models.py
 │   └── routes/             # tasks / streams / operations / health
 ├── gateways/
-│   ├── task/               # Command Gateway + Admission
-│   ├── query/              # Task / Result / Children 只读入口
-│   └── streaming/          # Runtime Event → SSE
-├── session/                # Task / Collaboration 写侧服务与 ports
-├── projection/             # Relay、Projectors、Read Model、Maintenance 与 ports
-├── control/                # Orchestrator 与 Control ports
-├── action/                 # Tool Gateway、Policy 与 Action ports
-├── delivery/               # Delivery Worker 与 ports
-├── observability/          # Observability service 与脱敏规则
+│   ├── task/               # TaskCommandGateway + AllowAllAdmissionController
+│   ├── query/              # TaskQueryService（只读）
+│   └── streaming/          # StreamingGateway
+├── session/
+│   ├── task_service.py
+│   ├── collaboration_service.py
+│   └── ports.py            # EventStore / OutboxRelayPort / SessionSnapshot
+├── projection/
+│   ├── relay.py
+│   ├── maintenance.py
+│   ├── ports.py            # TaskReader / CollaborationReader / ApprovalViewReader
+│   └── {task,approval,collaboration}/projector.py
+├── control/
+│   ├── orchestrator.py
+│   └── ports.py            # ControlStateStore / Orchestrator / RunnableItem …
+├── action/
+│   ├── tool_gateway.py
+│   ├── policy.py
+│   └── ports.py            # HandsExecutor / CredentialInvoker / ArtifactWriter
+├── delivery/
+│   ├── worker.py
+│   └── ports.py
+├── observability/
+│   ├── service.py
+│   └── redaction.py
 ├── domain/                 # Session / Collaboration / Approval 聚合
-├── contracts/              # 稳定跨边界类型
+├── contracts/
 ├── infrastructure/
-│   ├── persistence/        # Event / Control / Operations stores
-│   ├── projection/         # PostgreSQL Projection stores
-│   ├── kafka/              # Runtime Event adapters
-│   └── artifacts/ hands/ credentials/ delivery/ observability/
-├── runtime/                 # Harness、Clients、Model Gateway 与 Runtime ports
+│   ├── persistence/        # event / control / operations stores
+│   ├── projection/         # postgres read-model stores
+│   ├── kafka/              # runtime_events
+│   ├── delivery/           # job stores + sinks
+│   ├── hands/ credentials/ artifacts/ observability/
+├── runtime/                # harness / clients / model_gateway / ports（Model·Tool·RuntimeEvent）
 └── composition/
-    ├── api.py              # FastAPI app factory / lifespan
-    ├── providers.py        # 唯一具体实现选择与对象图
-    ├── cli.py              # Projection / Operations CLI 装配
-    └── adapters/           # DevelopmentRuntimeWorker / DevelopmentModelClient
+    ├── api.py              # FastAPI factory / lifespan / dependency_overrides / CORS
+    ├── providers.py        # 唯一对象图与适配器选择
+    ├── cli.py              # serve / projection / operations
+    └── adapters/           # development_worker / development_model
 ```
 
 **API Client（前端）**：`frontend/` 为独立 SPA，经公开 HTTP/SSE 调用后端；提供「智能问答」Streaming 页与「创建任务」Query/Result 页，默认 API `http://127.0.0.1:8000`。详见 `frontend/README.md`。
@@ -548,13 +616,21 @@ src/auraclaw/
 
 ## 10. 相对架构图的主要缺口
 
-1. **生产进程装配**：Orchestrator、Runtime Pool、Tool、Delivery 未进入生产 `create_app` lifespan；开发环境已有 `DevelopmentRuntimeWorker` 单进程验证。
-2. **Admission / Auth**：放行桩；无 OAuth/配额硬门禁。
-3. **Model Provider**：生产仅 Protocol + 测试 Adapter；开发用 `DevelopmentModelClient`。
-4. **Artifact / Vault**：无 S3、无企业 Vault；`artifact_root` 未接线。
-5. **Collaboration 写面**：无 REST；仅 `GET .../children` 读投影。
-6. **部署拓扑**：模块化单体；文档中的 Gateway / Workers / Runtime 三分进程未拆。
-7. **架构图 Planner**：代码侧为 Reviewer 角色，命名不完全一致。
+**Issue #8 已关闭的结构债**（重构后不再列为缺口）：
+
+- `application/` 平铺、`infrastructure/postgres.py` 巨型文件、Projection 规则与 PG 存储分裂
+- `api/dependencies.py` 承担全部 DI / Worker 装配
+- Query 与 Command 未分包、缺少 import-linter 门禁
+
+**仍待后续 feature issue**：
+
+1. **生产进程装配**：`auraclaw runtime run`、`auraclaw delivery run` 未实现；生产 Orchestrator / Delivery 未挂 lifespan
+2. **Admission / Auth**：`AllowAllAdmissionController` 为放行桩；无 OAuth/配额
+3. **Model Provider**：生产仅 Protocol + 测试 Adapter；开发用 `DevelopmentModelClient`
+4. **Artifact / Vault**：无 S3、无企业 Vault；`artifact_root` 未接线
+5. **Collaboration 写面**：无 REST；仅 `GET .../children` 读投影
+6. **部署拓扑**：模块化单体；Gateway / Workers / Runtime 三分进程未拆
+7. **架构图 Planner**：代码侧为 Reviewer 角色，命名不完全一致
 
 ---
 
@@ -563,7 +639,8 @@ src/auraclaw/
 - [Managed Agent 系统架构图](./Managed%20Agent%20系统架构图.png)
 - [Managed Agent 系统架构总览](./Managed%20Agent%20系统架构/00%20Managed%20Agent%20系统架构总览.md)
 - [Python 后端结构说明](./Python%20后端结构说明.md)
-- [Managed Agent 开发方案与实施计划](./Managed%20Agent%20开发方案与实施计划.md)
+- [Managed Agent 模块重构方案](./Managed%20Agent%20模块重构方案.md)
+- [Issue #8 — 模块重构跟踪](https://github.com/sushaofei/AuraClaw/issues/8)
 - [开发阶段校验清单](./开发阶段校验清单.md)
 - [AGENTS.md](../AGENTS.md)
 - [M7 测试报告](./M7%20测试报告.md)
