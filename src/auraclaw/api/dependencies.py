@@ -153,14 +153,13 @@ def build_development_runtime_worker() -> DevelopmentRuntimeWorker:
     settings = get_settings()
     event_store = get_event_store()
     projection = get_task_projection()
-    if not isinstance(event_store, InMemoryEventStore) or not isinstance(
-        projection, InMemoryTaskProjection
-    ):
-        raise RuntimeError("development runtime requires in-memory storage")
     control = InMemoryControlStateStore()
     session = FencedSessionClient(event_store, control)
     publisher = DelayedRuntimeEventPublisher(
-        get_runtime_event_producer().publish,
+        # The worker and Streaming Gateway share this process. Publishing its
+        # deterministic test deltas directly keeps the test surface available
+        # even when a developer's .env selects Kafka but Kafka is unavailable.
+        get_runtime_replay_bus().publish,
         delta_delay=settings.development_stream_delay,
     )
     relay = OutboxRelay(

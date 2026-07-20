@@ -145,10 +145,19 @@ def test_streaming_gateway_authorizes_replays_and_signals_expired_cursor() -> No
             last_event_id=f"{session_id}:0",
         )
         assert expired.replay_missed and expired.initial == []
-        slow = await gateway.subscribe(
+        initial = await gateway.subscribe(
             tenant_id="tenant-m5",
             session_id=session_id,
             last_event_id=None,
+        )
+        assert [event.sequence for event in initial.initial] == [2, 3]
+        initial_events = initial.events()
+        assert (await anext(initial_events)).sequence == 2
+        await initial_events.aclose()
+        slow = await gateway.subscribe(
+            tenant_id="tenant-m5",
+            session_id=session_id,
+            last_event_id=f"{session_id}:3",
         )
         for index in range(4, 7):
             await producer.publish(

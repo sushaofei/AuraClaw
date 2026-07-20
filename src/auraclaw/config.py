@@ -90,8 +90,6 @@ class Settings(BaseSettings):
         return (
             self.development_runtime_enabled
             and self.env.lower() in {"development", "dev"}
-            and not self.postgres_enabled
-            and not self.kafka_enabled
         )
 
 
