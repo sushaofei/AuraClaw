@@ -47,6 +47,8 @@ at-least-once 方式驱动幂等投影；投影记录 source version、processed
 
 ## 依赖方向
 
+以下是当前代码结构；Issue #8 将按 [模块重构 RFC](./Managed%20Agent%20模块重构方案.md) 分阶段迁移。
+
 ```text
 api -> application -> domain -> contracts
                 |       ^
@@ -61,6 +63,8 @@ api -> application -> domain -> contracts
 - `projections`：可删除、可重建的查询模型。
 - `api`：鉴权上下文、幂等键、版本前置条件和 HTTP 表示。
 - `runtime`：Runtime 端口、fenced client、可恢复 Harness 和 Model Gateway。
+
+重构后的装配约束为：entrypoint → `composition` → `api`/gateways/业务包/infrastructure adapters。`api` 和 gateways 不导入 `composition` 或具体 infrastructure；infrastructure 可以依赖其实现的 ports，但不能依赖 `api`、gateways 或 `composition`。生产 `runtime run`、`delivery run` 是后续功能，不属于本次零业务行为重构。
 
 ## 与目标架构的对应关系
 

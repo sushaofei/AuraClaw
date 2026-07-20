@@ -26,6 +26,11 @@ uv run mypy src/auraclaw
 - Tools and model providers are accessed through gateways; Agent Runtime never reads secrets.
 - All writes carry tenant, command id, expected version, actor, correlation and causation context.
 - Relative imports are not used across top-level modules; import through `auraclaw.*`.
+- Entrypoints call `composition`; `api`, gateways, and business packages never import `composition`.
+- `api` and gateways do not select concrete infrastructure adapters. Infrastructure may implement
+  and import stable ports, but does not depend on `api`, gateways, or `composition`.
+- Package-to-deployment alignment is maintained by the component/package/entrypoint map in
+  `docs/Managed Agent 模块重构方案.md`, not by forcing a 1:1 directory topology.
 
 ## Stage completion gate
 
