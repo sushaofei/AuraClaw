@@ -6,7 +6,7 @@
 
 ## 一句话总结
 
-AuraClaw 是以 **Canonical Session Event Log** 为唯一任务事实源的模块化单体：HTTP 进程已装配 Task/Query/Streaming/Observability；**开发环境**额外在进程内启动 `DevelopmentRuntimeWorker`，经 Orchestrator + AgentHarness 产出真实 SSE 增量与终态 Result。生产路径下 Orchestrator、Agent Runtime、Tool Gateway、Result Delivery 仍以应用库 + CLI/测试为主，逻辑边界与架构图对齐，部署上尚未拆成独立 Worker 进程。
+AuraClaw 是以 **Canonical Session Event Log** 为唯一任务事实源的模块化单体：HTTP 进程已装配 Task/Query/Streaming/Observability；**开发环境**额外在进程内启动 `DevelopmentRuntimeWorker`，经 Orchestrator + AgentHarness 产出真实 SSE 增量与终态 Result。生产路径下 Orchestrator、Agent Runtime、Tool Gateway、Result Delivery 仍以应用库和测试为主，仅 Projection 已有常驻 CLI；逻辑边界与架构图对齐，部署上尚未拆成独立 Worker 进程。
 
 ---
 
@@ -23,13 +23,15 @@ AuraClaw 是以 **Canonical Session Event Log** 为唯一任务事实源的模�
 | **开发联调** | `DevelopmentRuntimeWorker`（dev 环境进程内）、CORS 默认放行 `localhost:3000` |
 | **不包含** | 生产云厂商 Model SDK、企业 Vault/KMS、S3 Artifact、远程容器 Hands |
 
-依赖方向（强制）：
+当前依赖方向（现状描述，不作为重构后的门禁配置）：
 
 ```text
 api → application → domain → contracts
               ↓           ↑
      infrastructure / projections / runtime
 ```
+
+Issue #8 的目标方向见 [Managed Agent 模块重构方案](./Managed%20Agent%20模块重构方案.md)：entrypoint 经 `composition` 组装 `api`、gateways、业务包和 infrastructure adapters；`api`/gateways 不反向导入 composition 或 infrastructure。包与部署单元不追求 1:1，而通过「组件 → 主归属包 → 进程入口」矩阵保持可追踪。
 
 ---
 
@@ -472,7 +474,7 @@ auraclaw operations redrive --tenant --queue {projection|delivery} --item-id ...
 | Result Delivery Worker | ❌ 库 + 测试 |
 | Tool Gateway / Model Gateway（**生产**） | ❌ 库（由 Harness 组装） |
 
-架构文档允许 MVP 合并部署，但要求逻辑边界不合并——当前代码满足逻辑边界；**开发环境**已通过 `DevelopmentRuntimeWorker` 在单进程内验证完整 Streaming 链路，**生产 Worker 进程装配**仍是主要缺口。
+架构文档允许 MVP 合并部署，但要求逻辑边界不合并——当前代码满足逻辑边界；**开发环境**已通过 `DevelopmentRuntimeWorker` 在单进程内验证完整 Streaming 链路，**生产 Worker 进程装配**仍是主要缺口。该缺口属于新增运行行为，不纳入 Issue #8 的纯结构重构，后续以独立 feature issue 实施。
 
 ---
 
