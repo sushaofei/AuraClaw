@@ -167,6 +167,7 @@ npm run dev
 - `POST /v1/sessions/{session_id}/messages`
 - `POST /v1/sessions/{session_id}/runs`
 - `POST /v1/sessions/{session_id}/cancel`
+- `POST /v1/sessions/{session_id}/close`
 - `POST /v1/sessions/{session_id}/resume`
 - `POST /v1/sessions/{session_id}/approvals/{approval_id}/responses`
 - `GET /v1/operations/sessions/{session_id}/timeline`
@@ -176,8 +177,14 @@ npm run dev
 查询支持 `ETag`、`If-None-Match` 和 `min_version`，投影未追上时返回 `202` 与
 `Retry-After`。
 
+Root Session 可以承载多个顺序执行的 Run：一轮 Run 进入 `completed`、`failed` 或
+`cancelled` 后，Session 回到 `ready`，后续消息继续使用同一个 `session_id` 并生成新的
+`run_id`。Task View 分别返回 `status`（Session）和 `run_status`（最新 Run）；Result 响应的
+`status` 表示最新 Run 状态，并通过 `session_status` 返回 Session 状态。只有显式调用
+`/close` 产生 `session.closed` 后，Root Session 才拒绝新消息和 Run。
+
 SSE 连接关闭或 Streaming Gateway 重启不会取消任务。客户端重连时使用公开
-`session_id:sequence` 游标；游标仍在保留窗口内时补齐事件，过期时收到 `stream.reset` 并回退
+`session_id:sequence` 游标；`sequence` 在同一 Session 的多个 Run 间保持单调递增。游标仍在保留窗口内时补齐事件，过期时收到 `stream.reset` 并回退
 Task Query API。Kafka Offset 只在 Gateway 内部使用，不暴露给客户端。每个连接使用有界队列，
 慢连接不会阻塞 Runtime 或 Kafka 分区；Runtime Event Bus 不可用时 Canonical 结果仍正常提交。
 
@@ -217,6 +224,7 @@ migrations/0004_m3_tool_artifact_approval.sql
 migrations/0005_m4_collaboration_review.sql
 migrations/0006_m5_streaming_delivery.sql
 migrations/0007_m6_observability_reliability.sql
+migrations/0008_multi_run_sessions.sql
 ```
 
 对应的 `.down.sql` 文件提供 M1～M6 Schema 回滚。生产部署应由迁移系统执行这些 SQL，

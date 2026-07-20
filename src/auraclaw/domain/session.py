@@ -6,7 +6,13 @@ from typing import Any
 
 from auraclaw.contracts.errors import InvalidTransitionError
 from auraclaw.contracts.events import CanonicalEvent, NewEvent
-from auraclaw.contracts.state import TERMINAL_SESSION_STATUSES, SessionStatus, Visibility
+from auraclaw.contracts.state import (
+    TERMINAL_RUN_STATUSES,
+    TERMINAL_SESSION_STATUSES,
+    RunStatus,
+    SessionStatus,
+    Visibility,
+)
 
 
 @dataclass
@@ -16,6 +22,7 @@ class SessionAggregate:
     tenant_id: str
     version: int = 0
     status: SessionStatus | None = None
+    run_status: RunStatus | None = None
     goal: str = ""
     run_id: str | None = None
     parent_session_id: str | None = None
@@ -46,16 +53,32 @@ class SessionAggregate:
 
     @classmethod
     def from_snapshot(cls, state: dict[str, Any], version: int) -> SessionAggregate:
+        role = str(state.get("role", "root"))
+        stored_status = SessionStatus(str(state["status"]))
+        stored_run_status = state.get("run_status")
+        if stored_run_status is None and stored_status.value in {
+            status.value for status in RunStatus
+        }:
+            stored_run_status = stored_status.value
+        # Snapshots written before multi-run Sessions used the Run terminal state
+        # as the Root Session terminal state. Translate them during restoration.
+        if role == "root" and stored_status in {
+            SessionStatus.COMPLETED,
+            SessionStatus.FAILED,
+            SessionStatus.CANCELLED,
+        }:
+            stored_status = SessionStatus.READY
         aggregate = cls(
             session_id=str(state["session_id"]),
             root_session_id=str(state["root_session_id"]),
             tenant_id=str(state["tenant_id"]),
             version=version,
-            status=SessionStatus(str(state["status"])),
+            status=stored_status,
+            run_status=RunStatus(str(stored_run_status)) if stored_run_status else None,
             goal=str(state["goal"]),
             run_id=state.get("run_id"),
             parent_session_id=state.get("parent_session_id"),
-            role=str(state.get("role", "root")),
+            role=role,
             result_summary=state.get("result_summary"),
             result_ref=state.get("result_ref"),
             artifact_refs=list(state.get("artifact_refs", [])),
@@ -84,6 +107,7 @@ class SessionAggregate:
             "root_session_id": self.root_session_id,
             "tenant_id": self.tenant_id,
             "status": status.value,
+            "run_status": self.run_status.value if self.run_status else None,
             "goal": self.goal,
             "run_id": self.run_id,
             "parent_session_id": self.parent_session_id,
@@ -123,6 +147,8 @@ class SessionAggregate:
         self._require_existing()
         if self.status in TERMINAL_SESSION_STATUSES:
             raise InvalidTransitionError(f"cannot cancel Session in {self.status.value}")
+        if self.run_status in TERMINAL_RUN_STATUSES:
+            raise InvalidTransitionError("cannot cancel a Session without an active Run")
         self._raise(
             NewEvent(
                 type="run.cancelled",
@@ -149,13 +175,29 @@ class SessionAggregate:
         self._require_existing()
         status = self.status
         assert status is not None
-        if status not in {SessionStatus.CREATED, SessionStatus.PAUSED}:
+        if status not in {SessionStatus.CREATED, SessionStatus.READY, SessionStatus.PAUSED}:
             raise InvalidTransitionError(f"cannot request run for Session in {status.value}")
         self._raise(
             NewEvent(
                 type="run.requested",
                 visibility=Visibility.USER,
                 payload={"run_id": run_id},
+            )
+        )
+
+    def close(self, reason: str) -> None:
+        self._require_existing()
+        status = self.status
+        assert status is not None
+        if status in TERMINAL_SESSION_STATUSES:
+            raise InvalidTransitionError(f"cannot close Session in {status.value}")
+        if self.run_status not in TERMINAL_RUN_STATUSES:
+            raise InvalidTransitionError("cannot close Session while a Run is active")
+        self._raise(
+            NewEvent(
+                type="session.closed",
+                visibility=Visibility.USER,
+                payload={"reason": reason},
             )
         )
 
@@ -241,30 +283,45 @@ class SessionAggregate:
             )
         elif event_type == "run.requested":
             self.run_id = str(payload["run_id"])
+            self.run_status = RunStatus.PENDING
+            self.result_summary = None
+            self.result_ref = None
+            self.artifact_refs = []
             if self.role == "root":
                 self.status = SessionStatus.PENDING
         elif event_type == "run.scheduled":
             self.status = SessionStatus.RUNNABLE
+            self.run_status = RunStatus.RUNNABLE
         elif event_type == "run.started":
             self.status = SessionStatus.RUNNING
+            self.run_status = RunStatus.RUNNING
         elif event_type == "session.paused":
             self.status = SessionStatus.PAUSED
+            self.run_status = RunStatus.PAUSED
         elif event_type == "approval.requested":
             self.status = SessionStatus.WAITING_FOR_HUMAN
+            self.run_status = RunStatus.WAITING_FOR_HUMAN
         elif event_type == "approval.approved":
             self.status = SessionStatus.RUNNABLE
+            self.run_status = RunStatus.RUNNABLE
         elif event_type == "approval.rejected":
             self.status = SessionStatus.RUNNABLE
+            self.run_status = RunStatus.RUNNABLE
         elif event_type == "run.retry_scheduled":
             self.status = SessionStatus.RETRY_WAIT
+            self.run_status = RunStatus.RETRY_WAIT
         elif event_type == "session.resumed":
             self.run_id = str(payload["run_id"])
             self.status = SessionStatus.PENDING
+            self.run_status = RunStatus.PENDING
         elif event_type == "run.completed":
             self.result_summary = payload.get("result_summary")
             self.result_ref = payload.get("result_ref")
             self.artifact_refs = list(payload.get("artifact_refs", []))
-            self.status = SessionStatus.COMPLETED
+            self.run_status = RunStatus.COMPLETED
+            self.status = (
+                SessionStatus.READY if self.role == "root" else SessionStatus.COMPLETED
+            )
         elif event_type == "dependency.changed":
             self.dependency_ids = list(payload["dependency_ids"])
             self.status = (
@@ -282,15 +339,24 @@ class SessionAggregate:
             self.result_ref = payload.get("target_result_ref")
             self.status = SessionStatus.COMPLETED
         elif event_type == "run.failed":
-            self.status = SessionStatus.FAILED
+            self.run_status = RunStatus.FAILED
+            self.status = SessionStatus.READY if self.role == "root" else SessionStatus.FAILED
         elif event_type == "run.cancelled":
-            self.status = SessionStatus.CANCELLED
+            self.run_status = RunStatus.CANCELLED
+            self.status = (
+                SessionStatus.READY if self.role == "root" else SessionStatus.CANCELLED
+            )
         elif event_type == "runtime.failed":
             self.status = SessionStatus.RETRY_WAIT
+            self.run_status = RunStatus.RETRY_WAIT
         elif event_type == "runtime.reprovisioned":
             self.status = SessionStatus.RUNNABLE
+            self.run_status = RunStatus.RUNNABLE
         elif event_type == "run.terminated":
-            self.status = SessionStatus.FAILED
+            self.run_status = RunStatus.FAILED
+            self.status = SessionStatus.READY if self.role == "root" else SessionStatus.FAILED
+        elif event_type == "session.closed":
+            self.status = SessionStatus.CLOSED
 
     def _raise(self, event: NewEvent) -> None:
         self.apply(event.type, event.payload)

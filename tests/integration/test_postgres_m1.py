@@ -21,7 +21,11 @@ DATABASE_URL = _asyncpg_url(SETTINGS.resolved_database_url) if SETTINGS.postgres
 ROOT = Path(__file__).resolve().parents[2]
 MIGRATIONS = tuple(
     (ROOT / path).read_text()
-    for path in ("migrations/0001_initial.sql", "migrations/0002_m1_fact_query.sql")
+    for path in (
+        "migrations/0001_initial.sql",
+        "migrations/0002_m1_fact_query.sql",
+        "migrations/0008_multi_run_sessions.sql",
+    )
 )
 pytestmark = pytest.mark.skipif(DATABASE_URL is None, reason="PostgreSQL test URL not configured")
 
@@ -43,6 +47,13 @@ def test_postgres_concurrent_idempotency_outbox_snapshot_and_rebuild() -> None:
             )
             if role_column is None:
                 await connection.execute(MIGRATIONS[1])
+            run_status_column = await connection.fetchval(
+                """SELECT 1 FROM information_schema.columns
+                WHERE table_schema = 'projection' AND table_name = 'task_view'
+                  AND column_name = 'run_status'"""
+            )
+            if run_status_column is None:
+                await connection.execute(MIGRATIONS[2])
         finally:
             await connection.close()
 
@@ -82,6 +93,7 @@ def test_postgres_concurrent_idempotency_outbox_snapshot_and_rebuild() -> None:
             assert before is not None and after is not None
             assert before["projection_version"] == after["projection_version"] == 2
             assert before["status"] == after["status"] == "pending"
+            assert before["run_status"] == after["run_status"] == "pending"
             assert before["artifact_refs"] == after["artifact_refs"] == []
             assert before["result_ref"] is after["result_ref"] is None
             assert before["error"] is after["error"] is None

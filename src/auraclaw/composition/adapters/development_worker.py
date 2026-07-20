@@ -4,6 +4,7 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
+from dataclasses import replace
 
 from auraclaw.control.orchestrator import ManagedOrchestrator
 from auraclaw.projection.ports import TaskReader
@@ -62,11 +63,17 @@ class DelayedRuntimeEventPublisher:
     ) -> None:
         self._publish = publish
         self._delta_delay = max(0.0, delta_delay)
+        self._sequences: dict[tuple[str, str], int] = {}
+        self._sequence_lock = asyncio.Lock()
 
     async def publish(self, event: RuntimeEvent) -> None:
         if event.type == "model.output.delta" and self._delta_delay:
             await asyncio.sleep(self._delta_delay)
-        await self._publish(event)
+        key = (event.tenant_id, event.session_id)
+        async with self._sequence_lock:
+            sequence = self._sequences.get(key, 0) + 1
+            self._sequences[key] = sequence
+        await self._publish(replace(event, sequence=sequence))
 
 
 class DevelopmentRuntimeWorker:

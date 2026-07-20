@@ -32,6 +32,13 @@ class TaskCommandGateway:
             session_id=session_id, reason=reason, context=context
         )
 
+    async def close_session(
+        self, *, session_id: str, reason: str, context: CommandContext
+    ) -> dict[str, Any]:
+        return await self._service.close_session(
+            session_id=session_id, reason=reason, context=context
+        )
+
     async def resume_task(
         self, *, session_id: str, context: CommandContext
     ) -> dict[str, Any]:

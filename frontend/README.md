@@ -4,7 +4,7 @@ AuraClaw 的独立纯前端测试与监控工作台。它只调用公开 HTTP/SS
 
 ## 协议测试页面
 
-- **智能问答**：首次提问创建任务并自动连接 SSE，将 `model.output.delta` 按事件游标去重合并；断线携带 `Last-Event-ID` 重连，终态后使用 Task / Result API 核对最终回答。终态 Session 按后端约束不可继续追加消息，页面会为后续追问创建新 Session 并明确提示。
+- **智能问答**：首次提问创建 Session 并自动连接 SSE，将 `model.output.delta` 按事件游标去重合并；断线携带 `Last-Event-ID` 重连，每轮 Run 终态后使用 Task / Result API 核对最终回答。后续追问在同一 Session 追加消息并创建新 Run；只有显式关闭的 Session 才会为新问题创建新的 Session。
 - **创建任务**：并列展示脱敏后的 Query 请求、权威 Task View 和 Result；轮询遵循 `Retry-After`，条件查询使用 `ETag / If-None-Match`，支持 Session ID 恢复、手动刷新、停止自动轮询和复制脱敏 JSON。
 
 两个入口使用 `#chat` 与 `#create` 页面锚点，刷新或直接访问时会恢复当前功能页；不会把问答正文写入浏览器持久化存储。
@@ -48,6 +48,7 @@ npm run lint
 - 无游标首次连接会回放当前保留窗口，避免任务在 SSE 建连前已输出时丢失开头内容。
 - 状态为 `reconnecting` 时会指数退避重连，最长等待 10 秒。
 - 收到 `stream.reset` 表示回放游标已过期；应刷新 Task View，以 Task/Result API 的最终状态为准。
+- Task View 的 `status` 是 Session 状态，`run_status` 是当前或最近一次 Run 状态；Result 的 `status` 对应其 `run_id`，`session_status` 表示 Session 是否仍可继续。
 - 代理层必须关闭响应缓冲，并保持 `text/event-stream` 长连接。
 
 ## 安全边界

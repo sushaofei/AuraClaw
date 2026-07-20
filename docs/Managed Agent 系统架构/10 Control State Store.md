@@ -98,5 +98,5 @@ reconciliation_repairs
 
 - 并发 Claim 同一任务只有一个成功。
 - Lease 重新分配后 Fencing Token 单调递增。
-- 终态 Session 不会再次被 Runnable Queue 调度。
+- 显式关闭或 Child 终态 Session 不会再次被 Runnable Queue 调度；Root Session 的 Run 终态会释放执行租约，后续 Run 可再次入队。
 - 数据库恢复后 Reconciler 能消除僵尸 Assignment。

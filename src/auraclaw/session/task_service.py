@@ -67,6 +67,7 @@ class TaskService:
             "session_id": session_id,
             "run_id": session.run_id,
             "status": session.status.value if session.status else "created",
+            "run_status": session.run_status.value if session.run_status else None,
         }
         result = await self._event_store.append(
             root_session_id=session.root_session_id,
@@ -83,7 +84,12 @@ class TaskService:
         session = await self._load(context.tenant_id, session_id)
         run_id = f"run_{uuid4().hex}"
         session.request_run(run_id)
-        response = {"session_id": session_id, "run_id": run_id, "status": "pending"}
+        response = {
+            "session_id": session_id,
+            "run_id": run_id,
+            "status": "pending",
+            "run_status": "pending",
+        }
         result = await self._event_store.append(
             root_session_id=session.root_session_id,
             session_id=session.session_id,
@@ -107,7 +113,34 @@ class TaskService:
         response = {
             "session_id": session_id,
             "run_id": session.run_id,
-            "status": "cancelled",
+            "status": session.status.value if session.status else "created",
+            "run_status": session.run_status.value if session.run_status else None,
+        }
+        result = await self._event_store.append(
+            root_session_id=session.root_session_id,
+            session_id=session.session_id,
+            run_id=session.run_id,
+            context=context,
+            events=session.release_pending_events(),
+            command_result=response,
+        )
+        await self._after_append(session, result)
+        return result.command_result
+
+    async def close_session(
+        self,
+        *,
+        session_id: str,
+        reason: str,
+        context: CommandContext,
+    ) -> dict[str, Any]:
+        session = await self._load(context.tenant_id, session_id)
+        session.close(reason)
+        response = {
+            "session_id": session_id,
+            "run_id": session.run_id,
+            "status": "closed",
+            "run_status": session.run_status.value if session.run_status else None,
         }
         result = await self._event_store.append(
             root_session_id=session.root_session_id,
@@ -129,7 +162,12 @@ class TaskService:
         session = await self._load(context.tenant_id, session_id)
         run_id = f"run_{uuid4().hex}"
         session.resume(run_id)
-        response = {"session_id": session_id, "run_id": run_id, "status": "pending"}
+        response = {
+            "session_id": session_id,
+            "run_id": run_id,
+            "status": "pending",
+            "run_status": "pending",
+        }
         result = await self._event_store.append(
             root_session_id=session.root_session_id,
             session_id=session.session_id,
@@ -172,6 +210,7 @@ class TaskService:
             "session_id": session_id,
             "run_id": session.run_id,
             "status": session.status.value if session.status else "created",
+            "run_status": session.run_status.value if session.run_status else None,
             "approval_id": approval_id,
             "decision": decided.status.value,
         }

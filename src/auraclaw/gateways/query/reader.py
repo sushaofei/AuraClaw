@@ -26,7 +26,8 @@ class TaskQueryService:
         return {
             "session_id": session_id,
             "run_id": task["run_id"],
-            "status": task["status"],
+            "status": task["run_status"],
+            "session_status": task["status"],
             "result_summary": task["result_summary"],
             "result_ref": task["result_ref"],
             "artifact_refs": task["artifact_refs"],

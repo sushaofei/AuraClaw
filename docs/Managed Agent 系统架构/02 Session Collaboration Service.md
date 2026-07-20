@@ -67,6 +67,7 @@ appendEvent(sessionId, expectedVersion, event)
 getEvents(sessionId, fromVersion)
 getSnapshot(sessionId)
 requestRun(sessionId)
+closeSession(sessionId, reason)
 createChild(parentId, role, goal, outputContract)
 setDependencies(childId, dependencyIds)
 delegate(childId, agentProfile)
@@ -86,12 +87,17 @@ model.output.completed
 tool.call.requested / completed / failed
 artifact.attached
 approval.requested / human.response.recorded
-session.paused / resumed / handed_off
+session.paused / resumed / handed_off / closed
 run.completed / failed / cancelled
 delivery.succeeded / retrying / dead_lettered
 ```
 
 Token Delta、Typing、Heartbeat 等高频事件不进入 Canonical Log。
+
+Root Session 与 Run 使用独立生命周期。一条 Root Session 可按顺序承载多个 Run；
+`run.completed / failed / cancelled` 只结束对应 Run，并使 Root Session 回到 `ready`。
+只有显式 `session.closed` 才终结 Root Session。Child Session 仍以发布合同结果作为终态，
+以保持 DAG、Review 与 Join 语义。
 
 ## Transactional Outbox
 

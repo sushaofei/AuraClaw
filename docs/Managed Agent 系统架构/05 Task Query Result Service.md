@@ -35,6 +35,8 @@ GET /v1/approvals/{approval_id}
 {
   "session_id": "ses_123",
   "status": "running",
+  "run_id": "run_456",
+  "run_status": "running",
   "progress": 0.6,
   "current_stage": "review",
   "projection_version": 42,
@@ -45,6 +47,11 @@ GET /v1/approvals/{approval_id}
   }
 }
 ```
+
+`status` 描述 Session 生命周期，`run_status` 描述当前或最近一次 Run。兼容的
+`GET /v1/tasks/{session_id}/result` 返回最新 Run 的结果，响应中的 `run_id` 明确关联该结果，
+`status` 表示 Run 状态，`session_status` 表示 Session 状态。新 Run 请求后，最新结果字段在
+投影中清空，避免把上一轮结果误认为当前轮结果。
 
 ## 轮询治理
 

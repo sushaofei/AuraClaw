@@ -142,7 +142,13 @@ class InMemoryControlStateStore:
         async with self._lock:
             entry = self._assignments.get(task_id)
             if entry is not None:
-                self._assignments[task_id] = (entry[0], outcome)
+                assignment = entry[0]
+                self._assignments[task_id] = (assignment, outcome)
+                if outcome in {"completed", "failed", "cancelled"}:
+                    resource_id = f"session:{assignment.tenant_id}:{assignment.session_id}"
+                    lease = self._leases.get(resource_id)
+                    if lease is not None and lease.lease_id == assignment.lease_id:
+                        del self._leases[resource_id]
             queued = self._queue.get(task_id)
             if queued is not None:
                 self._queue[task_id] = (queued[0], "acked", queued[2])

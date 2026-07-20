@@ -65,7 +65,7 @@ tool.progress
 SDK 负责：
 
 - 自动填充 tenant、root/session/run、event_id 和 timestamp。
-- 分配或校验 sequence。
+- 分配或校验 Session 范围内单调递增的 sequence；新 Run 不得从 1 重新开始。
 - Schema 和消息大小校验。
 - visibility 分类和敏感字段拦截。
 - 批量、压缩和 Token Delta 合并。
@@ -76,7 +76,7 @@ SDK 负责：
 - Consumer 使用 Offset 恢复内部消费位置。
 - 浏览器游标使用公开 `session_seq` 或不透明 Cursor，不暴露 Kafka Offset。
 - Replay 只承诺保留期内可用；超出保留期从 Session Snapshot/完整消息恢复。
-- Consumer 以 `event_id` 去重并检测 sequence gap。
+- Consumer 以 `event_id` 去重并检测 Session 范围的 sequence gap；`run_id` 用于区分轮次。
 
 ## 背压
 

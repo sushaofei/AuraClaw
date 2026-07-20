@@ -64,16 +64,18 @@ class PostgresTaskProjection(LazyPool):
                 await connection.execute(
                     """INSERT INTO projection.task_view
                     (tenant_id, session_id, root_session_id, run_id, status, goal, role,
-                     parent_session_id, progress, current_stage, result_summary, result_ref,
+                     parent_session_id, progress, current_stage, run_status,
+                     result_summary, result_ref,
                      artifact_refs, error, delivery_status, delivery_id,
                      delivery_attempt_count, delivery_response_summary,
                      source_version, source_event_id, projected_at)
-                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13::jsonb,
-                            $14::jsonb,$15,$16,$17,$18,$19,$20,$21)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14::jsonb,
+                            $15::jsonb,$16,$17,$18,$19,$20,$21,$22)
                     ON CONFLICT (tenant_id, session_id) DO UPDATE SET
                       run_id=EXCLUDED.run_id, status=EXCLUDED.status, goal=EXCLUDED.goal,
                       role=EXCLUDED.role, parent_session_id=EXCLUDED.parent_session_id,
                       progress=EXCLUDED.progress, current_stage=EXCLUDED.current_stage,
+                      run_status=EXCLUDED.run_status,
                       result_summary=EXCLUDED.result_summary, result_ref=EXCLUDED.result_ref,
                       artifact_refs=EXCLUDED.artifact_refs, error=EXCLUDED.error,
                       delivery_status=EXCLUDED.delivery_status,
@@ -93,6 +95,7 @@ class PostgresTaskProjection(LazyPool):
                     view.get("parent_session_id"),
                     view["progress"],
                     view["current_stage"],
+                    view.get("run_status"),
                     view.get("result_summary"),
                     json_dumps(view.get("result_ref")),
                     json_dumps(view.get("artifact_refs", [])),
@@ -130,6 +133,7 @@ class PostgresTaskProjection(LazyPool):
             "root_session_id": str(row["root_session_id"]),
             "run_id": str(row["run_id"]) if row["run_id"] is not None else None,
             "status": str(row["status"]),
+            "run_status": str(row["run_status"]) if row["run_status"] is not None else None,
             "goal": str(row["goal"]),
             "role": str(row["role"]),
             "parent_session_id": row["parent_session_id"],
