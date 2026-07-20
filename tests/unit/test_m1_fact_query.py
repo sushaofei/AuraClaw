@@ -2,18 +2,19 @@ import asyncio
 
 import pytest
 
-from auraclaw.application.maintenance import ProjectionMaintenanceService
-from auraclaw.application.tasks import AllowAllAdmissionController, TaskService
 from auraclaw.contracts.commands import CommandContext
 from auraclaw.contracts.events import Actor, CanonicalEvent, NewEvent, utc_now
 from auraclaw.contracts.state import Visibility
-from auraclaw.infrastructure.memory import InMemoryEventStore
-from auraclaw.projections.relay import OutboxRelay
-from auraclaw.projections.tasks import (
+from auraclaw.gateways.task.admission import AllowAllAdmissionController
+from auraclaw.infrastructure.persistence.memory_event_store import InMemoryEventStore
+from auraclaw.projection.maintenance import ProjectionMaintenanceService
+from auraclaw.projection.relay import OutboxRelay
+from auraclaw.projection.task.projector import (
     InMemoryTaskProjection,
     ProjectionGapError,
     UnsupportedEventError,
 )
+from auraclaw.session.task_service import TaskService
 
 
 def _context(command_id: str, *, operation: str = "create_task") -> CommandContext:

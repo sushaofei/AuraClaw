@@ -8,9 +8,9 @@ from auraclaw.api.dependencies import (
     get_task_projection,
     request_identity,
 )
-from auraclaw.application.observability import ObservabilityService
 from auraclaw.contracts.errors import NotFoundError
-from auraclaw.domain.ports import TaskReader
+from auraclaw.observability.service import ObservabilityService
+from auraclaw.projection.ports import TaskReader
 
 router = APIRouter(prefix="/v1/operations", tags=["operations"])
 Identity = Annotated[RequestIdentity, Depends(request_identity)]

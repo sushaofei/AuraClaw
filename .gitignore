@@ -19,7 +19,7 @@ build/
 
 # Runtime data
 .data/
-artifacts/
+/artifacts/
 logs/
 *.log
 

@@ -6,9 +6,7 @@ from typing import Any
 
 import pytest
 
-from auraclaw.application.orchestration import LocalRuntimeProvisioner, ManagedOrchestrator
-from auraclaw.application.tasks import AllowAllAdmissionController, TaskService
-from auraclaw.application.tooling import GatewayToolClient, PolicyEngine, ToolGateway, ToolRegistry
+from auraclaw.action.tool_gateway import GatewayToolClient, PolicyEngine, ToolGateway, ToolRegistry
 from auraclaw.contracts.commands import CommandContext
 from auraclaw.contracts.errors import (
     ApprovalValidationError,
@@ -27,21 +25,24 @@ from auraclaw.contracts.tools import (
     ToolInvocation,
     ToolPermission,
 )
+from auraclaw.control.orchestrator import LocalRuntimeProvisioner, ManagedOrchestrator
 from auraclaw.domain.approval import ApprovalAggregate
-from auraclaw.infrastructure.artifacts import ArtifactStore, InMemoryObjectStorage
-from auraclaw.infrastructure.control_memory import InMemoryControlStateStore
-from auraclaw.infrastructure.credentials import CredentialProxy, InMemoryVault
-from auraclaw.infrastructure.hands import LocalHandsService
-from auraclaw.infrastructure.memory import InMemoryEventStore
-from auraclaw.projections.approvals import InMemoryApprovalProjection
-from auraclaw.projections.relay import OutboxRelay
-from auraclaw.projections.tasks import InMemoryTaskProjection
+from auraclaw.gateways.task.admission import AllowAllAdmissionController
+from auraclaw.infrastructure.artifacts.store import ArtifactStore, InMemoryObjectStorage
+from auraclaw.infrastructure.credentials.proxy import CredentialProxy, InMemoryVault
+from auraclaw.infrastructure.hands.local import LocalHandsService
+from auraclaw.infrastructure.persistence.memory_control_store import InMemoryControlStateStore
+from auraclaw.infrastructure.persistence.memory_event_store import InMemoryEventStore
+from auraclaw.projection.approval.projector import InMemoryApprovalProjection
+from auraclaw.projection.relay import OutboxRelay
+from auraclaw.projection.task.projector import InMemoryTaskProjection
 from auraclaw.runtime.clients import (
     FencedSessionClient,
     InMemoryRuntimeEventBus,
 )
 from auraclaw.runtime.harness import AgentHarness
 from auraclaw.runtime.ports import ModelRequest, ModelResponse, ToolCall
+from auraclaw.session.task_service import TaskService
 
 
 class RecordingHands(LocalHandsService):

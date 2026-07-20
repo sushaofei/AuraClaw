@@ -20,11 +20,100 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+  "import-linter>=2.1,<3",
   "mypy>=1.13,<2",
   "pytest>=8.3,<9",
   "pytest-asyncio>=0.24,<1",
   "ruff>=0.8,<1",
 ]
+
+[tool.importlinter]
+root_package = "auraclaw"
+
+[[tool.importlinter.contracts]]
+name = "Contracts are framework independent"
+type = "forbidden"
+source_modules = ["auraclaw.contracts"]
+forbidden_modules = [
+  "auraclaw.action",
+  "auraclaw.api",
+  "auraclaw.composition",
+  "auraclaw.control",
+  "auraclaw.delivery",
+  "auraclaw.domain",
+  "auraclaw.gateways",
+  "auraclaw.infrastructure",
+  "auraclaw.observability",
+  "auraclaw.projection",
+  "auraclaw.runtime",
+  "auraclaw.session",
+]
+
+[[tool.importlinter.contracts]]
+name = "Domain only depends on contracts"
+type = "forbidden"
+source_modules = ["auraclaw.domain"]
+forbidden_modules = [
+  "auraclaw.action",
+  "auraclaw.api",
+  "auraclaw.composition",
+  "auraclaw.control",
+  "auraclaw.delivery",
+  "auraclaw.gateways",
+  "auraclaw.infrastructure",
+  "auraclaw.observability",
+  "auraclaw.projection",
+  "auraclaw.runtime",
+  "auraclaw.session",
+]
+
+[[tool.importlinter.contracts]]
+name = "API is transport only"
+type = "forbidden"
+source_modules = ["auraclaw.api"]
+forbidden_modules = ["auraclaw.composition", "auraclaw.infrastructure"]
+
+[[tool.importlinter.contracts]]
+name = "Gateways do not select adapters"
+type = "forbidden"
+source_modules = ["auraclaw.gateways"]
+forbidden_modules = ["auraclaw.composition", "auraclaw.infrastructure"]
+
+[[tool.importlinter.contracts]]
+name = "Infrastructure ignores delivery surfaces and composition"
+type = "forbidden"
+source_modules = ["auraclaw.infrastructure"]
+forbidden_modules = ["auraclaw.api", "auraclaw.composition", "auraclaw.gateways"]
+
+[[tool.importlinter.contracts]]
+name = "Business packages do not import composition"
+type = "forbidden"
+source_modules = [
+  "auraclaw.action",
+  "auraclaw.control",
+  "auraclaw.delivery",
+  "auraclaw.observability",
+  "auraclaw.projection",
+  "auraclaw.runtime",
+  "auraclaw.session",
+]
+forbidden_modules = ["auraclaw.composition"]
+
+[[tool.importlinter.contracts]]
+name = "Read gateways do not call Session write services"
+type = "forbidden"
+source_modules = ["auraclaw.gateways.query", "auraclaw.gateways.streaming"]
+forbidden_modules = ["auraclaw.session.task_service", "auraclaw.session.collaboration_service"]
+
+[[tool.importlinter.contracts]]
+name = "Projection rules are adapter independent"
+type = "forbidden"
+source_modules = [
+  "auraclaw.projection.approval",
+  "auraclaw.projection.collaboration",
+  "auraclaw.projection.task",
+]
+forbidden_modules = ["auraclaw.infrastructure"]
 
 [project.scripts]
 auraclaw = "auraclaw.__main__:main"

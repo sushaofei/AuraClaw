@@ -6,12 +6,13 @@ from uuid import uuid4
 import asyncpg
 import pytest
 
-from auraclaw.application.observability import ObservabilityService
 from auraclaw.config import get_settings
 from auraclaw.contracts.observability import TraceContext
-from auraclaw.infrastructure.observability import PostgresObservabilityStore
-from auraclaw.infrastructure.operations import PostgresOperationsStore
-from auraclaw.infrastructure.postgres import PostgresEventStore, _asyncpg_url
+from auraclaw.infrastructure.observability.stores import PostgresObservabilityStore
+from auraclaw.infrastructure.persistence.postgres_common import asyncpg_url as _asyncpg_url
+from auraclaw.infrastructure.persistence.postgres_event_store import PostgresEventStore
+from auraclaw.infrastructure.persistence.postgres_operations_store import PostgresOperationsStore
+from auraclaw.observability.service import ObservabilityService
 
 SETTINGS = get_settings()
 DATABASE_URL = _asyncpg_url(SETTINGS.resolved_database_url) if SETTINGS.postgres_enabled else None

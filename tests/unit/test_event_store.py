@@ -2,7 +2,7 @@ import asyncio
 
 from auraclaw.contracts.commands import CommandContext
 from auraclaw.contracts.events import Actor, NewEvent
-from auraclaw.infrastructure.memory import InMemoryEventStore
+from auraclaw.infrastructure.persistence.memory_event_store import InMemoryEventStore
 
 
 def test_same_command_is_idempotent() -> None:

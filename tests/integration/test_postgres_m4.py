@@ -5,8 +5,6 @@ from uuid import uuid4
 import asyncpg
 import pytest
 
-from auraclaw.application.collaboration import CollaborationService
-from auraclaw.application.tasks import AllowAllAdmissionController, TaskService
 from auraclaw.config import get_settings
 from auraclaw.contracts.collaboration import (
     ChildResult,
@@ -16,14 +14,17 @@ from auraclaw.contracts.collaboration import (
 )
 from auraclaw.contracts.commands import CommandContext
 from auraclaw.contracts.events import Actor
-from auraclaw.infrastructure.postgres import (
+from auraclaw.gateways.task.admission import AllowAllAdmissionController
+from auraclaw.infrastructure.persistence.postgres_common import asyncpg_url as _asyncpg_url
+from auraclaw.infrastructure.persistence.postgres_event_store import PostgresEventStore
+from auraclaw.infrastructure.projection.postgres_collaboration_store import (
     PostgresCollaborationProjection,
-    PostgresEventStore,
-    PostgresTaskProjection,
-    _asyncpg_url,
 )
-from auraclaw.projections.approvals import CompositeProjection
-from auraclaw.projections.relay import OutboxRelay
+from auraclaw.infrastructure.projection.postgres_task_store import PostgresTaskProjection
+from auraclaw.projection.approval.projector import CompositeProjection
+from auraclaw.projection.relay import OutboxRelay
+from auraclaw.session.collaboration_service import CollaborationService
+from auraclaw.session.task_service import TaskService
 
 SETTINGS = get_settings()
 DATABASE_URL = _asyncpg_url(SETTINGS.resolved_database_url) if SETTINGS.postgres_enabled else None

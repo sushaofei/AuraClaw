@@ -8,7 +8,7 @@ from auraclaw.api.dependencies import (
     get_streaming_gateway,
     request_identity,
 )
-from auraclaw.application.streaming import StreamingGateway
+from auraclaw.gateways.streaming.gateway import StreamingGateway
 
 router = APIRouter(prefix="/v1", tags=["streams"])
 Identity = Annotated[RequestIdentity, Depends(request_identity)]

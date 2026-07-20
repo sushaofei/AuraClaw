@@ -7,28 +7,29 @@ from datetime import timedelta
 import httpx
 import pytest
 
-from auraclaw.application.delivery import CircuitBreaker, ResultDeliveryWorker
-from auraclaw.application.streaming import StreamingGateway
-from auraclaw.application.tasks import AllowAllAdmissionController, TaskService
 from auraclaw.contracts.commands import CommandContext
 from auraclaw.contracts.delivery import DeliveryJob, ResultSinkConfig, SinkResponse
 from auraclaw.contracts.errors import NotFoundError
 from auraclaw.contracts.events import Actor, NewEvent
 from auraclaw.contracts.state import Visibility
+from auraclaw.delivery.worker import CircuitBreaker, ResultDeliveryWorker
+from auraclaw.gateways.streaming.gateway import StreamingGateway
+from auraclaw.gateways.task.admission import AllowAllAdmissionController
 from auraclaw.infrastructure.delivery import (
     InMemoryDeliveryJobStore,
     ParentSessionResultSink,
     StaticDeliverySecretResolver,
     WebhookResultSink,
 )
-from auraclaw.infrastructure.memory import InMemoryEventStore
-from auraclaw.infrastructure.runtime_events import (
+from auraclaw.infrastructure.kafka.runtime_events import (
     ReplayRuntimeEventBus,
     RuntimeEventProducerSDK,
     RuntimeEventRejectedError,
 )
-from auraclaw.projections.relay import OutboxRelay
-from auraclaw.projections.tasks import InMemoryTaskProjection
+from auraclaw.infrastructure.persistence.memory_event_store import InMemoryEventStore
+from auraclaw.projection.relay import OutboxRelay
+from auraclaw.projection.task.projector import InMemoryTaskProjection
+from auraclaw.session.task_service import TaskService
 
 
 class RecordingSink:

@@ -4,15 +4,15 @@ from typing import Any
 
 import pytest
 
-from auraclaw.application.orchestration import LocalRuntimeProvisioner, ManagedOrchestrator
-from auraclaw.application.tasks import AllowAllAdmissionController, TaskService
 from auraclaw.contracts.commands import CommandContext
 from auraclaw.contracts.errors import FencingTokenError
 from auraclaw.contracts.events import Actor, NewEvent
-from auraclaw.infrastructure.control_memory import InMemoryControlStateStore
-from auraclaw.infrastructure.memory import InMemoryEventStore
-from auraclaw.projections.relay import OutboxRelay
-from auraclaw.projections.tasks import InMemoryTaskProjection
+from auraclaw.control.orchestrator import LocalRuntimeProvisioner, ManagedOrchestrator
+from auraclaw.gateways.task.admission import AllowAllAdmissionController
+from auraclaw.infrastructure.persistence.memory_control_store import InMemoryControlStateStore
+from auraclaw.infrastructure.persistence.memory_event_store import InMemoryEventStore
+from auraclaw.projection.relay import OutboxRelay
+from auraclaw.projection.task.projector import InMemoryTaskProjection
 from auraclaw.runtime.clients import (
     FencedSessionClient,
     FencedToolClient,
@@ -22,6 +22,7 @@ from auraclaw.runtime.clients import (
 from auraclaw.runtime.harness import AgentHarness, InjectionPoint
 from auraclaw.runtime.model_gateway import ModelGateway, StaticCredentialResolver
 from auraclaw.runtime.ports import ModelRequest, ModelResponse, ToolCall
+from auraclaw.session.task_service import TaskService
 
 
 class RecordingProvider:

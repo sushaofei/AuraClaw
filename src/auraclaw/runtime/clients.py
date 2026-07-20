@@ -6,13 +6,9 @@ from typing import Any
 
 from auraclaw.contracts.commands import CommandContext
 from auraclaw.contracts.events import Actor, CanonicalEvent, NewEvent
-from auraclaw.domain.ports import EventStore
-from auraclaw.runtime.ports import (
-    ControlStateStore,
-    RuntimeAssignment,
-    RuntimeEvent,
-    ToolCall,
-)
+from auraclaw.control.ports import ControlStateStore, RuntimeAssignment
+from auraclaw.runtime.ports import RuntimeEvent, ToolCall
+from auraclaw.session.ports import EventStore
 
 
 def assignment_resource_id(assignment: RuntimeAssignment) -> str:
