@@ -17,9 +17,12 @@ test("server-renders the AuraClaw console shell", async () => {
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
   const html = await response.text();
-  assert.match(html, /<title>AuraClaw Operations Console<\/title>/i);
+  assert.match(html, /<title>AuraClaw Protocol Test Console<\/title>/i);
   assert.match(html, /AuraClaw/);
-  assert.match(html, /任务测试台/);
+  assert.match(html, /智能问答/);
+  assert.match(html, /创建任务/);
+  assert.match(html, /STREAM \/ RESULT/);
+  assert.match(html, /Session 详情/);
   assert.match(html, /实时事件/);
   assert.match(html, />Timeline</);
   assert.match(html, /Metrics/);

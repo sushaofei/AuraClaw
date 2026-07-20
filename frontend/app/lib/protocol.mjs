@@ -57,6 +57,32 @@ export function createSseParser(onEvent) {
   };
 }
 
+export function runtimeDelta(event, data) {
+  if (event !== "model.output.delta") return "";
+  const payload = data && typeof data === "object" && data.payload && typeof data.payload === "object"
+    ? data.payload
+    : data;
+  return typeof payload?.delta === "string" ? payload.delta : "";
+}
+
+export function appendUniqueEvent(entries, entry, limit = 500) {
+  if (entry.id && entries.some((item) => item.id === entry.id)) return entries;
+  return [...entries, entry].slice(-limit);
+}
+
+export function resultText(result) {
+  if (!result || typeof result !== "object") return "";
+  if (typeof result.result_summary === "string") return result.result_summary;
+  if (typeof result.output === "string") return result.output;
+  if (typeof result.result === "string") return result.result;
+  return "";
+}
+
+export function retryAfterMs(value, fallback = 2000) {
+  const seconds = Number.parseFloat(String(value ?? ""));
+  return Number.isFinite(seconds) && seconds >= 0 ? Math.max(250, seconds * 1000) : fallback;
+}
+
 export function filterTimeline(entries, query, kind) {
   const needle = String(query || "").trim().toLowerCase();
   return (entries || []).filter((entry) => {

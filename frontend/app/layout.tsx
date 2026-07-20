@@ -20,10 +20,10 @@ export async function generateMetadata(): Promise<Metadata> {
   const protocol = requestHeaders.get("x-forwarded-proto") ?? (host.startsWith("localhost") ? "http" : "https");
   const image = `${protocol}://${host}/og.png`;
   return {
-    title: "AuraClaw Operations Console",
-    description: "Test managed agent sessions, inspect runtime streams, and trace operational signals.",
-    openGraph: { title: "AuraClaw Operations Console", description: "Managed agent testing and operational clarity in one console.", images: [{ url: image, width: 1792, height: 925 }] },
-    twitter: { card: "summary_large_image", title: "AuraClaw Operations Console", description: "Managed agent testing and operational clarity in one console.", images: [image] },
+    title: "AuraClaw Protocol Test Console",
+    description: "Test streaming conversations, Query / Result flows, and managed agent operational signals.",
+    openGraph: { title: "AuraClaw Protocol Test Console", description: "Streaming and Query / Result testing with canonical operational clarity.", images: [{ url: image, width: 1731, height: 909 }] },
+    twitter: { card: "summary_large_image", title: "AuraClaw Protocol Test Console", description: "Streaming and Query / Result testing with canonical operational clarity.", images: [image] },
   };
 }
 
