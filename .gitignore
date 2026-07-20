@@ -13,6 +13,8 @@ htmlcov/
 venv/
 dist/
 build/
+!frontend/build/
+!frontend/build/sites-vite-plugin.ts
 *.egg-info/
 
 # Runtime data
