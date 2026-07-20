@@ -33,6 +33,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     ingestor = get_streaming_ingestor()
     development_worker = None
     development_worker_task: asyncio.Task[None] | None = None
+    app.state.development_runtime_ready = False
     app.state.runtime_event_bus_ready = ingestor is None
     if ingestor is not None:
         try:
@@ -44,6 +45,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if settings.development_runtime_active:
         development_worker = build_development_runtime_worker()
         development_worker_task = asyncio.create_task(development_worker.run())
+        app.state.development_runtime_ready = True
+        logging.getLogger(__name__).info(
+            "development runtime worker started (storage=%s, runtime_events=%s)",
+            "postgres" if settings.postgres_enabled else "memory",
+            "kafka" if settings.kafka_enabled else "memory",
+        )
     yield
     if development_worker is not None and development_worker_task is not None:
         await development_worker.stop()

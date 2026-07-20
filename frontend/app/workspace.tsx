@@ -471,27 +471,34 @@ export function AuraClawConsole() {
 
   useEffect(() => {
     if (!sessionId || !["connecting", "generating", "reconnecting"].includes(chatStatus)) return;
-    const timer = window.setTimeout(() => {
-      void (async () => {
-        try {
-          const nextTask = await loadTask(true);
-          const currentTask = nextTask ?? task;
-          const status = String(currentTask?.status ?? "");
-          if (!TERMINAL_STATUSES.has(status)) return;
-          const loaded = await loadResult(true);
-          const finalResult = loaded?.result ?? result;
-          if (finalResult) setChatResult(finalResult);
-          setChatMessages((current) => current.map((item) => item.streaming ? { ...item, streaming: false } : item));
-          setChatStatus(status);
-          streamAbort.current?.abort();
-          streamAbort.current = null;
-          setStreamState("stopped");
-        } catch {
-          setChatStatus("reconnecting");
+    let cancelled = false;
+    let timer: number | undefined;
+    const pollUntilTerminal = async () => {
+      try {
+        const nextTask = await loadTask(true);
+        const currentTask = nextTask ?? task;
+        const status = String(currentTask?.status ?? "");
+        if (!TERMINAL_STATUSES.has(status)) {
+          if (!cancelled) timer = window.setTimeout(() => void pollUntilTerminal(), resultPollMs);
+          return;
         }
-      })();
-    }, resultPollMs);
-    return () => window.clearTimeout(timer);
+        const loaded = await loadResult(true);
+        const finalResult = loaded?.result ?? result;
+        if (finalResult) setChatResult(finalResult);
+        setChatMessages((current) => current.map((item) => item.streaming ? { ...item, streaming: false } : item));
+        setChatStatus(status);
+        streamAbort.current?.abort();
+        streamAbort.current = null;
+        setStreamState("stopped");
+      } catch {
+        setChatStatus("reconnecting");
+      }
+    };
+    timer = window.setTimeout(() => void pollUntilTerminal(), resultPollMs);
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
   }, [chatStatus, loadResult, loadTask, result, resultPollMs, sessionId, task]);
 
   const copyJson = (value: unknown) => navigator.clipboard.writeText(JSON.stringify(redact(value), null, 2));

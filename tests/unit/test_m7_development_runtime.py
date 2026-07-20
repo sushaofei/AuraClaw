@@ -16,7 +16,7 @@ from auraclaw.api.dependencies import (
     get_task_projection,
     get_task_service,
 )
-from auraclaw.config import get_settings
+from auraclaw.config import Settings, get_settings
 from auraclaw.main import create_app
 
 
@@ -56,6 +56,19 @@ def test_local_frontend_origin_passes_cors_preflight() -> None:
         assert "idempotency-key" in response.headers["access-control-allow-headers"].lower()
     finally:
         settings.development_runtime_enabled = previous
+
+
+def test_development_runtime_supports_external_development_backends() -> None:
+    settings = Settings(
+        _env_file=None,
+        env="development",
+        storage_backend="postgres",
+        runtime_event_backend="kafka",
+    )
+    assert settings.development_runtime_active is True
+
+    settings.env = "production"
+    assert settings.development_runtime_active is False
 
 
 def test_development_runtime_completes_task_and_replays_multiple_deltas() -> None:

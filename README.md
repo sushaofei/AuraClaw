@@ -45,14 +45,14 @@ Review Evidence 和 Artifact lineage。
 
 ```bash
 uv sync --extra dev
-AURACLAW_STORAGE_BACKEND=memory \
-AURACLAW_RUNTIME_EVENT_BACKEND=memory \
 uv run uvicorn auraclaw.main:app --reload
 ```
 
-纯内存开发模式会在 API 进程内启动确定性的本地 Runtime worker，经 Runnable Queue、
+开发环境默认在 API 进程内启动确定性的本地 Runtime worker，经 Runnable Queue、
 Orchestrator 和 Agent Harness 生成多个 `model.output.delta`，用于真实验证 Streaming 与最终
-Result 一致性；它不读取 Provider Secret，也不会在 PostgreSQL/Kafka 或生产环境自动启用。
+Result 一致性；它兼容内存或 PostgreSQL 存储，测试增量直接进入进程内 SSE 回放总线，不依赖
+Kafka 是否可用。它不读取 Provider Secret，生产环境不会自动启用；开发环境若已部署外部 Runtime，
+可设置 `AURACLAW_DEVELOPMENT_RUNTIME_ENABLED=false` 关闭。
 本地前端来源 `http://127.0.0.1:3000` 与 `http://localhost:3000` 默认允许跨域访问；其他来源通过
 逗号分隔的 `AURACLAW_CORS_ALLOW_ORIGINS` 显式配置。
 

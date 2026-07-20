@@ -21,13 +21,12 @@ AURACLAW_DEV_API_TARGET=http://127.0.0.1:8000 npm run dev
 打开开发服务器输出的地址，在页面顶部将 API 地址设为当前站点 Origin 加 `/auraclaw-api`，再配置 tenant 和 actor。该路径只在设置了 `AURACLAW_DEV_API_TARGET` 的本地开发服务器中代理到后端。后端用于真实 Streaming 联调时通过以下命令启动：
 
 ```bash
-AURACLAW_STORAGE_BACKEND=memory \
-AURACLAW_RUNTIME_EVENT_BACKEND=memory \
 uv run uvicorn auraclaw.main:app --reload
 ```
 
-该模式会实际完成任务并发布多个 SSE delta。若 API 使用 PostgreSQL/Kafka 配置，则应另行部署
-Orchestrator/Runtime worker；仅启动 API 不会伪造模型结果。
+开发环境会启动确定性测试 Runtime，实际完成任务并发布多个 SSE delta；它兼容内存和
+PostgreSQL/Kafka 配置，测试增量不依赖 Kafka。已部署外部 Runtime 时设置
+`AURACLAW_DEVELOPMENT_RUNTIME_ENABLED=false`，生产环境则始终不会自动启用测试 Runtime。
 
 ## 构建与测试
 
@@ -46,6 +45,7 @@ npm run lint
 ## SSE 排障
 
 - 页面使用 `fetch` 读取 SSE，因此可以携带 tenant/actor 和 `Last-Event-ID`。
+- 无游标首次连接会回放当前保留窗口，避免任务在 SSE 建连前已输出时丢失开头内容。
 - 状态为 `reconnecting` 时会指数退避重连，最长等待 10 秒。
 - 收到 `stream.reset` 表示回放游标已过期；应刷新 Task View，以 Task/Result API 的最终状态为准。
 - 代理层必须关闭响应缓冲，并保持 `text/event-stream` 长连接。

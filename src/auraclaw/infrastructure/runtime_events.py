@@ -255,11 +255,12 @@ class ReplayRuntimeEventBus:
                 and retained
                 and after_sequence < retained[0].sequence - 1
             )
-            initial = (
-                [event for event in retained if event.sequence > after_sequence]
-                if after_sequence is not None and not replay_missed
-                else []
-            )
+            if after_sequence is None:
+                initial = retained
+            elif not replay_missed:
+                initial = [event for event in retained if event.sequence > after_sequence]
+            else:
+                initial = []
             self._subscribers[key].add(queue)
 
         async def close() -> None:
