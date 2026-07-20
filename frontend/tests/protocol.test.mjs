@@ -1,12 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  appendUniqueEvent,
   createCommandId,
   createSseParser,
   filterTimeline,
   metricSeries,
   normalizeBaseUrl,
   redact,
+  resultText,
+  retryAfterMs,
+  runtimeDelta,
   safeCurl,
 } from "../app/lib/protocol.mjs";
 
@@ -29,6 +33,23 @@ test("parses fragmented SSE frames and preserves multiline data", () => {
     { id: "session:2", event: "message", data: "line one\nline two" },
   ]);
   assert.equal(parser.remaining(), "");
+});
+
+test("deduplicates replayed events and extracts streaming deltas", () => {
+  const first = { id: "session:1", event: "model.output.delta", data: { payload: { delta: "你好" } } };
+  const entries = appendUniqueEvent([], first);
+  assert.equal(appendUniqueEvent(entries, first), entries);
+  assert.deepEqual(appendUniqueEvent(entries, { ...first, id: "session:2" }).map((entry) => entry.id), ["session:1", "session:2"]);
+  assert.equal(runtimeDelta(first.event, first.data), "你好");
+  assert.equal(runtimeDelta("tool.progress", first.data), "");
+});
+
+test("normalizes result text and Retry-After delays", () => {
+  assert.equal(resultText({ result_summary: "最终答案" }), "最终答案");
+  assert.equal(resultText({ output: "fallback" }), "fallback");
+  assert.equal(retryAfterMs("3"), 3000);
+  assert.equal(retryAfterMs(null), 2000);
+  assert.equal(retryAfterMs("0"), 250);
 });
 
 test("redacts sensitive values from copied curl commands", () => {

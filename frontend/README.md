@@ -1,6 +1,13 @@
-# AuraClaw Operations Console
+# AuraClaw Protocol Test Console
 
 AuraClaw 的独立纯前端测试与监控工作台。它只调用公开 HTTP/SSE API，不读取数据库、Kafka、后端内部模块，也不把 Runtime Event 当作业务事实。
+
+## 协议测试页面
+
+- **智能问答**：首次提问创建任务并自动连接 SSE，将 `model.output.delta` 按事件游标去重合并；断线携带 `Last-Event-ID` 重连，终态后使用 Task / Result API 核对最终回答。终态 Session 按后端约束不可继续追加消息，页面会为后续追问创建新 Session 并明确提示。
+- **创建任务**：并列展示脱敏后的 Query 请求、权威 Task View 和 Result；轮询遵循 `Retry-After`，条件查询使用 `ETag / If-None-Match`，支持 Session ID 恢复、手动刷新、停止自动轮询和复制脱敏 JSON。
+
+两个入口使用 `#chat` 与 `#create` 页面锚点，刷新或直接访问时会恢复当前功能页；不会把问答正文写入浏览器持久化存储。
 
 ## 本地运行
 
