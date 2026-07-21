@@ -645,10 +645,19 @@ export function AuraClawConsole() {
       const loaded = await loadResult(true, id);
       const summary = resultText(loaded?.result ?? null) || String(nextTask.result_summary ?? "");
       if (loaded?.result) setChatResult(loaded.result);
+      let timelineEntries: Json[] = [];
+      try {
+        const { data } = await api(`/v1/operations/sessions/${encodeURIComponent(id)}/timeline`, { quiet: true });
+        timelineEntries = Array.isArray(asJson(data).entries) ? (asJson(data).entries as Json[]) : [];
+        setTimeline(timelineEntries);
+      } catch {
+        timelineEntries = [];
+      }
       setChatMessages(buildRestoredTranscript({
         goal: String(nextTask.goal ?? ""),
         resultSummary: summary,
         sessionId: id,
+        timelineEntries,
       }).map((item) => ({ ...item, id: createCommandId(`restore-${item.role}`) })));
       rememberSession(id, {
         goal: String(nextTask.goal ?? ""),
