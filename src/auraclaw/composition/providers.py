@@ -1,11 +1,6 @@
 from functools import lru_cache
 
-from auraclaw.composition.adapters.development_worker import (
-    DelayedRuntimeEventPublisher,
-    DevelopmentModelClient,
-    DevelopmentRuntimeWorker,
-    ProductionRuntimeWorker,
-)
+from auraclaw.composition.adapters.runtime_worker import RuntimeWorker
 from auraclaw.config import get_settings
 from auraclaw.control.orchestrator import LocalRuntimeProvisioner, ManagedOrchestrator
 from auraclaw.gateways.query.reader import TaskQueryService
@@ -185,63 +180,18 @@ def get_model_gateway() -> ModelGateway:
 
 
 @lru_cache
-def get_production_control_store() -> ControlStore:
+def get_control_store() -> ControlStore:
     settings = get_settings()
     if settings.postgres_enabled:
         return PostgresControlStateStore(settings.resolved_database_url)
     return InMemoryControlStateStore()
 
 
-def build_development_runtime_worker() -> DevelopmentRuntimeWorker:
+def build_runtime_worker() -> RuntimeWorker:
     settings = get_settings()
     event_store = get_event_store()
     projection = get_task_projection()
-    control = InMemoryControlStateStore()
-    session = FencedSessionClient(event_store, control)
-    publisher = DelayedRuntimeEventPublisher(
-        # The worker and Streaming Gateway share this process. Publishing its
-        # deterministic test deltas directly keeps the test surface available
-        # even when a developer's .env selects Kafka but Kafka is unavailable.
-        get_runtime_replay_bus().publish,
-        delta_delay=settings.development_stream_delay,
-    )
-    relay = OutboxRelay(
-        event_store,
-        CompositeProjection(
-            projection,
-            get_approval_projection(),
-            get_collaboration_projection(),
-            ObservabilityProjector(get_observability_service()),
-        ),
-    )
-    orchestrator = ManagedOrchestrator(
-        orchestrator_id="development-orchestrator",
-        control_store=control,
-        session=session,
-        provisioner=LocalRuntimeProvisioner("development"),
-    )
-    harness = AgentHarness(
-        control_store=control,
-        session=session,
-        model=DevelopmentModelClient(),
-        tools=FencedToolClient(IdempotentToolClient(), control),
-        runtime_events=publisher,
-    )
-    return DevelopmentRuntimeWorker(
-        event_store=event_store,
-        reader=projection,
-        relay=relay,
-        orchestrator=orchestrator,
-        harness=harness,
-        poll_interval=settings.development_runtime_poll_interval,
-    )
-
-
-def build_production_runtime_worker() -> ProductionRuntimeWorker:
-    settings = get_settings()
-    event_store = get_event_store()
-    projection = get_task_projection()
-    control = get_production_control_store()
+    control = get_control_store()
     session = FencedSessionClient(event_store, control)
     relay = OutboxRelay(
         event_store,
@@ -253,10 +203,10 @@ def build_production_runtime_worker() -> ProductionRuntimeWorker:
         ),
     )
     orchestrator = ManagedOrchestrator(
-        orchestrator_id="production-orchestrator",
+        orchestrator_id="runtime-orchestrator",
         control_store=control,
         session=session,
-        provisioner=LocalRuntimeProvisioner("production"),
+        provisioner=LocalRuntimeProvisioner("local"),
     )
     harness = AgentHarness(
         control_store=control,
@@ -265,13 +215,13 @@ def build_production_runtime_worker() -> ProductionRuntimeWorker:
         tools=FencedToolClient(IdempotentToolClient(), control),
         runtime_events=get_runtime_event_publisher(),
     )
-    return ProductionRuntimeWorker(
+    return RuntimeWorker(
         event_store=event_store,
         reader=projection,
         relay=relay,
         orchestrator=orchestrator,
         harness=harness,
-        poll_interval=settings.development_runtime_poll_interval,
+        poll_interval=settings.runtime_poll_interval,
     )
 
 

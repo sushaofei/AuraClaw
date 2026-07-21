@@ -44,12 +44,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     producer = providers.get_runtime_event_producer()
     ingestor = providers.get_streaming_ingestor()
-    development_worker = None
-    development_worker_task: asyncio.Task[None] | None = None
-    production_worker = None
-    production_worker_task: asyncio.Task[None] | None = None
-    app.state.development_runtime_ready = False
-    app.state.production_runtime_ready = False
+    runtime_worker = None
+    runtime_worker_task: asyncio.Task[None] | None = None
+    app.state.runtime_worker_ready = False
     app.state.model_gateway_ready = settings.model_gateway_configured
     app.state.runtime_event_producer_ready = not settings.kafka_enabled
     app.state.runtime_event_ingestor_ready = not settings.kafka_enabled
@@ -73,34 +70,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.runtime_event_producer_ready
         and app.state.runtime_event_ingestor_ready
     )
-    if settings.development_runtime_active:
-        development_worker = providers.build_development_runtime_worker()
-        development_worker_task = asyncio.create_task(development_worker.run())
-        app.state.development_runtime_ready = True
+    if settings.runtime_enabled and settings.model_gateway_configured:
+        runtime_worker = providers.build_runtime_worker()
+        runtime_worker_task = asyncio.create_task(runtime_worker.run())
+        app.state.runtime_worker_ready = True
         logging.getLogger(__name__).info(
-            "development runtime worker started (storage=%s, runtime_events=%s)",
-            "postgres" if settings.postgres_enabled else "memory",
-            "kafka" if settings.kafka_enabled else "memory",
-        )
-    elif settings.production_runtime_active and settings.model_gateway_configured:
-        production_worker = providers.build_production_runtime_worker()
-        production_worker_task = asyncio.create_task(production_worker.run())
-        app.state.production_runtime_ready = True
-        logging.getLogger(__name__).info(
-            "production runtime worker started (storage=%s, runtime_events=%s, model_provider=%s)",
+            "runtime worker started (storage=%s, runtime_events=%s, model_provider=%s)",
             "postgres" if settings.postgres_enabled else "memory",
             "kafka" if settings.kafka_enabled else "memory",
             settings.model_provider,
         )
     yield
-    if development_worker is not None and development_worker_task is not None:
-        await development_worker.stop()
+    if runtime_worker is not None and runtime_worker_task is not None:
+        await runtime_worker.stop()
         with suppress(Exception):
-            await asyncio.wait_for(development_worker_task, timeout=10)
-    if production_worker is not None and production_worker_task is not None:
-        await production_worker.stop()
-        with suppress(Exception):
-            await asyncio.wait_for(production_worker_task, timeout=10)
+            await asyncio.wait_for(runtime_worker_task, timeout=10)
     if ingestor is not None:
         with suppress(Exception):
             await asyncio.wait_for(ingestor.close(), timeout=10)

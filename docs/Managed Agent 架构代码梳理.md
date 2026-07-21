@@ -6,7 +6,7 @@
 
 ## 一句话总结
 
-AuraClaw 是以 **Canonical Session Event Log** 为唯一任务事实源的模块化单体：HTTP 经 `gateways/` 接入，`composition/` 统一装配；**开发环境**在 `composition/api.py` lifespan 内启动 `DevelopmentRuntimeWorker`，经 Orchestrator + AgentHarness 产出真实 SSE 增量与终态 Result。`application/`、`projections/`、`domain/ports.py` 已移除；生产 Runtime / Delivery Worker CLI 仍待独立 feature。
+AuraClaw 是以 **Canonical Session Event Log** 为唯一任务事实源的模块化单体：HTTP 经 `gateways/` 接入，`composition/` 统一装配；所有部署在 `composition/api.py` lifespan 内启动同一个 `RuntimeWorker`，经 Orchestrator + AgentHarness 产出真实 SSE 增量与终态 Result。`application/`、`projections/`、`domain/ports.py` 已移除；独立 Runtime / Delivery Worker CLI 仍待后续 feature。
 
 ---
 
@@ -20,7 +20,7 @@ AuraClaw 是以 **Canonical Session Event Log** 为唯一任务事实源的模�
 | **核心依赖** | FastAPI、Pydantic Settings、asyncpg、aiokafka、httpx、uvicorn |
 | **存储** | 内存适配器（测试/本地）或 PostgreSQL（生产） |
 | **实时总线** | 内存 Replay Buffer 或 Kafka `managed-agent.runtime-events` |
-| **开发联调** | `DevelopmentRuntimeWorker`（dev 环境进程内）、CORS 默认放行 `localhost:3000` |
+| **Runtime 联调** | 统一 `RuntimeWorker`；模型、Store、Event Bus 与 CORS 均由当前 `.env` 提供 |
 | **质量门禁** | `ruff` + `mypy` + `pytest` + `lint-imports`（`pyproject.toml` `[tool.importlinter]`） |
 | **不包含** | 生产云厂商 Model SDK、企业 Vault/KMS、S3 Artifact、远程容器 Hands |
 
@@ -60,7 +60,7 @@ Issue #8 已按 [Managed Agent 模块重构方案](./Managed%20Agent%20模块重
 | `domain/ports.py`（EventStore） | `session/ports.py` |
 | `domain/ports.py`（TaskReader 等） | `projection/ports.py` |
 | `runtime/ports.py`（Control） | `control/ports.py` |
-| `runtime/development.py` | `composition/adapters/development_worker.py` |
+| 原 `runtime/development.py` | `composition/adapters/runtime_worker.py`（已统一环境逻辑） |
 | `infrastructure/postgres.py` | `infrastructure/persistence/postgres_event_store.py` + `infrastructure/projection/postgres_*_store.py` |
 | `infrastructure/{hands,credentials,delivery,observability,runtime_events}.py` | `infrastructure/{hands,credentials,delivery,observability,kafka}/` 子包 |
 | `api/dependencies.py`（DI 装配） | `composition/providers.py` + `composition/api.py`（`dependency_overrides`） |
@@ -113,7 +113,7 @@ Issue #8 已按 [Managed Agent 模块重构方案](./Managed%20Agent%20模块重
 | Streaming Gateway | `gateways/streaming` | `auraclaw serve` → `composition/api.py` |
 | Session / Collaboration | `session` | API 或 Runtime client 经端口调用 |
 | Projection / Read Model | `projection` | `auraclaw projection ...` → `composition/cli.py` |
-| Orchestrator / Runtime | `control`、`runtime` | `composition/adapters/development_worker.py`（仅开发环境） |
+| Orchestrator / Runtime | `control`、`runtime` | `composition/adapters/runtime_worker.py`（所有资源配置共用） |
 | Tool / Policy | `action` | Runtime 经 Action ports 调用 |
 | Result Delivery | `delivery` | 库级 Worker；生产入口仍属后续 feature |
 | 技术适配器 | `infrastructure` | 仅由 `composition/providers.py` 选择与注入 |
@@ -191,7 +191,7 @@ Issue #8 已按 [Managed Agent 模块重构方案](./Managed%20Agent%20模块重
 | **关键类型** | `RuntimeEventProducerSDK`、`ReplayRuntimeEventBus`、`KafkaRuntimeEventProducer`、`KafkaStreamingIngestor` |
 | **状态** | **已实现**（memory + Kafka） |
 | **配置** | `AURACLAW_RUNTIME_EVENT_BACKEND`、`KAFKA_HOST` / `KAFKA_PORT` |
-| **开发路径** | `DevelopmentRuntimeWorker` 经 `DelayedRuntimeEventPublisher` 直接写入 `ReplayRuntimeEventBus`，即使 `.env` 选了 Kafka 也不依赖 Kafka 可用 |
+| **统一路径** | `RuntimeWorker` 经 `RuntimeEventProducerSDK` 写入配置的 Kafka 或内存 Replay Bus |
 | **缺口** | 生产 Runtime Producer 仍未挂入主服务 DI；Kafka Producer 与开发 Worker 分路径 |
 
 ### 3.7 Streaming Gateway
@@ -221,9 +221,9 @@ Issue #8 已按 [Managed Agent 模块重构方案](./Managed%20Agent%20模块重
 | **架构角色** | 资源调度（queue / claim / lease / provision / assign）；不做语义拆分 |
 | **主路径** | `control/orchestrator.py`、`control/ports.py`（`Orchestrator` Protocol） |
 | **关键类型** | `ManagedOrchestrator`、`LocalRuntimeProvisioner` |
-| **状态** | **已实现**（库级）；**dev 环境经 `DevelopmentRuntimeWorker` 接入 HTTP 进程** |
+| **状态** | **已实现**；统一 `RuntimeWorker` 接入 HTTP 进程 |
 | **端口** | `watch`、`schedule_once`、`cancel`、`heartbeat`、`reconcile` |
-| **开发装配** | `composition/providers.py` → `build_development_runtime_worker()` → `ManagedOrchestrator` + `LocalRuntimeProvisioner("development")` |
+| **进程装配** | `composition/providers.py` → `build_runtime_worker()` → `ManagedOrchestrator` + `LocalRuntimeProvisioner` |
 | **缺口** | 生产无独立 orchestrator worker 入口；Provisioner 为本地计数式 |
 
 ### 3.10 Control State Store
@@ -244,21 +244,21 @@ Issue #8 已按 [Managed Agent 模块重构方案](./Managed%20Agent%20模块重
 | **架构角色** | `Role + Harness + Model Client + Context Policy + Tool Client`；可恢复执行 |
 | **主路径** | `runtime/harness.py`、`runtime/clients.py`、`runtime/ports.py`、`session/collaboration_service.py`（角色门面） |
 | **关键类型** | `AgentHarness`、`FencedSessionClient`、`FencedToolClient`、`IdempotentToolClient`、`CoordinatorRole` / `WorkerRole` / `ReviewerRole` |
-| **开发 Worker** | `composition/adapters/development_worker.py`：`DevelopmentRuntimeWorker`、`DevelopmentModelClient`、`DelayedRuntimeEventPublisher` |
-| **状态** | **部分实现**（Harness + 角色完整；dev 有进程内 Worker；非多进程 Pool） |
+| **Worker** | `composition/adapters/runtime_worker.py`：所有资源配置共用 `RuntimeWorker` |
+| **状态** | **部分实现**（Harness + 角色及同进程 Worker 完整；非多进程 Pool） |
 | **说明** | 架构图中的 Planner 对应代码中的 **Reviewer** 角色（校验生产结果），无独立 `PlannerRuntime` 类 |
-| **缺口** | 生产无常驻 Runtime 进程池；`development_runtime_active` 仅在 `env=development/dev` 且 `AURACLAW_DEVELOPMENT_RUNTIME_ENABLED=true` 时启用 |
+| **缺口** | 尚未拆分独立多进程 Runtime Pool；可用 `AURACLAW_RUNTIME_ENABLED` 关闭同进程 Worker |
 
 ### 3.12 Model Gateway
 
 | 项 | 内容 |
 |---|---|
 | **架构角色** | Runtime 与 LLM Provider 之间的唯一凭证解析与调用边界 |
-| **主路径** | `runtime/model_gateway.py`、`runtime/ports.py`（`ModelClient` / `ProviderAdapter`） |
+| **主路径** | `runtime/model_gateway.py`、`infrastructure/model/openai_compatible.py`、`runtime/ports.py` |
 | **关键类型** | `ModelGateway`、`StaticCredentialResolver` |
-| **开发模型** | `DevelopmentModelClient`（`composition/adapters/development_worker.py`）：确定性本地回答 + 多 delta 流式输出，不读 Provider Secret |
-| **状态** | **部分实现**（网关框架完整；dev 有确定性 Model Client；无生产 OpenAI/Anthropic Adapter） |
-| **缺口** | 生产 `ModelGateway` 未接入主服务 DI；开发路径绕过真实 Provider |
+| **Provider** | `OpenAICompatibleProvider`：所有部署经相同 Gateway 调用各自配置的模型资源 |
+| **状态** | **已实现**（generate 流式调用、usage、tool calls、错误映射与 Credential 隔离） |
+| **缺口** | 多模型路由、fallback、Vault/KMS 与独立 Gateway 服务未实现 |
 
 ### 3.13 Tool Gateway / Dispatcher
 
@@ -339,17 +339,17 @@ Issue #8 已按 [Managed Agent 模块重构方案](./Managed%20Agent%20模块重
 | **状态** | **已实现**（两类 Sink） |
 | **缺口** | 无 Sink 管理 API；Email/MQ 等未做 |
 
-### 3.21 Development Runtime Worker（开发联调）
+### 3.21 Runtime Worker
 
 | 项 | 内容 |
 |---|---|
-| **架构角色** | 开发环境进程内 Worker，保留 Queue → Orchestrator → Harness 边界，用于真实 Streaming + Result 联调 |
-| **主路径** | `composition/adapters/development_worker.py`、`composition/providers.py`（对象图）、`composition/api.py`（lifespan 启动） |
-| **关键类型** | `DevelopmentRuntimeWorker`、`DevelopmentModelClient`、`DelayedRuntimeEventPublisher` |
-| **触发条件** | `Settings.development_runtime_active`：`env=development/dev` 且 `AURACLAW_DEVELOPMENT_RUNTIME_ENABLED=true`（默认 true） |
-| **状态** | **已实现**（仅开发环境；生产不启用） |
-| **说明** | 轮询 Read Model 中 `pending`/`runnable` 任务 → `orchestrator.watch` → `schedule_once` → `harness.execute` → `relay_once`；Runtime Event 直接写入进程内 `ReplayRuntimeEventBus` |
-| **缺口** | 非生产 Runtime；使用 `InMemoryControlStateStore`；关闭开关：`AURACLAW_DEVELOPMENT_RUNTIME_ENABLED=false` |
+| **架构角色** | 进程内 Worker，保留 Queue → Orchestrator → Harness 边界 |
+| **主路径** | `composition/adapters/runtime_worker.py`、`composition/providers.py`、`composition/api.py` |
+| **关键类型** | `RuntimeWorker`、`ModelGateway`、`RuntimeEventProducerSDK` |
+| **触发条件** | `AURACLAW_RUNTIME_ENABLED=true` 且 Model Gateway 资源配置完整 |
+| **状态** | **已实现**（所有部署使用同一逻辑） |
+| **说明** | 轮询 runnable 任务并经统一 Harness 执行；Store、Model Provider 与 Runtime Event backend 只由当前 `.env` 选择 |
+| **缺口** | 尚未拆为独立 Runtime 进程 |
 
 ---
 
@@ -390,21 +390,21 @@ GET /v1/streams/{session_id}
   → SSE（user visibility；cursor 过期 → stream.reset）
 ```
 
-**开发环境端到端（M7.2/M7.3）**：
+**统一 Runtime 端到端**：
 
 ```text
 POST /v1/tasks（goal 含用户问题）
   → Canonical Event + Projection（status=pending）
-  → DevelopmentRuntimeWorker.run（lifespan 后台轮询）
+  → RuntimeWorker.run（lifespan 后台轮询）
       → orchestrator.watch → schedule_once → AgentHarness.execute
-      → DevelopmentModelClient.generate（多 model.output.delta）
-      → DelayedRuntimeEventPublisher → ReplayRuntimeEventBus.publish
+      → ModelGateway.generate（多 model.output.delta）
+      → RuntimeEventProducerSDK → Kafka/ReplayRuntimeEventBus
       → relay_once → Projection（status=completed）
   → GET /v1/streams/{session_id} 收到多个 delta
   → GET /v1/tasks/{session_id}/result 与 delta 拼接一致
 ```
 
-Runtime 侧生产（库/生产路径）：
+Runtime Event 发布链：
 
 ```text
 AgentHarness → RuntimeEventPublisher.publish
@@ -454,7 +454,7 @@ ReviewerRole → publish_review（独立 Review Session，不覆盖 Worker Artif
 | 方法 | 路径 | 架构组件 |
 |---|---|---|
 | `GET` | `/health/live` | 存活探针 |
-| `GET` | `/health/ready` | 就绪探针（返回 `storage`、`runtime_events`、`runtime_event_bus_ready`、`development_runtime`） |
+| `GET` | `/health/ready` | 就绪探针（返回资源 backend、Model Gateway、Runtime Event 与 `runtime_worker` 状态） |
 | `POST` | `/v1/tasks` | Task Gateway |
 | `GET` | `/v1/tasks/{session_id}` | Task Query |
 | `GET` | `/v1/tasks/{session_id}/result` | Task Query / Result |
@@ -493,10 +493,9 @@ ReviewerRole → publish_review（独立 Review Session，不覆盖 Worker Artif
 | `storage_backend=auto\|memory\|postgres` | `auto`：有 `DB_HOST`+用户+库名则 PG |
 | `runtime_event_backend=auto\|memory\|kafka` | `auto`：有 `KAFKA_HOST` 则 Kafka |
 | `artifact_root` | 已声明；当前 Artifact 仍用内存对象存储 |
-| `development_runtime_enabled` | 默认 `true`；与 `env=development/dev` 共同决定 `development_runtime_active` |
-| `development_runtime_poll_interval` | 开发 Worker 轮询间隔（默认 `0.05`s） |
-| `development_stream_delay` | 开发 delta 发布间隔（默认 `0.08`s），便于浏览器观察多段 SSE |
-| `cors_allow_origins` | 逗号分隔 Origin；dev 未配置时默认放行本地前端 `3000` 端口 |
+| `runtime_enabled` | 默认 `true`；关闭同进程 Worker 时设为 `false` |
+| `runtime_poll_interval` | 统一 Worker 轮询间隔（默认 `0.05`s） |
+| `cors_allow_origins` | 当前部署显式提供的逗号分隔 Origin |
 
 装配点：`composition/providers.py`（`lru_cache` 单例按开关选择实现）；`composition/api.py` 通过 `app.dependency_overrides` 绑定 `api/dependencies.py` 中的抽象 token。
 
@@ -531,13 +530,14 @@ auraclaw operations redrive --tenant --queue {projection|delivery} --item-id ...
 |---|---|
 | Task / Query / Streaming / Observability HTTP | ✅ |
 | Kafka Streaming Ingestor（若启用） | ✅（best-effort；失败不阻断 Canonical API） |
-| **DevelopmentRuntimeWorker**（dev 且 `development_runtime_active`） | ✅ |
+| **RuntimeWorker**（`runtime_enabled` 且模型资源完整） | ✅ |
 | Projection Relay Worker | ❌ CLI `projection relay --watch` → `composition/cli.py` |
-| Orchestrator / AgentHarness 循环（**生产**） | ❌ 库 + 测试 |
+| Orchestrator / AgentHarness 循环 | ✅（同进程统一装配） |
 | Result Delivery Worker | ❌ 库 + 测试 |
-| Tool Gateway / Model Gateway（**生产**） | ❌ 库（由 Harness 组装） |
+| Model Gateway | ✅（由统一 Harness 组装） |
 
-架构文档允许 MVP 合并部署，但要求逻辑边界不合并——当前代码满足逻辑边界；**开发环境**已通过 `DevelopmentRuntimeWorker` 在单进程内验证完整 Streaming 链路，**生产 Worker 进程装配**仍是主要缺口。该缺口属于新增运行行为，不纳入 Issue #8 的纯结构重构，后续以独立 feature issue 实施。
+架构文档允许 MVP 合并部署，但要求逻辑边界不合并。当前所有部署使用同一个进程内
+`RuntimeWorker` 验证完整 Streaming 链路；独立多进程 Worker 仍作为后续部署演进。
 
 ---
 
@@ -607,7 +607,7 @@ src/auraclaw/
     ├── api.py              # FastAPI factory / lifespan / dependency_overrides / CORS
     ├── providers.py        # 唯一对象图与适配器选择
     ├── cli.py              # serve / projection / operations
-    └── adapters/           # development_worker / development_model
+    └── adapters/           # unified runtime_worker
 ```
 
 **API Client（前端）**：`frontend/` 为独立 SPA，经公开 HTTP/SSE 调用后端；提供「智能问答」Streaming 页与「创建任务」Query/Result 页，默认 API `http://127.0.0.1:8000`。详见 `frontend/README.md`。
@@ -624,9 +624,9 @@ src/auraclaw/
 
 **仍待后续 feature issue**：
 
-1. **生产进程装配**：`auraclaw runtime run`、`auraclaw delivery run` 未实现；生产 Orchestrator / Delivery 未挂 lifespan
+1. **独立进程装配**：`auraclaw runtime run`、`auraclaw delivery run` 未实现；Runtime 当前挂 API lifespan
 2. **Admission / Auth**：`AllowAllAdmissionController` 为放行桩；无 OAuth/配额
-3. **Model Provider**：生产仅 Protocol + 测试 Adapter；开发用 `DevelopmentModelClient`
+3. **Model Provider 扩展**：已有 OpenAI-compatible Adapter；多模型路由与 fallback 未实现
 4. **Artifact / Vault**：无 S3、无企业 Vault；`artifact_root` 未接线
 5. **Collaboration 写面**：无 REST；仅 `GET .../children` 读投影
 6. **部署拓扑**：模块化单体；Gateway / Workers / Runtime 三分进程未拆

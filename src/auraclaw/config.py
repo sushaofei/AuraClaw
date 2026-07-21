@@ -10,7 +10,6 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_prefix="AURACLAW_", extra="ignore")
 
-    env: str = "development"
     host: str = "127.0.0.1"
     port: int = 8000
     log_level: str = "INFO"
@@ -21,8 +20,6 @@ class Settings(BaseSettings):
     db_user: str | None = Field(default=None, validation_alias="DB_USER")
     db_password: str | None = Field(default=None, validation_alias="DB_PWD")
     db_name: str | None = Field(default=None, validation_alias="DB_NAME")
-    db_name_dev: str | None = Field(default=None, validation_alias="DB_NAME_DEV")
-    db_name_pro: str | None = Field(default=None, validation_alias="DB_NAME_PRO")
     artifact_root: Path = Path(".data/artifacts")
     runtime_event_backend: Literal["auto", "memory", "kafka"] = "auto"
     kafka_host: str | None = Field(default=None, validation_alias="KAFKA_HOST")
@@ -32,9 +29,8 @@ class Settings(BaseSettings):
     runtime_event_retention_events: int = 1_000
     stream_connection_queue_size: int = 128
     cors_allow_origins: str = ""
-    development_runtime_enabled: bool = True
-    development_runtime_poll_interval: float = 0.05
-    development_stream_delay: float = 0.08
+    runtime_enabled: bool = True
+    runtime_poll_interval: float = 0.05
     model_api_key: str | None = None
     model_base_url: str | None = None
     model_name: str | None = None
@@ -43,21 +39,14 @@ class Settings(BaseSettings):
 
     @property
     def resolved_database_url(self) -> str:
-        database_name = self.selected_database_name
-        if self.db_host and self.db_user and self.db_password is not None and database_name:
+        if self.db_host and self.db_user and self.db_password is not None and self.db_name:
             user = quote(self.db_user, safe="")
             password = quote(self.db_password, safe="")
-            database = quote(database_name, safe="")
+            database = quote(self.db_name, safe="")
             return (
                 f"postgresql+asyncpg://{user}:{password}@{self.db_host}:{self.db_port}/{database}"
             )
         return self.database_url
-
-    @property
-    def selected_database_name(self) -> str | None:
-        if self.env.lower() in {"production", "prod"}:
-            return self.db_name_pro or self.db_name
-        return self.db_name_dev or self.db_name
 
     @property
     def postgres_enabled(self) -> bool:
@@ -65,7 +54,7 @@ class Settings(BaseSettings):
             return False
         if self.storage_backend == "postgres":
             return True
-        return bool(self.db_host and self.db_user and self.selected_database_name)
+        return bool(self.db_host and self.db_user and self.db_name)
 
     @property
     def kafka_enabled(self) -> bool:
@@ -84,22 +73,7 @@ class Settings(BaseSettings):
         configured = [
             origin.strip() for origin in self.cors_allow_origins.split(",") if origin.strip()
         ]
-        if configured:
-            return configured
-        if self.env.lower() in {"development", "dev"}:
-            return ["http://127.0.0.1:3000", "http://localhost:3000"]
-        return []
-
-    @property
-    def development_runtime_active(self) -> bool:
-        return (
-            self.development_runtime_enabled
-            and self.env.lower() in {"development", "dev"}
-        )
-
-    @property
-    def production_runtime_active(self) -> bool:
-        return self.env.lower() not in {"development", "dev"}
+        return configured
 
     @property
     def model_gateway_configured(self) -> bool:

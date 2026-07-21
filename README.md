@@ -134,20 +134,22 @@ uv sync --extra dev
 uv run uvicorn auraclaw.main:app --reload
 ```
 
-开发环境默认在 API 进程内启动确定性的本地 Runtime worker，经 Runnable Queue、
-Orchestrator 和 Agent Harness 生成多个 `model.output.delta`，用于真实验证 Streaming 与最终
-Result 一致性；它兼容内存或 PostgreSQL 存储，测试增量直接进入进程内 SSE 回放总线，不依赖
-Kafka 是否可用。它不读取 Provider Secret，生产环境不会自动启用；开发环境若已部署外部 Runtime，
-可设置 `AURACLAW_DEVELOPMENT_RUNTIME_ENABLED=false` 关闭。
-本地前端来源 `http://127.0.0.1:3000` 与 `http://localhost:3000` 默认允许跨域访问；其他来源通过
-逗号分隔的 `AURACLAW_CORS_ALLOW_ORIGINS` 显式配置。
+API lifespan 内启动统一的 Runtime Worker（后续可拆分为独立进程）。所有环境都经过相同的
+Runnable Queue、Orchestrator、Agent Harness、Model Gateway 和 Runtime Event Producer SDK；
+环境差异只来自各自 `.env` 提供的 PostgreSQL/内存、Kafka/内存、模型端点和 CORS 等资源。
+已部署外部 Runtime 时可设置 `AURACLAW_RUNTIME_ENABLED=false` 关闭同进程 Worker。
 
-非开发环境在 API lifespan 内启动最小可用生产 Worker（后续可拆分为独立进程）。生产模型使用
-Provider 中立配置，经 OpenAI-compatible Chat Completions Adapter 流式调用；凭证只在 Model
-Gateway 内解析：
+每套部署使用自己的 gitignored 配置文件，例如 `.env.development` 与 `.env.production`，无需
+在文件内容中加入环境标签。启动时由文件名选择资源集合：
+
+```bash
+uv run uvicorn auraclaw.main:app --reload --env-file .env.development
+uv run uvicorn auraclaw.main:app --env-file .env.production
+```
+
+生产资源文件示例：
 
 ```dotenv
-AURACLAW_ENV=production
 AURACLAW_MODEL_PROVIDER=openai_compatible
 AURACLAW_MODEL_API_KEY=replace-with-secret
 AURACLAW_MODEL_BASE_URL=https://models.example/v1
@@ -155,12 +157,14 @@ AURACLAW_MODEL_NAME=example-model
 AURACLAW_RUNTIME_EVENT_BACKEND=kafka
 KAFKA_HOST=localhost
 KAFKA_PORT=9092
+DB_NAME=auraclaw
+AURACLAW_CORS_ALLOW_ORIGINS=https://console.example.com
 ```
 
-生产 Harness 的 delta 经 Runtime Event Producer SDK 排序、校验和脱敏后进入 Kafka，再由
+Harness 的 delta 经 Runtime Event Producer SDK 排序、校验和脱敏后进入 Kafka，再由
 Streaming Ingestor 写入 Replay Bus 供 SSE 消费；Kafka 不可用只会令 `/health/ready` 降级，
 不会阻止完整模型输出与 `run.completed` 写入 Canonical Event。就绪响应分别报告 Model Gateway、
-producer、ingestor、总线以及 development/production executor 状态，且不会回显 API Key。
+producer、ingestor、总线以及统一 Runtime Worker 状态，且不会回显 API Key。
 
 另开终端启动独立前端工作台：
 
@@ -227,14 +231,12 @@ Event 回写，并通过 Task/Result Query 的 `delivery_status`、`delivery_id`
 存储配置支持两种形式：
 
 - `AURACLAW_DATABASE_URL=postgresql+asyncpg://...`
-- 现有环境的 `DB_HOST`、`DB_PORT`、`DB_USER`、`DB_PWD`、`DB_NAME_DEV`、
-  `DB_NAME_PRO`（旧 `DB_NAME` 仍兼容）
+- `DB_HOST`、`DB_PORT`、`DB_USER`、`DB_PWD`、`DB_NAME`
 
 当存在完整 `DB_*` 配置时默认启用 PostgreSQL；可设置
 `AURACLAW_STORAGE_BACKEND=memory` 强制使用开发内存适配器。首次启动前，按顺序应用：
 
-`AURACLAW_ENV=development/test` 选择 `DB_NAME_DEV`，`production/prod` 选择
-`DB_NAME_PRO`。
+开发和生产使用各自配置文件中的 `DB_NAME`，应用不根据环境标签切换数据库。
 
 ```text
 migrations/0001_initial.sql
@@ -267,7 +269,7 @@ uv run python scripts/release_gate.py
 PostgreSQL 集成测试使用独立测试库：
 
 ```bash
-# 默认使用 .env 的 DB_NAME_DEV
+# 使用当前 .env 的 DB_NAME
 uv run pytest tests/integration/test_postgres_m1.py
 ```
 

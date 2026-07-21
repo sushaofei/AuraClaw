@@ -1,8 +1,10 @@
 import asyncio
 import time
 
+import pytest
 from fastapi.testclient import TestClient
 
+from auraclaw.composition import providers
 from auraclaw.composition.providers import (
     get_approval_projection,
     get_collaboration_projection,
@@ -19,6 +21,22 @@ from auraclaw.composition.providers import (
 from auraclaw.config import Settings, get_settings
 from auraclaw.main import create_app
 from auraclaw.runtime.harness import AgentHarness
+from auraclaw.runtime.ports import ModelRequest, ModelResponse
+
+
+class DeterministicModelClient:
+    async def generate(self, request: ModelRequest) -> ModelResponse:
+        prompt = str(request.messages[-1].get("content", ""))
+        output = f"统一 Runtime 已收到问题：{prompt}。这是 Streaming 与 Result 一致性回答。"
+        deltas = tuple(output[index : index + 8] for index in range(0, len(output), 8))
+        return ModelResponse(
+            model_call_id=request.model_call_id,
+            provider="test",
+            model="deterministic",
+            completed_output=output,
+            deltas=deltas,
+            usage={"input_tokens": 1, "output_tokens": len(deltas)},
+        )
 
 
 def _clear_dependencies() -> None:
@@ -30,18 +48,24 @@ def _clear_dependencies() -> None:
         get_collaboration_projection,
         get_runtime_replay_bus,
         get_runtime_event_producer,
+        providers.get_runtime_event_publisher,
         get_streaming_ingestor,
         get_streaming_gateway,
+        providers.get_model_gateway,
+        providers.get_control_store,
         get_observability_store,
         get_observability_service,
     ):
-        dependency.cache_clear()
+        cache_clear = getattr(dependency, "cache_clear", None)
+        if cache_clear is not None:
+            cache_clear()
 
 
 def test_local_frontend_origin_passes_cors_preflight() -> None:
     settings = get_settings()
-    previous = settings.development_runtime_enabled
-    settings.development_runtime_enabled = False
+    previous = (settings.runtime_enabled, settings.cors_allow_origins)
+    settings.runtime_enabled = False
+    settings.cors_allow_origins = "http://127.0.0.1:3000"
     try:
         with TestClient(create_app()) as client:
             response = client.options(
@@ -56,39 +80,42 @@ def test_local_frontend_origin_passes_cors_preflight() -> None:
         assert response.headers["access-control-allow-origin"] == "http://127.0.0.1:3000"
         assert "idempotency-key" in response.headers["access-control-allow-headers"].lower()
     finally:
-        settings.development_runtime_enabled = previous
+        settings.runtime_enabled, settings.cors_allow_origins = previous
 
 
-def test_development_runtime_supports_external_development_backends() -> None:
+def test_runtime_logic_is_independent_of_resource_backends() -> None:
     settings = Settings(
         _env_file=None,
-        env="development",
         storage_backend="postgres",
         runtime_event_backend="kafka",
     )
-    assert settings.development_runtime_active is True
+    assert settings.postgres_enabled is True
+    assert settings.kafka_enabled is True
+    assert settings.runtime_enabled is True
 
-    settings.env = "production"
-    assert settings.development_runtime_active is False
 
-
-def test_development_runtime_supports_three_runs_in_one_session() -> None:
+def test_unified_runtime_supports_three_runs_in_one_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     settings = get_settings()
     previous = {
-        "env": settings.env,
         "storage_backend": settings.storage_backend,
         "runtime_event_backend": settings.runtime_event_backend,
-        "development_runtime_enabled": settings.development_runtime_enabled,
-        "development_runtime_poll_interval": settings.development_runtime_poll_interval,
-        "development_stream_delay": settings.development_stream_delay,
+        "runtime_enabled": settings.runtime_enabled,
+        "runtime_poll_interval": settings.runtime_poll_interval,
+        "model_api_key": settings.model_api_key,
+        "model_base_url": settings.model_base_url,
+        "model_name": settings.model_name,
     }
-    settings.env = "development"
     settings.storage_backend = "memory"
     settings.runtime_event_backend = "memory"
-    settings.development_runtime_enabled = True
-    settings.development_runtime_poll_interval = 0.01
-    settings.development_stream_delay = 0.001
+    settings.runtime_enabled = True
+    settings.runtime_poll_interval = 0.01
+    settings.model_api_key = "test-secret"
+    settings.model_base_url = "https://models.example/v1"
+    settings.model_name = "test-model"
     _clear_dependencies()
+    monkeypatch.setattr(providers, "get_model_gateway", lambda: DeterministicModelClient())
     try:
         with TestClient(create_app()) as client:
             created = client.post(
