@@ -240,15 +240,48 @@ export function removeChatSessionIndex(storage, tenant, sessionId) {
   return next;
 }
 
-export function buildRestoredTranscript({ goal, resultSummary, sessionId }) {
+export function transcriptFromTimeline(timelineEntries) {
+  const ordered = [...(timelineEntries || [])].toSorted((left, right) =>
+    String(left.timestamp ?? left.occurred_at ?? "").localeCompare(String(right.timestamp ?? right.occurred_at ?? "")),
+  );
   const messages = [];
-  const goalText = String(goal || "").trim();
-  if (goalText) messages.push({ role: "user", content: goalText });
-  const summary = String(resultSummary || "").trim();
-  if (summary) messages.push({ role: "assistant", content: summary });
+  for (const entry of ordered) {
+    const kind = String(entry?.kind ?? "");
+    if (kind && kind !== "canonical_event") continue;
+    const type = String(entry?.type ?? "");
+    const detail = asObject(entry?.detail ?? entry?.payload ?? entry);
+    if (type === "session.created") {
+      const content = String(detail.goal ?? "").trim();
+      if (content) messages.push({ role: "user", content });
+    } else if (type === "user.message.appended") {
+      const content = String(detail.message ?? "").trim();
+      if (content) messages.push({ role: "user", content });
+    } else if (type === "model.output.completed") {
+      const content = String(detail.output ?? detail.completed_output ?? "").trim();
+      if (content) messages.push({ role: "assistant", content });
+    }
+  }
+  return messages;
+}
+
+export function buildRestoredTranscript({ goal, resultSummary, sessionId, timelineEntries }) {
+  const fromTimeline = transcriptFromTimeline(timelineEntries);
+  const messages = fromTimeline.length
+    ? [...fromTimeline]
+    : (() => {
+        const fallback = [];
+        const goalText = String(goal || "").trim();
+        if (goalText) fallback.push({ role: "user", content: goalText });
+        const summary = String(resultSummary || "").trim();
+        if (summary) fallback.push({ role: "assistant", content: summary });
+        return fallback;
+      })();
+  const sid = String(sessionId || "").trim();
   messages.push({
     role: "system",
-    content: `已恢复 Session ${sessionId || ""}。历史正文以 Task / Result 为准；可重放的 Runtime Event 将重新显示，不会伪造中间轮次。`.trim(),
+    content: fromTimeline.length
+      ? `已恢复 Session ${sid}。对话按 Canonical Event 时间序重建；进行中的 Runtime Event 将继续流式追加。`.trim()
+      : `已恢复 Session ${sid}。Timeline 未提供完整对话，已回退到 Goal / Result；可重放的 Runtime Event 将重新显示。`.trim(),
   });
   return messages;
 }

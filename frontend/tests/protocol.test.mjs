@@ -17,6 +17,7 @@ import {
   retryAfterMs,
   runtimeDelta,
   safeCurl,
+  transcriptFromTimeline,
   truncateTitle,
   upsertChatSessionIndex,
 } from "../app/lib/protocol.mjs";
@@ -168,4 +169,66 @@ test("maintains a tenant-scoped chat session index without message bodies", () =
   assert.deepEqual(restored.map((item) => item.role), ["user", "assistant", "system"]);
   assert.match(JSON.stringify(memory.get("auraclaw-chat-sessions-v1")), /ses_2/);
   assert.doesNotMatch(JSON.stringify(memory.get("auraclaw-chat-sessions-v1")), /介绍架构|边界清晰/);
+});
+
+test("restores multi-turn chat transcript from timeline canonical events", () => {
+  const timeline = [
+    {
+      kind: "trace_span",
+      timestamp: "2026-07-21T10:00:00Z",
+      type: "runtime.step",
+      detail: { note: "ignored" },
+    },
+    {
+      kind: "canonical_event",
+      timestamp: "2026-07-21T10:00:01Z",
+      type: "session.created",
+      detail: { goal: "第一问" },
+    },
+    {
+      kind: "canonical_event",
+      timestamp: "2026-07-21T10:00:02Z",
+      type: "model.output.completed",
+      detail: { output: "第一答" },
+    },
+    {
+      kind: "canonical_event",
+      timestamp: "2026-07-21T10:00:03Z",
+      type: "user.message.appended",
+      detail: { message: "第二问" },
+    },
+    {
+      kind: "canonical_event",
+      timestamp: "2026-07-21T10:00:04Z",
+      type: "model.output.completed",
+      detail: { output: "第二答" },
+    },
+  ];
+  assert.deepEqual(transcriptFromTimeline(timeline), [
+    { role: "user", content: "第一问" },
+    { role: "assistant", content: "第一答" },
+    { role: "user", content: "第二问" },
+    { role: "assistant", content: "第二答" },
+  ]);
+  const restored = buildRestoredTranscript({
+    goal: "不应使用",
+    resultSummary: "也不应使用",
+    sessionId: "ses_multi",
+    timelineEntries: timeline,
+  });
+  assert.deepEqual(
+    restored.filter((item) => item.role !== "system").map((item) => item.content),
+    ["第一问", "第一答", "第二问", "第二答"],
+  );
+  assert.match(restored.at(-1).content, /Canonical Event/);
+  const fallback = buildRestoredTranscript({
+    goal: "回退问题",
+    resultSummary: "回退答案",
+    sessionId: "ses_fallback",
+    timelineEntries: [],
+  });
+  assert.deepEqual(
+    fallback.filter((item) => item.role !== "system").map((item) => [item.role, item.content]),
+    [["user", "回退问题"], ["assistant", "回退答案"]],
+  );
 });

@@ -43,8 +43,12 @@ export function removeChatSessionIndex(
   tenant: string,
   sessionId: string,
 ): ChatSessionIndexEntry[];
+export function transcriptFromTimeline(
+  timelineEntries: Array<Record<string, unknown>> | null | undefined,
+): Array<{ role: "user" | "assistant"; content: string }>;
 export function buildRestoredTranscript(input: {
   goal?: string;
   resultSummary?: string;
   sessionId?: string;
+  timelineEntries?: Array<Record<string, unknown>> | null;
 }): Array<{ role: "user" | "assistant" | "system"; content: string }>;
