@@ -180,6 +180,25 @@ class RuntimeEventProducerSDK:
         return event
 
 
+class SDKRuntimeEventPublisher:
+    """Adapts Harness RuntimeEvent writes to the producer SDK's validated API."""
+
+    def __init__(self, sdk: RuntimeEventProducerSDK) -> None:
+        self._sdk = sdk
+
+    async def publish(self, event: RuntimeEvent) -> None:
+        await self._sdk.publish(
+            tenant_id=event.tenant_id,
+            root_session_id=event.root_session_id,
+            session_id=event.session_id,
+            run_id=event.run_id,
+            event_type=event.type,
+            payload=event.payload,
+            visibility=event.visibility,
+            durable=event.durable,
+        )
+
+
 class RuntimeSubscription:
     def __init__(
         self,
@@ -321,6 +340,10 @@ class KafkaRuntimeEventProducer:
             await self._producer.stop()
             self._producer = None
 
+    @property
+    def ready(self) -> bool:
+        return self._producer is not None
+
 
 class KafkaStreamingIngestor:
     """One service-level consumer feeds a Gateway replay/router buffer."""
@@ -366,3 +389,7 @@ class KafkaStreamingIngestor:
                 await self._task
             self._task = None
         await self._consumer.stop()
+
+    @property
+    def ready(self) -> bool:
+        return self._task is not None and not self._task.done()

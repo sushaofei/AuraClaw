@@ -1,0 +1,277 @@
+import asyncio
+import json
+import time
+from typing import Any
+
+import httpx
+import pytest
+from fastapi.testclient import TestClient
+
+from auraclaw.composition import providers
+from auraclaw.config import Settings, get_settings
+from auraclaw.contracts.errors import (
+    ModelAuthenticationError,
+    ModelRateLimitError,
+    ModelTimeoutError,
+)
+from auraclaw.infrastructure.model import OpenAICompatibleProvider
+from auraclaw.main import create_app
+from auraclaw.runtime.ports import ModelRequest, ModelResponse
+
+
+class StreamingModelClient:
+    async def generate(self, request: ModelRequest) -> ModelResponse:
+        return ModelResponse(
+            model_call_id=request.model_call_id,
+            provider="openai_compatible",
+            model="test-model",
+            completed_output="production answer",
+            deltas=("production ", "answer"),
+            usage={"input_tokens": 2, "output_tokens": 2, "total_tokens": 4},
+        )
+
+
+def _clear_dependencies() -> None:
+    for dependency in (
+        providers.get_event_store,
+        providers.get_task_projection,
+        providers.get_approval_projection,
+        providers.get_collaboration_projection,
+        providers.get_task_service,
+        providers.get_runtime_replay_bus,
+        providers.get_runtime_event_producer,
+        providers.get_runtime_event_publisher,
+        providers.get_streaming_ingestor,
+        providers.get_streaming_gateway,
+        providers.get_model_gateway,
+        providers.get_production_control_store,
+        providers.get_observability_store,
+        providers.get_observability_service,
+    ):
+        cache_clear = getattr(dependency, "cache_clear", None)
+        if cache_clear is not None:
+            cache_clear()
+
+
+def test_settings_only_accept_provider_neutral_model_names(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in (
+        "AURACLAW_MODEL_API_KEY",
+        "AURACLAW_MODEL_BASE_URL",
+        "AURACLAW_MODEL_NAME",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("HUNYUAN" + "_API_KEY", "legacy-secret")
+    legacy = Settings(_env_file=None)
+    assert legacy.model_api_key is None
+    assert legacy.model_gateway_configured is False
+
+    monkeypatch.setenv("AURACLAW_MODEL_API_KEY", "neutral-secret")
+    monkeypatch.setenv("AURACLAW_MODEL_BASE_URL", "https://models.example/v1")
+    monkeypatch.setenv("AURACLAW_MODEL_NAME", "example-model")
+    configured = Settings(_env_file=None)
+    assert configured.model_gateway_configured is True
+    assert configured.model_provider == "openai_compatible"
+
+
+def test_openai_compatible_provider_streams_usage_and_tools() -> None:
+    captured: dict[str, Any] = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured["authorization"] = request.headers["Authorization"]
+        captured["body"] = json.loads(request.content)
+        chunks = [
+            {"choices": [{"delta": {"content": "managed "}}]},
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "content": "answer",
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call-1",
+                                    "function": {
+                                        "name": "lookup",
+                                        "arguments": '{"query":',
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                ]
+            },
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {"index": 0, "function": {"arguments": '"state"}'}}
+                            ]
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 3,
+                    "completion_tokens": 2,
+                    "total_tokens": 5,
+                },
+            },
+        ]
+        body = "".join(f"data: {json.dumps(chunk)}\n\n" for chunk in chunks)
+        return httpx.Response(200, text=f"{body}data: [DONE]\n\n")
+
+    async def scenario() -> None:
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        provider = OpenAICompatibleProvider(
+            base_url="https://models.example/v1/",
+            model="example-model",
+            client=client,
+        )
+        response = await provider.generate(
+            ModelRequest(
+                model_call_id="model-1",
+                tenant_id="tenant-m8",
+                run_id="run-m8",
+                messages=({"role": "user", "content": "hello"},),
+                max_output_tokens=32,
+            ),
+            credential="gateway-only-secret",
+        )
+        await client.aclose()
+        assert response.completed_output == "managed answer"
+        assert response.deltas == ("managed ", "answer")
+        assert response.usage == {
+            "input_tokens": 3,
+            "output_tokens": 2,
+            "total_tokens": 5,
+        }
+        assert response.tool_calls[0].arguments == {"query": "state"}
+        assert captured["authorization"] == "Bearer gateway-only-secret"
+        assert captured["body"]["stream"] is True
+        assert captured["body"]["max_tokens"] == 32
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("status", "error"),
+    [(401, ModelAuthenticationError), (403, ModelAuthenticationError), (429, ModelRateLimitError)],
+)
+def test_openai_compatible_provider_maps_status_errors(
+    status: int, error: type[Exception]
+) -> None:
+    async def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(status)
+
+    async def scenario() -> None:
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        provider = OpenAICompatibleProvider(
+            base_url="https://models.example/v1", model="model", client=client
+        )
+        with pytest.raises(error):
+            await provider.generate(
+                ModelRequest(
+                    model_call_id="model-error",
+                    tenant_id="tenant-m8",
+                    run_id="run-m8",
+                    messages=(),
+                ),
+                credential="secret",
+            )
+        await client.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_openai_compatible_provider_maps_timeout() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("timed out", request=request)
+
+    async def scenario() -> None:
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        provider = OpenAICompatibleProvider(
+            base_url="https://models.example/v1", model="model", client=client
+        )
+        with pytest.raises(ModelTimeoutError):
+            await provider.generate(
+                ModelRequest(
+                    model_call_id="model-timeout",
+                    tenant_id="tenant-m8",
+                    run_id="run-m8",
+                    messages=(),
+                ),
+                credential="secret",
+            )
+        await client.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_production_worker_completes_task_and_publishes_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = get_settings()
+    previous = {
+        "env": settings.env,
+        "storage_backend": settings.storage_backend,
+        "runtime_event_backend": settings.runtime_event_backend,
+        "development_runtime_enabled": settings.development_runtime_enabled,
+        "development_runtime_poll_interval": settings.development_runtime_poll_interval,
+        "model_api_key": settings.model_api_key,
+        "model_base_url": settings.model_base_url,
+        "model_name": settings.model_name,
+    }
+    settings.env = "production"
+    settings.storage_backend = "memory"
+    settings.runtime_event_backend = "memory"
+    settings.development_runtime_enabled = False
+    settings.development_runtime_poll_interval = 0.01
+    settings.model_api_key = "production-secret"
+    settings.model_base_url = "https://models.example/v1"
+    settings.model_name = "test-model"
+    _clear_dependencies()
+    monkeypatch.setattr(providers, "get_model_gateway", lambda: StreamingModelClient())
+    try:
+        with TestClient(create_app()) as client:
+            health = client.get("/health/ready").json()
+            assert health["status"] == "ready"
+            assert health["model_gateway_ready"] is True
+            assert health["production_runtime"] == "running"
+            assert health["runtime_event_producer_ready"] is True
+            assert health["runtime_event_ingestor_ready"] is True
+
+            created = client.post(
+                "/v1/tasks",
+                headers={"Idempotency-Key": "m8-production", "X-Tenant-ID": "tenant-m8"},
+                json={"goal": "exercise production runtime"},
+            )
+            assert created.status_code == 202
+            session_id = created.json()["session_id"]
+            deadline = time.monotonic() + 2
+            task: dict[str, Any] = {}
+            while time.monotonic() < deadline:
+                task = client.get(
+                    f"/v1/tasks/{session_id}", headers={"X-Tenant-ID": "tenant-m8"}
+                ).json()
+                if task.get("run_status") == "completed":
+                    break
+                time.sleep(0.01)
+            assert task["run_status"] == "completed"
+            result = client.get(
+                f"/v1/tasks/{session_id}/result",
+                headers={"X-Tenant-ID": "tenant-m8"},
+            )
+            assert result.json()["result_summary"] == "production answer"
+            events = asyncio.run(
+                providers.get_runtime_replay_bus().events("tenant-m8", session_id)
+            )
+            assert [event.payload["delta"] for event in events] == [
+                "production ",
+                "answer",
+            ]
+            assert "production-secret" not in repr(events)
+    finally:
+        for key, value in previous.items():
+            setattr(settings, key, value)
+        _clear_dependencies()

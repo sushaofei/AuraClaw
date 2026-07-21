@@ -70,7 +70,7 @@ entrypoint -> composition -> api -> gateways
 - `composition`：唯一对象图与进程装配根。
 - `runtime`：Runtime 端口、fenced client、可恢复 Harness 和 Model Gateway。
 
-重构后的装配约束为：entrypoint → `composition` → `api`/gateways/业务包/infrastructure adapters。`api` 和 gateways 不导入 `composition` 或具体 infrastructure；infrastructure 可以依赖其实现的 ports，但不能依赖 `api`、gateways 或 `composition`。生产 `runtime run`、`delivery run` 是后续功能，不属于本次零业务行为重构。
+重构后的装配约束为：entrypoint → `composition` → `api`/gateways/业务包/infrastructure adapters。`api` 和 gateways 不导入 `composition` 或具体 infrastructure；infrastructure 可以依赖其实现的 ports，但不能依赖 `api`、gateways 或 `composition`。M8 在 API lifespan 内装配最小可用 production Worker；拆分为独立 `runtime run` 进程与 `delivery run` 仍是后续功能。
 
 ## 与目标架构的对应关系
 
@@ -84,14 +84,14 @@ entrypoint -> composition -> api -> gateways
 | Control State | `control/ports.py`、`infrastructure/persistence/*control_store.py` | Queue、Lease、Fencing、Assignment、Heartbeat、Capacity、Checkpoint |
 | Orchestrator | `control/orchestrator.py` | watch、claim、schedule、provision、cancel、heartbeat、reconcile |
 | Agent Runtime | `runtime/harness.py`、`runtime/clients.py` | Budget、Deadline、Cancel、Checkpoint 与四类端口 |
-| Model Gateway | `runtime/model_gateway.py` | Provider Adapter、路由和 Gateway 内 Credential 解析 |
+| Model Gateway | `runtime/model_gateway.py`、`infrastructure/model/openai_compatible.py` | 生产 Provider Adapter、流式调用、错误映射和 Gateway 内 Credential 解析 |
 | Tool Gateway | `action/`、`contracts/tools.py` | Registry、Schema、权限、审批、幂等、取消、标准化 |
 | Hands | `infrastructure/hands/local.py` | 无 Shell 进程、受限环境、文件根隔离和取消 |
 | Artifact Store | `infrastructure/artifacts/store.py` | Hash、去重、不可变版本、lineage、ACL 和短期下载令牌 |
 | Policy / Approval | `action/policy.py`、`domain/approval.py`、`projection/approval/` | Action Digest、Aggregate、可重建 View、Human Response |
 | Credential Proxy | `infrastructure/credentials/proxy.py` | credential_ref、scope、撤销、代调用和递归脱敏 |
 | Collaboration | `session/collaboration_service.py`、`domain/collaboration.py`、`projection/collaboration/` | Child DAG、合同、委派、交接、Join、Runnable 与 Review |
-| Runtime Event Bus | `infrastructure/kafka/runtime_events.py` | Producer SDK、Kafka、sequence、visibility、大小限制、Token 合并 |
+| Runtime Event Bus | `infrastructure/kafka/runtime_events.py` | production Harness→Producer SDK→Kafka→Ingestor→Replay，含 sequence、visibility、大小限制与 Token 合并 |
 | Streaming Gateway | `gateways/streaming/gateway.py`、`api/routes/streams.py` | 租户授权、SSE、公开 Cursor、重放、过期回退和有界背压 |
 | Result Delivery | `delivery/worker.py`、`infrastructure/delivery/` | Outbox、持久 Job、Webhook/Parent Sink、签名、重试、Circuit、DLQ |
 
@@ -111,6 +111,9 @@ entrypoint -> composition -> api -> gateways
 - Control State Store 与 Canonical Event Store 使用独立 Schema/写入边界，不做跨 Store 事务。
 - Orchestrator 只调度资源，不解析目标、不拆分 Task DAG。
 - Runtime Event Bus 故障不阻止完整模型输出与最终结果写入 Canonical Event Log。
+- 非开发环境由同进程 production Worker 注入真实 Model Gateway；开发 Worker 继续使用确定性
+  Model Client 和直接 Replay Bus，两条装配路径互斥。Provider API Key 只由 Gateway 内的
+  CredentialResolver 读取，不进入 Harness、事件或日志。
 - Kafka Offset 仅用于 Streaming Ingestor 恢复；浏览器只使用 `session_id:sequence`，超出保留期
   时收到明确 Query 回退信号。关闭 SSE 不等于取消 Session。
 - Streaming Gateway 使用共享 Consumer 和每连接有界队列，慢客户端不阻塞 Runtime、Kafka

@@ -90,7 +90,7 @@ api → application → domain → contracts
 
 ## 架构概览
 
-当前版本已实现 M7 前端测试与监控工作台及 M7.1 协议测试页面：
+当前版本已实现 M8 Model Gateway 与 Runtime Event Bus 生产接入：
 
 ```text
 Task API -> Session Aggregate -> PostgreSQL Canonical Events + Transactional Outbox
@@ -141,6 +141,26 @@ Kafka 是否可用。它不读取 Provider Secret，生产环境不会自动启�
 可设置 `AURACLAW_DEVELOPMENT_RUNTIME_ENABLED=false` 关闭。
 本地前端来源 `http://127.0.0.1:3000` 与 `http://localhost:3000` 默认允许跨域访问；其他来源通过
 逗号分隔的 `AURACLAW_CORS_ALLOW_ORIGINS` 显式配置。
+
+非开发环境在 API lifespan 内启动最小可用生产 Worker（后续可拆分为独立进程）。生产模型使用
+Provider 中立配置，经 OpenAI-compatible Chat Completions Adapter 流式调用；凭证只在 Model
+Gateway 内解析：
+
+```dotenv
+AURACLAW_ENV=production
+AURACLAW_MODEL_PROVIDER=openai_compatible
+AURACLAW_MODEL_API_KEY=replace-with-secret
+AURACLAW_MODEL_BASE_URL=https://models.example/v1
+AURACLAW_MODEL_NAME=example-model
+AURACLAW_RUNTIME_EVENT_BACKEND=kafka
+KAFKA_HOST=localhost
+KAFKA_PORT=9092
+```
+
+生产 Harness 的 delta 经 Runtime Event Producer SDK 排序、校验和脱敏后进入 Kafka，再由
+Streaming Ingestor 写入 Replay Bus 供 SSE 消费；Kafka 不可用只会令 `/health/ready` 降级，
+不会阻止完整模型输出与 `run.completed` 写入 Canonical Event。就绪响应分别报告 Model Gateway、
+producer、ingestor、总线以及 development/production executor 状态，且不会回显 API Key。
 
 另开终端启动独立前端工作台：
 
@@ -282,7 +302,8 @@ M3 关键实现位于 `action/`、`domain/approval.py`、`infrastructure/hands/`
 `infrastructure/artifacts/`、`infrastructure/credentials/` 和 `projection/approval/`。
 M4 关键实现位于 `session/collaboration_service.py`、`domain/collaboration.py`、
 `contracts/collaboration.py` 和 `projection/collaboration/`。
-M5 关键实现位于 `infrastructure/kafka/runtime_events.py`、
+M5/M8 关键实现位于 `infrastructure/kafka/runtime_events.py`、
+`infrastructure/model/openai_compatible.py`、`composition/providers.py`、
 `gateways/streaming/gateway.py`、`api/routes/streams.py`、`delivery/worker.py` 与
 `infrastructure/delivery/`。M6 关键实现位于 `contracts/observability.py`、
 `observability/`、`infrastructure/observability/`、

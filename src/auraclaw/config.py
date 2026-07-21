@@ -35,6 +35,11 @@ class Settings(BaseSettings):
     development_runtime_enabled: bool = True
     development_runtime_poll_interval: float = 0.05
     development_stream_delay: float = 0.08
+    model_api_key: str | None = None
+    model_base_url: str | None = None
+    model_name: str | None = None
+    model_provider: str = "openai_compatible"
+    model_timeout_seconds: float = 120.0
 
     @property
     def resolved_database_url(self) -> str:
@@ -91,6 +96,14 @@ class Settings(BaseSettings):
             self.development_runtime_enabled
             and self.env.lower() in {"development", "dev"}
         )
+
+    @property
+    def production_runtime_active(self) -> bool:
+        return self.env.lower() not in {"development", "dev"}
+
+    @property
+    def model_gateway_configured(self) -> bool:
+        return bool(self.model_api_key and self.model_base_url and self.model_name)
 
 
 @lru_cache
