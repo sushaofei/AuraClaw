@@ -36,6 +36,8 @@ class Settings(BaseSettings):
     model_name: str | None = None
     model_provider: str = "openai_compatible"
     model_timeout_seconds: float = 120.0
+    # None omits the field; True/False maps to OpenAI-compatible thinking.type enabled/disabled.
+    model_thinking_enabled: bool | None = None
 
     @property
     def resolved_database_url(self) -> str:

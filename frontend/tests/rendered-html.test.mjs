@@ -21,6 +21,8 @@ test("server-renders the AuraClaw console shell", async () => {
   assert.match(html, /AuraClaw/);
   assert.match(html, /智能问答/);
   assert.match(html, /创建任务/);
+  assert.match(html, /历史会话/);
+  assert.match(html, /Human-in-the-loop|STREAM \/ RESULT \/ HITL/);
   assert.match(html, /STREAM \/ RESULT/);
   assert.match(html, /Session 详情/);
   assert.match(html, /实时事件/);

@@ -2,16 +2,23 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   appendUniqueEvent,
+  buildRestoredTranscript,
   createCommandId,
   createSseParser,
+  extractApprovalRequest,
   filterTimeline,
+  findPendingApproval,
+  loadChatSessionIndex,
   metricSeries,
   normalizeBaseUrl,
   redact,
+  removeChatSessionIndex,
   resultText,
   retryAfterMs,
   runtimeDelta,
   safeCurl,
+  truncateTitle,
+  upsertChatSessionIndex,
 } from "../app/lib/protocol.mjs";
 
 test("normalizes API base URLs and creates operation-scoped command ids", () => {
@@ -77,4 +84,88 @@ test("filters timeline records and builds chronologically ordered metric series"
   assert.equal(series[1].name, "projection.lag.seconds");
   assert.deepEqual(series[1].values.map((point) => point.value), [1, 3]);
   assert.equal(series[1].latest.value, 3);
+});
+
+test("extracts approval requests from runtime and nested payloads", () => {
+  assert.equal(extractApprovalRequest("model.output.delta", { payload: { delta: "hi" } }), null);
+  assert.deepEqual(
+    extractApprovalRequest("approval.requested", {
+      payload: {
+        approval_id: "apr-1",
+        tool_name: "controlled-write",
+        reason: "needs review",
+        risk: "high",
+        redacted_arguments: { target: "release" },
+        expected_effect: "write",
+        status: "waiting",
+      },
+    }),
+    {
+      approvalId: "apr-1",
+      toolName: "controlled-write",
+      reason: "needs review",
+      risk: "high",
+      redactedArguments: { target: "release" },
+      expectedEffect: "write",
+      status: "waiting",
+    },
+  );
+  assert.equal(
+    extractApprovalRequest("tool.call.denied", {
+      metadata: { approval_request: { approval_id: "apr-2", tool_name: "delete", reason: "destructive" } },
+      error_code: "approval_required",
+    })?.approvalId,
+    "apr-2",
+  );
+});
+
+test("finds the latest unresolved approval from timeline entries", () => {
+  const pending = findPendingApproval([
+    { type: "approval.requested", timestamp: "2026-07-21T01:00:00Z", detail: { approval_id: "apr-old", tool_name: "a" } },
+    { type: "approval.approved", timestamp: "2026-07-21T01:01:00Z", detail: { approval_id: "apr-old" } },
+    { type: "approval.requested", timestamp: "2026-07-21T01:02:00Z", detail: { approval_id: "apr-new", tool_name: "b", reason: "confirm" } },
+  ]);
+  assert.equal(pending?.approvalId, "apr-new");
+  assert.equal(pending?.toolName, "b");
+  assert.equal(
+    findPendingApproval([
+      { type: "approval.requested", timestamp: "2026-07-21T01:00:00Z", detail: { approval_id: "apr-done" } },
+      { type: "approval.rejected", timestamp: "2026-07-21T01:01:00Z", detail: { approval_id: "apr-done" } },
+    ]),
+    null,
+  );
+});
+
+test("maintains a tenant-scoped chat session index without message bodies", () => {
+  const memory = new Map();
+  const storage = {
+    getItem: (key) => memory.get(key) ?? null,
+    setItem: (key, value) => memory.set(key, value),
+  };
+  assert.equal(truncateTitle("  hello   world  ".repeat(10)).endsWith("…"), true);
+  const first = upsertChatSessionIndex(storage, "tenant-a", {
+    sessionId: "ses_1",
+    title: "first question",
+    status: "ready",
+    runStatus: "completed",
+  });
+  assert.equal(first[0].sessionId, "ses_1");
+  const second = upsertChatSessionIndex(storage, "tenant-a", {
+    sessionId: "ses_2",
+    goal: "second question",
+    status: "running",
+    runStatus: "running",
+  });
+  assert.deepEqual(second.map((item) => item.sessionId), ["ses_2", "ses_1"]);
+  assert.equal(loadChatSessionIndex(storage, "tenant-b").length, 0);
+  const removed = removeChatSessionIndex(storage, "tenant-a", "ses_1");
+  assert.deepEqual(removed.map((item) => item.sessionId), ["ses_2"]);
+  const restored = buildRestoredTranscript({
+    goal: "介绍架构",
+    resultSummary: "边界清晰",
+    sessionId: "ses_2",
+  });
+  assert.deepEqual(restored.map((item) => item.role), ["user", "assistant", "system"]);
+  assert.match(JSON.stringify(memory.get("auraclaw-chat-sessions-v1")), /ses_2/);
+  assert.doesNotMatch(JSON.stringify(memory.get("auraclaw-chat-sessions-v1")), /介绍架构|边界清晰/);
 });

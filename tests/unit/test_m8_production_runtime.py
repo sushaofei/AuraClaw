@@ -172,6 +172,42 @@ def test_openai_compatible_provider_streams_usage_and_tools() -> None:
         assert captured["authorization"] == "Bearer gateway-only-secret"
         assert captured["body"]["stream"] is True
         assert captured["body"]["max_tokens"] == 32
+        assert "thinking" not in captured["body"]
+
+    asyncio.run(scenario())
+
+
+def test_openai_compatible_provider_sends_thinking_disabled() -> None:
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content.decode())
+        chunk = {
+            "choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}],
+        }
+        body = f"data: {json.dumps(chunk)}\n\ndata: [DONE]\n\n"
+        return httpx.Response(200, text=body)
+
+    async def scenario() -> None:
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        provider = OpenAICompatibleProvider(
+            base_url="https://tokenhub.example/v1",
+            model="glm-5.2",
+            thinking_enabled=False,
+            client=client,
+        )
+        response = await provider.generate(
+            ModelRequest(
+                model_call_id="model-think",
+                tenant_id="tenant-m8",
+                run_id="run-m8",
+                messages=({"role": "user", "content": "hi"},),
+            ),
+            credential="secret",
+        )
+        await client.aclose()
+        assert response.completed_output == "ok"
+        assert captured["body"]["thinking"] == {"type": "disabled"}
 
     asyncio.run(scenario())
 

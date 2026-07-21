@@ -1,3 +1,4 @@
+from datetime import timedelta
 from functools import lru_cache
 
 from auraclaw.composition.adapters.runtime_worker import RuntimeWorker
@@ -171,6 +172,7 @@ def get_model_gateway() -> ModelGateway:
         model=settings.model_name,
         name=settings.model_provider,
         timeout_seconds=settings.model_timeout_seconds,
+        thinking_enabled=settings.model_thinking_enabled,
     )
     return ModelGateway(
         (adapter,),
@@ -207,6 +209,7 @@ def build_runtime_worker() -> RuntimeWorker:
         control_store=control,
         session=session,
         provisioner=LocalRuntimeProvisioner("local"),
+        lease_ttl=timedelta(seconds=max(30.0, settings.model_timeout_seconds / 2)),
     )
     harness = AgentHarness(
         control_store=control,

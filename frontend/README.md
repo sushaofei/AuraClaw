@@ -5,6 +5,8 @@ AuraClaw 的独立纯前端测试与监控工作台。它只调用公开 HTTP/SS
 ## 协议测试页面
 
 - **智能问答**：首次提问创建 Session 并自动连接 SSE，将 `model.output.delta` 按事件游标去重合并；断线携带 `Last-Event-ID` 重连，每轮 Run 终态后使用 Task / Result API 核对最终回答。后续追问在同一 Session 追加消息并创建新 Run；只有显式关闭的 Session 才会为新问题创建新的 Session。
+- **打断与恢复**：生成中可「停止生成」调用 cancel；左侧「历史会话」按 tenant 保存在浏览器本地的 Session 索引（`session_id` / 标题摘要 / 状态 / 时间），不存问答正文。点击可恢复并重连；也支持粘贴 Session ID。
+- **Human-in-the-loop**：当 Task 进入 `waiting_for_human` 时，从 SSE 或 Timeline 解析 `approval_id`，在对话内展示审批卡片并支持批准/拒绝，随后继续同一 Session 的 Runtime。
 - **创建任务**：并列展示脱敏后的 Query 请求、权威 Task View 和 Result；轮询遵循 `Retry-After`，条件查询使用 `ETag / If-None-Match`，支持 Session ID 恢复、手动刷新、停止自动轮询和复制脱敏 JSON。
 
 两个入口使用 `#chat` 与 `#create` 页面锚点，刷新或直接访问时会恢复当前功能页；不会把问答正文写入浏览器持久化存储。
@@ -56,4 +58,5 @@ npm run lint
 - 不在 localStorage、URL、控制台或请求历史中保存 Secret。
 - 复制 curl 时会移除敏感 Header，并递归脱敏常见敏感字段。
 - 取消、恢复和审批操作会展示 tenant/session 并要求二次确认。
+- 智能问答的历史会话列表只保存 Session 索引元数据，不保存消息正文或 Result 全文。
 - 前端不提供 Projection 重建、DLQ 重投、Retention 或 GC 操作。
