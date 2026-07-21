@@ -121,9 +121,13 @@ class DevelopmentRuntimeWorker:
             except asyncio.CancelledError:
                 raise
             except Exception:
-                logger.exception("development runtime iteration failed")
+                logger.exception("runtime worker iteration failed")
             with suppress(TimeoutError):
                 await asyncio.wait_for(self._stopped.wait(), timeout=self._poll_interval)
 
     async def stop(self) -> None:
         self._stopped.set()
+
+
+class ProductionRuntimeWorker(DevelopmentRuntimeWorker):
+    """MVP in-process production worker; a separate worker process remains future work."""

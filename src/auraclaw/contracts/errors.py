@@ -50,6 +50,26 @@ class BudgetExceededError(AuraClawError):
     status_code = 409
 
 
+class ModelAuthenticationError(AuraClawError):
+    code = "model_authentication_failed"
+    status_code = 502
+
+
+class ModelRateLimitError(AuraClawError):
+    code = "model_rate_limited"
+    status_code = 429
+
+
+class ModelTimeoutError(AuraClawError):
+    code = "model_timeout"
+    status_code = 504
+
+
+class ModelProviderError(AuraClawError):
+    code = "model_provider_error"
+    status_code = 502
+
+
 class SchemaValidationError(AuraClawError):
     code = "tool_schema_invalid"
     status_code = 422

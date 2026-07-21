@@ -4,6 +4,7 @@ from auraclaw.composition.adapters.development_worker import (
     DelayedRuntimeEventPublisher,
     DevelopmentModelClient,
     DevelopmentRuntimeWorker,
+    ProductionRuntimeWorker,
 )
 from auraclaw.config import get_settings
 from auraclaw.control.orchestrator import LocalRuntimeProvisioner, ManagedOrchestrator
@@ -15,13 +16,17 @@ from auraclaw.infrastructure.kafka.runtime_events import (
     KafkaRuntimeEventProducer,
     KafkaStreamingIngestor,
     ReplayRuntimeEventBus,
+    RuntimeEventProducerSDK,
+    SDKRuntimeEventPublisher,
 )
+from auraclaw.infrastructure.model import OpenAICompatibleProvider
 from auraclaw.infrastructure.observability.stores import (
     InMemoryObservabilityStore,
     PostgresObservabilityStore,
 )
 from auraclaw.infrastructure.persistence.memory_control_store import InMemoryControlStateStore
 from auraclaw.infrastructure.persistence.memory_event_store import InMemoryEventStore
+from auraclaw.infrastructure.persistence.postgres_control_store import PostgresControlStateStore
 from auraclaw.infrastructure.persistence.postgres_event_store import PostgresEventStore
 from auraclaw.infrastructure.projection.postgres_approval_store import (
     PostgresApprovalProjection,
@@ -37,6 +42,7 @@ from auraclaw.projection.relay import OutboxRelay
 from auraclaw.projection.task.projector import InMemoryTaskProjection
 from auraclaw.runtime.clients import FencedSessionClient, FencedToolClient, IdempotentToolClient
 from auraclaw.runtime.harness import AgentHarness
+from auraclaw.runtime.model_gateway import ModelGateway, StaticCredentialResolver
 from auraclaw.session.task_service import TaskService
 
 Store = InMemoryEventStore | PostgresEventStore
@@ -44,6 +50,7 @@ Projection = InMemoryTaskProjection | PostgresTaskProjection
 ApprovalProjection = InMemoryApprovalProjection | PostgresApprovalProjection
 CollaborationProjection = InMemoryCollaborationProjection | PostgresCollaborationProjection
 ObservabilityStore = InMemoryObservabilityStore | PostgresObservabilityStore
+ControlStore = InMemoryControlStateStore | PostgresControlStateStore
 
 
 @lru_cache
@@ -131,6 +138,14 @@ def get_runtime_event_producer() -> KafkaRuntimeEventProducer | ReplayRuntimeEve
 
 
 @lru_cache
+def get_runtime_event_publisher() -> SDKRuntimeEventPublisher:
+    # Provider streams already arrive as meaningful chunks. A one-byte threshold
+    # preserves those chunks while retaining SDK validation, redaction and sequencing.
+    sdk = RuntimeEventProducerSDK(get_runtime_event_producer(), delta_flush_bytes=1)
+    return SDKRuntimeEventPublisher(sdk)
+
+
+@lru_cache
 def get_streaming_ingestor() -> KafkaStreamingIngestor | None:
     settings = get_settings()
     if not settings.kafka_enabled:
@@ -146,6 +161,35 @@ def get_streaming_ingestor() -> KafkaStreamingIngestor | None:
 @lru_cache
 def get_streaming_gateway() -> StreamingGateway:
     return StreamingGateway(reader=get_task_projection(), bus=get_runtime_replay_bus())
+
+
+@lru_cache
+def get_model_gateway() -> ModelGateway:
+    settings = get_settings()
+    if not settings.model_gateway_configured:
+        raise RuntimeError("AURACLAW_MODEL_API_KEY, BASE_URL and NAME must be configured")
+    assert settings.model_api_key is not None
+    assert settings.model_base_url is not None
+    assert settings.model_name is not None
+    adapter = OpenAICompatibleProvider(
+        base_url=settings.model_base_url,
+        model=settings.model_name,
+        name=settings.model_provider,
+        timeout_seconds=settings.model_timeout_seconds,
+    )
+    return ModelGateway(
+        (adapter,),
+        StaticCredentialResolver({settings.model_provider: settings.model_api_key}),
+        default_provider=settings.model_provider,
+    )
+
+
+@lru_cache
+def get_production_control_store() -> ControlStore:
+    settings = get_settings()
+    if settings.postgres_enabled:
+        return PostgresControlStateStore(settings.resolved_database_url)
+    return InMemoryControlStateStore()
 
 
 def build_development_runtime_worker() -> DevelopmentRuntimeWorker:
@@ -184,6 +228,44 @@ def build_development_runtime_worker() -> DevelopmentRuntimeWorker:
         runtime_events=publisher,
     )
     return DevelopmentRuntimeWorker(
+        event_store=event_store,
+        reader=projection,
+        relay=relay,
+        orchestrator=orchestrator,
+        harness=harness,
+        poll_interval=settings.development_runtime_poll_interval,
+    )
+
+
+def build_production_runtime_worker() -> ProductionRuntimeWorker:
+    settings = get_settings()
+    event_store = get_event_store()
+    projection = get_task_projection()
+    control = get_production_control_store()
+    session = FencedSessionClient(event_store, control)
+    relay = OutboxRelay(
+        event_store,
+        CompositeProjection(
+            projection,
+            get_approval_projection(),
+            get_collaboration_projection(),
+            ObservabilityProjector(get_observability_service()),
+        ),
+    )
+    orchestrator = ManagedOrchestrator(
+        orchestrator_id="production-orchestrator",
+        control_store=control,
+        session=session,
+        provisioner=LocalRuntimeProvisioner("production"),
+    )
+    harness = AgentHarness(
+        control_store=control,
+        session=session,
+        model=get_model_gateway(),
+        tools=FencedToolClient(IdempotentToolClient(), control),
+        runtime_events=get_runtime_event_publisher(),
+    )
+    return ProductionRuntimeWorker(
         event_store=event_store,
         reader=projection,
         relay=relay,
