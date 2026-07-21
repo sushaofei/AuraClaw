@@ -29,12 +29,14 @@ class OpenAICompatibleProvider:
         model: str,
         name: str = "openai_compatible",
         timeout_seconds: float = 120.0,
+        thinking_enabled: bool | None = None,
         client: httpx.AsyncClient | None = None,
     ) -> None:
         self.name = name
         self._model = model
         self._endpoint = self._chat_completions_endpoint(base_url)
         self._timeout = timeout_seconds
+        self._thinking_enabled = thinking_enabled
         self._client = client
 
     async def generate(self, request: ModelRequest, *, credential: str) -> ModelResponse:
@@ -48,6 +50,10 @@ class OpenAICompatibleProvider:
         }
         if request.tools:
             payload["tools"] = list(request.tools)
+        if self._thinking_enabled is not None:
+            payload["thinking"] = {
+                "type": "enabled" if self._thinking_enabled else "disabled",
+            }
 
         started = time.perf_counter()
         deltas: list[str] = []
@@ -97,9 +103,11 @@ class OpenAICompatibleProvider:
 
         duration_ms = (time.perf_counter() - started) * 1_000
         logger.info(
-            "model provider call completed provider=%s model=%s duration_ms=%.2f usage=%s",
+            "model provider call completed provider=%s model=%s thinking=%s "
+            "duration_ms=%.2f usage=%s",
             self.name,
             model,
+            self._thinking_enabled,
             duration_ms,
             usage,
         )

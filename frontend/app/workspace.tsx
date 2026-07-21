@@ -3,17 +3,24 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   appendUniqueEvent,
+  buildRestoredTranscript,
   createCommandId,
   createSseParser,
+  extractApprovalRequest,
   filterTimeline,
+  findPendingApproval,
+  loadChatSessionIndex,
   metricSeries,
   normalizeBaseUrl,
   redact,
+  removeChatSessionIndex,
   resultText,
   retryAfterMs,
   runtimeDelta,
   safeCurl,
+  upsertChatSessionIndex,
 } from "./lib/protocol.mjs";
+import type { ApprovalRequest, ChatSessionIndexEntry } from "./lib/protocol.d.mts";
 
 type Json = Record<string, unknown>;
 type RequestEntry = {
@@ -37,7 +44,10 @@ const CRITICAL_METRICS = new Set([
   "delivery.dlq.count",
 ]);
 const TERMINAL_RUN_STATUSES = new Set(["completed", "failed", "cancelled"]);
+const ACTIVE_RUN_STATUSES = new Set(["pending", "runnable", "running", "paused", "retry_wait"]);
+const WAITING_FOR_HUMAN = "waiting_for_human";
 const TERMINAL_SESSION_STATUSES = new Set(["closed"]);
+const GENERATING_CHAT_STATUSES = new Set(["connecting", "generating", "reconnecting"]);
 const PANELS = new Set(["chat", "create", "task", "stream", "timeline", "metrics", "history"]);
 
 function asJson(value: unknown): Json {
@@ -105,6 +115,9 @@ export function AuraClawConsole() {
   const [chatStatus, setChatStatus] = useState("idle");
   const [chatResult, setChatResult] = useState<Json | null>(null);
   const [chatRawOpen, setChatRawOpen] = useState(false);
+  const [chatSessions, setChatSessions] = useState<ChatSessionIndexEntry[]>([]);
+  const [pendingApproval, setPendingApproval] = useState<ApprovalRequest | null>(null);
+  const [chatApprovalFeedback, setChatApprovalFeedback] = useState("");
   const [createRequest, setCreateRequest] = useState<Json | null>(null);
   const [createResponse, setCreateResponse] = useState<Json | null>(null);
   const [createIdempotencyKey, setCreateIdempotencyKey] = useState(() => createCommandId("create-task"));
@@ -115,6 +128,8 @@ export function AuraClawConsole() {
   const streamAbort = useRef<AbortController | null>(null);
   const lastEventId = useRef("");
   const seenEventIds = useRef(new Set<string>());
+  const pendingApprovalRef = useRef<ApprovalRequest | null>(null);
+  const taskRef = useRef<Json | null>(null);
 
   const navigatePanel = useCallback((panel: string) => {
     setActivePanel(panel);
@@ -131,6 +146,8 @@ export function AuraClawConsole() {
         if (saved.tenant) setTenant(saved.tenant);
         if (saved.actor) setActor(saved.actor);
         if (saved.sessionId) setSessionId(saved.sessionId);
+        const tenantKey = String(saved.tenant || "local");
+        setChatSessions(loadChatSessionIndex(localStorage, tenantKey));
       });
     } catch {
       // Ignore malformed device-local preferences.
@@ -151,6 +168,38 @@ export function AuraClawConsole() {
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({ baseUrl, tenant, actor, sessionId }));
   }, [baseUrl, tenant, actor, sessionId]);
+
+  useEffect(() => {
+    let active = true;
+    queueMicrotask(() => {
+      if (!active) return;
+      setChatSessions(loadChatSessionIndex(localStorage, tenant));
+    });
+    return () => { active = false; };
+  }, [tenant]);
+
+  useEffect(() => {
+    pendingApprovalRef.current = pendingApproval;
+  }, [pendingApproval]);
+
+  useEffect(() => {
+    taskRef.current = task;
+  }, [task]);
+
+  const rememberSession = useCallback((
+    id: string,
+    meta: { title?: string; goal?: string; status?: unknown; runStatus?: unknown } = {},
+  ) => {
+    if (!id.trim()) return;
+    setChatSessions(upsertChatSessionIndex(localStorage, tenant, {
+      sessionId: id.trim(),
+      title: meta.title || meta.goal || id.trim(),
+      goal: meta.goal,
+      status: meta.status ? String(meta.status) : "",
+      runStatus: meta.runStatus ? String(meta.runStatus) : "",
+      updatedAt: new Date().toISOString(),
+    }));
+  }, [tenant]);
 
   const identityHeaders = useCallback(() => {
     const headers: Record<string, string> = { "X-Tenant-ID": tenant, "X-Actor-ID": actor };
@@ -207,21 +256,72 @@ export function AuraClawConsole() {
     setBusy("");
   }, [api]);
 
-  const loadTask = useCallback(async (quiet = false, targetSessionId = sessionId) => {
+  const loadTask = useCallback(async (quiet = false, targetSessionId = sessionId, force = false) => {
     if (!targetSessionId.trim()) return null;
     if (!quiet) setBusy("task");
     try {
+      if (force) taskEtag.current = "";
       const headers = taskEtag.current ? { "If-None-Match": taskEtag.current } : undefined;
       const { data, response } = await api(`/v1/tasks/${encodeURIComponent(targetSessionId.trim())}`, { headers, quiet });
-      const nextTask = response.status !== 304 && data ? asJson(data) : null;
-      if (nextTask) setTask(nextTask);
+      if (response.status === 304) {
+        if (!quiet) setNotice("任务视图没有变化");
+        const cached = taskRef.current;
+        return cached && String(cached.session_id ?? "") === targetSessionId.trim() ? cached : null;
+      }
+      const nextTask = data ? asJson(data) : null;
+      if (nextTask) {
+        setTask(nextTask);
+        rememberSession(String(nextTask.session_id ?? targetSessionId), {
+          goal: String(nextTask.goal ?? ""),
+          status: nextTask.status,
+          runStatus: nextTask.run_status,
+        });
+      }
       taskEtag.current = response.headers.get("etag") ?? taskEtag.current;
-      if (!quiet) setNotice(response.status === 304 ? "任务视图没有变化" : "任务视图已刷新");
+      if (!quiet) setNotice("任务视图已刷新");
       return nextTask;
     } finally {
       if (!quiet) setBusy("");
     }
-  }, [api, sessionId]);
+  }, [api, rememberSession, sessionId]);
+
+  const isVersionConflict = (error: unknown) => {
+    const message = error instanceof Error ? error.message : String(error ?? "");
+    return /expected Session version|version conflict|409/i.test(message);
+  };
+
+  const postSessionCommand = async (
+    targetSessionId: string,
+    path: string,
+    body: unknown,
+    operation: string,
+    expectedVersion: number,
+  ) => {
+    try {
+      await api(path, {
+        method: "POST",
+        body,
+        headers: {
+          "Idempotency-Key": createCommandId(operation),
+          "X-Expected-Version": String(expectedVersion),
+        },
+      });
+      return expectedVersion;
+    } catch (error) {
+      if (!isVersionConflict(error)) throw error;
+      const refreshed = await loadTask(true, targetSessionId, true);
+      const nextVersion = Number(refreshed?.projection_version ?? 0);
+      await api(path, {
+        method: "POST",
+        body,
+        headers: {
+          "Idempotency-Key": createCommandId(`${operation}-retry`),
+          "X-Expected-Version": String(nextVersion),
+        },
+      });
+      return nextVersion;
+    }
+  };
 
   useEffect(() => {
     if (!autoRefresh || !sessionId) return;
@@ -246,6 +346,11 @@ export function AuraClawConsole() {
         setResultAutoPoll(true);
       }
       const view = await loadTask(true, id);
+      rememberSession(id, {
+        goal: query.trim(),
+        status: view?.status ?? created.status,
+        runStatus: view?.run_status,
+      });
       setNotice(`任务已接纳：${id}`);
       return { id, created, view };
     } catch (error) {
@@ -328,9 +433,53 @@ export function AuraClawConsole() {
     } finally { if (!quiet) setBusy(""); }
   }, [api, navigatePanel]);
 
+  const resolvePendingApproval = useCallback(async (targetSessionId: string) => {
+    if (!targetSessionId.trim()) return null;
+    if (pendingApprovalRef.current) return pendingApprovalRef.current;
+    try {
+      const { data } = await api(`/v1/operations/sessions/${encodeURIComponent(targetSessionId)}/timeline`, { quiet: true });
+      const entries = Array.isArray(asJson(data).entries) ? (asJson(data).entries as Json[]) : [];
+      setTimeline(entries);
+      const pending = findPendingApproval(entries);
+      if (pending) {
+        setPendingApproval(pending);
+        setApprovalId(pending.approvalId);
+        setChatStatus("awaiting_approval");
+        setChatMessages((current) => {
+          if (current.some((item) => item.content.includes(pending.approvalId))) return current;
+          return [...current, {
+            id: createCommandId("chat-system"),
+            role: "system",
+            content: `需要人工审批：${pending.toolName || "tool"}（${pending.approvalId}）${pending.reason ? ` — ${pending.reason}` : ""}`,
+          }];
+        });
+      }
+      return pending;
+    } catch {
+      return null;
+    }
+  }, [api]);
+
+  const applyApprovalFromEvent = useCallback((eventName: string, data: Json) => {
+    const pending = extractApprovalRequest(eventName, data);
+    if (!pending) return;
+    if (pendingApprovalRef.current?.approvalId === pending.approvalId) return;
+    setPendingApproval(pending);
+    setApprovalId(pending.approvalId);
+    setChatStatus("awaiting_approval");
+    setChatMessages((current) => {
+      if (current.some((item) => item.content.includes(pending.approvalId))) return current;
+      return [...current, {
+        id: createCommandId("chat-system"),
+        role: "system",
+        content: `需要人工审批：${pending.toolName || "tool"}（${pending.approvalId}）${pending.reason ? ` — ${pending.reason}` : ""}`,
+      }];
+    });
+  }, []);
+
   const stopStream = useCallback(() => {
     streamAbort.current?.abort(); streamAbort.current = null; setStreamState("stopped");
-    setChatStatus((current) => ["connecting", "generating", "reconnecting"].includes(current) ? "stopped" : current);
+    setChatStatus((current) => GENERATING_CHAT_STATUSES.has(current) ? "stopped" : current);
   }, []);
 
   useEffect(() => () => streamAbort.current?.abort(), []);
@@ -340,7 +489,7 @@ export function AuraClawConsole() {
     const controller = new AbortController();
     streamAbort.current = controller; setStreamState(lastEventId.current ? "reconnecting" : "connecting");
     if (navigate) navigatePanel("stream");
-    else setChatStatus(lastEventId.current ? "reconnecting" : "connecting");
+    else if (!pendingApprovalRef.current) setChatStatus(lastEventId.current ? "reconnecting" : "connecting");
     let attempt = 0;
     while (!controller.signal.aborted) {
       try {
@@ -349,7 +498,9 @@ export function AuraClawConsole() {
         if (reconnectCursor) headers["Last-Event-ID"] = reconnectCursor;
         const response = await fetch(`${normalizeBaseUrl(baseUrl)}/v1/streams/${encodeURIComponent(targetSessionId)}`, { headers, signal: controller.signal, cache: "no-store" });
         if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`);
-        attempt = 0; setStreamState("live"); setChatStatus("generating"); setNotice("Runtime Event 流已连接");
+        attempt = 0; setStreamState("live");
+        if (!pendingApprovalRef.current) setChatStatus("generating");
+        setNotice("Runtime Event 流已连接");
         const decoder = new TextDecoder();
         const parser = createSseParser((frame) => {
           let data: Json;
@@ -364,6 +515,9 @@ export function AuraClawConsole() {
           }
           const entry = { id: frame.id || createCommandId("event"), event: frame.event, data, receivedAt: new Date().toISOString(), replay };
           setEvents((current) => appendUniqueEvent(current, entry));
+          applyApprovalFromEvent(frame.event, data);
+          const payloadType = typeof data.type === "string" ? data.type : "";
+          if (payloadType) applyApprovalFromEvent(payloadType, data);
           const delta = runtimeDelta(frame.event, data);
           if (delta) {
             setChatMessages((current) => {
@@ -383,7 +537,8 @@ export function AuraClawConsole() {
         }
       } catch {
         if (controller.signal.aborted) break;
-        attempt += 1; setStreamState("reconnecting"); setChatStatus("reconnecting");
+        attempt += 1; setStreamState("reconnecting");
+        if (!pendingApprovalRef.current) setChatStatus("reconnecting");
         setNotice(`实时流中断，正在第 ${attempt} 次重连`);
         await new Promise((resolve) => window.setTimeout(resolve, Math.min(1000 * 2 ** (attempt - 1), 10000)));
       }
@@ -393,16 +548,32 @@ export function AuraClawConsole() {
 
   const sendChat = async () => {
     const query = chatInput.trim();
-    if (!query || busy) return;
+    if (!query || busy || GENERATING_CHAT_STATUSES.has(chatStatus) || chatStatus === "awaiting_approval") return;
     setBusy("chat-send");
+    setPendingApproval(null);
+    setChatApprovalFeedback("");
     try {
-      let targetSessionId = sessionId;
-      let currentTask = task;
-      if (targetSessionId && (!currentTask || String(currentTask.session_id ?? "") !== targetSessionId)) {
-        currentTask = await loadTask(true, targetSessionId);
+      let targetSessionId = sessionId.trim();
+      const currentTask = targetSessionId ? await loadTask(true, targetSessionId, true) : null;
+      const sessionStatus = String(currentTask?.status ?? "");
+      const runStatusValue = String(currentTask?.run_status ?? "");
+
+      if (targetSessionId && currentTask && (runStatusValue === WAITING_FOR_HUMAN || sessionStatus === WAITING_FOR_HUMAN)) {
+        setChatStatus("awaiting_approval");
+        await resolvePendingApproval(targetSessionId);
+        setNotice("当前 Session 等待人工审批，请先批准或拒绝后再追问。");
+        return;
       }
-      if (!targetSessionId || (currentTask && TERMINAL_SESSION_STATUSES.has(String(currentTask.status ?? "")))) {
-        const continuesAfterTerminal = Boolean(targetSessionId && currentTask && TERMINAL_SESSION_STATUSES.has(String(currentTask.status ?? "")));
+
+      if (targetSessionId && currentTask && ACTIVE_RUN_STATUSES.has(runStatusValue)) {
+        setChatStatus("connecting");
+        if (!streamAbort.current) void startStream(targetSessionId, false);
+        setNotice("当前 Run 尚未结束，已重新连接实时流；请等待完成或点击停止生成后再追问。");
+        return;
+      }
+
+      if (!targetSessionId || (currentTask && TERMINAL_SESSION_STATUSES.has(sessionStatus))) {
+        const continuesAfterTerminal = Boolean(targetSessionId && currentTask && TERMINAL_SESSION_STATUSES.has(sessionStatus));
         const created = await createTask(query, "chat");
         if (!created) return;
         targetSessionId = created.id;
@@ -411,19 +582,27 @@ export function AuraClawConsole() {
         }
       } else {
         const expectedVersion = Number(currentTask?.projection_version ?? 0);
-        await api(`/v1/sessions/${encodeURIComponent(targetSessionId)}/messages`, {
-          method: "POST",
-          body: { message: query },
-          headers: { "Idempotency-Key": createCommandId("chat-message"), "X-Expected-Version": String(expectedVersion) },
+        await postSessionCommand(
+          targetSessionId,
+          `/v1/sessions/${encodeURIComponent(targetSessionId)}/messages`,
+          { message: query },
+          "chat-message",
+          expectedVersion,
+        );
+        const afterMessage = await loadTask(true, targetSessionId, true);
+        await postSessionCommand(
+          targetSessionId,
+          `/v1/sessions/${encodeURIComponent(targetSessionId)}/runs`,
+          undefined,
+          "chat-run",
+          Number(afterMessage?.projection_version ?? expectedVersion + 1),
+        );
+        await loadTask(true, targetSessionId, true);
+        rememberSession(targetSessionId, {
+          title: query,
+          status: afterMessage?.status,
+          runStatus: afterMessage?.run_status,
         });
-        taskEtag.current = "";
-        const afterMessage = await loadTask(true, targetSessionId);
-        await api(`/v1/sessions/${encodeURIComponent(targetSessionId)}/runs`, {
-          method: "POST",
-          headers: { "Idempotency-Key": createCommandId("chat-run"), "X-Expected-Version": String(afterMessage?.projection_version ?? expectedVersion + 1) },
-        });
-        taskEtag.current = "";
-        await loadTask(true, targetSessionId);
       }
       setChatMessages((current) => [
         ...current.map((item) => item.streaming ? { ...item, streaming: false } : item),
@@ -442,22 +621,87 @@ export function AuraClawConsole() {
     }
   };
 
-  const openChatSession = async () => {
-    if (!sessionId.trim()) return;
+  const openChatSession = async (targetId = sessionId) => {
+    const id = targetId.trim();
+    if (!id) return;
     stopStream();
     taskEtag.current = "";
     setResultEtag("");
     lastEventId.current = "";
     seenEventIds.current.clear();
     setEvents([]);
-    setChatMessages([{ id: createCommandId("chat-system"), role: "system", content: "已通过 Session ID 恢复。可重放的 Runtime Event 将重新显示；最终内容以 Result 为准。" }]);
+    setPendingApproval(null);
+    setChatApprovalFeedback("");
+    setChatResult(null);
+    setSessionId(id);
+    setBusy("task");
     try {
-      await loadTask(false, sessionId.trim());
-      setChatStatus("connecting");
-      void startStream(sessionId.trim(), false);
-    } catch {
+      const nextTask = await loadTask(true, id);
+      if (!nextTask) {
+        setChatStatus("failed");
+        setNotice(`无法恢复 Session：${id}`);
+        return;
+      }
+      const loaded = await loadResult(true, id);
+      const summary = resultText(loaded?.result ?? null) || String(nextTask.result_summary ?? "");
+      if (loaded?.result) setChatResult(loaded.result);
+      setChatMessages(buildRestoredTranscript({
+        goal: String(nextTask.goal ?? ""),
+        resultSummary: summary,
+        sessionId: id,
+      }).map((item) => ({ ...item, id: createCommandId(`restore-${item.role}`) })));
+      rememberSession(id, {
+        goal: String(nextTask.goal ?? ""),
+        status: nextTask.status,
+        runStatus: nextTask.run_status,
+      });
+      const run = String(nextTask.run_status ?? "");
+      const sessionStatus = String(nextTask.status ?? "");
+      if (run === WAITING_FOR_HUMAN || sessionStatus === WAITING_FOR_HUMAN) {
+        setChatStatus("awaiting_approval");
+        await resolvePendingApproval(id);
+        if (!streamAbort.current) void startStream(id, false);
+        setNotice(`已恢复并等待人工审批：${id}`);
+        return;
+      }
+      if (ACTIVE_RUN_STATUSES.has(run)) {
+        setChatStatus("connecting");
+        void startStream(id, false);
+        setNotice(`已恢复并重连流：${id}`);
+        return;
+      }
+      setChatStatus(TERMINAL_RUN_STATUSES.has(run) ? run : "ready");
+      setNotice(`已恢复 Session：${id}`);
+    } catch (error) {
       setChatStatus("failed");
+      setNotice(`恢复失败：${error instanceof Error ? error.message : "请求失败"}`);
+    } finally {
+      setBusy("");
     }
+  };
+
+  const startNewChat = () => {
+    stopStream();
+    setSessionId("");
+    setTask(null);
+    setResult(null);
+    setChatMessages([]);
+    setEvents([]);
+    setChatResult(null);
+    setPendingApproval(null);
+    setChatApprovalFeedback("");
+    setChatStatus("idle");
+    setStreamCursor("");
+    setResultEtag("");
+    taskEtag.current = "";
+    lastEventId.current = "";
+    seenEventIds.current.clear();
+    setNotice("已开始新对话；历史会话索引仍保留在本机。");
+  };
+
+  const removeChatSession = (id: string) => {
+    setChatSessions(removeChatSessionIndex(localStorage, tenant, id));
+    if (sessionId === id) startNewChat();
   };
 
   const stopChat = async () => {
@@ -467,14 +711,55 @@ export function AuraClawConsole() {
       if (!cancelled) return;
       stopStream();
       setChatStatus("cancelled");
+      setPendingApproval(null);
       await loadResult(true);
+      rememberSession(sessionId, {
+        goal: String(task.goal ?? ""),
+        status: "ready",
+        runStatus: "cancelled",
+      });
     } catch {
       // The shared request notice already contains the structured failure.
     }
   };
 
+  const respondChatApproval = async (decision: "approved" | "rejected") => {
+    if (!sessionId || !pendingApproval) return;
+    const label = decision === "approved" ? "批准" : "拒绝";
+    const approval = pendingApproval;
+    const feedback = chatApprovalFeedback.trim();
+    if (!window.confirm(`确认${label}该操作？\n\nTenant: ${tenant}\nSession: ${sessionId}\nApproval: ${approval.approvalId}`)) return;
+    setBusy(decision);
+    try {
+      const currentTask = await loadTask(true, sessionId, true);
+      if (!currentTask) throw new Error("无法刷新 Task View");
+      await postSessionCommand(
+        sessionId,
+        `/v1/sessions/${encodeURIComponent(sessionId)}/approvals/${encodeURIComponent(approval.approvalId)}/responses`,
+        { decision, feedback: feedback || null },
+        decision,
+        Number(currentTask.projection_version ?? 0),
+      );
+      setPendingApproval(null);
+      setChatApprovalFeedback("");
+      setChatMessages((current) => [...current, {
+        id: createCommandId("chat-system"),
+        role: "system",
+        content: `已${label}审批 ${approval.approvalId}${feedback ? `：${feedback}` : ""}`,
+      }]);
+      await loadTask(true, sessionId, true);
+      setChatStatus("connecting");
+      if (!streamAbort.current) void startStream(sessionId, false);
+      setNotice(`审批已${label}，继续等待 Runtime`);
+    } catch (error) {
+      setNotice(`审批失败：${error instanceof Error ? error.message : "请求失败"}`);
+    } finally {
+      setBusy("");
+    }
+  };
+
   useEffect(() => {
-    if (!sessionId || !["connecting", "generating", "reconnecting"].includes(chatStatus)) return;
+    if (!sessionId || !GENERATING_CHAT_STATUSES.has(chatStatus)) return;
     let cancelled = false;
     let timer: number | undefined;
     const pollUntilTerminal = async () => {
@@ -482,6 +767,13 @@ export function AuraClawConsole() {
         const nextTask = await loadTask(true);
         const currentTask = nextTask ?? task;
         const status = String(currentTask?.run_status ?? "");
+        const sessionStatus = String(currentTask?.status ?? "");
+        if (status === WAITING_FOR_HUMAN || sessionStatus === WAITING_FOR_HUMAN) {
+          setChatMessages((current) => current.map((item) => item.streaming ? { ...item, streaming: false } : item));
+          setChatStatus("awaiting_approval");
+          await resolvePendingApproval(sessionId);
+          return;
+        }
         if (!TERMINAL_RUN_STATUSES.has(status)) {
           if (!cancelled) timer = window.setTimeout(() => void pollUntilTerminal(), resultPollMs);
           return;
@@ -491,11 +783,12 @@ export function AuraClawConsole() {
         if (finalResult) setChatResult(finalResult);
         setChatMessages((current) => current.map((item) => item.streaming ? { ...item, streaming: false } : item));
         setChatStatus(status);
+        setPendingApproval(null);
         streamAbort.current?.abort();
         streamAbort.current = null;
         setStreamState("stopped");
       } catch {
-        setChatStatus("reconnecting");
+        if (!pendingApprovalRef.current) setChatStatus("reconnecting");
       }
     };
     timer = window.setTimeout(() => void pollUntilTerminal(), resultPollMs);
@@ -503,7 +796,7 @@ export function AuraClawConsole() {
       cancelled = true;
       if (timer !== undefined) window.clearTimeout(timer);
     };
-  }, [chatStatus, loadResult, loadTask, result, resultPollMs, sessionId, task]);
+  }, [chatStatus, loadResult, loadTask, resolvePendingApproval, result, resultPollMs, sessionId, task]);
 
   const copyJson = (value: unknown) => navigator.clipboard.writeText(JSON.stringify(redact(value), null, 2));
 
@@ -516,6 +809,7 @@ export function AuraClawConsole() {
   const streamedAnswer = [...chatMessages].reverse().find((item) => item.role === "assistant")?.content ?? "";
   const finalAnswer = resultText(chatResult);
   const answerMismatch = Boolean(streamedAnswer && finalAnswer && streamedAnswer.trim() !== finalAnswer.trim());
+  const chatBusy = Boolean(busy) || GENERATING_CHAT_STATUSES.has(chatStatus) || chatStatus === "awaiting_approval";
 
   return (
     <main className="console-shell">
@@ -552,18 +846,53 @@ export function AuraClawConsole() {
         <section className="panel-stage">
           {activePanel === "chat" && (
             <div className="panel-stack chat-page">
-              <div className="panel-heading"><div><p className="eyebrow">Streaming protocol lab</p><h1>智能问答</h1><p>验证增量输出、事件去重、断线续传与最终 Result 一致性。</p></div><div className="panel-actions"><span className={`stream-badge ${chatStatus}`}>{chatStatus}</span><button className="button" onClick={() => setChatRawOpen((value) => !value)}>{chatRawOpen ? "收起事件" : "原始事件"}</button></div></div>
+              <div className="panel-heading"><div><p className="eyebrow">Streaming protocol lab</p><h1>智能问答</h1><p>支持打断生成、历史会话恢复，以及等待人工审批时的 human-in-the-loop。</p></div><div className="panel-actions"><span className={`stream-badge ${chatStatus}`}>{chatStatus}</span><button className="button" onClick={startNewChat}>新建对话</button><button className="button" onClick={() => setChatRawOpen((value) => !value)}>{chatRawOpen ? "收起事件" : "原始事件"}</button></div></div>
               <div className="session-locator"><label className="field grow"><span>恢复已有 Session</span><input value={sessionId} onChange={(e) => { setSessionId(e.target.value); taskEtag.current = ""; }} placeholder="ses_..." /></label><button className="button" onClick={() => void openChatSession()} disabled={!sessionId.trim() || busy === "task"}>恢复并重连</button></div>
-              <div className="chat-layout">
+              <div className="chat-layout with-history">
+                <aside className="chat-history" aria-label="历史会话列表">
+                  <div className="subpanel-title"><h2>历史会话</h2><span>{chatSessions.length}</span></div>
+                  <p className="chat-history-note">仅本机保存 session 索引，不存问答正文。</p>
+                  {chatSessions.length ? (
+                    <div className="chat-history-list">
+                      {chatSessions.map((entry) => (
+                        <div className={`chat-history-item ${entry.sessionId === sessionId ? "active" : ""}`} key={entry.sessionId}>
+                          <button type="button" className="chat-history-open" onClick={() => void openChatSession(entry.sessionId)}>
+                            <strong>{entry.title}</strong>
+                            <small>{entry.sessionId}</small>
+                            <span>{displayTime(entry.updatedAt)} · {entry.runStatus || entry.status || "unknown"}</span>
+                          </button>
+                          <button type="button" className="chat-history-remove" aria-label="删除会话索引" onClick={() => removeChatSession(entry.sessionId)}>×</button>
+                        </div>
+                      ))}
+                    </div>
+                  ) : <EmptyState title="暂无历史会话" detail="发送问题后会在此留下可恢复的 Session 索引。" />}
+                </aside>
                 <section className="chat-surface" aria-label="智能问答消息">
                   <div className="chat-transcript" aria-live="polite">
-                    {chatMessages.length ? chatMessages.map((item) => <article className={`chat-message ${item.role}`} key={item.id}><div className="chat-avatar">{item.role === "user" ? "YOU" : item.role === "assistant" ? "AC" : "SYS"}</div><div><small>{item.role === "user" ? "你" : item.role === "assistant" ? "AuraClaw" : "系统提示"}</small><p>{item.content}{item.streaming && <span className="typing-caret" aria-label="生成中" />}</p></div></article>) : <div className="chat-welcome"><span>STREAM / RESULT</span><h2>从一个真实问题开始</h2><p>首次发送会创建任务并自动连接 SSE。后续追问会追加消息并请求新的 Run。</p></div>}
+                    {chatMessages.length ? chatMessages.map((item) => <article className={`chat-message ${item.role}`} key={item.id}><div className="chat-avatar">{item.role === "user" ? "YOU" : item.role === "assistant" ? "AC" : "SYS"}</div><div><small>{item.role === "user" ? "你" : item.role === "assistant" ? "AuraClaw" : "系统提示"}</small><p>{item.content}{item.streaming && <span className="typing-caret" aria-label="生成中" />}</p></div></article>) : <div className="chat-welcome"><span>STREAM / RESULT / HITL</span><h2>从一个真实问题开始</h2><p>首次发送会创建任务并自动连接 SSE。可通过左侧历史会话恢复；生成中可打断，审批等待时直接在对话内处理。</p></div>}
+                    {pendingApproval && (
+                      <article className="hitl-card" aria-label="人工审批">
+                        <div className="subpanel-title"><h2>Human-in-the-loop</h2><span className="pill warn">waiting</span></div>
+                        <dl className="protocol-dl">
+                          <div><dt>Approval</dt><dd>{pendingApproval.approvalId}</dd></div>
+                          <div><dt>Tool</dt><dd>{pendingApproval.toolName || "—"}</dd></div>
+                          <div><dt>Risk</dt><dd>{pendingApproval.risk || "—"}</dd></div>
+                          <div><dt>Reason</dt><dd>{pendingApproval.reason || "—"}</dd></div>
+                        </dl>
+                        {pendingApproval.redactedArguments != null && <JsonBlock value={pendingApproval.redactedArguments} />}
+                        <label className="field"><span>反馈（可选）</span><input value={chatApprovalFeedback} onChange={(e) => setChatApprovalFeedback(e.target.value)} placeholder="批准或拒绝时的备注" /></label>
+                        <div className="button-row">
+                          <button className="button approve" disabled={Boolean(busy)} onClick={() => void respondChatApproval("approved")}>批准</button>
+                          <button className="button danger" disabled={Boolean(busy)} onClick={() => void respondChatApproval("rejected")}>拒绝</button>
+                        </div>
+                      </article>
+                    )}
                   </div>
-                  <div className="chat-composer"><label className="field"><span>输入问题</span><textarea value={chatInput} onChange={(e) => setChatInput(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void sendChat(); } }} rows={4} placeholder="输入问题；Enter 发送，Shift+Enter 换行" /></label><div className="chat-composer-actions"><span>Runtime Event 仅用于实时体验</span><div className="button-row"><button className="button" onClick={() => { setChatMessages([]); setEvents([]); setChatResult(null); }}>清空显示</button>{["connecting", "generating", "reconnecting"].includes(chatStatus) && <button className="button danger" onClick={() => void stopChat()}>停止生成</button>}<button className="button primary" onClick={() => void sendChat()} disabled={!chatInput.trim() || Boolean(busy)}>发送</button></div></div></div>
+                  <div className="chat-composer"><label className="field"><span>输入问题</span><textarea value={chatInput} onChange={(e) => setChatInput(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void sendChat(); } }} rows={4} placeholder="输入问题；Enter 发送，Shift+Enter 换行" disabled={chatBusy && chatStatus !== "awaiting_approval"} /></label><div className="chat-composer-actions"><span>{chatStatus === "awaiting_approval" ? "等待人工审批中" : "Runtime Event 仅用于实时体验"}</span><div className="button-row"><button className="button" onClick={() => { setChatMessages([]); setEvents([]); setChatResult(null); }}>清空显示</button>{GENERATING_CHAT_STATUSES.has(chatStatus) && <button className="button danger" onClick={() => void stopChat()}>停止生成</button>}<button className="button primary" onClick={() => void sendChat()} disabled={!chatInput.trim() || chatBusy}>发送</button></div></div></div>
                 </section>
                 <aside className="chat-inspector">
                   <article className="subpanel"><div className="subpanel-title"><h2>权威结果核对</h2><span className={`pill ${statusTone(chatResult?.status ?? chatStatus)}`}>{String(chatResult?.status ?? chatStatus)}</span></div>{chatResult ? <><div className={`consistency-note ${answerMismatch ? "mismatch" : "match"}`}><strong>{answerMismatch ? "流式内容与 Result 存在差异" : "流式内容与 Result 已核对"}</strong><p>{answerMismatch ? "最终回答以 Result API 为准。" : "Result 是任务完成与交付的事实来源。"}</p></div><div className="answer-block"><small>FINAL RESULT</small><p>{finalAnswer || "结果没有文本摘要，请查看结构化 JSON。"}</p></div><button className="copy-button" onClick={() => void copyJson(chatResult)}>复制脱敏 Result</button><JsonBlock value={chatResult} /></> : <EmptyState title="等待最终 Result" detail="页面会轮询 Task View，并按 Retry-After 获取最终结果。" />}</article>
-                  <article className="subpanel protocol-facts"><div className="subpanel-title"><h2>当前协议状态</h2><span>canonical first</span></div><dl><div><dt>Session</dt><dd>{sessionId || "—"}</dd></div><div><dt>Session status</dt><dd>{taskStatus}</dd></div><div><dt>Run status</dt><dd>{runStatus}</dd></div><div><dt>Event cursor</dt><dd>{streamCursor || "—"}</dd></div><div><dt>Streamed chars</dt><dd>{streamedAnswer.length}</dd></div></dl></article>
+                  <article className="subpanel protocol-facts"><div className="subpanel-title"><h2>当前协议状态</h2><span>canonical first</span></div><dl><div><dt>Session</dt><dd>{sessionId || "—"}</dd></div><div><dt>Session status</dt><dd>{taskStatus}</dd></div><div><dt>Run status</dt><dd>{runStatus}</dd></div><div><dt>Approval</dt><dd>{pendingApproval?.approvalId || "—"}</dd></div><div><dt>Event cursor</dt><dd>{streamCursor || "—"}</dd></div><div><dt>Streamed chars</dt><dd>{streamedAnswer.length}</dd></div></dl></article>
                 </aside>
               </div>
               {chatRawOpen && <article className="subpanel"><div className="subpanel-title"><h2>Runtime Event 原始视图</h2><span>{events.length} events</span></div>{events.length ? <div className="event-list compact-events">{events.toReversed().map((entry) => <details className={`event-row ${entry.event === "stream.reset" ? "reset" : ""}`} key={entry.id}><summary><span className="sequence">{entry.id}</span><strong>{entry.event}</strong>{entry.replay && <span className="pill warn">replay</span>}<time>{displayTime(entry.receivedAt)}</time></summary><JsonBlock value={entry.data} /></details>)}</div> : <EmptyState title="暂无事件" detail="发送问题或恢复 Session 后会自动连接。" />}</article>}

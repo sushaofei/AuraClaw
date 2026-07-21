@@ -106,3 +106,149 @@ export function metricSeries(points) {
     }))
     .toSorted((a, b) => a.name.localeCompare(b.name));
 }
+
+const APPROVAL_TERMINAL = new Set([
+  "approval.approved",
+  "approval.rejected",
+  "approval.expired",
+  "approval.cancelled",
+]);
+
+function asObject(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+
+function pickApprovalPayload(data) {
+  const root = asObject(data);
+  const nested = asObject(root.payload);
+  const detail = asObject(root.detail);
+  const metadata = asObject(root.metadata);
+  const approvalRequest = asObject(metadata.approval_request);
+  return { ...root, ...nested, ...detail, ...approvalRequest };
+}
+
+export function extractApprovalRequest(event, data) {
+  const type = String(event || "");
+  const payload = pickApprovalPayload(data);
+  const approvalId = typeof payload.approval_id === "string" ? payload.approval_id.trim() : "";
+  const isApprovalEvent = type === "approval.requested"
+    || type.endsWith(".approval.requested")
+    || (Boolean(approvalId) && (type.includes("approval") || payload.error_code === "approval_required"));
+  if (!approvalId || !isApprovalEvent) return null;
+  if (APPROVAL_TERMINAL.has(type)) return null;
+  return {
+    approvalId,
+    toolName: typeof payload.tool_name === "string"
+      ? payload.tool_name
+      : (typeof payload.name === "string" ? payload.name : ""),
+    reason: typeof payload.reason === "string"
+      ? payload.reason
+      : (typeof payload.summary === "string" ? payload.summary : ""),
+    risk: typeof payload.risk === "string" ? payload.risk : "",
+    redactedArguments: payload.redacted_arguments ?? payload.arguments ?? null,
+    expectedEffect: typeof payload.expected_effect === "string" ? payload.expected_effect : "",
+    status: typeof payload.status === "string" ? payload.status : "waiting",
+  };
+}
+
+export function findPendingApproval(timelineEntries) {
+  const pending = new Map();
+  const ordered = [...(timelineEntries || [])].toSorted((left, right) =>
+    String(left.timestamp ?? left.occurred_at ?? "").localeCompare(String(right.timestamp ?? right.occurred_at ?? "")),
+  );
+  for (const entry of ordered) {
+    const type = String(entry?.type ?? "");
+    const payload = pickApprovalPayload(entry?.detail ?? entry);
+    const approvalId = typeof payload.approval_id === "string" ? payload.approval_id.trim() : "";
+    if (!approvalId) continue;
+    if (type === "approval.requested") {
+      pending.set(approvalId, {
+        approvalId,
+        toolName: typeof payload.tool_name === "string" ? payload.tool_name : "",
+        reason: typeof payload.reason === "string" ? payload.reason : "",
+        risk: typeof payload.risk === "string" ? payload.risk : "",
+        redactedArguments: payload.redacted_arguments ?? null,
+        expectedEffect: typeof payload.expected_effect === "string" ? payload.expected_effect : "",
+        status: typeof payload.status === "string" ? payload.status : "waiting",
+      });
+      continue;
+    }
+    if (APPROVAL_TERMINAL.has(type)) pending.delete(approvalId);
+  }
+  const remaining = [...pending.values()];
+  return remaining.at(-1) ?? null;
+}
+
+export const CHAT_SESSION_STORAGE_KEY = "auraclaw-chat-sessions-v1";
+const CHAT_SESSION_LIMIT = 30;
+
+export function truncateTitle(value, limit = 48) {
+  const text = String(value || "").trim().replace(/\s+/g, " ");
+  if (!text) return "未命名会话";
+  return text.length > limit ? `${text.slice(0, limit - 1)}…` : text;
+}
+
+export function loadChatSessionIndex(storage, tenant) {
+  try {
+    const raw = storage?.getItem?.(CHAT_SESSION_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    const bucket = parsed?.[String(tenant || "")];
+    return Array.isArray(bucket) ? bucket.filter((item) => item && typeof item.sessionId === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+export function upsertChatSessionIndex(storage, tenant, entry, limit = CHAT_SESSION_LIMIT) {
+  const key = String(tenant || "");
+  const current = loadChatSessionIndex(storage, key);
+  const sessionId = String(entry?.sessionId || "").trim();
+  if (!sessionId) return current;
+  const nextEntry = {
+    sessionId,
+    title: truncateTitle(entry.title || entry.goal || sessionId),
+    updatedAt: entry.updatedAt || new Date().toISOString(),
+    status: entry.status ? String(entry.status) : "",
+    runStatus: entry.runStatus ? String(entry.runStatus) : "",
+  };
+  const next = [nextEntry, ...current.filter((item) => item.sessionId !== sessionId)].slice(0, limit);
+  try {
+    const raw = storage?.getItem?.(CHAT_SESSION_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    const store = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+    store[key] = next;
+    storage?.setItem?.(CHAT_SESSION_STORAGE_KEY, JSON.stringify(store));
+  } catch {
+    // Ignore quota / private-mode failures; in-memory list still updates.
+  }
+  return next;
+}
+
+export function removeChatSessionIndex(storage, tenant, sessionId) {
+  const key = String(tenant || "");
+  const target = String(sessionId || "").trim();
+  const next = loadChatSessionIndex(storage, key).filter((item) => item.sessionId !== target);
+  try {
+    const raw = storage?.getItem?.(CHAT_SESSION_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    const store = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+    store[key] = next;
+    storage?.setItem?.(CHAT_SESSION_STORAGE_KEY, JSON.stringify(store));
+  } catch {
+    // Ignore persistence failures.
+  }
+  return next;
+}
+
+export function buildRestoredTranscript({ goal, resultSummary, sessionId }) {
+  const messages = [];
+  const goalText = String(goal || "").trim();
+  if (goalText) messages.push({ role: "user", content: goalText });
+  const summary = String(resultSummary || "").trim();
+  if (summary) messages.push({ role: "assistant", content: summary });
+  messages.push({
+    role: "system",
+    content: `已恢复 Session ${sessionId || ""}。历史正文以 Task / Result 为准；可重放的 Runtime Event 将重新显示，不会伪造中间轮次。`.trim(),
+  });
+  return messages;
+}

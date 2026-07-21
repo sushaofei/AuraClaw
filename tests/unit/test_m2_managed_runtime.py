@@ -4,6 +4,7 @@ from typing import Any
 
 import pytest
 
+from auraclaw.composition.adapters.runtime_worker import RuntimeWorker
 from auraclaw.contracts.commands import CommandContext
 from auraclaw.contracts.errors import FencingTokenError
 from auraclaw.contracts.events import Actor, NewEvent
@@ -286,5 +287,54 @@ def test_runtime_event_bus_failure_does_not_lose_canonical_model_output() -> Non
         output = next(event for event in events if event.type == "model.output.completed")
         assert output.payload["output"] == "managed answer"
         assert any(event.type == "run.completed" for event in events)
+
+    asyncio.run(scenario())
+
+
+def test_runtime_worker_renews_lease_during_slow_model_calls() -> None:
+    async def scenario() -> None:
+        task, event_store, projection = await _pending_task()
+        control = InMemoryControlStateStore()
+        session = FencedSessionClient(event_store, control)
+        orchestrator = ManagedOrchestrator(
+            orchestrator_id="orch-keepalive",
+            control_store=control,
+            session=session,
+            provisioner=LocalRuntimeProvisioner(),
+            lease_ttl=timedelta(milliseconds=80),
+        )
+
+        class SlowProvider(RecordingProvider):
+            async def generate(self, request: ModelRequest, *, credential: str) -> ModelResponse:
+                await asyncio.sleep(0.25)
+                return await super().generate(request, credential=credential)
+
+        provider = SlowProvider("provider-a")
+        harness = AgentHarness(
+            control_store=control,
+            session=session,
+            model=ModelGateway(
+                (provider,),
+                StaticCredentialResolver({"provider-a": "secret"}),
+                default_provider="provider-a",
+            ),
+            tools=FencedToolClient(IdempotentToolClient(), control),
+            runtime_events=InMemoryRuntimeEventBus(),
+        )
+        worker = RuntimeWorker(
+            event_store=event_store,
+            reader=projection,
+            relay=OutboxRelay(event_store, projection),
+            orchestrator=orchestrator,
+            harness=harness,
+            heartbeat_interval=timedelta(milliseconds=25),
+        )
+        completed = await worker.run_once()
+        assert completed == 1
+        events = await event_store.load("tenant-m2", str(task["session_id"]))
+        assert any(event.type == "run.completed" for event in events)
+        refreshed = await projection.get_task("tenant-m2", str(task["session_id"]))
+        assert refreshed is not None
+        assert refreshed["run_status"] == "completed"
 
     asyncio.run(scenario())

@@ -34,6 +34,18 @@ class ManagedOrchestrator:
         self._provisioner = provisioner
         self._lease_ttl = lease_ttl
 
+    @property
+    def lease_ttl(self) -> timedelta:
+        return self._lease_ttl
+
+    async def recover(self) -> int:
+        return await self._control.recover_expired()
+
+    async def release_lost(self, assignment: RuntimeAssignment) -> None:
+        await self._control.reschedule(
+            self.task_id(assignment.tenant_id, assignment.session_id, assignment.run_id)
+        )
+
     async def watch(self, tasks: list[dict[str, Any]]) -> int:
         enqueued = 0
         for task in tasks:
