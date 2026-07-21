@@ -24,9 +24,9 @@ AURACLAW_DEV_API_TARGET=http://127.0.0.1:8000 npm run dev
 uv run uvicorn auraclaw.main:app --reload
 ```
 
-开发环境会启动确定性测试 Runtime，实际完成任务并发布多个 SSE delta；它兼容内存和
-PostgreSQL/Kafka 配置，测试增量不依赖 Kafka。已部署外部 Runtime 时设置
-`AURACLAW_DEVELOPMENT_RUNTIME_ENABLED=false`，生产环境则始终不会自动启用测试 Runtime。
+后端始终使用统一 Runtime Worker、Model Gateway 与 Runtime Event 发布链；本地和部署环境
+只通过各自 `.env.development` / `.env.production` 文件选择资源，文件内容不含环境标签。
+已部署外部 Runtime 时设置 `AURACLAW_RUNTIME_ENABLED=false`。
 
 ## 构建与测试
 

@@ -1,6 +1,7 @@
 import asyncio
 import json
 import time
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -44,7 +45,7 @@ def _clear_dependencies() -> None:
         providers.get_streaming_ingestor,
         providers.get_streaming_gateway,
         providers.get_model_gateway,
-        providers.get_production_control_store,
+        providers.get_control_store,
         providers.get_observability_store,
         providers.get_observability_service,
     ):
@@ -71,6 +72,27 @@ def test_settings_only_accept_provider_neutral_model_names(monkeypatch: pytest.M
     configured = Settings(_env_file=None)
     assert configured.model_gateway_configured is True
     assert configured.model_provider == "openai_compatible"
+
+
+def test_named_env_files_select_resources_without_environment_label(
+    tmp_path: Path,
+) -> None:
+    development = tmp_path / ".env.development"
+    production = tmp_path / ".env.production"
+    development.write_text(
+        "DB_NAME=auraclaw_development\nAURACLAW_STORAGE_BACKEND=memory\n"
+    )
+    production.write_text(
+        "DB_NAME=auraclaw_production\nAURACLAW_STORAGE_BACKEND=postgres\n"
+    )
+
+    development_settings = Settings(_env_file=development)
+    production_settings = Settings(_env_file=production)
+    assert not hasattr(development_settings, "env")
+    assert development_settings.db_name == "auraclaw_development"
+    assert production_settings.db_name == "auraclaw_production"
+    assert development_settings.postgres_enabled is False
+    assert production_settings.postgres_enabled is True
 
 
 def test_openai_compatible_provider_streams_usage_and_tools() -> None:
@@ -208,25 +230,23 @@ def test_openai_compatible_provider_maps_timeout() -> None:
     asyncio.run(scenario())
 
 
-def test_production_worker_completes_task_and_publishes_stream(
+def test_unified_worker_completes_task_and_publishes_stream(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = get_settings()
     previous = {
-        "env": settings.env,
         "storage_backend": settings.storage_backend,
         "runtime_event_backend": settings.runtime_event_backend,
-        "development_runtime_enabled": settings.development_runtime_enabled,
-        "development_runtime_poll_interval": settings.development_runtime_poll_interval,
+        "runtime_enabled": settings.runtime_enabled,
+        "runtime_poll_interval": settings.runtime_poll_interval,
         "model_api_key": settings.model_api_key,
         "model_base_url": settings.model_base_url,
         "model_name": settings.model_name,
     }
-    settings.env = "production"
     settings.storage_backend = "memory"
     settings.runtime_event_backend = "memory"
-    settings.development_runtime_enabled = False
-    settings.development_runtime_poll_interval = 0.01
+    settings.runtime_enabled = True
+    settings.runtime_poll_interval = 0.01
     settings.model_api_key = "production-secret"
     settings.model_base_url = "https://models.example/v1"
     settings.model_name = "test-model"
@@ -237,7 +257,7 @@ def test_production_worker_completes_task_and_publishes_stream(
             health = client.get("/health/ready").json()
             assert health["status"] == "ready"
             assert health["model_gateway_ready"] is True
-            assert health["production_runtime"] == "running"
+            assert health["runtime_worker"] == "running"
             assert health["runtime_event_producer_ready"] is True
             assert health["runtime_event_ingestor_ready"] is True
 

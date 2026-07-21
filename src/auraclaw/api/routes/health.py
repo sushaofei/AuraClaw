@@ -21,17 +21,10 @@ async def readiness(request: Request) -> dict[str, Any]:
     model_gateway_ready = bool(
         getattr(request.app.state, "model_gateway_ready", False)
     )
-    development_runtime_ready = bool(
-        getattr(request.app.state, "development_runtime_ready", False)
+    runtime_worker_ready = bool(
+        getattr(request.app.state, "runtime_worker_ready", False)
     )
-    production_runtime_ready = bool(
-        getattr(request.app.state, "production_runtime_ready", False)
-    )
-    executor_ready = (
-        development_runtime_ready
-        if settings.development_runtime_active
-        else production_runtime_ready
-    )
+    executor_ready = not settings.runtime_enabled or runtime_worker_ready
     ready = runtime_events_ready and executor_ready
     return {
         "status": "ready" if ready else "degraded",
@@ -46,10 +39,9 @@ async def readiness(request: Request) -> dict[str, Any]:
         ),
         "model_gateway": settings.model_provider,
         "model_gateway_ready": model_gateway_ready,
-        "development_runtime": (
+        "runtime_worker": (
             "running"
-            if development_runtime_ready
-            else "disabled"
+            if runtime_worker_ready
+            else "disabled" if not settings.runtime_enabled else "unconfigured"
         ),
-        "production_runtime": "running" if production_runtime_ready else "disabled",
     }
