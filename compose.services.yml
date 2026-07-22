@@ -1,0 +1,151 @@
+x-auraclaw-service: &auraclaw-service
+  build:
+    context: .
+  image: auraclaw:local
+  env_file:
+    - .env
+  restart: unless-stopped
+  stop_grace_period: 20s
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+  networks:
+    - auraclaw
+
+services:
+  task-api:
+    <<: *auraclaw-service
+    command: ["api", "run", "--host", "0.0.0.0", "--port", "8000"]
+    ports: ["8000:8000"]
+    healthcheck: &health-8000
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready')"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
+  session:
+    <<: *auraclaw-service
+    command: ["session", "run", "--host", "0.0.0.0", "--port", "8001"]
+    ports: ["8001:8001"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health/ready')"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
+  projection-worker:
+    <<: *auraclaw-service
+    command: ["projection", "relay", "--watch", "--host", "0.0.0.0", "--port", "8002"]
+    ports: ["8002:8002"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/health/ready')"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
+  orchestrator:
+    <<: *auraclaw-service
+    command: ["orchestrator", "run", "--host", "0.0.0.0", "--port", "8003"]
+    ports: ["8003:8003"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8003/health/ready')"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
+  agent-runtime:
+    <<: *auraclaw-service
+    command: ["runtime", "run", "--host", "0.0.0.0", "--port", "8004"]
+    ports: ["8004:8004"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8004/health/ready')"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
+  model-gateway:
+    <<: *auraclaw-service
+    command: ["model-gateway", "run", "--host", "0.0.0.0", "--port", "8005"]
+    ports: ["8005:8005"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8005/health/ready')"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
+  action-hands:
+    <<: *auraclaw-service
+    command: ["hands", "run", "--host", "0.0.0.0", "--port", "8006"]
+    ports: ["8006:8006"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8006/health/ready')"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
+  policy:
+    <<: *auraclaw-service
+    command: ["policy", "run", "--host", "0.0.0.0", "--port", "8007"]
+    ports: ["8007:8007"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8007/health/ready')"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
+  credential-proxy:
+    <<: *auraclaw-service
+    command: ["credential-proxy", "run", "--host", "0.0.0.0", "--port", "8008"]
+    ports: ["8008:8008"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8008/health/ready')"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
+  artifact-service:
+    <<: *auraclaw-service
+    command: ["artifact", "run", "--host", "0.0.0.0", "--port", "8009"]
+    ports: ["8009:8009"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8009/health/ready')"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
+  streaming-gateway:
+    <<: *auraclaw-service
+    command: ["streaming", "run", "--host", "0.0.0.0", "--port", "8010"]
+    ports: ["8010:8010"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8010/health/ready')"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
+  delivery-worker:
+    <<: *auraclaw-service
+    command: ["delivery", "run", "--host", "0.0.0.0", "--port", "8011"]
+    ports: ["8011:8011"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8011/health/ready')"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
+  ingress:
+    image: nginx:1.27-alpine
+    profiles: ["ingress"]
+    depends_on:
+      task-api:
+        condition: service_healthy
+      streaming-gateway:
+        condition: service_healthy
+    ports: ["8080:8080"]
+    volumes:
+      - ./deploy/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    networks:
+      - auraclaw
+
+networks:
+  auraclaw:
+    name: auraclaw

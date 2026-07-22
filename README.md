@@ -129,12 +129,44 @@ Review Evidence 和 Artifact lineage。
 
 ## 本地启动
 
+`auraclaw serve` 是显式的 development combined profile，不是生产入口：
+
 ```bash
 uv sync --extra dev
-uv run uvicorn auraclaw.main:app --reload
+uv run auraclaw serve
 ```
 
-API lifespan 内启动统一的 Runtime Worker（后续可拆分为独立进程）。所有环境都经过相同的
+development profile 的 API lifespan 内启动统一 Runtime Worker。正式服务使用同一镜像和不同
+entrypoint：
+
+```text
+auraclaw api run                  auraclaw session run
+auraclaw projection relay --watch
+auraclaw orchestrator run         auraclaw runtime run
+auraclaw model-gateway run        auraclaw hands run
+auraclaw policy run               auraclaw credential-proxy run
+auraclaw artifact run             auraclaw streaming run
+auraclaw delivery run
+```
+
+每个入口都有 `/health/live` 和 `/health/ready`；Worker 在 Uvicorn 收到 SIGTERM 后停止接收新循环、
+等待当前循环退出。Task API 不暴露 `/v1/streams/*`，Streaming Gateway 不暴露 Task Command。
+
+本地启动 12 服务拓扑：
+
+```bash
+docker compose -f compose.services.yml up --build
+# 同时启动可选 Ingress（监听 8080）
+docker compose -f compose.services.yml --profile ingress up --build
+```
+
+Compose 不启动 SeaweedFS，而是使用 `.env` 中已部署的外部 S3 endpoint。若 SeaweedFS、
+PostgreSQL 或 Kafka 运行在 Docker Host，请把相应 host 配置为 `host.docker.internal`；生产环境
+使用服务 DNS、Secret/Workload 注入，不在 Compose 文件中写入密钥。Ingress 将
+`/v1/streams/*` 路由到 `streaming-gateway:8010`，其余路径路由到 `task-api:8000`。
+
+S2 建立进程、路由和生命周期边界；S3 才删除兼容期内的 direct Store 装配并切换为内部 HTTP/MCP
+Client。所有环境都经过相同的
 Runnable Queue、Orchestrator、Agent Harness、Model Gateway 和 Runtime Event Producer SDK；
 环境差异只来自各自 `.env` 提供的 PostgreSQL/内存、Kafka/内存、模型端点和 CORS 等资源。
 已部署外部 Runtime 时可设置 `AURACLAW_RUNTIME_ENABLED=false` 关闭同进程 Worker。
