@@ -24,9 +24,12 @@ flowchart TD
     RM --> OR[Orchestrator]
     OR --> AR[Agent Runtime Pool]
     AR --> MG[Model Gateway]
-    AR --> TOOL[Tool Gateway / Dispatcher]
-    TOOL --> HANDS[Hands Service]
-    HANDS --> EXT[External Systems]
+    AR --> TOOL[Action Hands MCP Gateway]
+    TOOL --> HANDS[Hands Executor / Sandbox]
+    HANDS --> ART[Artifact Service]
+    ART --> SW[SeaweedFS S3]
+    HANDS --> CP[Credential Proxy]
+    CP --> EXT[External Systems]
     AR --> EB[Runtime Event Bus]
     TOOL --> EB
     EB --> SG[Streaming Gateway]
@@ -36,8 +39,11 @@ flowchart TD
     RM --> RD
     RD --> SINK[Result Sink]
     POLICY[Policy / Approval Service] -.-> TG
+    POLICY -.-> MG
+    POLICY -.-> OR
     POLICY -.-> TOOL
-    TOOL --> CP[Credential Proxy]
+    POLICY -.-> RD
+    POLICY -.-> ART
     CP --> VAULT[Vault]
 ```
 
@@ -87,34 +93,46 @@ flowchart TD
 | 用户命令、模型完成输出、工具结果、审批结果、任务生命周期 | Session / Collaboration Service | Canonical Event Log | 否，事实源 |
 | Control、Collaboration、Result、Approval 视图 | Projection Service | Read Model Store | 是 |
 | 租约、心跳、Assignment、Runnable Queue | Orchestrator | Control State Store | 部分可恢复，短期状态 |
+| Tool Invocation、Attempt、副作用状态 | Action Hands | Hands Invocation Store | 否，副作用证据 |
+| Policy 版本、Decision Evidence、Approval Control State | Policy / Approval Service | Policy Store；重要审批事实回写 Session | 决策可重算，证据不可丢 |
 | Token Delta、实时进度、Typing、短期状态 | Runtime producers | Runtime Event Bus | 不保证长期存在 |
-| 文件、报告、数据集、补丁和大型日志 | Artifact producers | Artifact Store | 由版本和保留策略决定 |
-| Secret、OAuth Token、外部系统凭证 | Vault | Secret Store | 不进入 Session 和 Sandbox |
+| Artifact Metadata、ACL、Version、Lineage、Scan State | Artifact Service | PostgreSQL + SeaweedFS S3 Object | 元数据不可由对象反推完整重建 |
+| Secret、OAuth Token、外部系统凭证 | Credential Proxy / Vault | Vault / KMS | 不进入 Session、Runtime 和 Sandbox |
 
 ## 部署边界
 
-MVP 可以合并部署，但逻辑边界不能合并：
+MVP 合并进程仍作为显式 development profile 保留。生产拓扑固定为 12 个独立入口，允许使用同一
+monorepo 和应用镜像，但必须使用不同 service identity、配置、数据库角色、健康检查和扩缩容策略：
 
 ```text
-Task API Deployment
-  Task Gateway
-  Task Query / Result Service
-
-Session Deployment
-  Session / Collaboration Service
-  Projection Workers
-  Read Model Store
-
-Runtime Control Deployment
-  Orchestrator
-  Control State Store
-
-Delivery Deployment
-  Streaming Gateway
-  Result Delivery Workers
+1. task-api              Admission / Command / Query / Ops
+2. session               Canonical Session / Collaboration 唯一事实写入口
+3. projection-worker     Session Outbox/Event Feed -> Read Model / Runnable Outbox
+4. orchestrator          Runnable / Lease / Assignment / Provision / Reconcile
+5. agent-runtime         Coordinator / Worker / Reviewer Runtime Pool
+6. model-gateway         Provider Secret / Model Call / Quota / Usage
+7. action-hands          MCP Gateway + Hands/Sandbox + Invocation Store
+8. policy                Policy / Approval / Budget / Data Egress
+9. credential-proxy      Vault/KMS Proxy / Sign / Refresh / Credential Audit
+10. artifact-service     Artifact Metadata/ACL/Version -> SeaweedFS S3
+11. streaming-gateway    Runtime Event -> Replay/Router -> SSE
+12. delivery-worker      Delivery Outbox -> Job/Attempt -> Sink
 ```
 
-生产阶段按负载和故障域拆分。任何拆分都不得引入跨组件数据库表直写或跨边界事务。
+生产边界遵守以下规则：
+
+- Session Event Log 只有 `session` 的数据库角色可写；其他服务通过版本化 Session Internal API 追加。
+- Projection、Control、Hands Invocation、Policy、Credential Audit、Artifact Metadata、Delivery 各有唯一写入者。
+- Task Query 由 `task-api` 使用 `task_query_ro` 只读 Projection；Orchestrator 只消费 Runnable Outbox/Feed。
+- Runtime 到 Hands 使用 MCP 2025-11-25 Streamable HTTP；MCP 不替代 Invocation Store、Lease 或 Canonical Event。
+- Artifact Service 使用 PostgreSQL 保存业务元数据、SeaweedFS S3 保存对象；生产不依赖本地共享目录。
+- Policy 对高风险、凭证和外发动作 fail closed；Credential Proxy 不提供返回明文 Secret 的接口。
+- 所有内部写调用携带 tenant、command/operation id、expected version、actor、correlation 和 causation；
+  Runtime/Hands 还携带可验证 Lease Assertion 与 Fencing Token。
+
+详细决策、迁移顺序与回滚边界见
+[ADR-001：生产服务部署边界与通信契约](../ADR-001%20生产服务部署边界与通信契约.md)。任何拆分都不得引入
+跨组件数据库表直写、跨边界事务或共享超级用户凭证。
 
 ## 架构完成标准
 
