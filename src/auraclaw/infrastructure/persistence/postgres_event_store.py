@@ -158,7 +158,7 @@ class PostgresEventStore(LazyPool):
                     occurred_at=utc_now(),
                     actor=context.actor,
                     correlation_id=context.correlation_id,
-                    causation_id=context.command_id,
+                    causation_id=context.causation_id or context.command_id,
                     visibility=new_event.visibility,
                     schema_version=1,
                     payload=dict(new_event.payload),

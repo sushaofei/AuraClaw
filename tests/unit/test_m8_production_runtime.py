@@ -95,6 +95,51 @@ def test_named_env_files_select_resources_without_environment_label(
     assert production_settings.postgres_enabled is True
 
 
+def test_seaweedfs_settings_resolve_endpoints_and_auto_enable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in (
+        "SEAWEEDFS_HOST",
+        "SEAWEEDFS_MASTER_PORT",
+        "SEAWEEDFS_FILER_PORT",
+        "SEAWEEDFS_S3_PORT",
+        "SEAWEEDFS_ACCESS_KEY",
+        "SEAWEEDFS_SECRET_KEY",
+        "SEAWEEDFS_BUCKET",
+        "SEAWEEDFS_USE_SSL",
+        "SEAWEEDFS_PATH_STYLE",
+        "AURACLAW_ARTIFACT_BACKEND",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    local_only = Settings(_env_file=None)
+    assert local_only.seaweedfs_enabled is False
+    assert local_only.seaweedfs_s3_endpoint == "http://127.0.0.1:8333"
+
+    monkeypatch.setenv("SEAWEEDFS_HOST", "seaweed.example")
+    monkeypatch.setenv("SEAWEEDFS_ACCESS_KEY", "ak")
+    monkeypatch.setenv("SEAWEEDFS_SECRET_KEY", "sk")
+    monkeypatch.setenv("SEAWEEDFS_BUCKET", "auraclaw-dev")
+    auto = Settings(_env_file=None)
+    assert auto.seaweedfs_enabled is True
+    assert auto.seaweedfs_master == "seaweed.example:9333"
+    assert auto.seaweedfs_filer_url == "http://seaweed.example:8888"
+    assert auto.seaweedfs_s3_endpoint == "http://seaweed.example:8333"
+    assert auto.seaweedfs_bucket == "auraclaw-dev"
+    assert auto.seaweedfs_path_style is True
+    assert "ak" not in repr(auto.seaweedfs_access_key)
+    assert "sk" not in repr(auto.seaweedfs_secret_key)
+
+    monkeypatch.setenv("AURACLAW_ARTIFACT_BACKEND", "local")
+    forced_local = Settings(_env_file=None)
+    assert forced_local.seaweedfs_enabled is False
+
+    monkeypatch.setenv("AURACLAW_ARTIFACT_BACKEND", "seaweedfs")
+    monkeypatch.delenv("SEAWEEDFS_SECRET_KEY")
+    with pytest.raises(ValueError, match="SEAWEEDFS_SECRET_KEY"):
+        Settings(_env_file=None)
+
+
 def test_openai_compatible_provider_streams_usage_and_tools() -> None:
     captured: dict[str, Any] = {}
 

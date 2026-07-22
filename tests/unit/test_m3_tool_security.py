@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from auraclaw.action.tool_gateway import GatewayToolClient, PolicyEngine, ToolGateway, ToolRegistry
+from auraclaw.action.tool_gateway import PolicyEngine, ToolGateway, ToolRegistry
 from auraclaw.contracts.commands import CommandContext
 from auraclaw.contracts.errors import (
     ApprovalValidationError,
@@ -33,6 +33,7 @@ from auraclaw.infrastructure.credentials.proxy import CredentialProxy, InMemoryV
 from auraclaw.infrastructure.hands.local import LocalHandsService
 from auraclaw.infrastructure.persistence.memory_control_store import InMemoryControlStateStore
 from auraclaw.infrastructure.persistence.memory_event_store import InMemoryEventStore
+from auraclaw.internal.tool_client import GatewayToolClient
 from auraclaw.projection.approval.projector import InMemoryApprovalProjection
 from auraclaw.projection.relay import OutboxRelay
 from auraclaw.projection.task.projector import InMemoryTaskProjection
