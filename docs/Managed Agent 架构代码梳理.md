@@ -2,11 +2,14 @@
 
 > 依据 [Managed Agent 系统架构图](./Managed%20Agent%20系统架构图.png) 与 `docs/Managed Agent 系统架构/`，对当前 `src/auraclaw/` 代码做组件级映射。  
 > 分析范围：纯 Python Managed Agent 后端（FastAPI）；前端工作台仅作 API Client 引用。  
-> 梳理日期：2026-07-20（[Issue #8](https://github.com/sushaofei/AuraClaw/issues/8) 模块边界重构完成，`2c95537`）。
+> 梳理日期：2026-07-22（Issue #8 模块边界重构已完成；[Issue #12](https://github.com/sushaofei/AuraClaw/issues/12)
+> S0 已冻结 12 服务生产目标，当前代码仍是模块化单体）。
 
 ## 一句话总结
 
-AuraClaw 是以 **Canonical Session Event Log** 为唯一任务事实源的模块化单体：HTTP 经 `gateways/` 接入，`composition/` 统一装配；所有部署在 `composition/api.py` lifespan 内启动同一个 `RuntimeWorker`，经 Orchestrator + AgentHarness 产出真实 SSE 增量与终态 Result。`application/`、`projections/`、`domain/ports.py` 已移除；独立 Runtime / Delivery Worker CLI 仍待后续 feature。
+AuraClaw 当前是以 **Canonical Session Event Log** 为唯一任务事实源的模块化单体：HTTP 经 `gateways/` 接入，
+`composition/` 统一装配；API lifespan 内启动同一个 `RuntimeWorker`。Issue #12 将在不改变 Canonical/Projection
+语义的前提下演进为 12 个生产入口；S0 只建立契约、所有权与迁移门禁，尚未声称进程拆分已经完成。
 
 ---
 
@@ -18,7 +21,7 @@ AuraClaw 是以 **Canonical Session Event Log** 为唯一任务事实源的模�
 | **入口** | `auraclaw.main:app`（FastAPI） / CLI `auraclaw` |
 | **语言与运行时** | Python ≥ 3.11 |
 | **核心依赖** | FastAPI、Pydantic Settings、asyncpg、aiokafka、httpx、uvicorn |
-| **存储** | 内存适配器（测试/本地）或 PostgreSQL（生产） |
+| **存储** | 当前：内存适配器或 PostgreSQL；目标：PostgreSQL 独立角色 + SeaweedFS S3 Artifact Object |
 | **实时总线** | 内存 Replay Buffer 或 Kafka `managed-agent.runtime-events` |
 | **Runtime 联调** | 统一 `RuntimeWorker`；模型、Store、Event Bus 与 CORS 均由当前 `.env` 提供 |
 | **质量门禁** | `ruff` + `mypy` + `pytest` + `lint-imports`（`pyproject.toml` `[tool.importlinter]`） |
@@ -117,6 +120,28 @@ Issue #8 已按 [Managed Agent 模块重构方案](./Managed%20Agent%20模块重
 | Tool / Policy | `action` | Runtime 经 Action ports 调用 |
 | Result Delivery | `delivery` | 库级 Worker；生产入口仍属后续 feature |
 | 技术适配器 | `infrastructure` | 仅由 `composition/providers.py` 选择与注入 |
+
+### 2.2 Issue #12 目标组件 → 包 → 生产入口
+
+包与服务不是 1:1。下表记录业务组件的主归属包、当前装配点和目标入口；目标入口在 S2 之前均为“未实现”。
+
+| 生产服务 | 主归属包 | 当前装配/实现 | 目标入口 |
+|---|---|---|---|
+| task-api | `api`、`gateways/task`、`gateways/query` | `auraclaw serve` / `composition/api.py` | `auraclaw api run` |
+| session | `session`、`domain` | API/Runtime 经进程内 Port 调用 | `auraclaw session run` |
+| projection-worker | `projection` | 已有 projection CLI | `auraclaw projection relay --watch` |
+| orchestrator | `control` | 嵌入 `RuntimeWorker` | `auraclaw orchestrator run` |
+| agent-runtime | `runtime` | `composition/adapters/runtime_worker.py` | `auraclaw runtime run` |
+| model-gateway | `runtime/model_gateway.py`；后续迁入稳定 Gateway 包 | Runtime 进程内装配 | `auraclaw model-gateway run` |
+| action-hands | `action` + `infrastructure/hands` | Runtime 进程内 Tool Client/Executor | `auraclaw hands run`（`/mcp`） |
+| policy | `action/policy.py` + Approval 组件 | Tool Gateway/Session 内嵌逻辑 | `auraclaw policy run` |
+| credential-proxy | `infrastructure/credentials`；S1 建立稳定业务 Port | 库级实现 | `auraclaw credential-proxy run` |
+| artifact-service | `infrastructure/artifacts`；S1 建立稳定业务 Port | 内存对象实现；本地路径配置未接线 | `auraclaw artifact run` |
+| streaming-gateway | `gateways/streaming` + Kafka adapter | API lifespan | `auraclaw streaming run` |
+| delivery-worker | `delivery` + `infrastructure/delivery` | 库级 Worker | `auraclaw delivery run` |
+
+详细通信、数据库角色、MCP、Policy/Credential、SeaweedFS 与迁移决策见
+[ADR-001](./ADR-001%20生产服务部署边界与通信契约.md)。
 
 ---
 
@@ -517,6 +542,8 @@ ReviewerRole → publish_review（独立 Review Session，不覆盖 Worker Artif
 
 ## 7. CLI 与进程边界
 
+### 当前入口
+
 ```text
 auraclaw serve                    # composition/cli.py → uvicorn auraclaw.main:app
 auraclaw projection relay [--tenant] [--watch] [--interval]
@@ -538,6 +565,27 @@ auraclaw operations redrive --tenant --queue {projection|delivery} --item-id ...
 
 架构文档允许 MVP 合并部署，但要求逻辑边界不合并。当前所有部署使用同一个进程内
 `RuntimeWorker` 验证完整 Streaming 链路；独立多进程 Worker 仍作为后续部署演进。
+
+### Issue #12 目标入口（S2）
+
+```text
+auraclaw api run
+auraclaw session run
+auraclaw projection relay --watch
+auraclaw orchestrator run
+auraclaw runtime run
+auraclaw model-gateway run
+auraclaw hands run
+auraclaw policy run
+auraclaw credential-proxy run
+auraclaw artifact run
+auraclaw streaming run
+auraclaw delivery run
+```
+
+目标入口使用同一应用镜像但不同对象图、service identity、数据库角色与 readiness。`auraclaw serve` 只保留为
+development combined profile。S1 先建立稳定 Port/DTO 与 in-process/HTTP/MCP 同构 contract tests，S2 才增加入口，
+S3 再移除跨边界 direct Store 装配。
 
 ---
 
@@ -622,15 +670,17 @@ src/auraclaw/
 - `api/dependencies.py` 承担全部 DI / Worker 装配
 - Query 与 Command 未分包、缺少 import-linter 门禁
 
-**仍待后续 feature issue**：
+**Issue #12 跟踪中的生产缺口**：
 
-1. **独立进程装配**：`auraclaw runtime run`、`auraclaw delivery run` 未实现；Runtime 当前挂 API lifespan
+1. **独立进程装配**：12 个目标入口中只有 Projection CLI 已独立；Runtime 当前挂 API lifespan
 2. **Admission / Auth**：`AllowAllAdmissionController` 为放行桩；无 OAuth/配额
 3. **Model Provider 扩展**：已有 OpenAI-compatible Adapter；多模型路由与 fallback 未实现
-4. **Artifact / Vault**：无 S3、无企业 Vault；`artifact_root` 未接线
+4. **Artifact / Vault**：SeaweedFS 配置已由用户加入工作区但适配器未接线；Artifact Metadata Service、Vault 生产适配仍未实现
 5. **Collaboration 写面**：无 REST；仅 `GET .../children` 读投影
-6. **部署拓扑**：模块化单体；Gateway / Workers / Runtime 三分进程未拆
-7. **架构图 Planner**：代码侧为 Reviewer 角色，命名不完全一致
+6. **部署拓扑**：模块化单体；Session、Control、Model、Hands、Policy、Credential、Artifact、Delivery 信任域未拆
+7. **持久运行状态**：Hands Invocation Store、跨服务 Checkpoint/Lease Assertion、共享 Streaming cursor 未实现
+8. **管理写路径**：Operations CLI 仍可经跨 schema Store redrive/retention，尚未改为 owner Admin API
+9. **架构图 Planner**：代码侧为 Reviewer 角色，命名不完全一致
 
 ---
 
@@ -640,7 +690,9 @@ src/auraclaw/
 - [Managed Agent 系统架构总览](./Managed%20Agent%20系统架构/00%20Managed%20Agent%20系统架构总览.md)
 - [Python 后端结构说明](./Python%20后端结构说明.md)
 - [Managed Agent 模块重构方案](./Managed%20Agent%20模块重构方案.md)
+- [ADR-001：生产服务部署边界与通信契约](./ADR-001%20生产服务部署边界与通信契约.md)
 - [Issue #8 — 模块重构跟踪](https://github.com/sushaofei/AuraClaw/issues/8)
+- [Issue #12 — 12 服务生产边界](https://github.com/sushaofei/AuraClaw/issues/12)
 - [开发阶段校验清单](./开发阶段校验清单.md)
 - [AGENTS.md](../AGENTS.md)
 - [M7 测试报告](./M7%20测试报告.md)
