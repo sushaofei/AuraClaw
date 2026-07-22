@@ -106,7 +106,7 @@ class InMemoryEventStore:
                     occurred_at=utc_now(),
                     actor=context.actor,
                     correlation_id=context.correlation_id,
-                    causation_id=context.command_id,
+                    causation_id=context.causation_id or context.command_id,
                     visibility=event.visibility,
                     schema_version=1,
                     payload=dict(event.payload),

@@ -1,0 +1,176 @@
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Any
+
+from auraclaw.action.tool_gateway import ToolGateway, ToolRegistry
+from auraclaw.contracts.errors import AuraClawError
+from auraclaw.contracts.mcp import (
+    MCP_PROTOCOL_VERSION,
+    McpJsonRpcError,
+    McpJsonRpcRequest,
+    McpJsonRpcResponse,
+    McpTrustedContext,
+)
+from auraclaw.contracts.tools import ArtifactRef, ToolInvocation
+
+
+class HandsMcpServer:
+    def __init__(self, *, registry: ToolRegistry, gateway: ToolGateway) -> None:
+        self._registry = registry
+        self._gateway = gateway
+        self._initialized_runtimes: set[str] = set()
+
+    async def handle(
+        self,
+        request: McpJsonRpcRequest,
+        *,
+        trusted_context: McpTrustedContext,
+    ) -> McpJsonRpcResponse:
+        try:
+            if request.method == "initialize":
+                return self._initialize(request, trusted_context)
+            if trusted_context.runtime_id not in self._initialized_runtimes:
+                return self._error(request, -32002, "MCP session is not initialized")
+            if request.method == "ping":
+                return McpJsonRpcResponse(id=request.id, result={})
+            if request.method == "tools/list":
+                return self._list_tools(request)
+            if request.method == "tools/call":
+                return await self._call_tool(request, trusted_context)
+            if request.method == "notifications/cancelled":
+                invocation_id = str(request.params.get("toolInvocationId", ""))
+                cancelled = await self._gateway.cancel(invocation_id)
+                return McpJsonRpcResponse(id=request.id, result={"cancelled": cancelled})
+            return self._error(request, -32601, "MCP method not found")
+        except AuraClawError as exc:
+            return self._error(request, -32001, exc.message, {"code": exc.code})
+        except (TypeError, ValueError, KeyError) as exc:
+            return self._error(request, -32602, "Invalid MCP params", {"detail": str(exc)})
+
+    def _initialize(
+        self,
+        request: McpJsonRpcRequest,
+        trusted_context: McpTrustedContext,
+    ) -> McpJsonRpcResponse:
+        requested = str(request.params.get("protocolVersion", ""))
+        if requested != MCP_PROTOCOL_VERSION:
+            return self._error(
+                request,
+                -32602,
+                "Unsupported MCP protocol version",
+                {"supported": [MCP_PROTOCOL_VERSION]},
+            )
+        self._initialized_runtimes.add(trusted_context.runtime_id)
+        return McpJsonRpcResponse(
+            id=request.id,
+            result={
+                "protocolVersion": MCP_PROTOCOL_VERSION,
+                "capabilities": {
+                    "tools": {"listChanged": False},
+                    "progress": {},
+                    "cancellation": {},
+                },
+                "serverInfo": {"name": "auraclaw-action-hands", "version": "1"},
+            },
+        )
+
+    def _list_tools(self, request: McpJsonRpcRequest) -> McpJsonRpcResponse:
+        tools = []
+        for capability in self._registry.discover():
+            tools.append(
+                {
+                    "name": capability.name,
+                    "description": capability.description,
+                    "inputSchema": capability.input_schema,
+                    "outputSchema": capability.output_schema,
+                    "annotations": {
+                        "readOnlyHint": capability.permission.value == "read-only",
+                        "destructiveHint": capability.risk_level.value == "critical",
+                    },
+                    "_meta": {
+                        "auraclaw": {
+                            "version": capability.version,
+                            "riskLevel": capability.risk_level.value,
+                        }
+                    },
+                }
+            )
+        return McpJsonRpcResponse(id=request.id, result={"tools": tools})
+
+    async def _call_tool(
+        self,
+        request: McpJsonRpcRequest,
+        trusted: McpTrustedContext,
+    ) -> McpJsonRpcResponse:
+        name = str(request.params["name"])
+        arguments = dict(request.params.get("arguments", {}))
+        meta = dict(request.params.get("_meta", {})).get("auraclaw", {})
+        if not isinstance(meta, dict):
+            raise ValueError("_meta.auraclaw must be an object")
+        invocation_id = str(meta.get("toolInvocationId", ""))
+        if not invocation_id:
+            raise ValueError("toolInvocationId is required")
+        deadline = trusted.deadline
+        if meta.get("deadline"):
+            requested_deadline = datetime.fromisoformat(str(meta["deadline"]))
+            deadline = (
+                min(deadline, requested_deadline)
+                if deadline is not None
+                else requested_deadline
+            )
+        invocation = ToolInvocation(
+            tool_invocation_id=invocation_id,
+            tenant_id=trusted.tenant_id,
+            root_session_id=trusted.root_session_id,
+            session_id=trusted.session_id,
+            run_id=trusted.run_id,
+            tool_name=name,
+            tool_version=str(meta.get("toolVersion", "1")),
+            arguments=arguments,
+            expected_side_effect=str(meta.get("expectedSideEffect", "read")),
+            idempotency_key=str(meta.get("idempotencyKey", invocation_id)),
+            deadline=deadline,
+            fencing_token=trusted.fencing_token,
+            actor_id=trusted.runtime_id,
+            approval_id=_optional_string(meta.get("approvalId")),
+            credential_ref=_optional_string(meta.get("credentialRef")),
+        )
+        result = await self._gateway.execute(invocation)
+        serialized = result.as_dict()
+        content: list[dict[str, Any]] = [{"type": "text", "text": result.summary}]
+        if isinstance(result.content, ArtifactRef):
+            content.append(
+                {
+                    "type": "resource_link",
+                    "name": result.content.artifact_id,
+                    "uri": f"artifact://{result.content.artifact_id}/{result.content.version}",
+                    "mimeType": result.content.media_type,
+                    "size": result.content.size,
+                }
+            )
+        return McpJsonRpcResponse(
+            id=request.id,
+            result={
+                "content": content,
+                "structuredContent": serialized,
+                "isError": result.status.value != "success",
+                "_meta": {"auraclaw": {"toolInvocationId": invocation_id}},
+            },
+        )
+
+    @staticmethod
+    def _error(
+        request: McpJsonRpcRequest,
+        code: int,
+        message: str,
+        data: dict[str, Any] | None = None,
+    ) -> McpJsonRpcResponse:
+        return McpJsonRpcResponse(
+            id=request.id,
+            error=McpJsonRpcError(code=code, message=message, data=data or {}),
+        )
+
+
+def _optional_string(value: object) -> str | None:
+    return str(value) if value is not None else None

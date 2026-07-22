@@ -11,3 +11,4 @@ class CommandContext:
     correlation_id: str
     expected_version: int
     operation: str = "append"
+    causation_id: str | None = None

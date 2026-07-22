@@ -79,7 +79,7 @@ def test_postgres_control_claim_lease_fencing_checkpoint_and_capacity() -> None:
             assert sum(len(batch) for batch in claims) == 1
 
             lease = await store_a.acquire_lease(
-                resource_id, "orch-a", ttl=timedelta(seconds=5)
+                resource_id, "orch-a", ttl=timedelta(seconds=30)
             )
             assert lease is not None
             assert await store_b.acquire_lease(
