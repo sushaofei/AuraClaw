@@ -14,6 +14,21 @@ class Settings(BaseSettings):
 
     host: str = "127.0.0.1"
     port: int = 8000
+    deployment_profile: Literal["development", "production"] = "development"
+    task_api_port: int = 8000
+    session_port: int = 8001
+    projection_port: int = 8002
+    orchestrator_port: int = 8003
+    runtime_port: int = 8004
+    model_gateway_port: int = 8005
+    hands_port: int = 8006
+    policy_port: int = 8007
+    credential_proxy_port: int = 8008
+    artifact_port: int = 8009
+    streaming_port: int = 8010
+    delivery_port: int = 8011
+    lease_signing_key: SecretStr | None = None
+    runtime_workload_token: SecretStr | None = None
     log_level: str = "INFO"
     storage_backend: Literal["auto", "memory", "postgres"] = "auto"
     database_url: str = "postgresql+asyncpg://auraclaw:auraclaw@localhost:5432/auraclaw"
@@ -142,6 +157,26 @@ class Settings(BaseSettings):
     @property
     def model_gateway_configured(self) -> bool:
         return bool(self.model_api_key and self.model_base_url and self.model_name)
+
+    def service_port(self, service_name: str) -> int:
+        ports = {
+            "task-api": self.task_api_port,
+            "session": self.session_port,
+            "projection-worker": self.projection_port,
+            "orchestrator": self.orchestrator_port,
+            "agent-runtime": self.runtime_port,
+            "model-gateway": self.model_gateway_port,
+            "action-hands": self.hands_port,
+            "policy": self.policy_port,
+            "credential-proxy": self.credential_proxy_port,
+            "artifact-service": self.artifact_port,
+            "streaming-gateway": self.streaming_port,
+            "delivery-worker": self.delivery_port,
+        }
+        try:
+            return ports[service_name]
+        except KeyError as exc:
+            raise ValueError(f"unknown service: {service_name}") from exc
 
 
 @lru_cache

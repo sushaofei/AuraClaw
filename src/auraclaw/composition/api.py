@@ -31,7 +31,10 @@ from auraclaw.api.dependencies import (
 from auraclaw.api.dependencies import (
     get_task_query_service as task_query_service_dependency,
 )
-from auraclaw.api.routes import router
+from auraclaw.api.routes.health import router as health_router
+from auraclaw.api.routes.operations import router as operations_router
+from auraclaw.api.routes.streams import router as stream_router
+from auraclaw.api.routes.tasks import router as task_router
 from auraclaw.composition import providers
 from auraclaw.config import get_settings
 from auraclaw.contracts.errors import AuraClawError
@@ -41,6 +44,7 @@ from auraclaw.infrastructure.observability.stores import StructuredLogger
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    app.state.service_name = "development-combined"
     settings = get_settings()
     producer = providers.get_runtime_event_producer()
     ingestor = providers.get_streaming_ingestor()
@@ -95,13 +99,47 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await providers.get_runtime_replay_bus().close()
 
 
-def create_app() -> FastAPI:
+@asynccontextmanager
+async def task_api_lifespan(app: FastAPI) -> AsyncIterator[None]:
+    app.state.service_name = "task-api"
+    app.state.service_ready = True
+    yield
+    app.state.service_ready = False
+
+
+@asynccontextmanager
+async def streaming_lifespan(app: FastAPI) -> AsyncIterator[None]:
+    app.state.service_name = "streaming-gateway"
+    app.state.service_ready = False
+    ingestor = providers.get_streaming_ingestor()
+    if ingestor is not None:
+        await asyncio.wait_for(ingestor.start(), timeout=10)
+    app.state.runtime_event_bus_ready = True
+    app.state.service_ready = True
+    try:
+        yield
+    finally:
+        app.state.service_ready = False
+        if ingestor is not None:
+            with suppress(Exception):
+                await asyncio.wait_for(ingestor.close(), timeout=10)
+        await providers.get_runtime_replay_bus().close()
+
+
+def create_app(*, profile: str = "development") -> FastAPI:
     settings = get_settings()
+    selected_lifespan = {
+        "development": lifespan,
+        "task-api": task_api_lifespan,
+        "streaming-gateway": streaming_lifespan,
+    }.get(profile)
+    if selected_lifespan is None:
+        raise ValueError(f"unsupported API composition profile: {profile}")
     app = FastAPI(
-        title="AuraClaw Managed Agent API",
+        title=f"AuraClaw {profile}",
         version=__version__,
         description="Canonical-event-driven Managed Agent backend",
-        lifespan=lifespan,
+        lifespan=selected_lifespan,
     )
     app.dependency_overrides.update(
         {
@@ -130,7 +168,12 @@ def create_app() -> FastAPI:
             ],
             expose_headers=["ETag", "Retry-After", "traceparent"],
         )
-    app.include_router(router)
+    app.include_router(health_router)
+    if profile in {"development", "task-api"}:
+        app.include_router(task_router)
+        app.include_router(operations_router)
+    if profile in {"development", "streaming-gateway"}:
+        app.include_router(stream_router)
     structured_logger = StructuredLogger()
 
     @app.middleware("http")

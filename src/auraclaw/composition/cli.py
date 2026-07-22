@@ -1,8 +1,11 @@
 import argparse
 import asyncio
+from collections.abc import Callable, Sequence
+from typing import Any
 
 import uvicorn
 
+from auraclaw.composition.services import SERVICE_BY_COMMAND, create_service_app, service_spec
 from auraclaw.config import get_settings
 from auraclaw.infrastructure.persistence.postgres_event_store import PostgresEventStore
 from auraclaw.infrastructure.persistence.postgres_operations_store import PostgresOperationsStore
@@ -77,22 +80,54 @@ async def _run_operations_command(
         await store.close()
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="auraclaw")
     subcommands = parser.add_subparsers(dest="command")
-    subcommands.add_parser("serve")
+    serve = subcommands.add_parser("serve", help="development combined profile")
+    serve.add_argument("--host")
+    serve.add_argument("--port", type=int)
     projection = subcommands.add_parser("projection")
     projection.add_argument("action", choices=("relay", "rebuild"))
     projection.add_argument("--tenant")
     projection.add_argument("--watch", action="store_true")
     projection.add_argument("--interval", type=float, default=1.0)
+    projection.add_argument("--host")
+    projection.add_argument("--port", type=int)
     operations = subcommands.add_parser("operations")
     operations.add_argument("action", choices=("status", "retention", "redrive"))
     operations.add_argument("--tenant")
     operations.add_argument("--queue", choices=("projection", "delivery"))
     operations.add_argument("--item-id")
-    args = parser.parse_args()
+    for command in SERVICE_BY_COMMAND:
+        if command == "projection":
+            continue
+        service = subcommands.add_parser(command)
+        service.add_argument("action", choices=("run",))
+        service.add_argument("--host")
+        service.add_argument("--port", type=int)
+    return parser
+
+
+def main(
+    argv: Sequence[str] | None = None,
+    *,
+    uvicorn_runner: Callable[..., Any] = uvicorn.run,
+) -> None:
+    parser = build_parser()
+    args = parser.parse_args(argv)
     if args.command == "projection":
+        if args.action == "relay" and args.watch:
+            settings = get_settings()
+            spec = service_spec("projection", settings)
+            uvicorn_runner(
+                create_service_app(
+                    "projection", settings, worker_interval=args.interval
+                ),
+                host=args.host or settings.host,
+                port=args.port or spec.port,
+                log_level=settings.log_level.lower(),
+            )
+            return
         asyncio.run(
             _run_projection_command(
                 args.action, args.tenant, watch=args.watch, interval=args.interval
@@ -109,11 +144,21 @@ def main() -> None:
             )
         )
         return
+    if args.command in SERVICE_BY_COMMAND and args.command != "projection":
+        settings = get_settings()
+        spec = service_spec(args.command, settings)
+        uvicorn_runner(
+            create_service_app(args.command, settings),
+            host=args.host or settings.host,
+            port=args.port or spec.port,
+            log_level=settings.log_level.lower(),
+        )
+        return
     settings = get_settings()
-    uvicorn.run(
+    uvicorn_runner(
         "auraclaw.main:app",
-        host=settings.host,
-        port=settings.port,
+        host=getattr(args, "host", None) or settings.host,
+        port=getattr(args, "port", None) or settings.port,
         log_level=settings.log_level.lower(),
     )
 
