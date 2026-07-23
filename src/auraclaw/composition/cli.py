@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 from collections.abc import Callable, Sequence
+from pathlib import Path
 from typing import Any
 
 import uvicorn
@@ -9,6 +10,9 @@ from auraclaw.composition.services import SERVICE_BY_COMMAND, create_service_app
 from auraclaw.config import get_settings
 from auraclaw.contracts.internal import ServiceIdentity
 from auraclaw.infrastructure.clients.admin import RemoteAdminClient
+from auraclaw.infrastructure.persistence.migration_runner import (
+    PostgresMigrationRunner,
+)
 from auraclaw.infrastructure.persistence.postgres_event_store import PostgresEventStore
 from auraclaw.infrastructure.projection.postgres_task_store import PostgresTaskProjection
 from auraclaw.projection.maintenance import ProjectionMaintenanceService
@@ -117,6 +121,43 @@ async def _run_operations_command(
         await artifact.aclose()
 
 
+async def _run_migration_command(
+    action: str,
+    *,
+    target: str | None,
+    directory: str,
+    confirm_existing_schema: bool = False,
+) -> None:
+    settings = get_settings()
+    if (
+        settings.deployment_profile == "production"
+        and settings.migration_database_url is None
+    ):
+        raise SystemExit(
+            "production migration requires AURACLAW_MIGRATION_DATABASE_URL"
+        )
+    runner = PostgresMigrationRunner(
+        settings.resolved_migration_database_url,
+        Path(directory),
+    )
+    if action == "status":
+        for item in await runner.status():
+            print(f"{item.version} {item.state} {item.name} sha256={item.checksum[:12]}")
+        return
+    if action == "baseline":
+        if target is None or not confirm_existing_schema:
+            raise SystemExit(
+                "baseline requires --target and --confirm-existing-schema"
+            )
+        baselined = await runner.baseline(target)
+        print(f"migrations baselined={len(baselined)} target={target}")
+        return
+    applied = await runner.apply(target)
+    print(f"migrations applied={len(applied)}")
+    for name in applied:
+        print(name)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="auraclaw")
     subcommands = parser.add_subparsers(dest="command")
@@ -135,6 +176,11 @@ def build_parser() -> argparse.ArgumentParser:
     operations.add_argument("--tenant")
     operations.add_argument("--queue", choices=("projection", "delivery"))
     operations.add_argument("--item-id")
+    migrate = subcommands.add_parser("migrate")
+    migrate.add_argument("action", choices=("status", "up", "baseline"))
+    migrate.add_argument("--target")
+    migrate.add_argument("--directory", default="migrations")
+    migrate.add_argument("--confirm-existing-schema", action="store_true")
     for command in SERVICE_BY_COMMAND:
         if command == "projection":
             continue
@@ -178,6 +224,16 @@ def main(
                 args.tenant,
                 queue=args.queue,
                 item_id=args.item_id,
+            )
+        )
+        return
+    if args.command == "migrate":
+        asyncio.run(
+            _run_migration_command(
+                args.action,
+                target=args.target,
+                directory=args.directory,
+                confirm_existing_schema=args.confirm_existing_schema,
             )
         )
         return

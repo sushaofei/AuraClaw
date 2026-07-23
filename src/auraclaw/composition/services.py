@@ -226,10 +226,11 @@ class RemoteRuntimeWorker:
         for assignment in assignments:
             try:
                 await self._harness.execute(assignment)
-            except Exception:
+            except Exception as exc:
                 task_id = (
                     f"{assignment.tenant_id}:{assignment.session_id}:{assignment.run_id}"
                 )
+                await self._harness.record_failure(assignment, exc)
                 await self._control.finish_assignment(task_id, "failed")
                 raise
         return len(assignments)

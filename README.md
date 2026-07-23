@@ -165,6 +165,22 @@ PostgreSQL 或 Kafka 运行在 Docker Host，请把相应 host 配置为 `host.d
 使用服务 DNS、Secret/Workload 注入，不在 Compose 文件中写入密钥。Ingress 将
 `/v1/streams/*` 路由到 `streaming-gateway:8010`，其余路径路由到 `task-api:8000`。
 
+生产部署使用独立模板，先运行 checksum/advisory-lock 保护的 migration job，再启动拓扑：
+
+```bash
+docker network create auraclaw-platform # 已存在时跳过
+uv run python scripts/materialize_compose_secrets.py \
+  --env-file .env.production --output-dir .runtime/compose-secrets
+uv run python scripts/compose_preflight.py --env-file .env.production
+docker compose --env-file .env.production -f compose.production.yml \
+  --profile migrate run --rm migrate migrate up \
+  --target 0014 --directory /app/migrations
+docker compose --env-file .env.production -f compose.production.yml up -d --wait
+```
+
+副本、资源、Secret 文件挂载、蓝绿发布、回滚、扩缩容与 kill test 见
+[S5 Docker Compose 生产部署与故障演练 Runbook](docs/S5%20Docker%20Compose%20生产部署与故障演练%20Runbook.md)。
+
 S3 生产装配已切换为 owner HTTP/MCP Client：Session、Control、Model、Policy、Credential、
 Artifact 和 Admin 写路径不再共享跨域 Store。Action Hands 以 MCP Server 暴露工具，并通过持久
 Invocation Store、Policy、Credential Proxy 和 Artifact Service 执行；Runtime 只持有 MCP Client。

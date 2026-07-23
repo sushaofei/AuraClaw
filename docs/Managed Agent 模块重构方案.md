@@ -497,4 +497,5 @@ Phase 1–4 各自视为一个开发阶段。每个阶段开工时在 [开发阶
 - [Python 后端结构说明](./Python%20后端结构说明.md)
 - [开发阶段校验清单](./开发阶段校验清单.md)
 - [M6 运维与灰度发布 Runbook](./M6%20运维与灰度发布%20Runbook.md)
+- [S5 Docker Compose 生产部署与故障演练 Runbook](./S5%20Docker%20Compose%20生产部署与故障演练%20Runbook.md)
 - [AGENTS.md](../AGENTS.md)

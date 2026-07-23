@@ -9,6 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from auraclaw.composition import providers
+from auraclaw.composition.services import RemoteRuntimeWorker
 from auraclaw.config import Settings, get_settings
 from auraclaw.contracts.errors import (
     ModelAuthenticationError,
@@ -30,6 +31,100 @@ class StreamingModelClient:
             deltas=("production ", "answer"),
             usage={"input_tokens": 2, "output_tokens": 2, "total_tokens": 4},
         )
+
+
+def test_remote_runtime_records_canonical_failure_before_acking_assignment() -> None:
+    class Assignment:
+        tenant_id = "tenant-m8"
+        session_id = "session-m8"
+        run_id = "run-m8"
+
+    class Control:
+        def __init__(self) -> None:
+            self.finished: list[tuple[str, str]] = []
+
+        async def register(self) -> None:
+            return None
+
+        async def heartbeat(self) -> None:
+            return None
+
+        async def claim(self, *, limit: int) -> list[Assignment]:
+            assert limit == 1
+            return [Assignment()]
+
+        async def finish_assignment(self, task_id: str, outcome: str) -> None:
+            self.finished.append((task_id, outcome))
+
+    class Harness:
+        def __init__(self) -> None:
+            self.failure_recorded = False
+
+        async def execute(self, assignment: Assignment) -> None:
+            del assignment
+            raise RuntimeError("provider unavailable")
+
+        async def record_failure(
+            self, assignment: Assignment, error: Exception
+        ) -> None:
+            assert assignment.run_id == "run-m8"
+            assert isinstance(error, RuntimeError)
+            self.failure_recorded = True
+
+    async def scenario() -> None:
+        control = Control()
+        harness = Harness()
+        worker = RemoteRuntimeWorker(control, harness)  # type: ignore[arg-type]
+        with pytest.raises(RuntimeError, match="provider unavailable"):
+            await worker.tick()
+        assert harness.failure_recorded is True
+        assert control.finished == [
+            ("tenant-m8:session-m8:run-m8", "failed")
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_remote_runtime_does_not_ack_when_canonical_failure_cannot_be_written() -> None:
+    class Assignment:
+        tenant_id = "tenant-m8"
+        session_id = "session-m8"
+        run_id = "run-m8"
+
+    class Control:
+        def __init__(self) -> None:
+            self.finished = False
+
+        async def register(self) -> None:
+            return None
+
+        async def claim(self, *, limit: int) -> list[Assignment]:
+            del limit
+            return [Assignment()]
+
+        async def finish_assignment(self, task_id: str, outcome: str) -> None:
+            del task_id, outcome
+            self.finished = True
+
+    class Harness:
+        async def execute(self, assignment: Assignment) -> None:
+            del assignment
+            raise RuntimeError("provider unavailable")
+
+        async def record_failure(
+            self, assignment: Assignment, error: Exception
+        ) -> None:
+            del assignment, error
+            raise ConnectionError("session unavailable")
+
+    async def scenario() -> None:
+        control = Control()
+        worker = RemoteRuntimeWorker(control, Harness())  # type: ignore[arg-type]
+        with pytest.raises(ConnectionError, match="session unavailable"):
+            await worker.tick()
+        assert control.finished is False
+
+    asyncio.run(scenario())
 
 
 def _clear_dependencies() -> None:

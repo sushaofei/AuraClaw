@@ -174,6 +174,29 @@ class AgentHarness:
         )
         await self._control.finish_assignment(self._task_id(assignment), "completed")
 
+    async def record_failure(
+        self, assignment: RuntimeAssignment, error: Exception
+    ) -> None:
+        """Persist a terminal business fact before releasing a failed assignment."""
+        events = await self._session.load(assignment)
+        if any(
+            event.type in {"run.completed", "run.failed", "run.cancelled"}
+            and event.run_id == assignment.run_id
+            for event in events
+        ):
+            return
+        await self._append_once(
+            assignment,
+            events,
+            "run.failed",
+            {
+                "run_id": assignment.run_id,
+                "error": type(error).__name__,
+            },
+            identity=assignment.run_id,
+            visibility=Visibility.USER,
+        )
+
     async def _run_tool(
         self,
         assignment: RuntimeAssignment,

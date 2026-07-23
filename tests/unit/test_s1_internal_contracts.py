@@ -169,6 +169,39 @@ def test_session_in_process_and_http_adapters_share_the_contract() -> None:
     asyncio.run(scenario())
 
 
+def test_task_api_can_atomically_create_a_session_and_request_its_first_run() -> None:
+    async def scenario() -> None:
+        service = SessionInternalService(
+            InMemoryEventStore(),
+            lease_verifier=_verifier(),
+        )
+        response = await service.append(
+            SessionAppendRequest(
+                context=_context(ServiceIdentity.TASK_API),
+                root_session_id="session-s1",
+                session_id="session-s1",
+                run_id="run-s1",
+                command_id="command-create-s1",
+                expected_version=0,
+                operation="task.create",
+                actor_type="user",
+                actor_id="user-s1",
+                events=(
+                    EventInput(type="session.created", payload={"goal": "test"}),
+                    EventInput(type="run.requested", payload={"run_id": "run-s1"}),
+                ),
+                command_result={"accepted": True},
+            )
+        )
+
+        assert [event["type"] for event in response.events] == [
+            "session.created",
+            "run.requested",
+        ]
+
+    asyncio.run(scenario())
+
+
 def test_session_rejects_event_spoofing_bad_signatures_and_stale_fencing() -> None:
     async def scenario() -> None:
         service = SessionInternalService(
