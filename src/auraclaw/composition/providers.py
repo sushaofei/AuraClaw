@@ -11,6 +11,7 @@ from auraclaw.gateways.task.commands import TaskCommandGateway
 from auraclaw.infrastructure.kafka.runtime_events import (
     KafkaRuntimeEventProducer,
     KafkaStreamingIngestor,
+    PostgresRuntimeEventStore,
     ReplayRuntimeEventBus,
     RuntimeEventProducerSDK,
     SDKRuntimeEventPublisher,
@@ -47,6 +48,7 @@ ApprovalProjection = InMemoryApprovalProjection | PostgresApprovalProjection
 CollaborationProjection = InMemoryCollaborationProjection | PostgresCollaborationProjection
 ObservabilityStore = InMemoryObservabilityStore | PostgresObservabilityStore
 ControlStore = InMemoryControlStateStore | PostgresControlStateStore
+RuntimeReplayStore = ReplayRuntimeEventBus | PostgresRuntimeEventStore
 
 
 @lru_cache
@@ -114,8 +116,14 @@ def get_task_query_service() -> TaskQueryService:
 
 
 @lru_cache
-def get_runtime_replay_bus() -> ReplayRuntimeEventBus:
+def get_runtime_replay_bus() -> RuntimeReplayStore:
     settings = get_settings()
+    if settings.postgres_enabled:
+        return PostgresRuntimeEventStore(
+            settings.resolved_database_url,
+            retention_events=settings.runtime_event_retention_events,
+            connection_queue_size=settings.stream_connection_queue_size,
+        )
     return ReplayRuntimeEventBus(
         retention_events=settings.runtime_event_retention_events,
         connection_queue_size=settings.stream_connection_queue_size,
@@ -123,7 +131,7 @@ def get_runtime_replay_bus() -> ReplayRuntimeEventBus:
 
 
 @lru_cache
-def get_runtime_event_producer() -> KafkaRuntimeEventProducer | ReplayRuntimeEventBus:
+def get_runtime_event_producer() -> KafkaRuntimeEventProducer | RuntimeReplayStore:
     settings = get_settings()
     if settings.kafka_enabled:
         return KafkaRuntimeEventProducer(
@@ -137,7 +145,19 @@ def get_runtime_event_producer() -> KafkaRuntimeEventProducer | ReplayRuntimeEve
 def get_runtime_event_publisher() -> SDKRuntimeEventPublisher:
     # Provider streams already arrive as meaningful chunks. A one-byte threshold
     # preserves those chunks while retaining SDK validation, redaction and sequencing.
-    sdk = RuntimeEventProducerSDK(get_runtime_event_producer(), delta_flush_bytes=1)
+    settings = get_settings()
+    producer = get_runtime_event_producer()
+    replay = get_runtime_replay_bus()
+    allocator = (
+        replay
+        if not settings.kafka_enabled and isinstance(replay, PostgresRuntimeEventStore)
+        else None
+    )
+    sdk = RuntimeEventProducerSDK(
+        producer,
+        sequence_allocator=allocator,
+        delta_flush_bytes=1,
+    )
     return SDKRuntimeEventPublisher(sdk)
 
 

@@ -22,6 +22,7 @@ def _canonical_claims(assertion: LeaseAssertion) -> bytes:
             "lease_id": assertion.lease_id,
             "run_id": assertion.run_id,
             "root_session_id": assertion.root_session_id,
+            "runtime_id": assertion.runtime_id,
             "session_id": assertion.session_id,
             "tenant_id": assertion.tenant_id,
         },

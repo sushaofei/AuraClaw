@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
 from auraclaw.action.policy import PolicyEngine
+from auraclaw.contracts.errors import VersionConflictError
 from auraclaw.contracts.internal import (
     ApprovalCommandRequest,
     ApprovalValidationResponse,
@@ -18,6 +19,8 @@ from auraclaw.contracts.tools import RiskLevel, ToolCapability, ToolPermission
 
 
 class PolicyStateStore(Protocol):
+    async def ensure_active_version(self, version: str) -> bool: ...
+
     async def record_decision(
         self, request: PolicyEvaluateRequest, response: PolicyEvaluateResponse
     ) -> None: ...
@@ -41,11 +44,18 @@ class PolicyInternalService:
         store: PolicyStateStore | None = None,
     ) -> None:
         self._engine = PolicyEngine(version=version)
+        self._version = version
         self._store = store
         self._approvals: dict[tuple[str, str], dict[str, Any]] = {}
         self._decisions: dict[str, tuple[PolicyEvaluateRequest, PolicyEvaluateResponse]] = {}
 
     async def evaluate(self, request: PolicyEvaluateRequest) -> PolicyEvaluateResponse:
+        if self._store is not None and not await self._store.ensure_active_version(
+            self._version
+        ):
+            raise VersionConflictError(
+                "configured policy version does not match the active bundle"
+            )
         attributes = request.attributes
         capability = ToolCapability(
             name=request.resource,

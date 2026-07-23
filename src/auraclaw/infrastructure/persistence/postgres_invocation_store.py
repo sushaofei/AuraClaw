@@ -27,14 +27,36 @@ class PostgresInvocationStore(LazyPool):
     ) -> InvocationBegin:
         pool = await self.pool()
         async with pool.acquire() as connection, connection.transaction():
-            row = await connection.fetchrow(
-                """SELECT argument_digest,normalized_result,status,side_effect_status
-                FROM hands.invocation
-                WHERE tenant_id=$1 AND idempotency_key=$2 FOR UPDATE""",
+            inserted = await connection.fetchval(
+                """INSERT INTO hands.invocation
+                (tenant_id,tool_invocation_id,idempotency_key,root_session_id,session_id,
+                 run_id,tool_name,tool_version,argument_digest,normalized_arguments,status,
+                 fencing_token,deadline)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,'accepted',$11,$12)
+                ON CONFLICT (tenant_id,idempotency_key) DO NOTHING
+                RETURNING tool_invocation_id""",
                 invocation.tenant_id,
+                invocation.tool_invocation_id,
                 invocation.idempotency_key,
+                invocation.root_session_id,
+                invocation.session_id,
+                invocation.run_id,
+                invocation.tool_name,
+                invocation.tool_version,
+                argument_digest,
+                json_dumps(invocation.arguments),
+                invocation.fencing_token,
+                invocation.deadline,
             )
-            if row is not None:
+            if inserted is None:
+                row = await connection.fetchrow(
+                    """SELECT argument_digest,normalized_result,status,side_effect_status
+                    FROM hands.invocation
+                    WHERE tenant_id=$1 AND idempotency_key=$2""",
+                    invocation.tenant_id,
+                    invocation.idempotency_key,
+                )
+                assert row is not None
                 if str(row["argument_digest"]) != argument_digest:
                     return InvocationBegin(conflict=True)
                 stored = row["normalized_result"]
@@ -54,25 +76,6 @@ class PostgresInvocationStore(LazyPool):
                         else None
                     )
                 )
-            await connection.execute(
-                """INSERT INTO hands.invocation
-                (tenant_id,tool_invocation_id,idempotency_key,root_session_id,session_id,
-                 run_id,tool_name,tool_version,argument_digest,normalized_arguments,status,
-                 fencing_token,deadline)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,'accepted',$11,$12)""",
-                invocation.tenant_id,
-                invocation.tool_invocation_id,
-                invocation.idempotency_key,
-                invocation.root_session_id,
-                invocation.session_id,
-                invocation.run_id,
-                invocation.tool_name,
-                invocation.tool_version,
-                argument_digest,
-                json_dumps(invocation.arguments),
-                invocation.fencing_token,
-                invocation.deadline,
-            )
             await connection.execute(
                 """INSERT INTO hands.invocation_attempt
                 (tenant_id,tool_invocation_id,attempt,status) VALUES ($1,$2,1,'accepted')""",

@@ -18,6 +18,18 @@ from auraclaw.infrastructure.persistence.postgres_common import (
 
 
 class PostgresPolicyStateStore(LazyPool):
+    async def ensure_active_version(self, version: str) -> bool:
+        pool = await self.pool()
+        await pool.execute(
+            """INSERT INTO policy.active_bundle (singleton,policy_version)
+            VALUES (true,$1) ON CONFLICT (singleton) DO NOTHING""",
+            version,
+        )
+        active = await pool.fetchval(
+            "SELECT policy_version FROM policy.active_bundle WHERE singleton=true"
+        )
+        return str(active) == version
+
     async def record_decision(
         self, request: PolicyEvaluateRequest, response: PolicyEvaluateResponse
     ) -> None:

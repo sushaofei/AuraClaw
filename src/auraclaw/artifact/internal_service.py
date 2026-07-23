@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Protocol
+from typing import Literal, Protocol
 
 import httpx
 
@@ -17,7 +18,10 @@ from auraclaw.contracts.internal import (
     ArtifactUploadResponse,
     ServiceIdentity,
 )
-from auraclaw.infrastructure.artifacts.seaweedfs import SeaweedFSS3Presigner
+from auraclaw.infrastructure.artifacts.seaweedfs import (
+    SeaweedFSMultipartClient,
+    SeaweedFSS3Presigner,
+)
 
 
 @dataclass(frozen=True)
@@ -34,6 +38,12 @@ class PendingUpload:
     expected_checksum: str
     classification: str
     expires_at: datetime
+    upload_mode: str = "single"
+    multipart_upload_id: str | None = None
+    multipart_part_size: int | None = None
+    multipart_completed: bool = False
+    gc_claim_token: str | None = None
+    finalize_claim_token: str | None = None
 
 
 class ArtifactMetadataRepository(Protocol):
@@ -47,7 +57,19 @@ class ArtifactMetadataRepository(Protocol):
 
     async def cleanup_expired(self) -> int: ...
 
-    async def mark_ready(self, pending: PendingUpload, version: int) -> None: ...
+    async def expired_uploads(self, *, limit: int = 100) -> list[PendingUpload]: ...
+
+    async def mark_deleted(self, pending: PendingUpload) -> None: ...
+
+    async def release_gc(self, pending: PendingUpload, error: str) -> None: ...
+
+    async def mark_ready(self, pending: PendingUpload, version: int) -> bool: ...
+
+    async def mark_multipart_completed(self, pending: PendingUpload) -> None: ...
+
+    async def mark_quarantined(self, pending: PendingUpload, reason: str) -> None: ...
+
+    async def claim_finalize(self, pending: PendingUpload) -> PendingUpload | None: ...
 
     async def get_ready(
         self, tenant_id: str, artifact_id: str, version: int
@@ -78,16 +100,49 @@ class SeaweedFSObjectVerifier:
         await self._client.aclose()
 
     async def verify(self, pending: PendingUpload) -> bool:
+        return await self.inspect(pending) == "clean"
+
+    async def inspect(
+        self, pending: PendingUpload
+    ) -> Literal["clean", "missing", "size_mismatch", "checksum_mismatch", "unavailable"]:
         url, _ = self._presigner.presign("HEAD", pending.object_key)
         try:
             response = await self._client.head(url)
         except httpx.HTTPError:
+            return "unavailable"
+        if response.status_code == 404:
+            return "missing"
+        if response.status_code != 200:
+            return "unavailable"
+        if int(response.headers.get("Content-Length", "-1")) != pending.expected_size:
+            return "size_mismatch"
+        get_url, _ = self._presigner.presign("GET", pending.object_key)
+        digest = hashlib.sha256()
+        size = 0
+        try:
+            async with self._client.stream("GET", get_url) as downloaded:
+                if downloaded.status_code != 200:
+                    return "missing" if downloaded.status_code == 404 else "unavailable"
+                async for chunk in downloaded.aiter_bytes():
+                    size += len(chunk)
+                    if size > pending.expected_size:
+                        return "size_mismatch"
+                    digest.update(chunk)
+        except httpx.HTTPError:
+            return "unavailable"
+        if size != pending.expected_size:
+            return "size_mismatch"
+        if digest.hexdigest().lower() != pending.expected_checksum.lower():
+            return "checksum_mismatch"
+        return "clean"
+
+    async def delete(self, pending: PendingUpload) -> bool:
+        url, _ = self._presigner.presign("DELETE", pending.object_key)
+        try:
+            response = await self._client.delete(url)
+        except httpx.HTTPError:
             return False
-        return (
-            response.status_code == 200
-            and int(response.headers.get("Content-Length", "-1"))
-            == pending.expected_size
-        )
+        return response.status_code in {200, 202, 204, 404}
 
     async def readiness(self) -> tuple[bool, str]:
         url, _ = self._presigner.presign("HEAD", "health/readiness-probe")
@@ -107,11 +162,17 @@ class ArtifactInternalService:
         repository: ArtifactMetadataRepository | None = None,
         object_verifier: SeaweedFSObjectVerifier | None = None,
         policy: ArtifactPolicyValidator | None = None,
+        multipart: SeaweedFSMultipartClient | None = None,
+        multipart_threshold: int = 16 * 1024 * 1024,
+        multipart_part_size: int = 8 * 1024 * 1024,
     ) -> None:
         self._presigner = presigner
         self._repository = repository
         self._object_verifier = object_verifier
         self._policy = policy
+        self._multipart = multipart
+        self._multipart_threshold = multipart_threshold
+        self._multipart_part_size = multipart_part_size
         self._uploads: dict[str, PendingUpload] = {}
         self._ready: dict[tuple[str, str, int], PendingUpload] = {}
 
@@ -130,6 +191,17 @@ class ArtifactInternalService:
             f"artifacts/{artifact_id}/v1/{uuid.uuid4().hex}"
         )
         upload_url, expires_at = self._presigner.presign("PUT", object_key)
+        upload_mode = "single"
+        multipart_upload_id: str | None = None
+        part_urls: tuple[str, ...] = ()
+        if self._multipart is not None and request.expected_size >= self._multipart_threshold:
+            upload_mode = "multipart"
+            multipart_upload_id, part_urls = await self._multipart.create(
+                object_key,
+                expected_size=request.expected_size,
+                part_size=self._multipart_part_size,
+            )
+            upload_url = part_urls[0]
         self._uploads[upload_id] = PendingUpload(
             tenant_id=request.context.tenant_id,
             artifact_id=artifact_id,
@@ -143,6 +215,11 @@ class ArtifactInternalService:
             expected_checksum=request.expected_checksum,
             classification=request.classification,
             expires_at=expires_at,
+            upload_mode=upload_mode,
+            multipart_upload_id=multipart_upload_id,
+            multipart_part_size=(
+                self._multipart_part_size if upload_mode == "multipart" else None
+            ),
         )
         if self._repository is not None:
             await self._repository.save_pending(self._uploads[upload_id])
@@ -152,6 +229,9 @@ class ArtifactInternalService:
             upload_id=upload_id,
             upload_url=upload_url,
             expires_at=expires_at,
+            upload_mode=upload_mode,
+            part_size=(self._multipart_part_size if upload_mode == "multipart" else None),
+            part_urls=part_urls,
         )
 
     async def finalize(
@@ -167,6 +247,21 @@ class ArtifactInternalService:
             pending = await self._repository.get_upload(
                 request.context.tenant_id, request.artifact_id, request.upload_id
             )
+            if pending is None:
+                ready = await self._repository.get_ready(
+                    request.context.tenant_id, request.artifact_id, request.version
+                )
+                if ready is not None:
+                    return ArtifactFinalizeResponse(
+                        artifact_ref={
+                            "artifact_id": ready.artifact_id,
+                            "version": request.version,
+                            "content_hash": ready.expected_checksum,
+                            "media_type": ready.media_type,
+                            "size": ready.expected_size,
+                        },
+                        status="ready",
+                    )
         if pending is None or pending.artifact_id != request.artifact_id:
             raise NotFoundError("artifact upload was not found")
         if pending.tenant_id != request.context.tenant_id:
@@ -178,14 +273,61 @@ class ArtifactInternalService:
             or pending.expected_checksum != request.checksum
         ):
             raise ArtifactAccessError("artifact upload integrity mismatch")
-        if self._object_verifier is not None and not await self._object_verifier.verify(
-            pending
-        ):
-            raise ArtifactAccessError("artifact object is missing or has wrong size")
+        if self._repository is not None:
+            claimed = await self._repository.claim_finalize(pending)
+            if claimed is None:
+                ready = await self._repository.get_ready(
+                    request.context.tenant_id, request.artifact_id, request.version
+                )
+                if ready is not None:
+                    return ArtifactFinalizeResponse(
+                        artifact_ref={
+                            "artifact_id": ready.artifact_id,
+                            "version": request.version,
+                            "content_hash": ready.expected_checksum,
+                            "media_type": ready.media_type,
+                            "size": ready.expected_size,
+                        },
+                        status="ready",
+                    )
+                raise ArtifactAccessError("artifact finalization is already in progress")
+            pending = claimed
+        if pending.upload_mode == "multipart" and not pending.multipart_completed:
+            if self._multipart is None or pending.multipart_upload_id is None:
+                raise ArtifactAccessError("artifact multipart state is unavailable")
+            expected_parts = max(
+                1,
+                (pending.expected_size + int(pending.multipart_part_size or 1) - 1)
+                // int(pending.multipart_part_size or 1),
+            )
+            if len(request.parts) != expected_parts:
+                raise ArtifactAccessError("artifact multipart completion is incomplete")
+            try:
+                await self._multipart.complete(
+                    pending.object_key,
+                    pending.multipart_upload_id,
+                    request.parts,
+                )
+            except ArtifactAccessError:
+                if self._object_verifier is None or not await self._object_verifier.verify(
+                    pending
+                ):
+                    raise
+            if self._repository is not None:
+                await self._repository.mark_multipart_completed(pending)
+        if self._object_verifier is not None:
+            scan = await self._object_verifier.inspect(pending)
+            if scan in {"size_mismatch", "checksum_mismatch"}:
+                if self._repository is not None:
+                    await self._repository.mark_quarantined(pending, scan)
+                raise ArtifactAccessError(f"artifact object scan failed: {scan}")
+            if scan != "clean":
+                raise ArtifactAccessError(f"artifact object is not ready: {scan}")
         self._uploads.pop(request.upload_id, None)
         self._ready[(pending.tenant_id, pending.artifact_id, request.version)] = pending
         if self._repository is not None:
-            await self._repository.mark_ready(pending, request.version)
+            if not await self._repository.mark_ready(pending, request.version):
+                raise ArtifactAccessError("artifact finalization lease was lost")
         return ArtifactFinalizeResponse(
             artifact_ref={
                 "artifact_id": pending.artifact_id,
@@ -196,6 +338,32 @@ class ArtifactInternalService:
             },
             status="ready",
         )
+
+    async def cleanup_expired(self, *, limit: int = 100) -> int:
+        if self._repository is None:
+            return 0
+        deleted = 0
+        for pending in await self._repository.expired_uploads(limit=limit):
+            removed = False
+            if (
+                pending.upload_mode == "multipart"
+                and not pending.multipart_completed
+                and pending.multipart_upload_id is not None
+                and self._multipart is not None
+            ):
+                removed = await self._multipart.abort(
+                    pending.object_key, pending.multipart_upload_id
+                )
+            elif self._object_verifier is not None:
+                removed = await self._object_verifier.delete(pending)
+            else:
+                removed = True
+            if removed:
+                await self._repository.mark_deleted(pending)
+                deleted += 1
+            else:
+                await self._repository.release_gc(pending, "object deletion failed")
+        return deleted
 
     async def download(self, request: ArtifactDownloadRequest) -> ArtifactDownloadResponse:
         if request.context.service_identity not in {

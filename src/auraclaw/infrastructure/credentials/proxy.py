@@ -28,7 +28,11 @@ class CredentialRegistry(Protocol):
 
     async def revoke_reference(self, tenant_id: str, credential_ref: str) -> None: ...
 
-    async def record_usage(self, record: dict[str, str]) -> None: ...
+    async def record_usage(self, record: dict[str, str]) -> str: ...
+
+    async def complete_usage(
+        self, usage_id: str, *, status: str, side_effect_status: str
+    ) -> None: ...
 
 
 class InMemoryVault:
@@ -112,10 +116,12 @@ class CredentialProxy:
         request: dict[str, Any],
         adapter: CredentialAdapter | None = None,
         policy_decision_id: str | None = None,
+        usage_id: str | None = None,
     ) -> Any:
-        reference = self._references.get((tenant_id, credential_ref))
-        if reference is None and self._registry is not None:
+        if self._registry is not None:
             reference = await self._registry.get_reference(tenant_id, credential_ref)
+        else:
+            reference = self._references.get((tenant_id, credential_ref))
         if reference is None:
             raise CredentialAccessError("credential reference is not valid for tenant")
         if datetime.now(UTC) >= reference.expires_at:
@@ -127,6 +133,7 @@ class CredentialProxy:
             raise CredentialAccessError("credential target adapter is not registered")
         self._redactor.register(secret)
         audit = {
+            "usage_id": usage_id or "",
             "tenant_id": tenant_id,
             "session_id": session_id,
             "tool_name": tool_name,
@@ -138,9 +145,24 @@ class CredentialProxy:
         }
         self._usage_audit.append(audit)
         if self._registry is not None:
-            await self._registry.record_usage(audit)
-        value = adapter(dict(request), secret)
-        response = await value if hasattr(value, "__await__") else value
+            audit["usage_id"] = await self._registry.record_usage(audit)
+        try:
+            value = adapter(dict(request), secret)
+            response = await value if hasattr(value, "__await__") else value
+        except Exception:
+            audit["status"] = "failed"
+            audit["side_effect_status"] = "unknown"
+            if self._registry is not None:
+                await self._registry.complete_usage(
+                    audit["usage_id"], status="failed", side_effect_status="unknown"
+                )
+            raise
+        audit["status"] = "completed"
+        audit["side_effect_status"] = "completed"
+        if self._registry is not None:
+            await self._registry.complete_usage(
+                audit["usage_id"], status="completed", side_effect_status="completed"
+            )
         return self._redactor.redact(response)
 
     def redact(self, value: Any) -> Any:

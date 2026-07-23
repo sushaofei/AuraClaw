@@ -285,10 +285,20 @@ migrations/0005_m4_collaboration_review.sql
 migrations/0006_m5_streaming_delivery.sql
 migrations/0007_m6_observability_reliability.sql
 migrations/0008_multi_run_sessions.sql
+migrations/0009_s3_owner_boundaries.sql
+migrations/0010_s4_claim_recovery.sql
+migrations/0011_s4_streaming_state.sql
+migrations/0012_s4_model_state.sql
+migrations/0013_s4_artifact_lifecycle.sql
+migrations/0014_s4_policy_version.sql
 ```
 
-对应的 `.down.sql` 文件提供 M1～M6 Schema 回滚。生产部署应由迁移系统执行这些 SQL，
+对应的 `.down.sql` 文件提供逐阶段 Schema 回滚。生产部署应由迁移系统执行这些 SQL，
 不应由 API 进程在启动时自动修改 Schema。
+
+多副本生产边界、角色配置、恢复与回滚顺序见
+[S4 横向扩展与恢复运行说明](docs/S4%20横向扩展与恢复运行说明.md)，验证证据见
+[S4 测试报告](docs/S4%20测试报告.md)。
 
 Outbox Worker 与投影重建：
 

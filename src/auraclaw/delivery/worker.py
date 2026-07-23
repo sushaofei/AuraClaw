@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 
 from auraclaw.contracts.commands import CommandContext
 from auraclaw.contracts.delivery import DeliveryJob, DeliveryStatus, SinkResponse
@@ -65,6 +66,8 @@ class ResultDeliveryWorker:
         max_attempts: int = 5,
         base_retry_delay: timedelta = timedelta(seconds=1),
         circuit_breaker: CircuitBreaker | None = None,
+        worker_id: str | None = None,
+        claim_ttl: timedelta = timedelta(seconds=30),
     ) -> None:
         self._outbox = outbox
         self._event_store = event_store
@@ -74,6 +77,8 @@ class ResultDeliveryWorker:
         self._max_attempts = max_attempts
         self._base_retry_delay = base_retry_delay
         self._circuit = circuit_breaker or CircuitBreaker()
+        self._worker_id = worker_id or f"delivery-{uuid4().hex}"
+        self._claim_ttl = claim_ttl
 
     async def ingest_once(self, *, limit: int = 100) -> int:
         ingested = 0
@@ -96,13 +101,22 @@ class ResultDeliveryWorker:
 
     async def run_once(self, *, limit: int = 100) -> int:
         await self.ingest_once(limit=limit)
-        jobs = await self._store.claim_due(limit=limit)
+        jobs = await self._store.claim_due(
+            worker_id=self._worker_id,
+            claim_ttl=self._claim_ttl,
+            limit=limit,
+        )
         for job in jobs:
             await self._deliver(job)
         return len(jobs)
 
     async def redeliver(self, tenant_id: str, delivery_id: str) -> bool:
-        job = await self._store.begin_redelivery(tenant_id, delivery_id)
+        job = await self._store.begin_redelivery(
+            tenant_id,
+            delivery_id,
+            worker_id=self._worker_id,
+            claim_ttl=self._claim_ttl,
+        )
         if job is None:
             return False
         await self._deliver(job)

@@ -45,6 +45,9 @@ class DeliveryJob:
     last_response_summary: str | None
     created_at: datetime
     completed_at: datetime | None = None
+    claimed_by: str | None = None
+    claim_token: str | None = None
+    claim_expires_at: datetime | None = None
 
 
 @dataclass(frozen=True)

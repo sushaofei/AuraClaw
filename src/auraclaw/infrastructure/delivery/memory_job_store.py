@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timedelta
+from uuid import uuid4
 
 from auraclaw.contracts.delivery import (
     DeliveryAttempt,
@@ -46,24 +47,55 @@ class InMemoryDeliveryJobStore:
         async with self._lock:
             return self._jobs.setdefault(job.delivery_id, job)
 
-    async def claim_due(self, *, limit: int) -> list[DeliveryJob]:
+    async def claim_due(
+        self, *, worker_id: str, claim_ttl: timedelta, limit: int
+    ) -> list[DeliveryJob]:
         now = utc_now()
         async with self._lock:
-            due = sorted(
+            active = sorted(
                 (
                     job
                     for job in self._jobs.values()
-                    if job.status in {DeliveryStatus.PENDING, DeliveryStatus.RETRY_WAIT}
-                    and (job.next_attempt_at is None or job.next_attempt_at <= now)
+                    if job.status
+                    in {
+                        DeliveryStatus.PENDING,
+                        DeliveryStatus.RETRY_WAIT,
+                        DeliveryStatus.ATTEMPTING,
+                    }
                 ),
-                key=lambda job: (job.next_attempt_at or job.created_at, job.delivery_id),
-            )[:limit]
+                key=lambda job: (job.created_at, job.delivery_id),
+            )
+            due: list[DeliveryJob] = []
+            blocked: set[tuple[str, str, str]] = set()
+            for job in active:
+                order_key = (job.tenant_id, job.session_id, job.sink_id)
+                if order_key in blocked:
+                    continue
+                blocked.add(order_key)
+                claim_expired = (
+                    job.status is DeliveryStatus.ATTEMPTING
+                    and job.claim_expires_at is not None
+                    and job.claim_expires_at <= now
+                )
+                available = job.status in {
+                    DeliveryStatus.PENDING,
+                    DeliveryStatus.RETRY_WAIT,
+                } or claim_expired
+                if available and (
+                    job.next_attempt_at is None or job.next_attempt_at <= now
+                ):
+                    due.append(job)
+                    if len(due) >= limit:
+                        break
             claimed: list[DeliveryJob] = []
             for job in due:
                 updated = replace(
                     job,
                     status=DeliveryStatus.ATTEMPTING,
                     attempt_count=job.attempt_count + 1,
+                    claimed_by=worker_id,
+                    claim_token=uuid4().hex,
+                    claim_expires_at=now + claim_ttl,
                 )
                 self._jobs[job.delivery_id] = updated
                 claimed.append(updated)
@@ -78,6 +110,13 @@ class InMemoryDeliveryJobStore:
         max_attempts: int,
     ) -> DeliveryJob:
         completed_at = utc_now()
+        if (
+            job.claimed_by is None
+            or job.claim_token is None
+            or job.claim_expires_at is None
+            or job.claim_expires_at <= completed_at
+        ):
+            raise RuntimeError("delivery claim is no longer valid")
         if response.succeeded:
             status = DeliveryStatus.SUCCEEDED
         elif response.retryable and job.attempt_count < max_attempts:
@@ -101,6 +140,9 @@ class InMemoryDeliveryJobStore:
                 }
                 else None
             ),
+            claimed_by=None,
+            claim_token=None,
+            claim_expires_at=None,
         )
         attempt = DeliveryAttempt(
             delivery_id=job.delivery_id,
@@ -131,7 +173,12 @@ class InMemoryDeliveryJobStore:
         return [attempt for attempt in self._attempts if attempt.delivery_id == delivery_id]
 
     async def begin_redelivery(
-        self, tenant_id: str, delivery_id: str
+        self,
+        tenant_id: str,
+        delivery_id: str,
+        *,
+        worker_id: str,
+        claim_ttl: timedelta,
     ) -> DeliveryJob | None:
         async with self._lock:
             job = self._jobs.get(delivery_id)
@@ -143,6 +190,9 @@ class InMemoryDeliveryJobStore:
                 attempt_count=job.attempt_count + 1,
                 next_attempt_at=None,
                 completed_at=None,
+                claimed_by=worker_id,
+                claim_token=uuid4().hex,
+                claim_expires_at=utc_now() + claim_ttl,
             )
             self._jobs[delivery_id] = updated
             return updated

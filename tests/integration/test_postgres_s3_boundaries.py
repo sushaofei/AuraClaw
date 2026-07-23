@@ -47,7 +47,13 @@ from auraclaw.infrastructure.persistence.postgres_tool_registry import (
 SETTINGS = get_settings()
 DATABASE_URL = asyncpg_url(SETTINGS.resolved_database_url) if SETTINGS.postgres_enabled else None
 ROOT = Path(__file__).resolve().parents[2]
-MIGRATION = (ROOT / "migrations/0009_s3_owner_boundaries.sql").read_text()
+MIGRATION = "\n".join(
+    (ROOT / path).read_text()
+    for path in (
+        "migrations/0009_s3_owner_boundaries.sql",
+        "migrations/0013_s4_artifact_lifecycle.sql",
+    )
+)
 pytestmark = pytest.mark.skipif(DATABASE_URL is None, reason="PostgreSQL test URL not configured")
 
 

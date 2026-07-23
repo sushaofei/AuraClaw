@@ -122,6 +122,91 @@ class RemoteRuntimeSessionClient:
         return [canonical_event_from_dict(event) for event in response.events]
 
 
+class RemoteOrchestratorSessionClient:
+    """Orchestrator-only lifecycle writer with no Session database access."""
+
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        bearer_token: str,
+        timeout: float = 10.0,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        self._client = httpx.AsyncClient(
+            base_url=base_url, timeout=timeout, transport=transport
+        )
+        self._contract = HttpContractClient(self._client, bearer_token=bearer_token)
+
+    async def aclose(self) -> None:
+        await self._client.aclose()
+
+    @staticmethod
+    def _context(tenant_id: str, request_id: str, correlation_id: str) -> InternalRequestContext:
+        return InternalRequestContext(
+            tenant_id=tenant_id,
+            service_identity=ServiceIdentity.ORCHESTRATOR,
+            request_id=request_id,
+            correlation_id=correlation_id,
+            causation_id=request_id,
+        )
+
+    async def load(self, assignment: RuntimeAssignment) -> list[CanonicalEvent]:
+        response = await self._contract.call(
+            "/internal/v1/session/feed",
+            SessionFeedRequest(
+                context=self._context(
+                    assignment.tenant_id,
+                    f"orchestrator-feed:{assignment.run_id}",
+                    assignment.run_id,
+                ),
+                session_id=assignment.session_id,
+                limit=1000,
+            ),
+            SessionFeedResponse,
+        )
+        return [canonical_event_from_dict(event) for event in response.events]
+
+    async def append(
+        self,
+        assignment: RuntimeAssignment,
+        events: Sequence[NewEvent],
+        *,
+        command_id: str,
+        operation: str,
+    ) -> list[CanonicalEvent]:
+        current = await self.load(assignment)
+        response = await self._contract.call(
+            "/internal/v1/session/append",
+            SessionAppendRequest(
+                context=self._context(
+                    assignment.tenant_id, command_id, assignment.run_id
+                ),
+                root_session_id=assignment.root_session_id,
+                session_id=assignment.session_id,
+                run_id=assignment.run_id,
+                command_id=command_id,
+                expected_version=len(current),
+                operation=operation,
+                actor_type="orchestrator",
+                actor_id="orchestrator",
+                events=tuple(
+                    EventInput(
+                        type=event.type,
+                        payload=dict(event.payload),
+                        visibility=event.visibility.value,
+                    )
+                    for event in events
+                ),
+                command_result={
+                    "session_id": assignment.session_id,
+                    "run_id": assignment.run_id,
+                },
+            ),
+            SessionAppendResponse,
+        )
+        return [canonical_event_from_dict(event) for event in response.events]
+
 class RemoteRuntimeControlClient:
     def __init__(
         self,

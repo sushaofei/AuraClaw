@@ -6,12 +6,18 @@ from collections import defaultdict, deque
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import suppress
 from dataclasses import replace
-from datetime import UTC, datetime
-from typing import Any
+from datetime import UTC, datetime, timedelta
+from typing import Any, Protocol
 from uuid import uuid4
 
+import asyncpg  # type: ignore[import-untyped]
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer  # type: ignore[import-untyped]
 
+from auraclaw.infrastructure.persistence.postgres_common import (
+    LazyPool,
+    json_dumps,
+    json_loads,
+)
 from auraclaw.runtime.ports import RuntimeEvent, RuntimeEventPublisher
 
 _SENSITIVE_KEYS = {
@@ -31,6 +37,20 @@ _NON_CRITICAL_TYPES = {"model.output.delta", "runtime.progress", "typing", "hear
 
 class RuntimeEventRejectedError(ValueError):
     pass
+
+
+class RuntimeSequenceAllocator(Protocol):
+    async def next_sequence(self, tenant_id: str, session_id: str) -> int: ...
+
+
+class InMemoryRuntimeSequenceAllocator:
+    def __init__(self) -> None:
+        self._sequences: dict[tuple[str, str], int] = defaultdict(int)
+
+    async def next_sequence(self, tenant_id: str, session_id: str) -> int:
+        key = (tenant_id, session_id)
+        self._sequences[key] += 1
+        return self._sequences[key]
 
 
 def _safe_payload(value: Any) -> Any:
@@ -87,15 +107,14 @@ class RuntimeEventProducerSDK:
         self,
         publisher: RuntimeEventPublisher,
         *,
+        sequence_allocator: RuntimeSequenceAllocator | None = None,
         max_event_bytes: int = 256_000,
         delta_flush_bytes: int = 512,
     ) -> None:
         self._publisher = publisher
+        self._sequence_allocator = sequence_allocator or InMemoryRuntimeSequenceAllocator()
         self._max_event_bytes = max_event_bytes
         self._delta_flush_bytes = delta_flush_bytes
-        # Public SSE cursors are Session-scoped, so sequences must remain monotonic
-        # when a Session starts a second or later Run.
-        self._sequences: dict[tuple[str, str], int] = defaultdict(int)
         self._deltas: dict[tuple[str, str, str], str] = defaultdict(str)
         self._lock = asyncio.Lock()
 
@@ -157,15 +176,14 @@ class RuntimeEventProducerSDK:
         visibility: str,
         durable: bool,
     ) -> RuntimeEvent:
-        sequence_key = (key[0], key[1])
-        self._sequences[sequence_key] += 1
+        sequence = await self._sequence_allocator.next_sequence(key[0], key[1])
         event = RuntimeEvent(
             event_id=f"rte_{uuid4().hex}",
             tenant_id=key[0],
             root_session_id=root_session_id,
             session_id=key[1],
             run_id=key[2],
-            sequence=self._sequences[sequence_key],
+            sequence=sequence,
             type=event_type,
             timestamp=datetime.now(UTC),
             payload=payload,
@@ -174,7 +192,6 @@ class RuntimeEventProducerSDK:
         )
         encoded = json.dumps(runtime_event_dict(event), separators=(",", ":")).encode()
         if len(encoded) > self._max_event_bytes:
-            self._sequences[sequence_key] -= 1
             raise RuntimeEventRejectedError("runtime event exceeds configured size limit")
         await self._publisher.publish(event)
         return event
@@ -212,6 +229,7 @@ class RuntimeSubscription:
         self.replay_missed = replay_missed
         self._queue = queue
         self._close = close
+        self._closed = False
 
     async def events(self) -> AsyncIterator[RuntimeEvent]:
         try:
@@ -223,7 +241,13 @@ class RuntimeSubscription:
                     return
                 yield queued_event
         finally:
-            await self._close()
+            await self.close()
+
+    async def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        await self._close()
 
 
 class ReplayRuntimeEventBus:
@@ -304,6 +328,251 @@ class ReplayRuntimeEventBus:
             self._subscribers.clear()
 
 
+class PostgresRuntimeEventStore(LazyPool):
+    """Shared sequence, replay and connection state for horizontally scaled gateways."""
+
+    def __init__(
+        self,
+        database_url: str,
+        *,
+        owner_id: str | None = None,
+        retention_events: int = 1_000,
+        connection_queue_size: int = 128,
+        connection_ttl: timedelta = timedelta(seconds=30),
+        poll_interval: float = 0.1,
+    ) -> None:
+        super().__init__(database_url)
+        self._owner_id = owner_id or f"streaming-{uuid4().hex}"
+        self._retention_events = retention_events
+        self._queue_size = connection_queue_size
+        self._connection_ttl = connection_ttl
+        self._poll_interval = poll_interval
+        self._subscriptions: dict[str, asyncio.Task[None]] = {}
+        self._closed = False
+
+    async def next_sequence(self, tenant_id: str, session_id: str) -> int:
+        pool = await self.pool()
+        value = await pool.fetchval(
+            """INSERT INTO streaming.session_sequence
+                   (tenant_id, session_id, last_sequence)
+               VALUES ($1, $2, 1)
+               ON CONFLICT (tenant_id, session_id) DO UPDATE SET
+                   last_sequence = streaming.session_sequence.last_sequence + 1,
+                   updated_at = now()
+               RETURNING last_sequence""",
+            tenant_id,
+            session_id,
+        )
+        return int(value)
+
+    async def publish(self, event: RuntimeEvent) -> None:
+        if event.visibility == "secret":
+            raise RuntimeEventRejectedError("secret runtime events cannot enter replay")
+        event = replace(event, payload=dict(_safe_payload(event.payload)))
+        pool = await self.pool()
+        try:
+            async with pool.acquire() as connection, connection.transaction():
+                status = await connection.execute(
+                    """INSERT INTO streaming.runtime_event
+                           (tenant_id, session_id, sequence, event_id,
+                            root_session_id, run_id, event_type, occurred_at,
+                            payload, durable, visibility)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11)
+                       ON CONFLICT (event_id) DO NOTHING""",
+                    event.tenant_id,
+                    event.session_id,
+                    event.sequence,
+                    event.event_id,
+                    event.root_session_id,
+                    event.run_id,
+                    event.type,
+                    event.timestamp,
+                    json_dumps(event.payload),
+                    event.durable,
+                    event.visibility,
+                )
+                if status == "INSERT 0 0":
+                    return
+                await connection.execute(
+                    """DELETE FROM streaming.runtime_event
+                       WHERE tenant_id = $1 AND session_id = $2
+                         AND sequence NOT IN (
+                             SELECT sequence FROM streaming.runtime_event
+                             WHERE tenant_id = $1 AND session_id = $2
+                             ORDER BY sequence DESC LIMIT $3
+                         )""",
+                    event.tenant_id,
+                    event.session_id,
+                    self._retention_events,
+                )
+        except asyncpg.UniqueViolationError as exc:
+            raise RuntimeEventRejectedError(
+                "runtime event sequence is already occupied"
+            ) from exc
+
+    async def ingest(self, event: RuntimeEvent) -> RuntimeEvent:
+        """Assign the public cursor at the shared Kafka ingestion boundary."""
+        sequence = await self.next_sequence(event.tenant_id, event.session_id)
+        event = replace(event, sequence=sequence)
+        await self.publish(event)
+        return event
+
+    async def subscribe(
+        self, tenant_id: str, session_id: str, *, after_sequence: int | None = None
+    ) -> RuntimeSubscription:
+        if self._closed:
+            raise RuntimeError("runtime event store is closed")
+        pool = await self.pool()
+        connection_id = f"conn_{uuid4().hex}"
+        queue: asyncio.Queue[RuntimeEvent | None] = asyncio.Queue(maxsize=self._queue_size)
+        async with pool.acquire() as connection, connection.transaction():
+            await connection.execute(
+                "DELETE FROM streaming.connection_registry WHERE expires_at <= now()"
+            )
+            rows = await connection.fetch(
+                """SELECT * FROM streaming.runtime_event
+                   WHERE tenant_id = $1 AND session_id = $2
+                   ORDER BY sequence""",
+                tenant_id,
+                session_id,
+            )
+            retained = [self._event(row) for row in rows]
+            replay_missed = bool(
+                after_sequence is not None
+                and retained
+                and after_sequence < retained[0].sequence - 1
+            )
+            if after_sequence is None:
+                initial = retained
+            elif replay_missed:
+                initial = []
+            else:
+                initial = [event for event in retained if event.sequence > after_sequence]
+            cursor = max(
+                after_sequence or 0,
+                max((event.sequence for event in initial), default=0),
+            )
+            await connection.execute(
+                """INSERT INTO streaming.connection_registry
+                       (connection_id, tenant_id, session_id, owner_id,
+                        cursor_sequence, expires_at)
+                   VALUES ($1, $2, $3, $4, $5, now() + $6::interval)""",
+                connection_id,
+                tenant_id,
+                session_id,
+                self._owner_id,
+                cursor,
+                self._connection_ttl,
+            )
+        task = asyncio.create_task(
+            self._poll(connection_id, tenant_id, session_id, cursor, queue)
+        )
+        self._subscriptions[connection_id] = task
+
+        async def close() -> None:
+            polling = self._subscriptions.pop(connection_id, None)
+            if polling is not None and polling is not asyncio.current_task():
+                polling.cancel()
+                with suppress(asyncio.CancelledError):
+                    await polling
+            current_pool = await self.pool()
+            await current_pool.execute(
+                "DELETE FROM streaming.connection_registry WHERE connection_id = $1",
+                connection_id,
+            )
+
+        return RuntimeSubscription(initial, queue, close, replay_missed=replay_missed)
+
+    async def _poll(
+        self,
+        connection_id: str,
+        tenant_id: str,
+        session_id: str,
+        cursor: int,
+        queue: asyncio.Queue[RuntimeEvent | None],
+    ) -> None:
+        pool = await self.pool()
+        try:
+            while True:
+                rows = await pool.fetch(
+                    """SELECT * FROM streaming.runtime_event
+                       WHERE tenant_id = $1 AND session_id = $2 AND sequence > $3
+                       ORDER BY sequence LIMIT $4""",
+                    tenant_id,
+                    session_id,
+                    cursor,
+                    self._queue_size,
+                )
+                for row in rows:
+                    event = self._event(row)
+                    cursor = event.sequence
+                    if queue.full():
+                        if event.type in _NON_CRITICAL_TYPES:
+                            continue
+                        with suppress(asyncio.QueueEmpty):
+                            queue.get_nowait()
+                    with suppress(asyncio.QueueFull):
+                        queue.put_nowait(event)
+                await pool.execute(
+                    """UPDATE streaming.connection_registry
+                       SET cursor_sequence = $2, heartbeat_at = now(),
+                           expires_at = now() + $3::interval
+                       WHERE connection_id = $1 AND owner_id = $4""",
+                    connection_id,
+                    cursor,
+                    self._connection_ttl,
+                    self._owner_id,
+                )
+                await asyncio.sleep(self._poll_interval)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            with suppress(asyncio.QueueFull):
+                queue.put_nowait(None)
+
+    async def events(self, tenant_id: str, session_id: str) -> list[RuntimeEvent]:
+        pool = await self.pool()
+        rows = await pool.fetch(
+            """SELECT * FROM streaming.runtime_event
+               WHERE tenant_id = $1 AND session_id = $2 ORDER BY sequence""",
+            tenant_id,
+            session_id,
+        )
+        return [self._event(row) for row in rows]
+
+    async def close(self) -> None:
+        self._closed = True
+        tasks = tuple(self._subscriptions.values())
+        self._subscriptions.clear()
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            with suppress(asyncio.CancelledError):
+                await task
+        if self._pool is not None:
+            await self._pool.execute(
+                "DELETE FROM streaming.connection_registry WHERE owner_id = $1",
+                self._owner_id,
+            )
+        await super().close()
+
+    @staticmethod
+    def _event(row: asyncpg.Record) -> RuntimeEvent:
+        return RuntimeEvent(
+            event_id=str(row["event_id"]),
+            tenant_id=str(row["tenant_id"]),
+            root_session_id=str(row["root_session_id"]),
+            session_id=str(row["session_id"]),
+            run_id=str(row["run_id"]),
+            sequence=int(row["sequence"]),
+            type=str(row["event_type"]),
+            timestamp=row["occurred_at"],
+            payload=dict(json_loads(row["payload"])),
+            durable=bool(row["durable"]),
+            visibility=str(row["visibility"]),
+        )
+
+
 class KafkaRuntimeEventProducer:
     """Kafka producer adapter; browser cursors never expose Kafka offsets."""
 
@@ -354,7 +623,7 @@ class KafkaStreamingIngestor:
         *,
         topic: str,
         group_id: str,
-        target: ReplayRuntimeEventBus,
+        target: RuntimeEventPublisher,
     ) -> None:
         self._consumer = AIOKafkaConsumer(
             topic,
@@ -377,7 +646,12 @@ class KafkaStreamingIngestor:
         try:
             async for message in self._consumer:
                 data = json.loads(message.value.decode())
-                await self._target.publish(runtime_event_from_dict(dict(data)))
+                event = runtime_event_from_dict(dict(data))
+                ingest = getattr(self._target, "ingest", None)
+                if ingest is None:
+                    await self._target.publish(event)
+                else:
+                    await ingest(event)
                 await self._consumer.commit()
         except asyncio.CancelledError:
             raise

@@ -1,5 +1,5 @@
 import asyncio
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -9,6 +9,7 @@ from auraclaw.contracts.commands import CommandContext
 from auraclaw.contracts.errors import FencingTokenError
 from auraclaw.contracts.events import Actor, NewEvent
 from auraclaw.control.orchestrator import LocalRuntimeProvisioner, ManagedOrchestrator
+from auraclaw.control.ports import RuntimeCheckpoint
 from auraclaw.gateways.task.admission import AllowAllAdmissionController
 from auraclaw.infrastructure.persistence.memory_control_store import InMemoryControlStateStore
 from auraclaw.infrastructure.persistence.memory_event_store import InMemoryEventStore
@@ -200,6 +201,19 @@ def test_runtime_recovers_at_all_required_failure_injection_points(
         recovered = await orchestrator.schedule_once()
         assert recovered is not None
         assert recovered.fencing_token > original.fencing_token
+        assert recovered.runtime_id != original.runtime_id
+        with pytest.raises(FencingTokenError):
+            await control.save_checkpoint(
+                RuntimeCheckpoint(
+                    tenant_id=original.tenant_id,
+                    session_id=original.session_id,
+                    run_id=original.run_id,
+                    fencing_token=original.fencing_token,
+                    phase="stale-runtime",
+                    state={},
+                    updated_at=datetime.now(UTC),
+                )
+            )
         recovered_harness = AgentHarness(
             control_store=control,
             session=session,

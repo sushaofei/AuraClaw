@@ -71,6 +71,7 @@ class LeaseAssertion(ContractModel):
     root_session_id: str | None = None
     session_id: str
     run_id: str
+    runtime_id: str | None = None
     lease_id: str
     fencing_token: int = Field(ge=1)
     expires_at: datetime
@@ -120,7 +121,7 @@ class SessionFeedResponse(ContractModel):
 
 class OutboxClaimRequest(ContractModel):
     context: InternalRequestContext
-    destination: Literal["projection", "delivery"]
+    destination: Literal["projection", "delivery", "control"]
     worker_id: str
     limit: int = Field(default=100, ge=1, le=1000)
     claim_ttl_seconds: int = Field(default=30, ge=1, le=3600)
@@ -141,7 +142,7 @@ class OutboxClaimResponse(ContractModel):
 
 class OutboxDispositionRequest(ContractModel):
     context: InternalRequestContext
-    destination: Literal["projection", "delivery"]
+    destination: Literal["projection", "delivery", "control"]
     worker_id: str
     outbox_id: str
     claim_token: str
@@ -466,6 +467,9 @@ class ArtifactUploadResponse(ContractModel):
     upload_id: str
     upload_url: str
     expires_at: datetime
+    upload_mode: Literal["single", "multipart"] = "single"
+    part_size: int | None = None
+    part_urls: tuple[str, ...] = ()
 
 
 class ArtifactFinalizeRequest(ContractModel):
@@ -475,6 +479,7 @@ class ArtifactFinalizeRequest(ContractModel):
     upload_id: str
     size: int = Field(ge=0)
     checksum: str
+    parts: tuple[dict[str, Any], ...] = ()
 
 
 class ArtifactFinalizeResponse(ContractModel):

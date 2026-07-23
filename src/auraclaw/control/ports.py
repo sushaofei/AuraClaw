@@ -57,6 +57,8 @@ class RunnableItem:
 class ClaimedRunnable:
     item: RunnableItem
     claimed_by: str
+    claim_token: str
+    claim_expires_at: datetime
 
 
 @dataclass(frozen=True)
@@ -92,9 +94,21 @@ class RuntimeCheckpoint:
 class ControlStateStore(Protocol):
     async def enqueue(self, item: RunnableItem) -> bool: ...
 
-    async def claim(self, worker_id: str, *, limit: int = 1) -> list[ClaimedRunnable]: ...
+    async def claim(
+        self,
+        worker_id: str,
+        *,
+        limit: int = 1,
+        claim_ttl: timedelta = timedelta(seconds=30),
+    ) -> list[ClaimedRunnable]: ...
 
-    async def reschedule(self, task_id: str) -> None: ...
+    async def reschedule(
+        self,
+        task_id: str,
+        *,
+        worker_id: str | None = None,
+        claim_token: str | None = None,
+    ) -> None: ...
 
     async def acquire_lease(
         self, resource_id: str, owner: str, *, ttl: timedelta
@@ -106,9 +120,13 @@ class ControlStateStore(Protocol):
 
     async def assert_fencing(self, resource_id: str, fencing_token: int) -> None: ...
 
-    async def assign(self, task_id: str, assignment: RuntimeAssignment) -> bool: ...
+    async def assign(
+        self, task_id: str, assignment: RuntimeAssignment, *, claim_token: str
+    ) -> bool: ...
 
     async def get_assignment(self, task_id: str) -> RuntimeAssignment | None: ...
+
+    async def select_runtime(self, item: RunnableItem) -> RuntimeInstance | None: ...
 
     async def claim_assignments(
         self, runtime_id: str, role: str, *, limit: int = 1

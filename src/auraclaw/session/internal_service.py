@@ -148,6 +148,7 @@ class SessionInternalService:
         expected = {
             "projection": ServiceIdentity.PROJECTION_WORKER,
             "delivery": ServiceIdentity.DELIVERY_WORKER,
+            "control": ServiceIdentity.ORCHESTRATOR,
         }[destination]
         if identity is not expected:
             raise AuthorizationError(
