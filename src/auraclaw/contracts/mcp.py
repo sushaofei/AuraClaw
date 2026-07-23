@@ -5,7 +5,7 @@ from typing import Any, Literal, Protocol
 
 from pydantic import Field
 
-from auraclaw.contracts.internal import ContractModel
+from auraclaw.contracts.internal import ContractModel, LeaseAssertion
 
 MCP_PROTOCOL_VERSION = "2025-11-25"
 MCP_JSONRPC_VERSION = "2.0"
@@ -20,6 +20,7 @@ class McpTrustedContext(ContractModel):
     lease_id: str
     fencing_token: int = Field(ge=1)
     deadline: datetime | None = None
+    lease_assertion: LeaseAssertion | None = None
 
 
 class McpJsonRpcRequest(ContractModel):

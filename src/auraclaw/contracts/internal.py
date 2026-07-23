@@ -68,6 +68,7 @@ class LeaseAssertion(ContractModel):
     key_id: str
     audience: str
     tenant_id: str
+    root_session_id: str | None = None
     session_id: str
     run_id: str
     lease_id: str
@@ -341,6 +342,22 @@ class PolicyEvaluateResponse(ContractModel):
     api_version: str = INTERNAL_API_VERSION
     decision_id: str
     decision: Literal["allow", "deny", "allow_with_constraints", "require_approval"]
+    policy_version: str
+    constraints: dict[str, Any] = Field(default_factory=dict)
+    expires_at: datetime
+
+
+class PolicyValidateDecisionRequest(ContractModel):
+    context: InternalRequestContext
+    decision_id: str
+    action: str
+    resource: str
+
+
+class PolicyValidateDecisionResponse(ContractModel):
+    api_version: str = INTERNAL_API_VERSION
+    valid: bool
+    decision: str
     policy_version: str
     constraints: dict[str, Any] = Field(default_factory=dict)
     expires_at: datetime

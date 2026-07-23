@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import timedelta
 
 from auraclaw.contracts.commands import CommandContext
 from auraclaw.contracts.errors import AuthorizationError
 from auraclaw.contracts.events import Actor, NewEvent
 from auraclaw.contracts.internal import (
+    OutboxClaimRequest,
+    OutboxClaimResponse,
+    OutboxDispositionRequest,
+    OutboxDispositionResponse,
+    OutboxRecord,
     ServiceIdentity,
     SessionAppendRequest,
     SessionAppendResponse,
@@ -134,3 +140,55 @@ class SessionInternalService:
             events=tuple(event.as_dict() for event in page),
             next_version=next_version,
         )
+
+    @staticmethod
+    def _require_outbox_identity(
+        identity: ServiceIdentity, destination: str
+    ) -> None:
+        expected = {
+            "projection": ServiceIdentity.PROJECTION_WORKER,
+            "delivery": ServiceIdentity.DELIVERY_WORKER,
+        }[destination]
+        if identity is not expected:
+            raise AuthorizationError(
+                f"{destination} outbox is restricted to {expected.value}"
+            )
+
+    async def claim_outbox(self, request: OutboxClaimRequest) -> OutboxClaimResponse:
+        self._require_outbox_identity(
+            request.context.service_identity, request.destination
+        )
+        records = await self._event_store.claim_outbox(
+            request.destination,
+            request.worker_id,
+            limit=request.limit,
+            claim_ttl=timedelta(seconds=request.claim_ttl_seconds),
+        )
+        return OutboxClaimResponse(
+            records=tuple(
+                OutboxRecord(
+                    outbox_id=record.outbox_id,
+                    event_id=record.event_id,
+                    event=record.event.as_dict(),
+                    claim_token=record.claim_token,
+                    attempt=record.attempt,
+                )
+                for record in records
+            )
+        )
+
+    async def disposition_outbox(
+        self, request: OutboxDispositionRequest
+    ) -> OutboxDispositionResponse:
+        self._require_outbox_identity(
+            request.context.service_identity, request.destination
+        )
+        accepted = await self._event_store.disposition_outbox(
+            request.destination,
+            request.worker_id,
+            request.outbox_id,
+            request.claim_token,
+            request.disposition,
+            request.reason,
+        )
+        return OutboxDispositionResponse(accepted=accepted)

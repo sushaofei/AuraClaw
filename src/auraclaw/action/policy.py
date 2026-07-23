@@ -1,11 +1,21 @@
-from auraclaw.contracts.tools import PolicyDecision, ToolCapability, ToolPermission
+from auraclaw.contracts.tools import (
+    PolicyDecision,
+    ToolCapability,
+    ToolInvocation,
+    ToolPermission,
+)
 
 
 class PolicyEngine:
     def __init__(self, *, version: str = "m3-v1") -> None:
         self.version = version
 
-    def evaluate(self, capability: ToolCapability) -> PolicyDecision:
+    def evaluate(
+        self,
+        capability: ToolCapability,
+        invocation: ToolInvocation | None = None,
+    ) -> PolicyDecision:
+        del invocation
         if capability.permission is ToolPermission.SUGGEST_ONLY:
             return PolicyDecision.DENY
         if capability.permission in {

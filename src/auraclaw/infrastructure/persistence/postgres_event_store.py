@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Any
 from uuid import uuid4
 
@@ -15,7 +16,7 @@ from auraclaw.infrastructure.persistence.postgres_common import (
     json_dumps,
     json_loads,
 )
-from auraclaw.session.ports import AppendResult, SessionSnapshot
+from auraclaw.session.ports import AppendResult, ClaimedOutboxRecord, SessionSnapshot
 
 
 @dataclass
@@ -272,3 +273,86 @@ class PostgresEventStore(LazyPool):
             WHERE outbox_id = $1""",
             outbox_id,
         )
+
+    async def claim_outbox(
+        self,
+        destination: str,
+        worker_id: str,
+        *,
+        limit: int,
+        claim_ttl: timedelta,
+    ) -> list[ClaimedOutboxRecord]:
+        pool = await self.pool()
+        claimed: list[ClaimedOutboxRecord] = []
+        async with pool.acquire() as connection, connection.transaction():
+            rows = await connection.fetch(
+                """SELECT o.outbox_id, o.event_id, o.publish_attempt, e.*
+                FROM session_core.outbox o
+                JOIN session_core.canonical_event e ON e.event_id = o.event_id
+                WHERE o.destination = $1 AND o.published_at IS NULL
+                  AND o.poisoned_at IS NULL AND o.next_attempt_at <= now()
+                  AND (o.claim_token IS NULL OR o.claim_expires_at <= now())
+                ORDER BY o.outbox_id
+                FOR UPDATE OF o SKIP LOCKED LIMIT $2""",
+                destination,
+                limit,
+            )
+            for row in rows:
+                token = f"clm_{uuid4().hex}"
+                outbox_id = int(row["outbox_id"])
+                await connection.execute(
+                    """UPDATE session_core.outbox
+                    SET claimed_by=$2, claim_token=$3,
+                        claim_expires_at=now() + $4::interval,
+                        publish_attempt=publish_attempt + 1
+                    WHERE outbox_id=$1""",
+                    outbox_id,
+                    worker_id,
+                    token,
+                    claim_ttl,
+                )
+                claimed.append(
+                    ClaimedOutboxRecord(
+                        outbox_id=str(outbox_id),
+                        event_id=str(row["event_id"]),
+                        event=event_from_record(row),
+                        claim_token=token,
+                        attempt=int(row["publish_attempt"]) + 1,
+                    )
+                )
+        return claimed
+
+    async def disposition_outbox(
+        self,
+        destination: str,
+        worker_id: str,
+        outbox_id: str,
+        claim_token: str,
+        disposition: str,
+        reason: str | None = None,
+    ) -> bool:
+        pool = await self.pool()
+        assignments = {
+            "ack": "published_at=now()",
+            "nack": (
+                "next_attempt_at=now() + interval '1 second' * "
+                "LEAST(60, power(2, publish_attempt))"
+            ),
+            "poison": "poisoned_at=now()",
+        }
+        selected = assignments.get(disposition)
+        if selected is None:
+            return False
+        result = await pool.execute(
+            f"""UPDATE session_core.outbox SET {selected}, last_error=$5,
+                claimed_by=NULL, claim_token=NULL, claim_expires_at=NULL
+            WHERE outbox_id=$1 AND destination=$2 AND claimed_by=$3
+              AND claim_token=$4 AND claim_expires_at > now()
+              AND published_at IS NULL AND poisoned_at IS NULL""",
+            int(outbox_id),
+            destination,
+            worker_id,
+            claim_token,
+            None if disposition == "ack" else reason,
+        )
+        return str(result) == "UPDATE 1"

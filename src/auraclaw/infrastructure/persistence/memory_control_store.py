@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from auraclaw.contracts.errors import FencingTokenError, LeaseConflictError
 from auraclaw.control.ports import (
+    ClaimedAssignment,
     ClaimedRunnable,
     RunnableItem,
     RuntimeAssignment,
@@ -137,6 +138,26 @@ class InMemoryControlStateStore:
         async with self._lock:
             entry = self._assignments.get(task_id)
             return entry[0] if entry is not None else None
+
+    async def claim_assignments(
+        self, runtime_id: str, role: str, *, limit: int = 1
+    ) -> list[ClaimedAssignment]:
+        async with self._lock:
+            claimed: list[ClaimedAssignment] = []
+            for task_id, (assignment, status) in self._assignments.items():
+                if (
+                    status != "assigned"
+                    or assignment.runtime_id != runtime_id
+                    or assignment.role != role
+                ):
+                    continue
+                self._assignments[task_id] = (assignment, "running")
+                claimed.append(
+                    ClaimedAssignment(task_id=task_id, assignment=assignment)
+                )
+                if len(claimed) >= limit:
+                    break
+            return claimed
 
     async def finish_assignment(self, task_id: str, outcome: str) -> None:
         async with self._lock:

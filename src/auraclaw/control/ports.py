@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Protocol
 
+from auraclaw.contracts.internal import LeaseAssertion
+
 
 @dataclass(frozen=True)
 class RuntimeBudget:
@@ -25,6 +27,14 @@ class RuntimeAssignment:
     resource_profile: dict[str, Any]
     deadline: datetime | None = None
     budget: RuntimeBudget = field(default_factory=RuntimeBudget)
+    lease_expires_at: datetime | None = None
+    lease_assertion: LeaseAssertion | None = None
+
+
+@dataclass(frozen=True)
+class ClaimedAssignment:
+    task_id: str
+    assignment: RuntimeAssignment
 
 
 @dataclass(frozen=True)
@@ -99,6 +109,10 @@ class ControlStateStore(Protocol):
     async def assign(self, task_id: str, assignment: RuntimeAssignment) -> bool: ...
 
     async def get_assignment(self, task_id: str) -> RuntimeAssignment | None: ...
+
+    async def claim_assignments(
+        self, runtime_id: str, role: str, *, limit: int = 1
+    ) -> list[ClaimedAssignment]: ...
 
     async def finish_assignment(self, task_id: str, outcome: str) -> None: ...
 

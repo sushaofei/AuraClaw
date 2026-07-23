@@ -7,8 +7,9 @@ import uvicorn
 
 from auraclaw.composition.services import SERVICE_BY_COMMAND, create_service_app, service_spec
 from auraclaw.config import get_settings
+from auraclaw.contracts.internal import ServiceIdentity
+from auraclaw.infrastructure.clients.admin import RemoteAdminClient
 from auraclaw.infrastructure.persistence.postgres_event_store import PostgresEventStore
-from auraclaw.infrastructure.persistence.postgres_operations_store import PostgresOperationsStore
 from auraclaw.infrastructure.projection.postgres_task_store import PostgresTaskProjection
 from auraclaw.projection.maintenance import ProjectionMaintenanceService
 from auraclaw.projection.relay import OutboxRelay
@@ -18,6 +19,22 @@ async def _run_projection_command(
     action: str, tenant_id: str | None, *, watch: bool = False, interval: float = 1.0
 ) -> None:
     settings = get_settings()
+    if settings.deployment_profile == "production":
+        token = settings.workload_token_value(ServiceIdentity.TASK_API.value)
+        if not token:
+            raise SystemExit("projection admin requires Task API workload identity")
+        client = RemoteAdminClient(settings.projection_base_url, bearer_token=token)
+        try:
+            response = await client.execute(
+                ServiceIdentity.PROJECTION_WORKER,
+                action,
+                {"tenant_id": tenant_id} if tenant_id else {},
+                tenant_id=tenant_id or "system",
+            )
+            print(f"projection {action} status={response.status} result={response.result}")
+        finally:
+            await client.aclose()
+        return
     if not settings.postgres_enabled:
         raise SystemExit("projection maintenance requires PostgreSQL storage configuration")
     event_store = PostgresEventStore(settings.resolved_database_url)
@@ -50,34 +67,54 @@ async def _run_operations_command(
     item_id: str | None = None,
 ) -> None:
     settings = get_settings()
-    if not settings.postgres_enabled:
-        raise SystemExit("operations maintenance requires PostgreSQL storage configuration")
-    store = PostgresOperationsStore(settings.resolved_database_url)
+    token = settings.workload_token_value(ServiceIdentity.TASK_API.value)
+    if not token:
+        raise SystemExit("operations admin requires Task API workload identity")
+    projection = RemoteAdminClient(settings.projection_base_url, bearer_token=token)
+    delivery = RemoteAdminClient(settings.delivery_base_url, bearer_token=token)
+    artifact = RemoteAdminClient(settings.artifact_base_url, bearer_token=token)
     try:
         if action == "status":
-            summary = await store.failure_queue_summary(tenant_id)
-            print(
-                "operations status "
-                f"projection_outbox_pending={summary.projection_outbox_pending} "
-                f"projection_poison={summary.projection_poison} "
-                f"delivery_dlq={summary.delivery_dlq}"
+            projection_status = await projection.execute(
+                ServiceIdentity.PROJECTION_WORKER,
+                "status",
+                {"tenant_id": tenant_id} if tenant_id else {},
+                tenant_id=tenant_id or "system",
             )
+            print(f"operations status projection={projection_status.result}")
         elif action == "retention":
-            deleted = await store.apply_retention()
-            retention_summary = " ".join(
-                f"{key}={value}" for key, value in deleted.items()
+            response = await artifact.execute(
+                ServiceIdentity.ARTIFACT_SERVICE,
+                "retention",
+                {},
+                tenant_id=tenant_id or "system",
             )
-            print(f"operations retention {retention_summary}")
+            print(f"operations retention status={response.status} result={response.result}")
         else:
             if tenant_id is None or queue is None or item_id is None:
                 raise SystemExit("redrive requires --tenant, --queue and --item-id")
             if queue == "projection":
-                changed = await store.redrive_projection_poison(tenant_id, item_id)
+                response = await projection.execute(
+                    ServiceIdentity.PROJECTION_WORKER,
+                    "redrive",
+                    {"tenant_id": tenant_id, "event_id": item_id},
+                    tenant_id=tenant_id,
+                )
             else:
-                changed = await store.redrive_delivery(tenant_id, item_id)
-            print(f"operations redrive queue={queue} item_id={item_id} changed={changed}")
+                response = await delivery.execute(
+                    ServiceIdentity.DELIVERY_WORKER,
+                    "redrive",
+                    {"tenant_id": tenant_id, "delivery_id": item_id},
+                    tenant_id=tenant_id,
+                )
+            print(
+                f"operations redrive queue={queue} item_id={item_id} "
+                f"status={response.status} result={response.result}"
+            )
     finally:
-        await store.close()
+        await projection.aclose()
+        await delivery.aclose()
+        await artifact.aclose()
 
 
 def build_parser() -> argparse.ArgumentParser:

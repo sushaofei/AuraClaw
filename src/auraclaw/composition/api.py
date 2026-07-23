@@ -102,9 +102,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 @asynccontextmanager
 async def task_api_lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.service_name = "task-api"
-    app.state.service_ready = True
-    yield
-    app.state.service_ready = False
+    app.state.service_ready = bool(getattr(app.state, "config_ready", True))
+    try:
+        yield
+    finally:
+        app.state.service_ready = False
+        for closeable in getattr(app.state, "closeables", ()):
+            close = getattr(closeable, "aclose", None)
+            if close is None:
+                close = closeable.close
+            await close()
 
 
 @asynccontextmanager
@@ -198,7 +205,12 @@ def create_app(*, profile: str = "development") -> FastAPI:
             duration_ms = (time.perf_counter() - started) * 1_000
             context = TraceContext(trace_id=trace, span_id=span_id, tenant_id=tenant_id)
             try:
-                await providers.get_observability_service().record_span(
+                observability = getattr(
+                    request.app.state,
+                    "observability_service",
+                    None,
+                ) or providers.get_observability_service()
+                await observability.record_span(
                     context=context,
                     component="task_gateway",
                     operation=f"{request.method} {request.url.path}",
@@ -206,7 +218,7 @@ def create_app(*, profile: str = "development") -> FastAPI:
                     status=status,
                     attributes={"http_status": status_code, "duration_ms": duration_ms},
                 )
-                await providers.get_observability_service().metric(
+                await observability.metric(
                     "http.request.duration_ms",
                     duration_ms,
                     context=context,

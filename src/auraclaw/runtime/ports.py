@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Any, Protocol
 
 from auraclaw.contracts.events import CanonicalEvent, NewEvent
-from auraclaw.control.ports import RuntimeAssignment
+from auraclaw.control.ports import RuntimeAssignment, RuntimeCheckpoint
 
 
 @dataclass(frozen=True)
@@ -78,6 +78,22 @@ class SessionClient(Protocol):
         command_id: str,
         operation: str,
     ) -> list[CanonicalEvent]: ...
+
+
+class RuntimeControlClient(Protocol):
+    async def assert_fencing(self, resource_id: str, fencing_token: int) -> None: ...
+
+    async def is_cancelled(
+        self, tenant_id: str, session_id: str, run_id: str
+    ) -> bool: ...
+
+    async def save_checkpoint(self, checkpoint: RuntimeCheckpoint) -> None: ...
+
+    async def load_checkpoint(
+        self, tenant_id: str, session_id: str, run_id: str
+    ) -> RuntimeCheckpoint | None: ...
+
+    async def finish_assignment(self, task_id: str, outcome: str) -> None: ...
 
 
 class ModelClient(Protocol):

@@ -14,6 +14,22 @@ CredentialAdapter = Callable[[dict[str, Any], str], Awaitable[Any] | Any]
 class Vault(Protocol):
     async def resolve(self, credential_ref: str) -> str: ...
 
+    async def revoke(self, credential_ref: str) -> None: ...
+
+
+class CredentialRegistry(Protocol):
+    async def get_reference(
+        self, tenant_id: str, credential_ref: str
+    ) -> CredentialReference | None: ...
+
+    async def save_reference(
+        self, tenant_id: str, reference: CredentialReference
+    ) -> None: ...
+
+    async def revoke_reference(self, tenant_id: str, credential_ref: str) -> None: ...
+
+    async def record_usage(self, record: dict[str, str]) -> None: ...
+
 
 class InMemoryVault:
     def __init__(self, secrets: dict[str, str]) -> None:
@@ -62,14 +78,28 @@ class SecretRedactor:
 class CredentialProxy:
     """Uses credentials on behalf of Hands without returning them to Runtime or Sandbox."""
 
-    def __init__(self, vault: Vault, *, redactor: SecretRedactor | None = None) -> None:
+    def __init__(
+        self,
+        vault: Vault,
+        *,
+        redactor: SecretRedactor | None = None,
+        registry: CredentialRegistry | None = None,
+    ) -> None:
         self._vault = vault
         self._redactor = redactor or SecretRedactor()
         self._references: dict[tuple[str, str], CredentialReference] = {}
         self._usage_audit: list[dict[str, str]] = []
+        self._registry = registry
 
     def register_reference(self, tenant_id: str, reference: CredentialReference) -> None:
         self._references[(tenant_id, reference.credential_ref)] = reference
+
+    async def save_reference(
+        self, tenant_id: str, reference: CredentialReference
+    ) -> None:
+        self.register_reference(tenant_id, reference)
+        if self._registry is not None:
+            await self._registry.save_reference(tenant_id, reference)
 
     async def invoke(
         self,
@@ -80,9 +110,12 @@ class CredentialProxy:
         credential_ref: str,
         operation: str,
         request: dict[str, Any],
-        adapter: CredentialAdapter,
+        adapter: CredentialAdapter | None = None,
+        policy_decision_id: str | None = None,
     ) -> Any:
         reference = self._references.get((tenant_id, credential_ref))
+        if reference is None and self._registry is not None:
+            reference = await self._registry.get_reference(tenant_id, credential_ref)
         if reference is None:
             raise CredentialAccessError("credential reference is not valid for tenant")
         if datetime.now(UTC) >= reference.expires_at:
@@ -90,16 +123,22 @@ class CredentialProxy:
         if operation not in reference.allowed_operations:
             raise CredentialAccessError("credential operation is outside allowed scope")
         secret = await self._vault.resolve(credential_ref)
+        if adapter is None:
+            raise CredentialAccessError("credential target adapter is not registered")
         self._redactor.register(secret)
-        self._usage_audit.append(
-            {
-                "tenant_id": tenant_id,
-                "session_id": session_id,
-                "tool_name": tool_name,
-                "credential_ref": credential_ref,
-                "operation": operation,
-            }
-        )
+        audit = {
+            "tenant_id": tenant_id,
+            "session_id": session_id,
+            "tool_name": tool_name,
+            "credential_ref": credential_ref,
+            "operation": operation,
+            "policy_decision_id": policy_decision_id or "development",
+            "status": "attempting",
+            "side_effect_status": "unknown",
+        }
+        self._usage_audit.append(audit)
+        if self._registry is not None:
+            await self._registry.record_usage(audit)
         value = adapter(dict(request), secret)
         response = await value if hasattr(value, "__await__") else value
         return self._redactor.redact(response)
@@ -109,3 +148,9 @@ class CredentialProxy:
 
     def usage_audit(self) -> list[dict[str, str]]:
         return [dict(record) for record in self._usage_audit]
+
+    async def revoke_reference(self, tenant_id: str, credential_ref: str) -> None:
+        self._references.pop((tenant_id, credential_ref), None)
+        if self._registry is not None:
+            await self._registry.revoke_reference(tenant_id, credential_ref)
+        await self._vault.revoke(credential_ref)

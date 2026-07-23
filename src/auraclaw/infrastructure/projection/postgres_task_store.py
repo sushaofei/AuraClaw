@@ -151,6 +151,35 @@ class PostgresTaskProjection(LazyPool):
             "projected_at": row["projected_at"].isoformat(),
         }
 
+    async def redrive_poison(self, tenant_id: str, event_id: str) -> bool:
+        pool = await self.pool()
+        result: str = await pool.execute(
+            """DELETE FROM projection.poison_event
+            WHERE tenant_id=$1 AND event_id=$2""",
+            tenant_id,
+            event_id,
+        )
+        return result == "DELETE 1"
+
+    async def poison_count(self, tenant_id: str | None = None) -> int:
+        pool = await self.pool()
+        return int(
+            await pool.fetchval(
+                """SELECT count(*) FROM projection.poison_event
+                WHERE $1::text IS NULL OR tenant_id=$1""",
+                tenant_id,
+            )
+        )
+
+    async def session_keys(self, tenant_id: str | None = None) -> list[tuple[str, str]]:
+        pool = await self.pool()
+        rows = await pool.fetch(
+            """SELECT tenant_id,session_id FROM projection.task_view
+            WHERE $1::text IS NULL OR tenant_id=$1 ORDER BY tenant_id,session_id""",
+            tenant_id,
+        )
+        return [(str(row["tenant_id"]), str(row["session_id"])) for row in rows]
+
     async def rebuild(self, events: Sequence[CanonicalEvent], tenant_id: str | None = None) -> int:
         pool = await self.pool()
         async with pool.acquire() as connection, connection.transaction():

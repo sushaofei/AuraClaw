@@ -40,6 +40,7 @@ class HandsMcpClient:
             lease_id=assignment.lease_id,
             fencing_token=assignment.fencing_token,
             deadline=assignment.deadline,
+            lease_assertion=assignment.lease_assertion,
         )
 
     async def initialize(self, assignment: RuntimeAssignment) -> dict[str, Any]:
@@ -140,6 +141,15 @@ class HttpMcpTransport:
                 "Authorization": f"Bearer {token}",
                 "Accept": "application/json, text/event-stream",
                 "MCP-Protocol-Version": MCP_PROTOCOL_VERSION,
+                **(
+                    {
+                        "X-AuraClaw-Lease-Assertion": (
+                            trusted_context.lease_assertion.model_dump_json()
+                        )
+                    }
+                    if trusted_context.lease_assertion is not None
+                    else {}
+                ),
             },
         )
         response.raise_for_status()
