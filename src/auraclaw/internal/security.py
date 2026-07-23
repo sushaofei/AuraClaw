@@ -21,6 +21,7 @@ def _canonical_claims(assertion: LeaseAssertion) -> bytes:
             "key_id": assertion.key_id,
             "lease_id": assertion.lease_id,
             "run_id": assertion.run_id,
+            "root_session_id": assertion.root_session_id,
             "session_id": assertion.session_id,
             "tenant_id": assertion.tenant_id,
         },
@@ -74,11 +75,11 @@ class LeaseAssertionVerifier:
         keys: Mapping[str, bytes],
         *,
         ledger: FencingTokenLedger,
-        audience: str = "session",
+        audience: str | tuple[str, ...] = "session",
     ) -> None:
         self._keys = {key_id: bytes(value) for key_id, value in keys.items()}
         self._ledger = ledger
-        self._audience = audience
+        self._audiences = (audience,) if isinstance(audience, str) else audience
 
     async def verify(
         self,
@@ -92,7 +93,7 @@ class LeaseAssertionVerifier:
         key = self._keys.get(assertion.key_id)
         if key is None:
             raise AuthorizationError("lease assertion key is not trusted")
-        if assertion.audience != self._audience:
+        if assertion.audience not in self._audiences:
             raise AuthorizationError("lease assertion audience mismatch")
         if (
             assertion.tenant_id != tenant_id

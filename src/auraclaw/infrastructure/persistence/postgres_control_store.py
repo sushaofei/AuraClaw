@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import timedelta
 from typing import Any
 from uuid import uuid4
@@ -9,6 +10,7 @@ from auraclaw.contracts.errors import (
     LeaseConflictError,
 )
 from auraclaw.control.ports import (
+    ClaimedAssignment,
     ClaimedRunnable,
     RunnableItem,
     RuntimeAssignment,
@@ -223,6 +225,41 @@ class PostgresControlStateStore(_LazyPool):
             deadline=row["deadline"],
             budget=budget,
         )
+
+    async def claim_assignments(
+        self, runtime_id: str, role: str, *, limit: int = 1
+    ) -> list[ClaimedAssignment]:
+        pool = await self.pool()
+        rows = await pool.fetch(
+            """WITH candidates AS (
+                SELECT task_id FROM control.assignment
+                WHERE runtime_id=$1 AND role=$2 AND assignment_status='assigned'
+                ORDER BY assigned_at, task_id
+                FOR UPDATE SKIP LOCKED LIMIT $3
+            )
+            UPDATE control.assignment a
+            SET assignment_status='running', started_at=COALESCE(started_at, now())
+            FROM candidates c WHERE a.task_id=c.task_id RETURNING a.task_id""",
+            runtime_id,
+            role,
+            limit,
+        )
+        claimed: list[ClaimedAssignment] = []
+        for row in rows:
+            task_id = str(row["task_id"])
+            assignment = await self.get_assignment(task_id)
+            if assignment is not None:
+                lease_expires_at = await pool.fetchval(
+                    "SELECT expires_at FROM control.runtime_lease WHERE lease_id=$1",
+                    assignment.lease_id,
+                )
+                assignment = replace(
+                    assignment, lease_expires_at=lease_expires_at
+                )
+                claimed.append(
+                    ClaimedAssignment(task_id=task_id, assignment=assignment)
+                )
+        return claimed
 
     async def finish_assignment(self, task_id: str, outcome: str) -> None:
         pool = await self.pool()

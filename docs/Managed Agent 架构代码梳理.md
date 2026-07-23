@@ -127,18 +127,18 @@ Issue #8 已按 [Managed Agent 模块重构方案](./Managed%20Agent%20模块重
 
 | 生产服务 | 主归属包 | 当前装配/实现 | 目标入口 |
 |---|---|---|---|
-| task-api | `api`、`gateways/task`、`gateways/query` | `auraclaw serve` / `composition/api.py` | `auraclaw api run` |
-| session | `session`、`domain` | API/Runtime 经进程内 Port 调用 | `auraclaw session run` |
-| projection-worker | `projection` | 已有 projection CLI | `auraclaw projection relay --watch` |
-| orchestrator | `control` | 嵌入 `RuntimeWorker` | `auraclaw orchestrator run` |
-| agent-runtime | `runtime` | `composition/adapters/runtime_worker.py` | `auraclaw runtime run` |
-| model-gateway | `runtime/model_gateway.py`；后续迁入稳定 Gateway 包 | Runtime 进程内装配 | `auraclaw model-gateway run` |
-| action-hands | `action` + `infrastructure/hands` | Runtime 进程内 Tool Client/Executor | `auraclaw hands run`（`/mcp`） |
-| policy | `action/policy.py` + Approval 组件 | Tool Gateway/Session 内嵌逻辑 | `auraclaw policy run` |
-| credential-proxy | `infrastructure/credentials`；S1 建立稳定业务 Port | 库级实现 | `auraclaw credential-proxy run` |
-| artifact-service | `infrastructure/artifacts`；S1 建立稳定业务 Port | 内存对象实现；本地路径配置未接线 | `auraclaw artifact run` |
-| streaming-gateway | `gateways/streaming` + Kafka adapter | API lifespan | `auraclaw streaming run` |
-| delivery-worker | `delivery` + `infrastructure/delivery` | 库级 Worker | `auraclaw delivery run` |
+| task-api | `api`、`gateways/task`、`gateways/query` | Projection 只读 role + Session/Policy HTTP Client | `auraclaw api run` |
+| session | `session`、`domain` | Canonical/Outbox 唯一写入服务 | `auraclaw session run` |
+| projection-worker | `projection` | Session claim/ack Client + Projection owner role | `auraclaw projection relay --watch` |
+| orchestrator | `control` | Control Store owner + Control HTTP API | `auraclaw orchestrator run` |
+| agent-runtime | `runtime` | 仅 Control/Session/Model HTTP Client 与 Hands MCP Client | `auraclaw runtime run` |
+| model-gateway | `model_gateway` + Provider adapters | Provider Secret owner + Policy Client | `auraclaw model-gateway run` |
+| action-hands | `action` + `infrastructure/hands` | MCP Server、Tool Registry、Invocation Store、远程 Policy/Credential/Artifact Client | `auraclaw hands run`（`/mcp`） |
+| policy | `policy` + `action/policy.py` | Decision/Approval owner 与持久 evidence | `auraclaw policy run` |
+| credential-proxy | `credential_proxy` + `infrastructure/credentials` | Vault KV、egress allowlist、Reference/Usage owner | `auraclaw credential-proxy run` |
+| artifact-service | `artifact` + `infrastructure/artifacts` | PostgreSQL Metadata + SeaweedFS SigV4 presigned objects | `auraclaw artifact run` |
+| streaming-gateway | `gateways/streaming` + Kafka adapter | 独立公开 SSE 入口 | `auraclaw streaming run` |
+| delivery-worker | `delivery` + `infrastructure/delivery` | Session claim/ack + Delivery owner DB + Policy/Credential Client | `auraclaw delivery run` |
 
 详细通信、数据库角色、MCP、Policy/Credential、SeaweedFS 与迁移决策见
 [ADR-001](./ADR-001%20生产服务部署边界与通信契约.md)。
@@ -670,17 +670,15 @@ src/auraclaw/
 - `api/dependencies.py` 承担全部 DI / Worker 装配
 - Query 与 Command 未分包、缺少 import-linter 门禁
 
-**Issue #12 跟踪中的生产缺口**：
+**Issue #12 S3 后仍由 S4/S5 跟踪的生产缺口**：
 
-1. **独立进程装配**：12 个目标入口中只有 Projection CLI 已独立；Runtime 当前挂 API lifespan
-2. **Admission / Auth**：`AllowAllAdmissionController` 为放行桩；无 OAuth/配额
-3. **Model Provider 扩展**：已有 OpenAI-compatible Adapter；多模型路由与 fallback 未实现
-4. **Artifact / Vault**：SeaweedFS 配置已由用户加入工作区但适配器未接线；Artifact Metadata Service、Vault 生产适配仍未实现
-5. **Collaboration 写面**：无 REST；仅 `GET .../children` 读投影
-6. **部署拓扑**：模块化单体；Session、Control、Model、Hands、Policy、Credential、Artifact、Delivery 信任域未拆
-7. **持久运行状态**：Hands Invocation Store、跨服务 Checkpoint/Lease Assertion、共享 Streaming cursor 未实现
-8. **管理写路径**：Operations CLI 仍可经跨 schema Store redrive/retention，尚未改为 owner Admin API
-9. **架构图 Planner**：代码侧为 Reviewer 角色，命名不完全一致
+1. **横向恢复**：Runnable feed、Orchestrator 2+ 副本 reconcile、Runtime 无黏性接管仍在 S4。
+2. **共享 Streaming cursor**：跨 Runtime/Gateway 的持久游标与 Replay Router 仍在 S4。
+3. **高级 Artifact**：multipart、扫描流水线、Legal Hold 与故障恢复演练仍在 S4/S5。
+4. **共享配额**：Model Gateway 多副本共享 Provider quota/usage 与 fallback 仍在 S4。
+5. **生产部署**：HPA/PDB、Secret 挂载、N/N-1 滚动升级及 Kill Test 仍在 S5。
+6. **外部资源门禁**：部署环境必须实际应用 `deploy/postgres/roles.sql`，并为 Artifact Service
+   credential 授予目标 SeaweedFS bucket 的最小 PUT/GET/HEAD/DELETE 权限。
 
 ---
 

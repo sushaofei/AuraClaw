@@ -165,8 +165,12 @@ PostgreSQL 或 Kafka 运行在 Docker Host，请把相应 host 配置为 `host.d
 使用服务 DNS、Secret/Workload 注入，不在 Compose 文件中写入密钥。Ingress 将
 `/v1/streams/*` 路由到 `streaming-gateway:8010`，其余路径路由到 `task-api:8000`。
 
-S2 建立进程、路由和生命周期边界；S3 才删除兼容期内的 direct Store 装配并切换为内部 HTTP/MCP
-Client。所有环境都经过相同的
+S3 生产装配已切换为 owner HTTP/MCP Client：Session、Control、Model、Policy、Credential、
+Artifact 和 Admin 写路径不再共享跨域 Store。Action Hands 以 MCP Server 暴露工具，并通过持久
+Invocation Store、Policy、Credential Proxy 和 Artifact Service 执行；Runtime 只持有 MCP Client。
+SeaweedFS 管理密钥只注入 Artifact Service，Vault Token 只注入 Credential Proxy，Runtime 位于
+无 platform egress 的内部 Docker network。development combined profile 继续使用进程内适配器。
+所有环境都经过相同的
 Runnable Queue、Orchestrator、Agent Harness、Model Gateway 和 Runtime Event Producer SDK；
 环境差异只来自各自 `.env` 提供的 PostgreSQL/内存、Kafka/内存、模型端点和 CORS 等资源。
 已部署外部 Runtime 时可设置 `AURACLAW_RUNTIME_ENABLED=false` 关闭同进程 Worker。

@@ -101,6 +101,7 @@ class ManagedOrchestrator:
                 resource_profile=item.required_capability,
                 deadline=item.deadline,
                 budget=item.budget,
+                lease_expires_at=lease.expires_at,
             )
             if not await self._control.assign(item.task_id, assignment):
                 await self._control.release_lease(lease)

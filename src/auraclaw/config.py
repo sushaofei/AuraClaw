@@ -28,7 +28,29 @@ class Settings(BaseSettings):
     streaming_port: int = 8010
     delivery_port: int = 8011
     lease_signing_key: SecretStr | None = None
+    task_api_workload_token: SecretStr | None = None
+    orchestrator_workload_token: SecretStr | None = None
+    projection_workload_token: SecretStr | None = None
     runtime_workload_token: SecretStr | None = None
+    model_gateway_workload_token: SecretStr | None = None
+    action_hands_workload_token: SecretStr | None = None
+    credential_proxy_workload_token: SecretStr | None = None
+    artifact_service_workload_token: SecretStr | None = None
+    policy_workload_token: SecretStr | None = None
+    delivery_workload_token: SecretStr | None = None
+    session_base_url: str = "http://127.0.0.1:8001"
+    projection_base_url: str = "http://127.0.0.1:8002"
+    control_base_url: str = "http://127.0.0.1:8003"
+    model_gateway_base_url: str = "http://127.0.0.1:8005"
+    hands_mcp_url: str = "http://127.0.0.1:8006/mcp"
+    policy_base_url: str = "http://127.0.0.1:8007"
+    credential_proxy_base_url: str = "http://127.0.0.1:8008"
+    credential_egress_allowlist: str = ""
+    credential_vault_addr: str | None = None
+    credential_vault_token: SecretStr | None = None
+    credential_vault_mount: str = "secret"
+    artifact_base_url: str = "http://127.0.0.1:8009"
+    delivery_base_url: str = "http://127.0.0.1:8011"
     log_level: str = "INFO"
     storage_backend: Literal["auto", "memory", "postgres"] = "auto"
     database_url: str = "postgresql+asyncpg://auraclaw:auraclaw@localhost:5432/auraclaw"
@@ -69,6 +91,10 @@ class Settings(BaseSettings):
     cors_allow_origins: str = ""
     runtime_enabled: bool = True
     runtime_poll_interval: float = 0.05
+    runtime_id: str = "runtime-local-1"
+    runtime_role: str = "root"
+    runtime_node_id: str = "local"
+    runtime_capacity: int = Field(default=1, ge=1)
     model_api_key: str | None = None
     model_base_url: str | None = None
     model_name: str | None = None
@@ -155,8 +181,32 @@ class Settings(BaseSettings):
         return configured
 
     @property
+    def allowed_credential_egress_hosts(self) -> tuple[str, ...]:
+        return tuple(
+            host.strip().lower()
+            for host in self.credential_egress_allowlist.split(",")
+            if host.strip()
+        )
+
+    @property
     def model_gateway_configured(self) -> bool:
         return bool(self.model_api_key and self.model_base_url and self.model_name)
+
+    def workload_token_value(self, service_name: str) -> str | None:
+        tokens = {
+            "task-api": self.task_api_workload_token,
+            "orchestrator": self.orchestrator_workload_token,
+            "projection-worker": self.projection_workload_token,
+            "agent-runtime": self.runtime_workload_token,
+            "model-gateway": self.model_gateway_workload_token,
+            "action-hands": self.action_hands_workload_token,
+            "credential-proxy": self.credential_proxy_workload_token,
+            "artifact-service": self.artifact_service_workload_token,
+            "policy": self.policy_workload_token,
+            "delivery-worker": self.delivery_workload_token,
+        }
+        token = tokens.get(service_name)
+        return token.get_secret_value() if token is not None else None
 
     def service_port(self, service_name: str) -> int:
         ports = {

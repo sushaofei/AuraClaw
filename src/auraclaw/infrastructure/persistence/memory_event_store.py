@@ -3,13 +3,14 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
 from auraclaw.contracts.commands import CommandContext
 from auraclaw.contracts.errors import VersionConflictError
 from auraclaw.contracts.events import CanonicalEvent, NewEvent, utc_now
-from auraclaw.session.ports import AppendResult, SessionSnapshot
+from auraclaw.session.ports import AppendResult, ClaimedOutboxRecord, SessionSnapshot
 
 DELIVERY_TRIGGER_EVENTS = {
     "run.completed",
@@ -28,6 +29,10 @@ class OutboxRecord:
     event: CanonicalEvent
     published: bool = False
     publish_attempt: int = 0
+    claimed_by: str | None = None
+    claim_token: str | None = None
+    claim_expires_at: datetime | None = None
+    poisoned: bool = False
 
 
 class InMemoryEventStore:
@@ -163,3 +168,80 @@ class InMemoryEventStore:
                 if record.outbox_id == outbox_id:
                     record.publish_attempt += 1
                     return
+
+    async def claim_outbox(
+        self,
+        destination: str,
+        worker_id: str,
+        *,
+        limit: int,
+        claim_ttl: timedelta,
+    ) -> list[ClaimedOutboxRecord]:
+        now = datetime.now(UTC)
+        claimed: list[ClaimedOutboxRecord] = []
+        async with self._lock:
+            for record in self._outbox:
+                claim_expired = (
+                    record.claim_expires_at is not None
+                    and record.claim_expires_at <= now
+                )
+                available = record.claimed_by is None or claim_expired
+                if (
+                    record.destination != destination
+                    or record.published
+                    or record.poisoned
+                    or not available
+                ):
+                    continue
+                token = f"clm_{uuid4().hex}"
+                record.claimed_by = worker_id
+                record.claim_token = token
+                record.claim_expires_at = now + claim_ttl
+                record.publish_attempt += 1
+                claimed.append(
+                    ClaimedOutboxRecord(
+                        outbox_id=str(record.outbox_id),
+                        event_id=record.event_id,
+                        event=record.event,
+                        claim_token=token,
+                        attempt=record.publish_attempt,
+                    )
+                )
+                if len(claimed) >= limit:
+                    break
+        return claimed
+
+    async def disposition_outbox(
+        self,
+        destination: str,
+        worker_id: str,
+        outbox_id: str,
+        claim_token: str,
+        disposition: str,
+        reason: str | None = None,
+    ) -> bool:
+        del reason
+        async with self._lock:
+            record = next(
+                (item for item in self._outbox if str(item.outbox_id) == outbox_id),
+                None,
+            )
+            if (
+                record is None
+                or record.destination != destination
+                or record.claimed_by != worker_id
+                or record.claim_token != claim_token
+                or record.claim_expires_at is None
+                or record.claim_expires_at <= datetime.now(UTC)
+            ):
+                return False
+            if disposition == "ack":
+                record.published = True
+            elif disposition == "poison":
+                record.poisoned = True
+            elif disposition != "nack":
+                return False
+            record.claimed_by = None
+            record.claim_token = None
+            record.claim_expires_at = None
+            return True

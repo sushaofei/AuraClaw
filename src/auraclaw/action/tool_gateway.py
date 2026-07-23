@@ -1,16 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
-from auraclaw.action.policy import PolicyEngine
+from auraclaw.action.policy import PolicyEngine as PolicyEngine
 from auraclaw.action.ports import (
+    ApprovalController,
     ArtifactWriter,
     CredentialAdapter,
     CredentialInvoker,
     HandsExecutor,
+    InvocationStore,
+    PolicyEvaluation,
+    PolicyEvaluator,
 )
 from auraclaw.contracts.errors import (
     ApprovalValidationError,
@@ -126,12 +131,14 @@ class ToolGateway:
         self,
         *,
         registry: ToolRegistry,
-        policy: PolicyEngine,
+        policy: PolicyEvaluator,
         approvals: ApprovalReader,
         hands: HandsExecutor,
         artifacts: ArtifactWriter,
         credential_proxy: CredentialInvoker | None = None,
         credential_adapters: dict[str, CredentialAdapter] | None = None,
+        invocation_store: InvocationStore | None = None,
+        approval_controller: ApprovalController | None = None,
         max_inline_bytes: int = 64 * 1024,
         approval_ttl: timedelta = timedelta(hours=1),
     ) -> None:
@@ -142,6 +149,8 @@ class ToolGateway:
         self._artifacts = artifacts
         self._credential_proxy = credential_proxy
         self._credential_adapters = credential_adapters or {}
+        self._invocation_store = invocation_store
+        self._approval_controller = approval_controller
         self._max_inline_bytes = max_inline_bytes
         self._approval_ttl = approval_ttl
         self._results: dict[tuple[str, str], tuple[str, ToolResult]] = {}
@@ -164,6 +173,8 @@ class ToolGateway:
                 error_code="tool_cancelled",
                 side_effect_status="unknown",
             )
+            if self._invocation_store is not None:
+                await self._invocation_store.complete(invocation, result)
         finally:
             self._inflight.pop(invocation.tool_invocation_id, None)
         self._statuses[invocation.tool_invocation_id] = result.status.value
@@ -198,7 +209,27 @@ class ToolGateway:
                     )
                 return previous_result
 
-            decision = self._policy.evaluate(capability)
+            if self._invocation_store is not None:
+                persisted = await self._invocation_store.begin(invocation, digest)
+                if persisted.conflict:
+                    return ToolResult(
+                        status=ToolResultStatus.DENIED,
+                        summary="idempotency key was already used for a different action",
+                        error_code="idempotency_conflict",
+                    )
+                if isinstance(persisted.cached_result, ToolResult):
+                    return persisted.cached_result
+
+            evaluated = self._policy.evaluate(capability, invocation)
+            evaluation = await evaluated if inspect.isawaitable(evaluated) else evaluated
+            if isinstance(evaluation, PolicyEvaluation):
+                decision = evaluation.decision
+                decision_id = evaluation.decision_id
+                policy_version = evaluation.policy_version
+            else:
+                decision = evaluation
+                decision_id = None
+                policy_version = self._policy.version
             if decision is PolicyDecision.DENY:
                 result = ToolResult(
                     status=ToolResultStatus.DENIED,
@@ -206,10 +237,14 @@ class ToolGateway:
                     error_code="policy_denied",
                 )
                 self._results[cache_key] = (digest, result)
+                if self._invocation_store is not None:
+                    await self._invocation_store.complete(invocation, result)
                 return result
             if decision is PolicyDecision.REQUIRE_APPROVAL:
-                approval = await self._resolve_approval(invocation, capability, digest)
-                if approval is None:
+                approval = await self._resolve_approval(
+                    invocation, capability, digest, policy_version
+                )
+                if not approval:
                     pending = self._pending_approvals.get(
                         (invocation.tenant_id, invocation.session_id, digest)
                     )
@@ -224,21 +259,32 @@ class ToolGateway:
                             risk=capability.risk_level,
                             reason=f"{capability.permission.value} action requires human approval",
                             expected_effect=invocation.expected_side_effect,
-                            policy_version=self._policy.version,
+                            policy_version=policy_version,
                             ttl=self._approval_ttl,
                         )
                         self._pending_approvals[
                             (invocation.tenant_id, invocation.session_id, digest)
                         ] = pending
-                    return ToolResult(
+                        if self._approval_controller is not None:
+                            await self._approval_controller.request_approval(pending)
+                    result = ToolResult(
                         status=ToolResultStatus.DENIED,
                         summary="human approval is required before execution",
                         metadata={"approval_request": pending.as_event_payload()},
                         error_code="approval_required",
                     )
+                    if self._invocation_store is not None:
+                        await self._invocation_store.set_status(
+                            invocation, "waiting_approval", error_code="approval_required"
+                        )
+                    return result
 
-            result = await self._dispatch(invocation, capability)
+            result = await self._dispatch(
+                invocation, capability, policy_decision_id=decision_id
+            )
             self._results[cache_key] = (digest, result)
+            if self._invocation_store is not None:
+                await self._invocation_store.complete(invocation, result)
             return result
 
     async def _resolve_approval(
@@ -246,8 +292,20 @@ class ToolGateway:
         invocation: ToolInvocation,
         capability: ToolCapability,
         digest: str,
-    ) -> ApprovalRecord | None:
+        policy_version: str,
+    ) -> bool:
         del capability
+        if self._approval_controller is not None:
+            if invocation.approval_id is None:
+                return False
+            return await self._approval_controller.validate_approval(
+                tenant_id=invocation.tenant_id,
+                approval_id=invocation.approval_id,
+                session_id=invocation.session_id,
+                run_id=invocation.run_id,
+                action_digest=digest,
+                policy_version=policy_version,
+            )
         record = None
         if invocation.approval_id is not None:
             record = await self._approvals.get(
@@ -260,21 +318,25 @@ class ToolGateway:
                 invocation.tenant_id,
                 invocation.session_id,
                 digest,
-                self._policy.version,
+                policy_version,
             )
         if record is None:
-            return None
+            return False
         ApprovalAggregate.validate(
             record,
             tenant_id=invocation.tenant_id,
             session_id=invocation.session_id,
             digest=digest,
-            policy_version=self._policy.version,
+            policy_version=policy_version,
         )
-        return record
+        return True
 
     async def _dispatch(
-        self, invocation: ToolInvocation, capability: ToolCapability
+        self,
+        invocation: ToolInvocation,
+        capability: ToolCapability,
+        *,
+        policy_decision_id: str | None = None,
     ) -> ToolResult:
         if invocation.deadline is not None and datetime.now(UTC) >= invocation.deadline:
             return ToolResult(
@@ -287,7 +349,12 @@ class ToolGateway:
             timeout = min(timeout, (invocation.deadline - datetime.now(UTC)).total_seconds())
         try:
             raw = await asyncio.wait_for(
-                self._execute_adapter(invocation, capability), timeout=max(timeout, 0.001)
+                self._execute_adapter(
+                    invocation,
+                    capability,
+                    policy_decision_id=policy_decision_id,
+                ),
+                timeout=max(timeout, 0.001),
             )
         except TimeoutError:
             return ToolResult(
@@ -322,14 +389,16 @@ class ToolGateway:
         )
 
     async def _execute_adapter(
-        self, invocation: ToolInvocation, capability: ToolCapability
+        self,
+        invocation: ToolInvocation,
+        capability: ToolCapability,
+        *,
+        policy_decision_id: str | None = None,
     ) -> Any:
         if capability.runtime_location == "credential_proxy":
             if self._credential_proxy is None or invocation.credential_ref is None:
                 raise PolicyDeniedError("credential proxy execution requires credential_ref")
             adapter = self._credential_adapters.get(invocation.tool_name)
-            if adapter is None:
-                raise PolicyDeniedError("credential proxy adapter is not registered")
             operation = invocation.expected_side_effect
             if capability.allowed_credential_operations:
                 if operation not in capability.allowed_credential_operations:
@@ -342,6 +411,7 @@ class ToolGateway:
                 operation=operation,
                 request=invocation.arguments,
                 adapter=adapter,
+                policy_decision_id=policy_decision_id,
             )
         return await self._hands.execute(invocation, capability)
 

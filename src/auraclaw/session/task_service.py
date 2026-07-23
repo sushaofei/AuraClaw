@@ -12,6 +12,7 @@ from auraclaw.session.ports import (
     AdmissionController,
     AppendResult,
     EventStore,
+    HumanApprovalNotifier,
     OutboxRelayPort,
     SessionSnapshot,
 )
@@ -26,12 +27,14 @@ class TaskService:
         reader: TaskReader,
         admission: AdmissionController,
         approvals: ApprovalViewReader | None = None,
+        approval_notifier: HumanApprovalNotifier | None = None,
     ) -> None:
         self._event_store = event_store
         self._relay = relay
         self._reader = reader
         self._admission = admission
         self._approvals = approvals
+        self._approval_notifier = approval_notifier
 
     async def create_task(self, *, goal: str, context: CommandContext) -> dict[str, Any]:
         await self._admission.admit(goal=goal, context=context)
@@ -222,6 +225,12 @@ class TaskService:
             events=session.release_pending_events(),
             command_result=response,
         )
+        if self._approval_notifier is not None:
+            await self._approval_notifier.record_human_response(
+                record,
+                decision=decided.status.value,
+                feedback=feedback,
+            )
         await self._after_append(session, result)
         return result.command_result
 
