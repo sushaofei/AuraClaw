@@ -7,15 +7,23 @@ import asyncpg
 import pytest
 
 from auraclaw.config import get_settings
+from auraclaw.contracts.commands import CommandContext
 from auraclaw.contracts.errors import FencingTokenError
+from auraclaw.contracts.events import Actor, CanonicalEvent, NewEvent
+from auraclaw.control.orchestrator import (
+    ManagedOrchestrator,
+    RegisteredRuntimeProvisioner,
+)
 from auraclaw.control.ports import (
     RunnableItem,
     RuntimeAssignment,
     RuntimeCheckpoint,
     RuntimeInstance,
 )
+from auraclaw.control.runnable_feed import RunnableFeedConsumer
 from auraclaw.infrastructure.persistence.postgres_common import asyncpg_url as _asyncpg_url
 from auraclaw.infrastructure.persistence.postgres_control_store import PostgresControlStateStore
+from auraclaw.infrastructure.persistence.postgres_event_store import PostgresEventStore
 
 SETTINGS = get_settings()
 DATABASE_URL = _asyncpg_url(SETTINGS.resolved_database_url) if SETTINGS.postgres_enabled else None
@@ -26,9 +34,27 @@ MIGRATIONS = tuple(
         "migrations/0001_initial.sql",
         "migrations/0002_m1_fact_query.sql",
         "migrations/0003_m2_managed_runtime.sql",
+        "migrations/0010_s4_claim_recovery.sql",
     )
 )
 pytestmark = pytest.mark.skipif(DATABASE_URL is None, reason="PostgreSQL test URL not configured")
+
+
+class _RecordingSession:
+    def __init__(self) -> None:
+        self.calls: list[RuntimeAssignment] = []
+
+    async def append(
+        self,
+        assignment: RuntimeAssignment,
+        events: list[NewEvent],
+        *,
+        command_id: str,
+        operation: str,
+    ) -> list[CanonicalEvent]:
+        del events, command_id, operation
+        self.calls.append(assignment)
+        return []
 
 
 async def _apply_migrations() -> None:
@@ -46,6 +72,12 @@ async def _apply_migrations() -> None:
             "SELECT to_regclass('control.runtime_checkpoint')"
         ) is None:
             await connection.execute(MIGRATIONS[2])
+        if await connection.fetchval(
+            """SELECT 1 FROM information_schema.columns
+            WHERE table_schema='control' AND table_name='runnable_item'
+              AND column_name='claim_token'"""
+        ) is None:
+            await connection.execute(MIGRATIONS[3])
     finally:
         await connection.close()
 
@@ -77,9 +109,12 @@ def test_postgres_control_claim_lease_fencing_checkpoint_and_capacity() -> None:
                 store_a.claim("orch-a", limit=1), store_b.claim("orch-b", limit=1)
             )
             assert sum(len(batch) for batch in claims) == 1
+            runnable_claim = next(batch[0] for batch in claims if batch)
 
             lease = await store_a.acquire_lease(
-                resource_id, "orch-a", ttl=timedelta(seconds=30)
+                resource_id,
+                runnable_claim.claimed_by,
+                ttl=timedelta(seconds=30),
             )
             assert lease is not None
             assert await store_b.acquire_lease(
@@ -105,7 +140,11 @@ def test_postgres_control_claim_lease_fencing_checkpoint_and_capacity() -> None:
                 role="root",
                 resource_profile={},
             )
-            assert await store_a.assign(task_id, assignment)
+            assert await store_a.assign(
+                task_id,
+                assignment,
+                claim_token=runnable_claim.claim_token,
+            )
             assert await store_a.get_assignment(task_id) == assignment
             await store_a.heartbeat(runtime.runtime_id, lease.fencing_token)
             assert await store_a.reserve_capacity(scope, 2, limit=2)
@@ -169,6 +208,151 @@ def test_postgres_control_claim_lease_fencing_checkpoint_and_capacity() -> None:
                 )
                 await connection.execute(
                     "DELETE FROM control.runtime_lease WHERE resource_id=$1", resource_id
+                )
+            finally:
+                await connection.close()
+
+    asyncio.run(scenario())
+
+
+def test_postgres_runnable_feed_and_two_orchestrators_schedule_exactly_once() -> None:
+    async def scenario() -> None:
+        assert DATABASE_URL is not None
+        await _apply_migrations()
+        suffix = uuid4().hex
+        tenant_id = f"tenant-feed-s4-{suffix}"
+        session_id = f"session-feed-s4-{suffix}"
+        run_id = f"run-feed-s4-{suffix}"
+        events = PostgresEventStore(DATABASE_URL)
+        control = PostgresControlStateStore(DATABASE_URL)
+        session = _RecordingSession()
+        try:
+            await events.append(
+                root_session_id=session_id,
+                session_id=session_id,
+                run_id=run_id,
+                context=CommandContext(
+                    command_id=f"create-{suffix}",
+                    tenant_id=tenant_id,
+                    actor=Actor(type="user", id="integration"),
+                    correlation_id=run_id,
+                    expected_version=0,
+                    operation="create_task",
+                ),
+                events=(
+                    NewEvent(
+                        type="session.created",
+                        payload={"goal": "feed", "role": "root"},
+                    ),
+                    NewEvent(type="run.requested", payload={"run_id": run_id}),
+                ),
+                command_result={},
+            )
+            projection_destination = f"projection-test-{suffix}"
+            isolation_connection = await asyncpg.connect(DATABASE_URL)
+            try:
+                await isolation_connection.execute(
+                    """UPDATE session_core.outbox SET destination=$2
+                    WHERE destination='projection' AND event_id IN
+                      (SELECT event_id FROM session_core.canonical_event WHERE tenant_id=$1)""",
+                    tenant_id,
+                    projection_destination,
+                )
+            finally:
+                await isolation_connection.close()
+            projection_claims = await asyncio.gather(
+                events.claim_outbox(
+                    projection_destination,
+                    f"projection-a-{suffix}",
+                    limit=10,
+                    claim_ttl=timedelta(seconds=30),
+                ),
+                events.claim_outbox(
+                    projection_destination,
+                    f"projection-b-{suffix}",
+                    limit=10,
+                    claim_ttl=timedelta(seconds=30),
+                ),
+            )
+            first_projection = next(batch[0] for batch in projection_claims if batch)
+            assert sum(len(batch) for batch in projection_claims) == 1
+            assert first_projection.event.aggregate_version == 1
+            assert await events.disposition_outbox(
+                projection_destination,
+                f"projection-{'a' if projection_claims[0] else 'b'}-{suffix}",
+                first_projection.outbox_id,
+                first_projection.claim_token,
+                "ack",
+            )
+            second_projection = await events.claim_outbox(
+                projection_destination,
+                f"projection-c-{suffix}",
+                limit=10,
+                claim_ttl=timedelta(seconds=30),
+            )
+            assert [record.event.aggregate_version for record in second_projection] == [2]
+            feeds = (
+                RunnableFeedConsumer(events, control, worker_id=f"orch-a-{suffix}"),
+                RunnableFeedConsumer(events, control, worker_id=f"orch-b-{suffix}"),
+            )
+            assert sum(await asyncio.gather(*(feed.run_once() for feed in feeds))) == 1
+            for runtime_id in (f"runtime-a-{suffix}", f"runtime-b-{suffix}"):
+                await control.register_runtime(
+                    RuntimeInstance(
+                        runtime_id=runtime_id,
+                        runtime_type="agent",
+                        role="root",
+                        node_id=runtime_id,
+                        capabilities={},
+                        capacity=1,
+                    )
+                )
+            orchestrators = tuple(
+                ManagedOrchestrator(
+                    orchestrator_id=f"orch-{index}-{suffix}",
+                    control_store=control,
+                    session=session,
+                    provisioner=RegisteredRuntimeProvisioner(control),
+                )
+                for index in range(2)
+            )
+            assignments = await asyncio.gather(
+                *(orchestrator.schedule_once() for orchestrator in orchestrators)
+            )
+            assert sum(assignment is not None for assignment in assignments) == 1
+            assert len(session.calls) == 1
+        finally:
+            await events.close()
+            await control.close()
+            connection = await asyncpg.connect(DATABASE_URL)
+            try:
+                await connection.execute(
+                    "DELETE FROM control.assignment WHERE tenant_id=$1", tenant_id
+                )
+                await connection.execute(
+                    "DELETE FROM control.runnable_item WHERE tenant_id=$1", tenant_id
+                )
+                await connection.execute(
+                    "DELETE FROM control.runtime_lease WHERE resource_id=$1",
+                    f"session:{tenant_id}:{session_id}",
+                )
+                await connection.execute(
+                    "DELETE FROM control.runtime_instance WHERE runtime_id LIKE $1",
+                    f"%-{suffix}",
+                )
+                await connection.execute(
+                    """DELETE FROM session_core.outbox WHERE event_id IN
+                    (SELECT event_id FROM session_core.canonical_event WHERE tenant_id=$1)""",
+                    tenant_id,
+                )
+                await connection.execute(
+                    "DELETE FROM session_core.canonical_event WHERE tenant_id=$1", tenant_id
+                )
+                await connection.execute(
+                    "DELETE FROM session_core.command_dedup WHERE tenant_id=$1", tenant_id
+                )
+                await connection.execute(
+                    "DELETE FROM session_core.session_head WHERE tenant_id=$1", tenant_id
                 )
             finally:
                 await connection.close()

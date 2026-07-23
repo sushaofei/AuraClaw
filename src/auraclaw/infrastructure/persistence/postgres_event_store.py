@@ -9,7 +9,10 @@ from uuid import uuid4
 from auraclaw.contracts.commands import CommandContext
 from auraclaw.contracts.errors import VersionConflictError
 from auraclaw.contracts.events import CanonicalEvent, NewEvent, utc_now
-from auraclaw.infrastructure.persistence.memory_event_store import DELIVERY_TRIGGER_EVENTS
+from auraclaw.infrastructure.persistence.memory_event_store import (
+    CONTROL_TRIGGER_EVENTS,
+    DELIVERY_TRIGGER_EVENTS,
+)
 from auraclaw.infrastructure.persistence.postgres_common import (
     LazyPool,
     event_from_record,
@@ -199,6 +202,13 @@ class PostgresEventStore(LazyPool):
                         event.event_id,
                         json_dumps(event.as_dict()),
                     )
+                if event.type in CONTROL_TRIGGER_EVENTS:
+                    await connection.execute(
+                        """INSERT INTO session_core.outbox (event_id, destination, payload)
+                        VALUES ($1, 'control', $2::jsonb)""",
+                        event.event_id,
+                        json_dumps(event.as_dict()),
+                    )
 
             new_version = context.expected_version + len(canonical)
             await connection.execute(
@@ -292,6 +302,17 @@ class PostgresEventStore(LazyPool):
                 WHERE o.destination = $1 AND o.published_at IS NULL
                   AND o.poisoned_at IS NULL AND o.next_attempt_at <= now()
                   AND (o.claim_token IS NULL OR o.claim_expires_at <= now())
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM session_core.outbox earlier
+                    JOIN session_core.canonical_event earlier_event
+                      ON earlier_event.event_id = earlier.event_id
+                    WHERE earlier.destination = o.destination
+                      AND earlier.published_at IS NULL
+                      AND earlier.outbox_id < o.outbox_id
+                      AND earlier_event.tenant_id = e.tenant_id
+                      AND earlier_event.session_id = e.session_id
+                  )
                 ORDER BY o.outbox_id
                 FOR UPDATE OF o SKIP LOCKED LIMIT $2""",
                 destination,

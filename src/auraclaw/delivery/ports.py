@@ -1,5 +1,5 @@
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Protocol
 
 from auraclaw.contracts.delivery import (
@@ -35,7 +35,9 @@ class DeliveryStore(Protocol):
 
     async def create_job(self, event: CanonicalEvent, sink: ResultSinkConfig) -> DeliveryJob: ...
 
-    async def claim_due(self, *, limit: int) -> list[DeliveryJob]: ...
+    async def claim_due(
+        self, *, worker_id: str, claim_ttl: timedelta, limit: int
+    ) -> list[DeliveryJob]: ...
 
     async def record_attempt(
         self,
@@ -53,7 +55,12 @@ class DeliveryStore(Protocol):
     async def attempts(self, delivery_id: str) -> list[DeliveryAttempt]: ...
 
     async def begin_redelivery(
-        self, tenant_id: str, delivery_id: str
+        self,
+        tenant_id: str,
+        delivery_id: str,
+        *,
+        worker_id: str,
+        claim_ttl: timedelta,
     ) -> DeliveryJob | None: ...
 
 

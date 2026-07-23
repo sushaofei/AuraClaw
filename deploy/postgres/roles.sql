@@ -5,7 +5,9 @@ BEGIN
     FOREACH role_name IN ARRAY ARRAY[
         'auraclaw_session', 'auraclaw_projection', 'auraclaw_control',
         'auraclaw_delivery', 'auraclaw_hands', 'auraclaw_policy',
-        'auraclaw_credential', 'auraclaw_artifact', 'auraclaw_task_query_ro'
+        'auraclaw_credential', 'auraclaw_artifact', 'auraclaw_streaming',
+        'auraclaw_model',
+        'auraclaw_task_query_ro'
     ] LOOP
         IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = role_name) THEN
             EXECUTE format('CREATE ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT', role_name);
@@ -14,16 +16,18 @@ BEGIN
 END $$;
 
 REVOKE ALL ON SCHEMA session_core, projection, control, delivery,
-    hands, policy, credential, artifact FROM PUBLIC;
+    hands, policy, credential, artifact, streaming, model_gateway FROM PUBLIC;
 REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 
 GRANT USAGE ON SCHEMA session_core TO auraclaw_session;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA session_core TO auraclaw_session;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA session_core TO auraclaw_session;
 
-GRANT USAGE ON SCHEMA projection TO auraclaw_projection, auraclaw_task_query_ro;
+GRANT USAGE ON SCHEMA projection TO auraclaw_projection, auraclaw_streaming,
+    auraclaw_task_query_ro;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA projection TO auraclaw_projection;
 GRANT SELECT ON ALL TABLES IN SCHEMA projection TO auraclaw_task_query_ro;
+GRANT SELECT ON projection.task_view TO auraclaw_streaming;
 
 GRANT USAGE ON SCHEMA control TO auraclaw_control;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA control TO auraclaw_control;
@@ -42,6 +46,12 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA credential TO aurac
 GRANT USAGE ON SCHEMA artifact TO auraclaw_artifact;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA artifact TO auraclaw_artifact;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA artifact TO auraclaw_artifact;
+
+GRANT USAGE ON SCHEMA streaming TO auraclaw_streaming;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA streaming TO auraclaw_streaming;
+
+GRANT USAGE ON SCHEMA model_gateway TO auraclaw_model;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA model_gateway TO auraclaw_model;
 
 -- Keep grants correct for tables and sequences created by later expand migrations.
 -- Run migrations and this bootstrap as the same deployment owner; PostgreSQL default
@@ -85,3 +95,9 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA artifact
     GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO auraclaw_artifact;
 ALTER DEFAULT PRIVILEGES IN SCHEMA artifact
     GRANT USAGE, SELECT ON SEQUENCES TO auraclaw_artifact;
+
+ALTER DEFAULT PRIVILEGES IN SCHEMA streaming
+    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO auraclaw_streaming;
+
+ALTER DEFAULT PRIVILEGES IN SCHEMA model_gateway
+    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO auraclaw_model;

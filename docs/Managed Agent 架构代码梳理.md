@@ -670,14 +670,16 @@ src/auraclaw/
 - `api/dependencies.py` 承担全部 DI / Worker 装配
 - Query 与 Command 未分包、缺少 import-linter 门禁
 
-**Issue #12 S3 后仍由 S4/S5 跟踪的生产缺口**：
+**Issue #12 S4 后仍由 S5 跟踪的生产缺口**：
 
-1. **横向恢复**：Runnable feed、Orchestrator 2+ 副本 reconcile、Runtime 无黏性接管仍在 S4。
-2. **共享 Streaming cursor**：跨 Runtime/Gateway 的持久游标与 Replay Router 仍在 S4。
-3. **高级 Artifact**：multipart、扫描流水线、Legal Hold 与故障恢复演练仍在 S4/S5。
-4. **共享配额**：Model Gateway 多副本共享 Provider quota/usage 与 fallback 仍在 S4。
-5. **生产部署**：HPA/PDB、Secret 挂载、N/N-1 滚动升级及 Kill Test 仍在 S5。
-6. **外部资源门禁**：部署环境必须实际应用 `deploy/postgres/roles.sql`，并为 Artifact Service
+S4 已完成 Runnable Feed、Orchestrator 竞争恢复、Runtime 无黏性 checkpoint 接管、Projection 与
+Delivery 顺序消费、共享 Streaming cursor、Artifact multipart/scan/GC、Hands Invocation、Model
+幂等/配额、Policy bundle 和 Credential 撤销/usage 状态。
+
+1. **生产部署**：HPA/PDB、资源 request/limit、Secret 挂载、N/N-1 滚动升级及 Kill Test 仍在 S5。
+2. **Artifact 治理**：Legal Hold、Retention Policy 和恶意内容扫描平台集成仍在 S5。
+3. **模型治理**：跨 Provider fallback、供应商级限流和成本路由仍属于后续生产增强。
+4. **外部资源门禁**：部署环境必须实际应用 `deploy/postgres/roles.sql`，并为 Artifact Service
    credential 授予目标 SeaweedFS bucket 的最小 PUT/GET/HEAD/DELETE 权限。
 
 ---

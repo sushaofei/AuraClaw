@@ -1,5 +1,6 @@
 import asyncio
-from datetime import UTC, datetime
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
@@ -25,6 +26,7 @@ MIGRATIONS = tuple(
         "migrations/0004_m3_tool_artifact_approval.sql",
         "migrations/0005_m4_collaboration_review.sql",
         "migrations/0006_m5_streaming_delivery.sql",
+        "migrations/0010_s4_claim_recovery.sql",
     )
 )
 pytestmark = pytest.mark.skipif(DATABASE_URL is None, reason="PostgreSQL test URL not configured")
@@ -41,7 +43,7 @@ async def _apply_migrations() -> None:
             "projection.approval_view",
             "projection.collaboration_view",
         )
-        for migration, relation in zip(MIGRATIONS[:-1], checks, strict=True):
+        for migration, relation in zip(MIGRATIONS[:-2], checks, strict=True):
             if await connection.fetchval("SELECT to_regclass($1)", relation) is None:
                 await connection.execute(migration)
         m5_ready = await connection.fetchval(
@@ -57,6 +59,12 @@ async def _apply_migrations() -> None:
             )"""
         )
         if not m5_ready:
+            await connection.execute(MIGRATIONS[-2])
+        if await connection.fetchval(
+            """SELECT 1 FROM information_schema.columns
+            WHERE table_schema='delivery' AND table_name='delivery_job'
+              AND column_name='claim_token'"""
+        ) is None:
             await connection.execute(MIGRATIONS[-1])
     finally:
         await connection.close()
@@ -98,8 +106,25 @@ def test_postgres_delivery_job_survives_restart_and_duplicate_outbox() -> None:
             created = await delivery_store.create_job(event, sink)
             duplicate = await delivery_store.create_job(event, sink)
             assert duplicate.delivery_id == created.delivery_id
-            claimed = await delivery_store.claim_due(limit=1)
+            following = await delivery_store.create_job(
+                replace(
+                    event,
+                    event_id=f"event-pg-m5-following-{suffix}",
+                    aggregate_version=4,
+                ),
+                sink,
+            )
+            claimed = await delivery_store.claim_due(
+                worker_id="delivery-a",
+                claim_ttl=timedelta(seconds=30),
+                limit=1,
+            )
             assert len(claimed) == 1 and claimed[0].attempt_count == 1
+            assert await delivery_store.claim_due(
+                worker_id="delivery-competing",
+                claim_ttl=timedelta(seconds=30),
+                limit=10,
+            ) == []
             retrying = await delivery_store.record_attempt(
                 claimed[0],
                 SinkResponse(False, True, "HTTP 503"),
@@ -110,7 +135,11 @@ def test_postgres_delivery_job_survives_restart_and_duplicate_outbox() -> None:
             await delivery_store.close()
 
             restarted_store = PostgresDeliveryJobStore(DATABASE_URL)
-            recovered = await restarted_store.claim_due(limit=1)
+            recovered = await restarted_store.claim_due(
+                worker_id="delivery-b",
+                claim_ttl=timedelta(seconds=30),
+                limit=1,
+            )
             assert len(recovered) == 1 and recovered[0].attempt_count == 2
             succeeded = await restarted_store.record_attempt(
                 recovered[0],
@@ -119,9 +148,21 @@ def test_postgres_delivery_job_survives_restart_and_duplicate_outbox() -> None:
                 max_attempts=5,
             )
             jobs = await restarted_store.list_jobs(tenant_id, session_id)
-            assert len(jobs) == 1
+            assert len(jobs) == 2
             assert succeeded.status.value == "succeeded" and jobs[0].attempt_count == 2
             assert len(await restarted_store.attempts(created.delivery_id)) == 2
+            next_claim = await restarted_store.claim_due(
+                worker_id="delivery-b",
+                claim_ttl=timedelta(seconds=30),
+                limit=10,
+            )
+            assert [job.delivery_id for job in next_claim] == [following.delivery_id]
+            await restarted_store.record_attempt(
+                next_claim[0],
+                SinkResponse(True, summary="HTTP 204"),
+                next_attempt_at=None,
+                max_attempts=5,
+            )
             await restarted_store.close()
         finally:
             cleanup = await asyncpg.connect(DATABASE_URL, timeout=10)

@@ -30,6 +30,7 @@ class InMemoryControlStateStore:
 
     def __init__(self) -> None:
         self._queue: dict[str, tuple[RunnableItem, str, str | None]] = {}
+        self._queue_claims: dict[str, tuple[str, datetime]] = {}
         self._leases: dict[str, RuntimeLease] = {}
         self._lease_counters: dict[str, int] = {}
         self._assignments: dict[str, tuple[RuntimeAssignment, str]] = {}
@@ -47,25 +48,65 @@ class InMemoryControlStateStore:
             self._queue[item.task_id] = (item, "queued", None)
             return True
 
-    async def claim(self, worker_id: str, *, limit: int = 1) -> list[ClaimedRunnable]:
+    async def claim(
+        self,
+        worker_id: str,
+        *,
+        limit: int = 1,
+        claim_ttl: timedelta = timedelta(seconds=30),
+    ) -> list[ClaimedRunnable]:
         async with self._lock:
+            now = _now()
             candidates = [
                 item
                 for item, status, _ in self._queue.values()
                 if status == "queued"
+                or (
+                    status == "claimed"
+                    and self._queue_claims.get(
+                        item.task_id, ("", datetime.min.replace(tzinfo=UTC))
+                    )[1]
+                    <= now
+                )
             ]
             candidates.sort(key=lambda item: (-item.priority, item.task_id))
             claimed: list[ClaimedRunnable] = []
             for item in candidates[:limit]:
+                token = uuid4().hex
+                expires_at = now + claim_ttl
                 self._queue[item.task_id] = (item, "claimed", worker_id)
-                claimed.append(ClaimedRunnable(item=item, claimed_by=worker_id))
+                self._queue_claims[item.task_id] = (token, expires_at)
+                claimed.append(
+                    ClaimedRunnable(
+                        item=item,
+                        claimed_by=worker_id,
+                        claim_token=token,
+                        claim_expires_at=expires_at,
+                    )
+                )
             return claimed
 
-    async def reschedule(self, task_id: str) -> None:
+    async def reschedule(
+        self,
+        task_id: str,
+        *,
+        worker_id: str | None = None,
+        claim_token: str | None = None,
+    ) -> None:
         async with self._lock:
             queued = self._queue.get(task_id)
             if queued is not None:
+                if worker_id is not None or claim_token is not None:
+                    current_claim = self._queue_claims.get(task_id)
+                    if (
+                        queued[2] != worker_id
+                        or current_claim is None
+                        or current_claim[0] != claim_token
+                        or current_claim[1] <= _now()
+                    ):
+                        return
                 self._queue[task_id] = (queued[0], "queued", None)
+                self._queue_claims.pop(task_id, None)
             assignment = self._assignments.get(task_id)
             if assignment is not None:
                 self._assignments[task_id] = (assignment[0], "failed")
@@ -123,8 +164,27 @@ class InMemoryControlStateStore:
                     f"stale fencing token {fencing_token} for {resource_id}"
                 )
 
-    async def assign(self, task_id: str, assignment: RuntimeAssignment) -> bool:
+    async def assign(
+        self, task_id: str, assignment: RuntimeAssignment, *, claim_token: str
+    ) -> bool:
         async with self._lock:
+            queued = self._queue.get(task_id)
+            claim = self._queue_claims.get(task_id)
+            resource_id = f"session:{assignment.tenant_id}:{assignment.session_id}"
+            lease = self._leases.get(resource_id)
+            if (
+                queued is None
+                or queued[1] != "claimed"
+                or claim is None
+                or claim[0] != claim_token
+                or claim[1] <= _now()
+                or lease is None
+                or lease.lease_id != assignment.lease_id
+                or lease.fencing_token != assignment.fencing_token
+                or lease.owner != queued[2]
+                or lease.expires_at <= _now()
+            ):
+                return False
             current = self._assignments.get(task_id)
             if current is not None and current[1] not in {"expired", "completed", "failed"}:
                 return False
@@ -132,12 +192,34 @@ class InMemoryControlStateStore:
             if task_id in self._queue:
                 item, _, owner = self._queue[task_id]
                 self._queue[task_id] = (item, "assigned", owner)
+                self._queue_claims.pop(task_id, None)
             return True
 
     async def get_assignment(self, task_id: str) -> RuntimeAssignment | None:
         async with self._lock:
             entry = self._assignments.get(task_id)
             return entry[0] if entry is not None else None
+
+    async def select_runtime(self, item: RunnableItem) -> RuntimeInstance | None:
+        async with self._lock:
+            candidates: list[tuple[int, RuntimeInstance]] = []
+            for runtime, heartbeat_at in self._runtimes.values():
+                if runtime.role != item.role or heartbeat_at <= _now() - timedelta(seconds=30):
+                    continue
+                if any(
+                    runtime.capabilities.get(key) != value
+                    for key, value in item.required_capability.items()
+                ):
+                    continue
+                active = sum(
+                    1
+                    for assignment, status in self._assignments.values()
+                    if assignment.runtime_id == runtime.runtime_id
+                    and status in {"assigned", "running"}
+                )
+                if active < runtime.capacity:
+                    candidates.append((active, runtime))
+            return min(candidates, key=lambda candidate: candidate[0])[1] if candidates else None
 
     async def claim_assignments(
         self, runtime_id: str, role: str, *, limit: int = 1
@@ -255,5 +337,12 @@ class InMemoryControlStateStore:
                     queued = self._queue.get(task_id)
                     if queued is not None:
                         self._queue[task_id] = (queued[0], "queued", None)
+                        self._queue_claims.pop(task_id, None)
+                    repaired += 1
+            for task_id, (item, status, _owner) in list(self._queue.items()):
+                claim = self._queue_claims.get(task_id)
+                if status == "claimed" and claim is not None and claim[1] <= now:
+                    self._queue[task_id] = (item, "queued", None)
+                    self._queue_claims.pop(task_id, None)
                     repaired += 1
             return repaired

@@ -60,6 +60,7 @@ class CredentialProxyInternalService:
         adapter = self._adapters.get(request.target)
         if adapter is None:
             raise CredentialAccessError("credential target is not allowlisted")
+        usage_id = str(uuid.uuid4())
         response = await self._proxy.invoke(
             tenant_id=request.context.tenant_id,
             session_id=request.session_id,
@@ -69,10 +70,11 @@ class CredentialProxyInternalService:
             request=request.request,
             adapter=adapter,
             policy_decision_id=request.policy_decision_id,
+            usage_id=usage_id,
         )
         body = response if isinstance(response, dict) else {"value": response}
         return CredentialInvokeResponse(
-            usage_id=str(uuid.uuid4()),
+            usage_id=usage_id,
             status="completed",
             response=body,
         )

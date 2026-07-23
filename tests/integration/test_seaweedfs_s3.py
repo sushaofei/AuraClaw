@@ -5,7 +5,10 @@ import httpx
 import pytest
 
 from auraclaw.config import get_settings
-from auraclaw.infrastructure.artifacts.seaweedfs import SeaweedFSS3Presigner
+from auraclaw.infrastructure.artifacts.seaweedfs import (
+    SeaweedFSMultipartClient,
+    SeaweedFSS3Presigner,
+)
 
 SETTINGS = get_settings()
 pytestmark = pytest.mark.skipif(
@@ -43,6 +46,51 @@ def test_seaweedfs_presigned_put_head_get_and_delete() -> None:
                 assert downloaded.status_code == 200
                 assert downloaded.content == content
             finally:
+                deleted = await client.delete(delete_url)
+                assert deleted.status_code in {200, 202, 204, 404}
+
+    asyncio.run(scenario())
+
+
+def test_seaweedfs_multipart_complete_and_recover_object() -> None:
+    async def scenario() -> None:
+        assert SETTINGS.seaweedfs_access_key is not None
+        assert SETTINGS.seaweedfs_secret_key is not None
+        presigner = SeaweedFSS3Presigner(
+            SETTINGS.seaweedfs_s3_endpoint,
+            access_key=SETTINGS.seaweedfs_access_key.get_secret_value(),
+            secret_key=SETTINGS.seaweedfs_secret_key.get_secret_value(),
+            bucket=SETTINGS.seaweedfs_bucket,
+            region=SETTINGS.seaweedfs_region,
+            path_style=SETTINGS.seaweedfs_path_style,
+        )
+        key = f"integration/multipart/{uuid4().hex}"
+        part_size = 5 * 1024 * 1024
+        content = b"a" * part_size + b"recovered-tail"
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            multipart = SeaweedFSMultipartClient(presigner, client=client)
+            upload_id, part_urls = await multipart.create(
+                key, expected_size=len(content), part_size=part_size
+            )
+            parts = []
+            try:
+                for index, url in enumerate(part_urls, start=1):
+                    offset = (index - 1) * part_size
+                    response = await client.put(
+                        url, content=content[offset : offset + part_size]
+                    )
+                    assert response.status_code in {200, 201, 204}
+                    assert response.headers.get("ETag")
+                    parts.append(
+                        {"part_number": index, "etag": response.headers["ETag"]}
+                    )
+                await multipart.complete(key, upload_id, tuple(parts))
+                get_url, _ = presigner.presign("GET", key)
+                downloaded = await client.get(get_url)
+                assert downloaded.status_code == 200
+                assert downloaded.content == content
+            finally:
+                delete_url, _ = presigner.presign("DELETE", key)
                 deleted = await client.delete(delete_url)
                 assert deleted.status_code in {200, 202, 204, 404}
 

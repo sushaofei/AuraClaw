@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import secrets
+import socket
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
@@ -41,11 +42,16 @@ from auraclaw.config import Settings, get_settings
 from auraclaw.contracts.internal import ServiceIdentity
 from auraclaw.contracts.mcp import McpTrustedContext
 from auraclaw.control.internal_service import ControlInternalService
+from auraclaw.control.orchestrator import ManagedOrchestrator, RegisteredRuntimeProvisioner
+from auraclaw.control.runnable_feed import RunnableFeedConsumer
 from auraclaw.credential_proxy.internal_service import CredentialProxyInternalService
 from auraclaw.delivery.worker import ResultDeliveryWorker
 from auraclaw.gateways.query.reader import TaskQueryService
 from auraclaw.gateways.task.commands import TaskCommandGateway
-from auraclaw.infrastructure.artifacts.seaweedfs import SeaweedFSS3Presigner
+from auraclaw.infrastructure.artifacts.seaweedfs import (
+    SeaweedFSMultipartClient,
+    SeaweedFSS3Presigner,
+)
 from auraclaw.infrastructure.artifacts.store import ArtifactStore, InMemoryObjectStorage
 from auraclaw.infrastructure.clients.artifact import RemoteArtifactWriter
 from auraclaw.infrastructure.clients.credential import RemoteCredentialProxy
@@ -55,6 +61,7 @@ from auraclaw.infrastructure.clients.policy import (
     RemoteTaskAdmissionController,
 )
 from auraclaw.infrastructure.clients.runtime import (
+    RemoteOrchestratorSessionClient,
     RemoteRuntimeControlClient,
     RemoteRuntimeSessionClient,
 )
@@ -88,6 +95,9 @@ from auraclaw.infrastructure.persistence.postgres_credential_registry import (
 )
 from auraclaw.infrastructure.persistence.postgres_invocation_store import (
     PostgresInvocationStore,
+)
+from auraclaw.infrastructure.persistence.postgres_model_store import (
+    PostgresModelStateStore,
 )
 from auraclaw.infrastructure.persistence.postgres_policy_store import (
     PostgresPolicyStateStore,
@@ -160,6 +170,8 @@ DATABASE_SERVICES = {
     "policy",
     "credential-proxy",
     "artifact-service",
+    "model-gateway",
+    "streaming-gateway",
     "delivery-worker",
 }
 
@@ -221,6 +233,18 @@ class RemoteRuntimeWorker:
                 await self._control.finish_assignment(task_id, "failed")
                 raise
         return len(assignments)
+
+
+def _runtime_instance_identity(settings: Settings) -> tuple[str, str]:
+    """Give every production replica a stable pod/host-scoped identity by default."""
+    if settings.deployment_profile != "production":
+        return settings.runtime_id, settings.runtime_node_id
+    hostname = socket.gethostname()
+    runtime_id = (
+        f"runtime-{hostname}" if settings.runtime_id == "runtime-local-1" else settings.runtime_id
+    )
+    node_id = hostname if settings.runtime_node_id == "local" else settings.runtime_node_id
+    return runtime_id, node_id
 
 
 def _configured_identities(
@@ -677,11 +701,43 @@ def _orchestrator_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         else InMemoryControlStateStore()
     )
     key = _development_lease_key(settings)
+    closeables: tuple[Any, ...] = (store,) if settings.postgres_enabled else ()
+    tick: Callable[[], Awaitable[int | None]] = store.recover_expired
+    if settings.deployment_profile == "production":
+        token = settings.workload_token_value(ServiceIdentity.ORCHESTRATOR.value)
+        bearer_token = token or secrets.token_urlsafe(32)
+        feed_session = RemoteSessionEventStore(
+            settings.session_base_url,
+            service_identity=ServiceIdentity.ORCHESTRATOR,
+            bearer_token=bearer_token,
+        )
+        lifecycle_session = RemoteOrchestratorSessionClient(
+            settings.session_base_url,
+            bearer_token=bearer_token,
+        )
+        worker_id = f"orchestrator-{secrets.token_hex(8)}"
+        feed = RunnableFeedConsumer(feed_session, store, worker_id=worker_id)
+        orchestrator = ManagedOrchestrator(
+            orchestrator_id=worker_id,
+            control_store=store,
+            session=lifecycle_session,
+            provisioner=RegisteredRuntimeProvisioner(store),
+            lease_ttl=timedelta(seconds=settings.orchestrator_lease_ttl_seconds),
+        )
+
+        async def production_tick() -> int:
+            ingested = await feed.run_once()
+            recovered = await orchestrator.recover()
+            scheduled = await orchestrator.schedule_once()
+            return ingested + recovered + int(scheduled is not None)
+
+        tick = production_tick
+        closeables += (feed_session, lifecycle_session)
     app = _base_service_app(
         spec,
         settings,
-        tick=store.recover_expired,
-        closeables=(store,) if settings.postgres_enabled else (),
+        tick=tick,
+        closeables=closeables,
     )
     service = ControlInternalService(
         store,
@@ -792,7 +848,7 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
     else:
         key = _development_lease_key(settings)
         authenticator = SignedLeaseWorkloadAuthenticator(
-            {token: settings.runtime_id},
+            {token: "*"},
             verifier=LeaseAssertionVerifier(
                 {"development": key},
                 ledger=InMemoryFencingTokenLedger(),
@@ -939,6 +995,11 @@ def _artifact_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         if settings.deployment_profile == "production"
         else None
     )
+    multipart = (
+        SeaweedFSMultipartClient(presigner)
+        if settings.deployment_profile == "production"
+        else None
+    )
     policy: RemotePolicyClient | None = None
     if settings.deployment_profile == "production":
         token = settings.workload_token_value(ServiceIdentity.ARTIFACT_SERVICE.value)
@@ -951,6 +1012,7 @@ def _artifact_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         *((repository,) if repository is not None else ()),
         *((admin_store,) if admin_store is not None else ()),
         *((verifier,) if verifier is not None else ()),
+        *((multipart,) if multipart is not None else ()),
         *((policy,) if policy is not None else ()),
     )
     app = _base_service_app(
@@ -964,6 +1026,9 @@ def _artifact_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         repository=repository,
         object_verifier=verifier,
         policy=policy,
+        multipart=multipart,
+        multipart_threshold=settings.artifact_multipart_threshold,
+        multipart_part_size=settings.artifact_multipart_part_size,
     )
     async def artifact_status(parameters: dict[str, Any]) -> dict[str, Any]:
         del parameters
@@ -971,7 +1036,7 @@ def _artifact_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
 
     async def artifact_retention(parameters: dict[str, Any]) -> dict[str, Any]:
         del parameters
-        deleted = await repository.cleanup_expired() if repository is not None else 0
+        deleted = await service.cleanup_expired()
         return {"expired_uploads_deleted": deleted}
 
     routes = artifact_routes(service)
@@ -1167,6 +1232,11 @@ def _projection_app(
 
 def _model_gateway_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
     policy: RemotePolicyClient | None = None
+    state = (
+        PostgresModelStateStore(settings.resolved_database_url)
+        if settings.postgres_enabled
+        else None
+    )
     if settings.deployment_profile == "production":
         token = settings.workload_token_value(ServiceIdentity.MODEL_GATEWAY.value)
         policy = RemotePolicyClient(
@@ -1177,7 +1247,10 @@ def _model_gateway_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
     app = _base_service_app(
         spec,
         settings,
-        closeables=(policy,) if policy is not None else (),
+        closeables=(
+            *((policy,) if policy is not None else ()),
+            *((state,) if state is not None else ()),
+        ),
     )
     model = (
         providers.get_model_gateway()
@@ -1186,7 +1259,14 @@ def _model_gateway_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
     )
     contract_app = create_contract_app(
         "model-gateway",
-        model_routes(ModelGatewayInternalService(model, policy=policy)),
+        model_routes(
+            ModelGatewayInternalService(
+                model,
+                policy=policy,
+                state=state,
+                tenant_token_limit=settings.model_tenant_token_limit_per_hour,
+            )
+        ),
         workload_identities=_configured_identities(
             settings, (ServiceIdentity.AGENT_RUNTIME,)
         ),
@@ -1198,12 +1278,13 @@ def _model_gateway_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
 def _runtime_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
     token = settings.workload_token_value(ServiceIdentity.AGENT_RUNTIME.value)
     bearer_token = token or "development-runtime-token"
+    runtime_id, node_id = _runtime_instance_identity(settings)
     control = RemoteRuntimeControlClient(
         settings.control_base_url,
         bearer_token=bearer_token,
-        runtime_id=settings.runtime_id,
+        runtime_id=runtime_id,
         role=settings.runtime_role,
-        node_id=settings.runtime_node_id,
+        node_id=node_id,
         capacity=settings.runtime_capacity,
     )
     session = RemoteRuntimeSessionClient(
@@ -1222,7 +1303,7 @@ def _runtime_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
     hands = HandsMcpClient(
         HttpMcpTransport(
             hands_http,
-            bearer_tokens={settings.runtime_id: bearer_token},
+            bearer_tokens={runtime_id: bearer_token},
         )
     )
     harness = AgentHarness(

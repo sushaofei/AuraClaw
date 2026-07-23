@@ -58,14 +58,15 @@ class PostgresCredentialRegistry(LazyPool):
             credential_ref,
         )
 
-    async def record_usage(self, record: dict[str, str]) -> None:
+    async def record_usage(self, record: dict[str, str]) -> str:
         pool = await self.pool()
+        usage_id = record.get("usage_id") or str(uuid.uuid4())
         await pool.execute(
             """INSERT INTO credential.usage_audit
             (usage_id,tenant_id,session_id,target,credential_ref,operation,
              policy_decision_id,status,side_effect_status)
             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)""",
-            str(uuid.uuid4()),
+            usage_id,
             record["tenant_id"],
             record["session_id"],
             record["tool_name"],
@@ -74,4 +75,17 @@ class PostgresCredentialRegistry(LazyPool):
             record["policy_decision_id"],
             record["status"],
             record["side_effect_status"],
+        )
+        return usage_id
+
+    async def complete_usage(
+        self, usage_id: str, *, status: str, side_effect_status: str
+    ) -> None:
+        pool = await self.pool()
+        await pool.execute(
+            """UPDATE credential.usage_audit SET status=$2,side_effect_status=$3
+            WHERE usage_id=$1""",
+            usage_id,
+            status,
+            side_effect_status,
         )

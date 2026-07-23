@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
+from uuid import uuid4
 
 import asyncpg  # type: ignore[import-untyped]
 
@@ -11,6 +12,7 @@ from auraclaw.contracts.delivery import (
     ResultSinkConfig,
     SinkResponse,
 )
+from auraclaw.contracts.errors import LeaseConflictError
 from auraclaw.contracts.events import CanonicalEvent, utc_now
 from auraclaw.infrastructure.delivery.common import build_delivery_job
 from auraclaw.infrastructure.persistence.postgres_common import (
@@ -99,24 +101,46 @@ class PostgresDeliveryJobStore(_LazyPool):
         assert stored is not None
         return stored
 
-    async def claim_due(self, *, limit: int) -> list[DeliveryJob]:
+    async def claim_due(
+        self, *, worker_id: str, claim_ttl: timedelta, limit: int
+    ) -> list[DeliveryJob]:
         pool = await self.pool()
         async with pool.acquire() as connection, connection.transaction():
             rows = await connection.fetch(
                 """SELECT * FROM delivery.delivery_job
-                WHERE status IN ('pending','retry_wait') AND next_attempt_at <= now()
-                ORDER BY next_attempt_at, delivery_id FOR UPDATE SKIP LOCKED LIMIT $1""",
+                WHERE (
+                    (status IN ('pending','retry_wait') AND next_attempt_at <= now())
+                    OR (status='attempting' AND claim_expires_at <= now())
+                )
+                AND NOT EXISTS (
+                    SELECT 1 FROM delivery.delivery_job earlier
+                    WHERE earlier.tenant_id=delivery_job.tenant_id
+                      AND earlier.session_id=delivery_job.session_id
+                      AND earlier.sink_id=delivery_job.sink_id
+                      AND earlier.status IN ('pending','retry_wait','attempting')
+                      AND (earlier.created_at,earlier.delivery_id)
+                        < (delivery_job.created_at,delivery_job.delivery_id)
+                )
+                ORDER BY created_at, delivery_id
+                FOR UPDATE SKIP LOCKED LIMIT $1""",
                 limit,
             )
             if not rows:
                 return []
-            ids = [str(row["delivery_id"]) for row in rows]
-            updated = await connection.fetch(
-                """UPDATE delivery.delivery_job SET status='attempting',
-                attempt_count=attempt_count+1 WHERE delivery_id=ANY($1::text[])
-                RETURNING *""",
-                ids,
-            )
+            updated = []
+            for row in rows:
+                claimed = await connection.fetchrow(
+                    """UPDATE delivery.delivery_job SET status='attempting',
+                    attempt_count=attempt_count+1,claimed_by=$2,claim_token=$3,
+                    claim_expires_at=now() + $4::interval
+                    WHERE delivery_id=$1 RETURNING *""",
+                    str(row["delivery_id"]),
+                    worker_id,
+                    uuid4().hex,
+                    claim_ttl,
+                )
+                assert claimed is not None
+                updated.append(claimed)
             return [self._job(row) for row in updated]
 
     async def record_attempt(
@@ -140,7 +164,10 @@ class PostgresDeliveryJobStore(_LazyPool):
         async with pool.acquire() as connection, connection.transaction():
             row = await connection.fetchrow(
                 """UPDATE delivery.delivery_job SET status=$2,next_attempt_at=$3,
-                last_response_summary=$4,completed_at=$5 WHERE delivery_id=$1 RETURNING *""",
+                last_response_summary=$4,completed_at=$5,claimed_by=NULL,
+                claim_token=NULL,claim_expires_at=NULL
+                WHERE delivery_id=$1 AND claimed_by=$6 AND claim_token=$7
+                  AND claim_expires_at > now() RETURNING *""",
                 job.delivery_id,
                 status.value,
                 next_attempt_at if status is DeliveryStatus.RETRY_WAIT else None,
@@ -153,7 +180,13 @@ class PostgresDeliveryJobStore(_LazyPool):
                     DeliveryStatus.DEAD_LETTERED,
                 }
                 else None,
+                job.claimed_by,
+                job.claim_token,
             )
+            if row is None:
+                raise LeaseConflictError(
+                    f"delivery claim is no longer owned: {job.delivery_id}"
+                )
             await connection.execute(
                 """INSERT INTO delivery.delivery_attempt
                 (delivery_id,attempt_number,started_at,completed_at,outcome,
@@ -210,15 +243,24 @@ class PostgresDeliveryJobStore(_LazyPool):
         ]
 
     async def begin_redelivery(
-        self, tenant_id: str, delivery_id: str
+        self,
+        tenant_id: str,
+        delivery_id: str,
+        *,
+        worker_id: str,
+        claim_ttl: timedelta,
     ) -> DeliveryJob | None:
         pool = await self.pool()
         row = await pool.fetchrow(
             """UPDATE delivery.delivery_job SET status='attempting',
-            attempt_count=attempt_count+1,next_attempt_at=NULL,completed_at=NULL
+            attempt_count=attempt_count+1,next_attempt_at=NULL,completed_at=NULL,
+            claimed_by=$3,claim_token=$4,claim_expires_at=now() + $5::interval
             WHERE tenant_id=$1 AND delivery_id=$2 RETURNING *""",
             tenant_id,
             delivery_id,
+            worker_id,
+            uuid4().hex,
+            claim_ttl,
         )
         return self._job(row) if row is not None else None
 
@@ -254,4 +296,7 @@ class PostgresDeliveryJobStore(_LazyPool):
             last_response_summary=row["last_response_summary"],
             created_at=row["created_at"],
             completed_at=row["completed_at"],
+            claimed_by=row["claimed_by"],
+            claim_token=row["claim_token"],
+            claim_expires_at=row["claim_expires_at"],
         )

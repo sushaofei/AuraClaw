@@ -5,7 +5,13 @@ import json
 from typing import Protocol
 
 from auraclaw.action.ports import PolicyEvaluation
-from auraclaw.contracts.errors import AuthorizationError, PolicyDeniedError
+from auraclaw.contracts.errors import (
+    AuthorizationError,
+    BudgetExceededError,
+    LeaseConflictError,
+    PolicyDeniedError,
+    VersionConflictError,
+)
 from auraclaw.contracts.internal import (
     ModelCancelRequest,
     ModelCancelResponse,
@@ -14,6 +20,7 @@ from auraclaw.contracts.internal import (
     ServiceIdentity,
 )
 from auraclaw.contracts.tools import PolicyDecision
+from auraclaw.model_gateway.ports import ModelStateStore
 from auraclaw.runtime.ports import ModelClient, ModelPolicy, ModelRequest
 
 
@@ -33,10 +40,17 @@ class ModelPolicyEnforcer(Protocol):
 
 class ModelGatewayInternalService:
     def __init__(
-        self, model: ModelClient, *, policy: ModelPolicyEnforcer | None = None
+        self,
+        model: ModelClient,
+        *,
+        policy: ModelPolicyEnforcer | None = None,
+        state: ModelStateStore | None = None,
+        tenant_token_limit: int = 1_000_000,
     ) -> None:
         self._model = model
         self._policy = policy
+        self._state = state
+        self._tenant_token_limit = tenant_token_limit
 
     @staticmethod
     def _require_runtime(identity: ServiceIdentity) -> None:
@@ -65,23 +79,66 @@ class ModelGatewayInternalService:
                 PolicyDecision.ALLOW_WITH_CONSTRAINTS,
             }:
                 raise PolicyDeniedError("Model policy denied generation")
-        response = await self._model.generate(
-            ModelRequest(
-                model_call_id=request.model_call_id,
+        request_digest = hashlib.sha256(
+            json.dumps(
+                {
+                    "run_id": request.run_id,
+                    "messages": request.messages,
+                    "tools": request.tools,
+                    "capability": request.capability,
+                    "preferred_model": request.preferred_model,
+                    "allowed_providers": request.allowed_providers,
+                    "data_classification": request.data_classification,
+                    "max_output_tokens": request.max_output_tokens,
+                },
+                sort_keys=True,
+                default=str,
+            ).encode()
+        ).hexdigest()
+        if self._state is not None:
+            reservation = await self._state.reserve(
                 tenant_id=request.context.tenant_id,
+                model_call_id=request.model_call_id,
                 run_id=request.run_id,
-                messages=request.messages,
-                tools=request.tools,
-                policy=ModelPolicy(
-                    capability=request.capability,
-                    preferred_model=request.preferred_model,
-                    allowed_providers=request.allowed_providers,
-                    data_classification=request.data_classification,
-                ),
-                max_output_tokens=request.max_output_tokens,
+                request_digest=request_digest,
+                reserved_tokens=request.max_output_tokens,
+                token_limit=self._tenant_token_limit,
             )
-        )
-        return ModelGenerateResponse(
+            if reservation.status == "completed":
+                assert reservation.cached_response is not None
+                return reservation.cached_response
+            if reservation.status == "conflict":
+                raise VersionConflictError("model_call_id was reused with another request")
+            if reservation.status == "in_progress":
+                raise LeaseConflictError("model call is already in progress")
+            if reservation.status == "quota_exceeded":
+                raise BudgetExceededError("tenant model token quota is exhausted")
+        try:
+            response = await self._model.generate(
+                ModelRequest(
+                    model_call_id=request.model_call_id,
+                    tenant_id=request.context.tenant_id,
+                    run_id=request.run_id,
+                    messages=request.messages,
+                    tools=request.tools,
+                    policy=ModelPolicy(
+                        capability=request.capability,
+                        preferred_model=request.preferred_model,
+                        allowed_providers=request.allowed_providers,
+                        data_classification=request.data_classification,
+                    ),
+                    max_output_tokens=request.max_output_tokens,
+                )
+            )
+        except Exception as exc:
+            if self._state is not None:
+                await self._state.fail(
+                    tenant_id=request.context.tenant_id,
+                    model_call_id=request.model_call_id,
+                    error_code=type(exc).__name__,
+                )
+            raise
+        result = ModelGenerateResponse(
             model_call_id=response.model_call_id,
             provider=response.provider,
             model=response.model,
@@ -103,6 +160,13 @@ class ModelGatewayInternalService:
             finish_reason=response.finish_reason,
             usage=response.usage,
         )
+        if self._state is not None:
+            await self._state.complete(
+                tenant_id=request.context.tenant_id,
+                model_call_id=request.model_call_id,
+                response=result,
+            )
+        return result
 
     async def cancel(self, request: ModelCancelRequest) -> ModelCancelResponse:
         self._require_runtime(request.context.service_identity)

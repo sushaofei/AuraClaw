@@ -76,13 +76,32 @@ class RemoteArtifactWriter:
             ),
             ArtifactUploadResponse,
         )
-        response = await self._objects.put(
-            upload.upload_url,
-            content=content,
-            headers={"Content-Type": media_type},
-        )
-        if response.is_error:
-            raise ArtifactAccessError("artifact object upload failed")
+        completed_parts: tuple[dict[str, object], ...] = ()
+        if upload.upload_mode == "multipart":
+            if upload.part_size is None or not upload.part_urls:
+                raise ArtifactAccessError("artifact multipart plan is invalid")
+            parts: list[dict[str, object]] = []
+            for index, part_url in enumerate(upload.part_urls, start=1):
+                offset = (index - 1) * upload.part_size
+                response = await self._objects.put(
+                    part_url,
+                    content=content[offset : offset + upload.part_size],
+                    headers={"Content-Type": media_type},
+                )
+                if response.is_error or not response.headers.get("ETag"):
+                    raise ArtifactAccessError("artifact multipart part upload failed")
+                parts.append(
+                    {"part_number": index, "etag": response.headers["ETag"]}
+                )
+            completed_parts = tuple(parts)
+        else:
+            response = await self._objects.put(
+                upload.upload_url,
+                content=content,
+                headers={"Content-Type": media_type},
+            )
+            if response.is_error:
+                raise ArtifactAccessError("artifact object upload failed")
         finalized = await self._contract.call(
             "/internal/v1/artifacts/uploads/finalize",
             ArtifactFinalizeRequest(
@@ -92,6 +111,7 @@ class RemoteArtifactWriter:
                 upload_id=upload.upload_id,
                 size=len(content),
                 checksum=checksum,
+                parts=completed_parts,
             ),
             ArtifactFinalizeResponse,
         )

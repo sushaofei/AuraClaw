@@ -19,6 +19,7 @@ DELIVERY_TRIGGER_EVENTS = {
     "approval.requested",
     "child.result_published",
 }
+CONTROL_TRIGGER_EVENTS = {"run.requested", "session.resumed", "dependency.changed"}
 
 
 @dataclass
@@ -139,6 +140,15 @@ class InMemoryEventStore:
                             event=stored_event,
                         )
                     )
+                if stored_event.type in CONTROL_TRIGGER_EVENTS:
+                    self._outbox.append(
+                        OutboxRecord(
+                            outbox_id=len(self._outbox) + 1,
+                            event_id=stored_event.event_id,
+                            destination="control",
+                            event=stored_event,
+                        )
+                    )
             return AppendResult(events=canonical, command_result=dict(command_result))
 
     async def pending_outbox(self) -> list[OutboxRecord]:
@@ -179,19 +189,23 @@ class InMemoryEventStore:
     ) -> list[ClaimedOutboxRecord]:
         now = datetime.now(UTC)
         claimed: list[ClaimedOutboxRecord] = []
+        blocked_sessions: set[tuple[str, str]] = set()
         async with self._lock:
             for record in self._outbox:
+                if record.destination != destination or record.published:
+                    continue
+                session_key = (record.event.tenant_id, record.event.session_id)
+                if session_key in blocked_sessions:
+                    continue
+                # The first unpublished record is the per-Session ordering barrier.
+                # A live claim or poison record must block later events.
+                blocked_sessions.add(session_key)
                 claim_expired = (
                     record.claim_expires_at is not None
                     and record.claim_expires_at <= now
                 )
                 available = record.claimed_by is None or claim_expired
-                if (
-                    record.destination != destination
-                    or record.published
-                    or record.poisoned
-                    or not available
-                ):
+                if record.poisoned or not available:
                     continue
                 token = f"clm_{uuid4().hex}"
                 record.claimed_by = worker_id

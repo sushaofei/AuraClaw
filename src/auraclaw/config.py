@@ -81,6 +81,8 @@ class Settings(BaseSettings):
     seaweedfs_region: str = Field(default="us-east-1", validation_alias="SEAWEEDFS_REGION")
     seaweedfs_use_ssl: bool = Field(default=False, validation_alias="SEAWEEDFS_USE_SSL")
     seaweedfs_path_style: bool = Field(default=True, validation_alias="SEAWEEDFS_PATH_STYLE")
+    artifact_multipart_threshold: int = Field(default=16 * 1024 * 1024, ge=5 * 1024 * 1024)
+    artifact_multipart_part_size: int = Field(default=8 * 1024 * 1024, ge=5 * 1024 * 1024)
     runtime_event_backend: Literal["auto", "memory", "kafka"] = "auto"
     kafka_host: str | None = Field(default=None, validation_alias="KAFKA_HOST")
     kafka_port: int = Field(default=9092, validation_alias="KAFKA_PORT")
@@ -91,6 +93,7 @@ class Settings(BaseSettings):
     cors_allow_origins: str = ""
     runtime_enabled: bool = True
     runtime_poll_interval: float = 0.05
+    orchestrator_lease_ttl_seconds: int = Field(default=300, ge=30, le=3600)
     runtime_id: str = "runtime-local-1"
     runtime_role: str = "root"
     runtime_node_id: str = "local"
@@ -100,6 +103,7 @@ class Settings(BaseSettings):
     model_name: str | None = None
     model_provider: str = "openai_compatible"
     model_timeout_seconds: float = 120.0
+    model_tenant_token_limit_per_hour: int = Field(default=1_000_000, ge=1)
     # None omits the field; True/False maps to OpenAI-compatible thinking.type enabled/disabled.
     model_thinking_enabled: bool | None = None
 

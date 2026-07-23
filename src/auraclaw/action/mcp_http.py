@@ -52,8 +52,10 @@ class SignedLeaseWorkloadAuthenticator:
     ) -> McpTrustedContext:
         if authorization is None or not authorization.startswith("Bearer "):
             raise HTTPException(status_code=401, detail="missing workload bearer token")
-        runtime_id = self._runtimes.get(authorization.removeprefix("Bearer "))
-        if runtime_id is None:
+        expected_runtime_id = self._runtimes.get(
+            authorization.removeprefix("Bearer ")
+        )
+        if expected_runtime_id is None:
             raise HTTPException(status_code=403, detail="invalid workload bearer token")
         if lease_assertion is None:
             raise HTTPException(status_code=401, detail="missing lease assertion")
@@ -67,6 +69,16 @@ class SignedLeaseWorkloadAuthenticator:
             )
         except Exception as exc:
             raise HTTPException(status_code=403, detail="invalid lease assertion") from exc
+        runtime_id = assertion.runtime_id
+        if expected_runtime_id == "*":
+            if runtime_id is None:
+                raise HTTPException(
+                    status_code=403, detail="lease assertion has no runtime identity"
+                )
+        elif runtime_id is None:
+            runtime_id = expected_runtime_id
+        elif runtime_id != expected_runtime_id:
+            raise HTTPException(status_code=403, detail="runtime identity mismatch")
         return McpTrustedContext(
             tenant_id=assertion.tenant_id,
             root_session_id=assertion.root_session_id or assertion.session_id,

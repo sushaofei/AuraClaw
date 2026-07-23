@@ -36,7 +36,7 @@ from auraclaw.contracts.tools import (
     ToolPermission,
 )
 from auraclaw.control.internal_service import ControlInternalService
-from auraclaw.control.ports import RuntimeAssignment
+from auraclaw.control.ports import RunnableItem, RuntimeAssignment
 from auraclaw.credential_proxy.internal_service import CredentialProxyInternalService
 from auraclaw.infrastructure.artifacts.seaweedfs import SeaweedFSS3Presigner
 from auraclaw.infrastructure.clients.artifact import RemoteArtifactWriter
@@ -258,6 +258,17 @@ async def test_runtime_claims_signed_assignment_only_through_control_api() -> No
         ttl=timedelta(minutes=1),
     )
     assert lease is not None
+    assert await store.enqueue(
+        RunnableItem(
+            task_id="task-a",
+            tenant_id="tenant-a",
+            root_session_id="session-a",
+            session_id="session-a",
+            run_id="run-a",
+            source_version=1,
+        )
+    )
+    runnable_claim = (await store.claim("orchestrator-1"))[0]
     assignment = RuntimeAssignment(
         tenant_id="tenant-a",
         root_session_id="session-a",
@@ -270,7 +281,9 @@ async def test_runtime_claims_signed_assignment_only_through_control_api() -> No
         resource_profile={},
         lease_expires_at=lease.expires_at,
     )
-    assert await store.assign("task-a", assignment)
+    assert await store.assign(
+        "task-a", assignment, claim_token=runnable_claim.claim_token
+    )
     service = ControlInternalService(
         store,
         lease_verifier=LeaseAssertionVerifier(
@@ -347,6 +360,17 @@ async def test_remote_runtime_executes_with_no_control_or_session_store() -> Non
         ttl=timedelta(minutes=1),
     )
     assert lease is not None
+    assert await control_store.enqueue(
+        RunnableItem(
+            task_id="task-b",
+            tenant_id="tenant-a",
+            root_session_id="session-b",
+            session_id="session-b",
+            run_id="run-b",
+            source_version=1,
+        )
+    )
+    runnable_claim = (await control_store.claim("orchestrator-1"))[0]
     assert await control_store.assign(
         "task-b",
         RuntimeAssignment(
@@ -361,6 +385,7 @@ async def test_remote_runtime_executes_with_no_control_or_session_store() -> Non
             resource_profile={},
             lease_expires_at=lease.expires_at,
         ),
+        claim_token=runnable_claim.claim_token,
     )
     control_service = ControlInternalService(
         control_store,
@@ -468,6 +493,7 @@ def test_production_hands_requires_signed_runtime_lease_capability() -> None:
             root_session_id="root-a",
             session_id="session-a",
             run_id="run-a",
+            runtime_id="runtime-a",
             lease_id="lease-a",
             fencing_token=1,
             expires_at=datetime.now(UTC) + timedelta(minutes=1),
@@ -757,6 +783,8 @@ def test_s3_database_roles_and_ops_clients_preserve_owner_boundaries() -> None:
     assert "session_core TO auraclaw_session" in roles
     assert "hands TO auraclaw_hands" in roles
     assert "credential TO auraclaw_credential" in roles
+    assert "streaming TO auraclaw_streaming" in roles
+    assert "model_gateway TO auraclaw_model" in roles
     cli = (ROOT / "src/auraclaw/composition/cli.py").read_text()
     assert "RemoteAdminClient" in cli
     assert "PostgresOperationsStore" not in cli

@@ -36,10 +36,15 @@ def test_s3_migration_up_down_roundtrip_in_isolated_postgres() -> None:
                     raise
                 await asyncio.sleep(0.1)
         try:
-            migrations = sorted(MIGRATIONS.glob("[0-9][0-9][0-9][0-8]_*.sql"))
-            for migration in (
-                item for item in migrations if not item.name.endswith(".down.sql")
-            ):
+            migrations = [
+                next(
+                    item
+                    for item in sorted(MIGRATIONS.glob(f"{number:04d}_*.sql"))
+                    if not item.name.endswith(".down.sql")
+                )
+                for number in range(1, 9)
+            ]
+            for migration in migrations:
                 await connection.execute(migration.read_text())
 
             await connection.execute(

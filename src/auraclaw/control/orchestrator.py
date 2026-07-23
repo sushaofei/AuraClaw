@@ -79,12 +79,17 @@ class ManagedOrchestrator:
         claimed = await self._control.claim(self._id, limit=1)
         if not claimed:
             return None
-        item = claimed[0].item
+        claim = claimed[0]
+        item = claim.item
         previous = await self._control.get_assignment(item.task_id)
         resource_id = f"session:{item.tenant_id}:{item.session_id}"
         lease = await self._control.acquire_lease(resource_id, self._id, ttl=self._lease_ttl)
         if lease is None:
-            await self._control.reschedule(item.task_id)
+            await self._control.reschedule(
+                item.task_id,
+                worker_id=self._id,
+                claim_token=claim.claim_token,
+            )
             return None
         try:
             runtime = await self._provisioner.provision(item, lease)
@@ -103,8 +108,15 @@ class ManagedOrchestrator:
                 budget=item.budget,
                 lease_expires_at=lease.expires_at,
             )
-            if not await self._control.assign(item.task_id, assignment):
+            if not await self._control.assign(
+                item.task_id, assignment, claim_token=claim.claim_token
+            ):
                 await self._control.release_lease(lease)
+                await self._control.reschedule(
+                    item.task_id,
+                    worker_id=self._id,
+                    claim_token=claim.claim_token,
+                )
                 return None
             lifecycle_events = (
                 [
@@ -153,7 +165,11 @@ class ManagedOrchestrator:
             return assignment
         except Exception:
             await self._control.release_lease(lease)
-            await self._control.reschedule(item.task_id)
+            await self._control.reschedule(
+                item.task_id,
+                worker_id=self._id,
+                claim_token=claim.claim_token,
+            )
             raise
 
     async def cancel(self, assignment: RuntimeAssignment) -> None:
@@ -205,3 +221,20 @@ class LocalRuntimeProvisioner:
 
     async def cancel(self, runtime_id: str) -> None:
         self.cancelled.add(runtime_id)
+
+
+class RegisteredRuntimeProvisioner:
+    """Selects a healthy Runtime pool member; assignment remains Control-owned."""
+
+    def __init__(self, store: ControlStateStore) -> None:
+        self._store = store
+
+    async def provision(self, item: RunnableItem, lease: RuntimeLease) -> RuntimeInstance:
+        del lease
+        runtime = await self._store.select_runtime(item)
+        if runtime is None:
+            raise RuntimeError(f"no Runtime capacity is available for role={item.role}")
+        return runtime
+
+    async def cancel(self, runtime_id: str) -> None:
+        del runtime_id
