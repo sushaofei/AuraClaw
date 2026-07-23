@@ -15,8 +15,14 @@ from auraclaw.internal.http import HttpContractClient
 
 
 class RemoteAdminClient:
-    def __init__(self, base_url: str, *, bearer_token: str) -> None:
-        self._client = httpx.AsyncClient(base_url=base_url, timeout=30.0)
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        bearer_token: str,
+        timeout: float = 300.0,
+    ) -> None:
+        self._client = httpx.AsyncClient(base_url=base_url, timeout=timeout)
         self._contract = HttpContractClient(self._client, bearer_token=bearer_token)
 
     async def aclose(self) -> None:

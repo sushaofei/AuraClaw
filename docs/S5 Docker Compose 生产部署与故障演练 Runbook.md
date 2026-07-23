@@ -1,0 +1,173 @@
+# S5 Docker Compose 生产部署与故障演练 Runbook
+
+## 1. 适用范围
+
+生产部署固定使用根目录的 `compose.production.yml`。`compose.services.yml` 继续用于本地多进程
+开发，不作为生产模板。生产拓扑包含 12 个 AuraClaw 服务、一个一次性 migration job 和一个
+统一 Nginx ingress；除 ingress 外不发布宿主机端口。
+
+Docker Compose 不提供 Kubernetes HPA、PDB 或 NetworkPolicy。本方案以显式副本数、资源
+限额、内部网络、外部平台网络、服务身份/数据库角色标签、Secret 文件挂载和蓝绿切换提供
+对应的生产控制。跨主机调度不是本方案目标；单个 Compose 集群应运行在同一故障域，跨故障
+域由两套独立 Compose 集群和上游负载均衡承担。
+
+## 2. 前置条件
+
+- Docker Engine 与 Compose v2；
+- 已推送且使用 digest 或不可变 Git SHA 标记的 AuraClaw 镜像；
+- PostgreSQL 已执行 `deploy/postgres/roles.sql`，各服务使用独立角色 DSN；
+- Kafka/Replay Router、SeaweedFS、Vault 和模型出口可从 `auraclaw-platform` 网络访问；
+- 部署机存在被 `.gitignore` 排除的 `.env.production`，变量名参考 `.env.example`；
+- Secret 不写入 Compose、镜像、命令参数或日志。
+- 蓝绿窗口按两套完整集群预留 CPU、内存、数据库连接和外部配额；容量不足时不得开始切流。
+
+创建共享平台网络，并把外部依赖或其受控代理接入该网络：
+
+```bash
+docker network inspect auraclaw-platform >/dev/null 2>&1 ||
+  docker network create auraclaw-platform
+```
+
+最低必填配置包括不可变 `AURACLAW_IMAGE`、11 个角色 DSN、migration admin DSN、工作负载
+令牌、lease key、模型凭据、Vault 配置及 SeaweedFS 配置。Agent Runtime 没有数据库、模型、
+Vault 或 SeaweedFS Secret；只有对应 owner service 获得这些凭据。
+
+## 3. 预检与迁移
+
+```bash
+uv run python scripts/materialize_compose_secrets.py \
+  --env-file .env.production --output-dir .runtime/compose-secrets
+
+uv run python scripts/compose_preflight.py --env-file .env.production
+
+docker compose --env-file .env.production \
+  -f compose.production.yml --profile migrate config --quiet
+
+docker compose --env-file .env.production \
+  -f compose.production.yml run --rm migrate migrate status \
+  --directory /app/migrations
+
+docker compose --env-file .env.production \
+  -f compose.production.yml run --rm migrate migrate up \
+  --target 0014 --directory /app/migrations
+```
+
+迁移进程只挂载 migration admin DSN。它使用 PostgreSQL advisory lock 防止并发迁移，使用
+checksum ledger 阻止已执行文件漂移；重复运行是幂等的。当前 `0001`–`0014` 均为 expand
+迁移。滚动窗口内不得删除 N-1 仍读取的列、事件字段或内部 API；contract 迁移只能在旧版本
+实例归零且兼容窗口结束后，以后续显式迁移执行。
+
+Secret 生成目录必须与 `.env.production` 的 `AURACLAW_SECRET_DIR` 一致；目录权限为 `0700`，
+27 个文件权限为 `0600`，文件内容不会输出。既有数据库如果已由旧流程完整执行到 `0014`、但
+尚无 migration ledger，先确认 `status` 全部显示 pending，再且仅再执行一次：
+
+```bash
+docker compose --env-file .env.production -f compose.production.yml \
+  --profile migrate run --rm migrate migrate baseline \
+  --target 0014 --confirm-existing-schema --directory /app/migrations
+```
+
+全新库、未知来源库、部分迁移库或 checksum 不一致时禁止 baseline。
+
+## 4. 首次部署
+
+```bash
+docker compose --env-file .env.production \
+  -f compose.production.yml pull
+
+docker compose --env-file .env.production \
+  -f compose.production.yml up -d --wait --remove-orphans
+
+docker compose --env-file .env.production \
+  -f compose.production.yml ps
+
+curl --fail http://127.0.0.1:8080/health/ready
+```
+
+Compose 的 `deploy.replicas`、resources、restart policy 会由 Compose v2 应用。模板中的
+`update_config`/`rollback_config` 同时保留 Swarm 兼容语义，但普通 `docker compose up`
+不被视为零停机滚动更新；零停机必须使用下一节蓝绿流程。
+Ingress 使用 Docker DNS 动态重解析 Task API 与 Streaming Gateway；副本扩缩容或替换后
+不需要重启 Nginx。
+
+## 5. 蓝绿发布与回滚
+
+运行中的颜色假设为 blue。green 使用不同的 project、内部、edge、platform 网络和临时
+ingress 端口。先创建 green platform 网络，并将 PostgreSQL、Kafka、SeaweedFS、Vault、模型
+出口或其受控代理接入：
+
+```bash
+docker network create auraclaw-platform-green
+
+AURACLAW_INTERNAL_NETWORK=auraclaw-green \
+AURACLAW_EDGE_NETWORK=auraclaw-green-edge \
+AURACLAW_PLATFORM_NETWORK=auraclaw-platform-green \
+AURACLAW_INGRESS_PORT=18080 \
+docker compose -p auraclaw-green --env-file .env.production \
+  -f compose.production.yml up -d --wait
+
+curl --fail http://127.0.0.1:18080/health/ready
+```
+
+随后执行一条真实的只读查询和一条隔离租户的 canary 任务，确认 Runnable、Assignment、
+Model/MCP、Canonical Result、SSE 和 Delivery 均完成。上游负载均衡切到 green 后，先等待
+最长请求时限和 60 秒优雅退出窗口，再停止 blue：
+
+```bash
+docker compose -p auraclaw-blue --env-file .env.production \
+  -f compose.production.yml down
+```
+
+若 canary、错误率、队列延迟或外部依赖指标异常，不切流并删除 green。若切流后异常，立即
+把上游切回仍在运行的 blue；数据库只允许 expand 迁移，因此应用回滚不要求数据库 down
+migration。确认恢复后再停止 green。
+
+本地或预生产演练若没有两套完整副本的容量，只能显式 `--scale <service>=1` 缩小 green
+用于契约兼容验证，并记录该限制；这种结果不能替代生产容量验收。
+
+## 6. 扩缩容
+
+先检查数据库连接预算、Kafka partition 数和外部配额，再显式覆盖副本数：
+
+```bash
+docker compose --env-file .env.production -f compose.production.yml \
+  up -d --scale agent-runtime=6 --scale orchestrator=4 --scale delivery-worker=4
+```
+
+Session、Projection、Orchestrator、Runtime、Model、Hands、Policy、Credential、Artifact、
+Streaming 和 Delivery 都支持多副本。缩容前观察 claim/lease、outbox、delivery job 和
+multipart finalize/gc 是否排空；Hands 本地 workspace 是每个容器的临时文件系统，持久结果
+必须进入 Artifact Service/SeaweedFS。
+
+## 7. 故障演练矩阵
+
+每次演练只注入一个故障，记录开始/恢复时间、队列深度、错误率、告警和重复副作用：
+
+| 目标 | 注入 | 必须结果 |
+|---|---|---|
+| Session | stop/kill 一个副本 | ingress 继续服务；command id 与 expected version 防重复写 |
+| Orchestrator/Runtime | kill 持有 claim/lease 的副本 | TTL 后重新 claim；旧 fencing token 写入失败 |
+| Model/Hands | stop owner 副本或返回 5xx | 有界重试；idempotency key 不变；不绕过 owner |
+| Policy/Credential | stop、Vault 断连或 deny | fail closed；不执行 tool；不泄露 credential |
+| Artifact/SeaweedFS | S3 断连、multipart 中断 | metadata 保持 pending/failed；恢复后 finalize/gc 可重入 |
+| Kafka/Streaming | broker 断连、消费者暂停 | 生产端背压；SSE 可 replay；Canonical Result 不依赖 SSE |
+| Delivery | kill claim owner、sink 5xx | claim expiry 后重试；超限进入 DLQ；redrive 可审计 |
+| PostgreSQL | 短暂断连 | readiness 失败、停止接流；恢复后 outbox/claim 继续 |
+
+示例（选择一个副本，不要一次停止整个 owner service）：
+
+```bash
+docker kill "$(docker compose --env-file .env.production \
+  -f compose.production.yml ps -q agent-runtime | head -n 1)"
+docker compose --env-file .env.production -f compose.production.yml up -d agent-runtime
+```
+
+故障恢复后执行 `auraclaw operations status`，并按需使用 projection rebuild、projection/
+delivery redrive。任何需要清空 DLQ、缩短 retention 或删除 Artifact 的操作都要记录 tenant、
+actor、command id、correlation/causation 和审批依据。
+
+## 8. 停止条件
+
+出现以下任一情况立即停止发布或扩缩容：迁移 checksum drift、N/N-1 契约不兼容、readiness
+持续失败、Policy/Credential fail-open、跨角色数据库写入成功、Canonical Result 丢失、
+Delivery 重复副作用、SeaweedFS 对象与 metadata 无法收敛，或 Secret 出现在日志/config。

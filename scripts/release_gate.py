@@ -5,7 +5,8 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
-SCAN_ROOTS = (ROOT / "src", ROOT / "migrations")
+SCAN_ROOTS = (ROOT / "src", ROOT / "migrations", ROOT / "deploy")
+SCAN_FILES = (ROOT / "compose.production.yml", ROOT / ".env.example")
 SECRET_PATTERNS = {
     "private key": re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
     "OpenAI-style token": re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"),
@@ -16,6 +17,9 @@ REQUIRED = (
     ROOT / "migrations/0007_m6_observability_reliability.down.sql",
     ROOT / "docs/M6 测试报告.md",
     ROOT / "docs/M6 运维与灰度发布 Runbook.md",
+    ROOT / "compose.production.yml",
+    ROOT / "docs/S5 Docker Compose 生产部署与故障演练 Runbook.md",
+    ROOT / "docs/S5 测试报告.md",
 )
 
 
@@ -32,6 +36,11 @@ def main() -> int:
             for name, pattern in SECRET_PATTERNS.items():
                 if pattern.search(content):
                     failures.append(f"{name} found in {path.relative_to(ROOT)}")
+    for path in SCAN_FILES:
+        content = path.read_text(errors="replace")
+        for name, pattern in SECRET_PATTERNS.items():
+            if pattern.search(content):
+                failures.append(f"{name} found in {path.relative_to(ROOT)}")
     contracts_and_domain = tuple(
         (ROOT / "src/auraclaw" / name).rglob("*.py")
         for name in ("contracts", "domain")

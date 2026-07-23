@@ -119,6 +119,10 @@ monorepo 和应用镜像，但必须使用不同 service identity、配置、数
 12. delivery-worker      Delivery Outbox -> Job/Attempt -> Sink
 ```
 
+生产实现使用 `compose.production.yml`：12 个入口沿用同一不可变镜像，但分别声明副本、资源、
+service identity、数据库角色、健康检查和最小 Secret 文件挂载。Compose 集群只公开统一 ingress；
+普通 Compose 的零停机升级由两套 project 蓝绿切流完成。
+
 生产边界遵守以下规则：
 
 - Session Event Log 只有 `session` 的数据库角色可写；其他服务通过版本化 Session Internal API 追加。

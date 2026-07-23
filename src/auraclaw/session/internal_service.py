@@ -26,6 +26,7 @@ DEFAULT_EVENT_ALLOWLIST: Mapping[ServiceIdentity, tuple[str, ...]] = {
     ServiceIdentity.TASK_API: (
         "session.",
         "task.",
+        "run.requested",
         "run.cancel",
         "human.",
         "approval.",

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -7,6 +8,45 @@ from urllib.parse import quote
 
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_SECRET_FILE_VARIABLES = {
+    "AURACLAW_DATABASE_URL",
+    "AURACLAW_MIGRATION_DATABASE_URL",
+    "AURACLAW_TASK_API_WORKLOAD_TOKEN",
+    "AURACLAW_ORCHESTRATOR_WORKLOAD_TOKEN",
+    "AURACLAW_PROJECTION_WORKLOAD_TOKEN",
+    "AURACLAW_RUNTIME_WORKLOAD_TOKEN",
+    "AURACLAW_MODEL_GATEWAY_WORKLOAD_TOKEN",
+    "AURACLAW_ACTION_HANDS_WORKLOAD_TOKEN",
+    "AURACLAW_CREDENTIAL_PROXY_WORKLOAD_TOKEN",
+    "AURACLAW_ARTIFACT_SERVICE_WORKLOAD_TOKEN",
+    "AURACLAW_POLICY_WORKLOAD_TOKEN",
+    "AURACLAW_DELIVERY_WORKLOAD_TOKEN",
+    "AURACLAW_LEASE_SIGNING_KEY",
+    "AURACLAW_MODEL_API_KEY",
+    "AURACLAW_CREDENTIAL_VAULT_TOKEN",
+    "SEAWEEDFS_ACCESS_KEY",
+    "SEAWEEDFS_SECRET_KEY",
+}
+
+
+def load_secret_files(environ: dict[str, str] | None = None) -> None:
+    selected = os.environ if environ is None else environ
+    for variable in sorted(_SECRET_FILE_VARIABLES):
+        if selected.get(variable):
+            continue
+        path_value = selected.get(f"{variable}_FILE")
+        if not path_value:
+            continue
+        path = Path(path_value)
+        if not path.is_file():
+            raise ValueError(f"secret file is unavailable for {variable}")
+        if path.stat().st_size > 64 * 1024:
+            raise ValueError(f"secret file is too large for {variable}")
+        value = path.read_text().rstrip("\r\n")
+        if not value:
+            raise ValueError(f"secret file is empty for {variable}")
+        selected[variable] = value
 
 
 class Settings(BaseSettings):
@@ -54,6 +94,7 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     storage_backend: Literal["auto", "memory", "postgres"] = "auto"
     database_url: str = "postgresql+asyncpg://auraclaw:auraclaw@localhost:5432/auraclaw"
+    migration_database_url: SecretStr | None = None
     db_host: str | None = Field(default=None, validation_alias="DB_HOST")
     db_port: int = Field(default=5432, validation_alias="DB_PORT")
     db_user: str | None = Field(default=None, validation_alias="DB_USER")
@@ -134,6 +175,12 @@ class Settings(BaseSettings):
                 f"postgresql+asyncpg://{user}:{password}@{self.db_host}:{self.db_port}/{database}"
             )
         return self.database_url
+
+    @property
+    def resolved_migration_database_url(self) -> str:
+        if self.migration_database_url is not None:
+            return self.migration_database_url.get_secret_value()
+        return self.resolved_database_url
 
     @property
     def postgres_enabled(self) -> bool:
@@ -235,4 +282,5 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
+    load_secret_files()
     return Settings()
