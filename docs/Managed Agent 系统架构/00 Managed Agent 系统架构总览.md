@@ -86,6 +86,7 @@ flowchart TD
 
 - [[22 Shared Event and State Contracts]]
 - [[23 MCP Runtime 能力平面]]
+- [[24 Model Skill 转换服务]]
 
 ## 事实与状态归属
 

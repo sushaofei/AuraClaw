@@ -156,6 +156,31 @@ auraclaw delivery run
 每个入口都有 `/health/live` 和 `/health/ready`；Worker 在 Uvicorn 收到 SIGTERM 后停止接收新循环、
 等待当前循环退出。Task API 不暴露 `/v1/streams/*`，Streaming Gateway 不暴露 Task Command。
 
+### Model Skill 预览闭环
+
+`action-hands` 使用 `.env` 的 `MYSQL_DB_*` 在一致性只读快照中加载 `ct_model_*`，把每个模型版本
+编译成签名 Skill Package，并通过 `skill://ct-model/...` MCP Resource 提供给 Runtime。启动时先
+完成一次全量对账，此后按配置间隔继续扫描；不再符合读取条件的版本会从 MCP Resource 撤销。
+当前草稿会映射为 `1.0.0-draft.<version_id>`，只用于配置解释，不执行权威计算或业务回写。
+
+通过以下开关控制：
+
+```text
+AURACLAW_MODEL_SKILL_SOURCE_ENABLED
+AURACLAW_MODEL_SKILL_SOURCE_TENANT_ID
+AURACLAW_MODEL_SKILL_TARGET_TENANT_ID
+AURACLAW_MODEL_SKILL_INCLUDE_DRAFTS
+AURACLAW_MODEL_SKILL_RECONCILE_INTERVAL_SECONDS
+AURACLAW_MODEL_SKILL_SIGNING_KEY
+```
+
+当前同步机制是周期全量对账，不依赖 CDC；相同 source/package digest 幂等复用，版本内容冲突
+不会原地覆盖。后续 Outbox 仅作为低延迟提示，完整扫描仍作为正确性兜底。
+
+完整配置位于 Skill 的 `references/config.json`。生产环境应关闭 Draft 读取，并在完成快照发布、
+持久 Registry、确定性模型 Tool 和凭证治理后再启用。设计与后续边界见
+[Model Skill 转换服务](docs/Managed%20Agent%20系统架构/24%20Model%20Skill%20转换服务.md)。
+
 本地启动 12 服务拓扑：
 
 ```bash

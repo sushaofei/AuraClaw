@@ -27,7 +27,9 @@ _SECRET_FILE_VARIABLES = {
     "AURACLAW_DELIVERY_WORKLOAD_TOKEN",
     "AURACLAW_LEASE_SIGNING_KEY",
     "AURACLAW_MODEL_API_KEY",
+    "AURACLAW_MODEL_SKILL_SIGNING_KEY",
     "AURACLAW_CREDENTIAL_VAULT_TOKEN",
+    "MYSQL_DB_PWD",
     "SEAWEEDFS_ACCESS_KEY",
     "SEAWEEDFS_SECRET_KEY",
 }
@@ -91,6 +93,31 @@ class Settings(BaseSettings):
     credential_egress_allowlist: str = ""
     mcp_egress_servers_json: str = "[]"
     mcp_reconcile_interval_seconds: float = Field(default=60.0, ge=5.0, le=3600.0)
+    model_skill_source_enabled: bool = True
+    model_skill_source_tenant_id: int = Field(default=1, ge=0)
+    model_skill_target_tenant_id: str = Field(default="development", min_length=1)
+    model_skill_include_drafts: bool = True
+    model_skill_reconcile_interval_seconds: float = Field(
+        default=60.0,
+        ge=5.0,
+        le=3600.0,
+    )
+    model_skill_signing_key: SecretStr | None = None
+    model_skill_mysql_host: str | None = Field(
+        default=None, validation_alias="MYSQL_DB_HOST"
+    )
+    model_skill_mysql_port: int = Field(
+        default=3306, ge=1, le=65535, validation_alias="MYSQL_DB_PORT"
+    )
+    model_skill_mysql_user: str | None = Field(
+        default=None, validation_alias="MYSQL_DB_USER"
+    )
+    model_skill_mysql_password: SecretStr | None = Field(
+        default=None, validation_alias="MYSQL_DB_PWD"
+    )
+    model_skill_mysql_database: str | None = Field(
+        default=None, validation_alias="MYSQL_DB_NAME"
+    )
     credential_vault_addr: str | None = None
     credential_vault_token: SecretStr | None = None
     credential_vault_mount: str = "secret"
@@ -255,6 +282,17 @@ class Settings(BaseSettings):
     @property
     def model_gateway_configured(self) -> bool:
         return bool(self.model_api_key and self.model_base_url and self.model_name)
+
+    @property
+    def model_skill_source_configured(self) -> bool:
+        return bool(
+            self.model_skill_source_enabled
+            and self.model_skill_mysql_host
+            and self.model_skill_mysql_user
+            and self.model_skill_mysql_password is not None
+            and self.model_skill_mysql_password.get_secret_value()
+            and self.model_skill_mysql_database
+        )
 
     def workload_token_value(self, service_name: str) -> str | None:
         tokens = {

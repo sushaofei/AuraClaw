@@ -918,6 +918,7 @@ export function AuraClawConsole() {
             ["chat", "01", "智能问答"], ["create", "02", "创建任务"], ["task", "03", "Session 详情"],
             ["stream", "04", "实时事件"], ["timeline", "05", "Timeline"], ["metrics", "06", "Metrics"], ["history", "07", "请求历史"],
           ].map(([id, number, label]) => <button key={id} className={activePanel === id ? "nav-item active" : "nav-item"} onClick={() => navigatePanel(id)}><span>{number}</span>{label}</button>)}
+          <a className="nav-item" href="/model-skills"><span>08</span>Model Skills</a>
           <div className="sidebar-note"><span className="health-dot good" /><div><strong>Canonical first</strong><p>最终状态以 Task / Result API 为准</p></div></div>
         </aside>
 
