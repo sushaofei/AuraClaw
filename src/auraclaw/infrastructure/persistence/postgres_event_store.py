@@ -50,7 +50,7 @@ class PostgresEventStore(LazyPool):
         ]
         if event_types is not None:
             params.append(list(event_types))
-            clauses.append(f"type = ANY(${len(params)}::text[])")
+            clauses.append(f"event_type = ANY(${len(params)}::text[])")
         query = f"""
             SELECT * FROM session_core.canonical_event
             WHERE {' AND '.join(clauses)}
