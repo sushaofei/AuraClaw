@@ -4,7 +4,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from auraclaw.contracts.internal import ContractModel
 
@@ -30,6 +30,13 @@ class CapabilityStatus(StrEnum):
     RETIRED = "retired"
 
 
+class McpOAuthConfiguration(ContractModel):
+    token_endpoint: str = Field(pattern=r"^https://")
+    client_id: str = Field(min_length=1, max_length=512)
+    resource: str = Field(pattern=r"^https://")
+    scopes: tuple[str, ...] = ()
+
+
 class McpServerDefinition(ContractModel):
     server_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.-]+$")
     tenant_id: str | None = None
@@ -37,6 +44,7 @@ class McpServerDefinition(ContractModel):
     endpoint: str = Field(min_length=1, pattern=r"^https://")
     protocol_revision: str = "2025-11-25"
     credential_ref: str | None = None
+    oauth: McpOAuthConfiguration | None = None
     trust_level: CapabilityTrustLevel = CapabilityTrustLevel.EXTERNAL_UNTRUSTED
     allowed_tool_prefixes: tuple[str, ...] = ()
     allowed_resource_schemes: tuple[str, ...] = ()
@@ -44,6 +52,14 @@ class McpServerDefinition(ContractModel):
     status: CapabilityStatus = CapabilityStatus.QUARANTINED
     enabled: bool = False
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_remote_auth(self) -> McpServerDefinition:
+        if self.oauth is not None and self.credential_ref is None:
+            raise ValueError("OAuth MCP server requires a credential_ref")
+        if "_auraclaw_oauth" in self.metadata:
+            raise ValueError("MCP server metadata uses a reserved key")
+        return self
 
 
 class CapabilityDescriptor(ContractModel):
