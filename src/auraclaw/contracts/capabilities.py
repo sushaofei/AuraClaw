@@ -31,6 +31,9 @@ class CapabilityStatus(StrEnum):
 
 
 class McpOAuthConfiguration(ContractModel):
+    protected_resource_metadata_url: str = Field(pattern=r"^https://")
+    authorization_server_metadata_url: str = Field(pattern=r"^https://")
+    issuer: str = Field(pattern=r"^https://")
     token_endpoint: str = Field(pattern=r"^https://")
     client_id: str = Field(min_length=1, max_length=512)
     resource: str = Field(pattern=r"^https://")

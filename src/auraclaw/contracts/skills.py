@@ -113,6 +113,7 @@ class SkillBinding(ContractModel):
     resolved_tools: tuple[ResolvedSkillTool, ...] = ()
     resolved_resources: tuple[ResolvedSkillResource, ...] = ()
     policy_version: str
+    policy_decision_id: str | None = None
     max_steps: int = Field(ge=1, le=1000)
     timeout_seconds: int = Field(ge=1, le=86400)
 

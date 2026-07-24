@@ -52,6 +52,15 @@ def test_postgres_capability_catalog_is_shared_and_tenant_scoped() -> None:
                     endpoint="https://tenant.example/mcp",
                     credential_ref=f"vault/{server_id}#client_secret",
                     oauth=McpOAuthConfiguration(
+                        protected_resource_metadata_url=(
+                            "https://tenant.example/.well-known/"
+                            "oauth-protected-resource"
+                        ),
+                        authorization_server_metadata_url=(
+                            "https://auth.tenant.example/.well-known/"
+                            "oauth-authorization-server"
+                        ),
+                        issuer="https://auth.tenant.example",
                         token_endpoint="https://auth.tenant.example/oauth/token",
                         client_id="auraclaw",
                         resource="https://tenant.example/mcp",

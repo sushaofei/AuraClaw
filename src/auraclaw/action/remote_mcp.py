@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 from auraclaw.action.ports import CredentialInvoker, ResourcePolicyEvaluator
 from auraclaw.contracts.capabilities import CapabilityStatus, McpServerDefinition
@@ -11,7 +13,7 @@ from auraclaw.contracts.mcp import (
     McpJsonRpcResponse,
     McpTrustedContext,
 )
-from auraclaw.contracts.tools import PolicyDecision
+from auraclaw.contracts.tools import PolicyDecision, ToolCapability, ToolInvocation
 
 
 class ManagedRemoteMcpTransport:
@@ -37,6 +39,18 @@ class ManagedRemoteMcpTransport:
         assert self._credential_ref is not None
         self._credentials = credentials
         self._policy = policy
+        self._notification_handler: (
+            Callable[[str, str, dict[str, Any]], Awaitable[bool]] | None
+        ) = None
+
+    def set_notification_handler(
+        self,
+        handler: Callable[
+            [str, str, dict[str, Any]],
+            Awaitable[bool],
+        ],
+    ) -> None:
+        self._notification_handler = handler
 
     async def send(
         self,
@@ -75,7 +89,7 @@ class ManagedRemoteMcpTransport:
             PolicyDecision.ALLOW_WITH_CONSTRAINTS,
         }:
             raise PolicyDeniedError("remote MCP policy denied invocation")
-        response = await self._credentials.invoke(
+        raw_response = await self._credentials.invoke(
             tenant_id=trusted_context.tenant_id,
             session_id=trusted_context.session_id,
             tool_name=f"mcp:{self._server.server_id}",
@@ -87,4 +101,73 @@ class ManagedRemoteMcpTransport:
             },
             policy_decision_id=evaluation.decision_id,
         )
+        if not isinstance(raw_response, dict):
+            raise ValueError("remote MCP response is not an object")
+        response = dict(raw_response)
+        notifications = response.pop("_auraclaw_notifications", ())
+        if self._notification_handler is not None and isinstance(
+            notifications, list
+        ):
+            for notification in notifications:
+                if not isinstance(notification, dict):
+                    continue
+                method = notification.get("method")
+                params = notification.get("params", {})
+                if isinstance(method, str) and isinstance(params, dict):
+                    await self._notification_handler(
+                        self._server.server_id,
+                        method,
+                        dict(params),
+                    )
         return McpJsonRpcResponse.model_validate(response)
+
+
+class RemoteMcpToolExecutor:
+    def __init__(
+        self,
+        server: McpServerDefinition,
+        transport: ManagedRemoteMcpTransport,
+    ) -> None:
+        self._server = server
+        self._transport = transport
+        self.route_owner = f"mcp:{server.server_id}:tools"
+
+    async def execute(
+        self,
+        invocation: ToolInvocation,
+        capability: ToolCapability,
+    ) -> dict[str, object]:
+        del capability
+        response = await self._transport.send(
+            McpJsonRpcRequest(
+                id=invocation.tool_invocation_id,
+                method="tools/call",
+                params={
+                    "name": invocation.tool_name,
+                    "arguments": invocation.arguments,
+                },
+            ),
+            trusted_context=McpTrustedContext(
+                tenant_id=invocation.tenant_id,
+                root_session_id=invocation.root_session_id,
+                session_id=invocation.session_id,
+                run_id=invocation.run_id,
+                runtime_id=invocation.actor_id,
+                lease_id=f"tool:{invocation.tool_invocation_id}",
+                fencing_token=invocation.fencing_token,
+                deadline=invocation.deadline,
+            ),
+        )
+        if response.error is not None:
+            return {
+                "isError": True,
+                "error": {
+                    "code": response.error.code,
+                    "message": response.error.message,
+                },
+            }
+        result = dict(response.result or {})
+        if result.get("isError") is True:
+            raise RuntimeError("remote MCP Tool returned an execution error")
+        structured = result.get("structuredContent")
+        return dict(structured) if isinstance(structured, dict) else result

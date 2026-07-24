@@ -86,11 +86,12 @@ api → application → domain → contracts
 
 深入设计见 [Managed Agent 系统架构总览](docs/Managed%20Agent%20系统架构/00%20Managed%20Agent%20系统架构总览.md)、
 [开发方案与实施计划](docs/Managed%20Agent%20开发方案与实施计划.md) 与
-[架构代码梳理](docs/Managed%20Agent%20架构代码梳理.md)。
+[架构代码梳理](docs/Managed%20Agent%20架构代码梳理.md)。MCP 数据、工具和 Skill 接入见
+[M9 MCP Runtime 实施与运维](docs/M9%20MCP%20Runtime%20实施与运维.md)。
 
 ## 架构概览
 
-当前版本已实现 M8 Model Gateway 与 Runtime Event Bus 生产接入：
+当前版本已实现 M9 MCP Runtime 能力平面：
 
 ```text
 Task API -> Session Aggregate -> PostgreSQL Canonical Events + Transactional Outbox
@@ -99,6 +100,9 @@ Control Projection -> Runnable Queue -> Orchestrator -> Lease/Fencing/Assignment
                    -> Recoverable Agent Harness -> Model/Tool/Session Gateway Ports
 Tool Call -> Registry/Schema/Policy -> Approval Digest -> Hands/Credential Proxy
           -> Result Redaction/Normalization -> Inline Result or Artifact Reference
+Runtime -> Internal MCP Gateway -> Capability Catalog / Resource / Prompt / Tool
+       -> Signed Skill Package -> Fixed Binding -> Recoverable Skill Runner
+       -> Credential Proxy MCP Egress -> OAuth/OIDC + Pinned Remote Server
 Root Session -> Coordinator -> Child DAG/Contracts -> Runnable Projection
              -> Worker Result -> Reviewer Evidence/Decision -> Join + Lineage
 Agent/Tool/Orchestrator -> Runtime Event Producer SDK -> Kafka
@@ -174,7 +178,7 @@ uv run python scripts/materialize_compose_secrets.py \
 uv run python scripts/compose_preflight.py --env-file .env.production
 docker compose --env-file .env.production -f compose.production.yml \
   --profile migrate run --rm migrate migrate up \
-  --target 0014 --directory /app/migrations
+  --target 0016 --directory /app/migrations
 docker compose --env-file .env.production -f compose.production.yml up -d --wait
 ```
 

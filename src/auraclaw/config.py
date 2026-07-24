@@ -90,6 +90,7 @@ class Settings(BaseSettings):
     credential_proxy_base_url: str = "http://127.0.0.1:8008"
     credential_egress_allowlist: str = ""
     mcp_egress_servers_json: str = "[]"
+    mcp_reconcile_interval_seconds: float = Field(default=60.0, ge=5.0, le=3600.0)
     credential_vault_addr: str | None = None
     credential_vault_token: SecretStr | None = None
     credential_vault_mount: str = "secret"
