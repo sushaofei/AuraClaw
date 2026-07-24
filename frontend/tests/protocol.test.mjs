@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   appendUniqueEvent,
+  approvalFromTranscript,
   buildRestoredTranscript,
   createCommandId,
   createSseParser,
@@ -21,6 +22,7 @@ import {
   runtimeEventRunId,
   reconcileAssistantWithResult,
   safeCurl,
+  transcriptFromApiMessages,
   transcriptFromTimeline,
   truncateTitle,
   upsertChatSessionIndex,
@@ -323,5 +325,98 @@ test("restores multi-turn chat transcript from timeline canonical events", () =>
   assert.deepEqual(
     fallback.filter((item) => item.role !== "system").map((item) => [item.role, item.content]),
     [["user", "回退问题"], ["assistant", "回退答案"]],
+  );
+});
+
+test("prefers transcript API messages over timeline and maps pending approval", () => {
+  assert.deepEqual(
+    transcriptFromApiMessages([
+      { role: "user", content: "问" },
+      { role: "assistant", content: "答", run_id: "run-9" },
+      { role: "system", content: "忽略" },
+    ]),
+    [
+      { role: "user", content: "问" },
+      { role: "assistant", content: "答", runId: "run-9" },
+    ],
+  );
+  const restored = buildRestoredTranscript({
+    goal: "不应使用",
+    resultSummary: "也不应使用",
+    sessionId: "ses_api",
+    transcriptMessages: [
+      { role: "user", content: "API 问" },
+      { role: "assistant", content: "API 答", run_id: "run-api" },
+    ],
+    timelineEntries: [
+      {
+        kind: "canonical_event",
+        timestamp: "2026-07-21T10:00:01Z",
+        type: "session.created",
+        detail: { goal: "Timeline 问" },
+      },
+    ],
+  });
+  assert.deepEqual(
+    restored.filter((item) => item.role !== "system").map((item) => item.content),
+    ["API 问", "API 答"],
+  );
+  assert.deepEqual(
+    approvalFromTranscript({
+      approval_id: "apr_1",
+      tool_name: "shell",
+      reason: "needs review",
+      status: "waiting",
+    }),
+    {
+      approvalId: "apr_1",
+      toolName: "shell",
+      reason: "needs review",
+      risk: "",
+      redactedArguments: null,
+      expectedEffect: "",
+      status: "waiting",
+    },
+  );
+});
+
+test("falls back to timeline when transcript API returns no messages", () => {
+  const restored = buildRestoredTranscript({
+    goal: "回退 Goal",
+    resultSummary: "回退 Result",
+    sessionId: "ses_fallback_timeline",
+    transcriptMessages: [],
+    timelineEntries: [
+      {
+        kind: "canonical_event",
+        timestamp: "2026-07-21T10:00:01Z",
+        type: "session.created",
+        detail: { goal: "第一问" },
+      },
+      {
+        kind: "canonical_event",
+        timestamp: "2026-07-21T10:00:02Z",
+        type: "model.output.completed",
+        correlation: { run_id: "run-1" },
+        detail: { output: "第一答" },
+      },
+      {
+        kind: "canonical_event",
+        timestamp: "2026-07-21T10:00:03Z",
+        type: "user.message.appended",
+        detail: { message: "第二问" },
+      },
+      {
+        kind: "canonical_event",
+        timestamp: "2026-07-21T10:00:04Z",
+        type: "model.output.completed",
+        correlation: { run_id: "run-2" },
+        detail: { output: "第二答" },
+      },
+    ],
+  });
+  assert.deepEqual(
+    restored.filter((item) => item.role !== "system").map((item) => item.content),
+    ["第一问", "第一答", "第二问", "第二答"],
   );
 });

@@ -47,13 +47,24 @@ class InMemoryEventStore:
         self._lock = asyncio.Lock()
 
     async def load(
-        self, tenant_id: str, session_id: str, *, from_version: int = 1
+        self,
+        tenant_id: str,
+        session_id: str,
+        *,
+        from_version: int = 1,
+        event_types: Sequence[str] | None = None,
+        limit: int | None = None,
     ) -> list[CanonicalEvent]:
-        return [
+        allowed = set(event_types) if event_types is not None else None
+        events = [
             event
             for event in self._streams.get((tenant_id, session_id), [])
             if event.aggregate_version >= from_version
+            and (allowed is None or event.type in allowed)
         ]
+        if limit is not None:
+            return events[:limit]
+        return events
 
     async def load_all(self, tenant_id: str | None = None) -> list[CanonicalEvent]:
         events = [

@@ -100,6 +100,15 @@ async def get_result(
     return result
 
 
+@router.get("/tasks/{session_id}/transcript")
+async def get_transcript(
+    session_id: str,
+    identity: Identity,
+    query: TaskQueryDependency,
+) -> dict[str, Any]:
+    return await query.get_transcript(tenant_id=identity.tenant_id, session_id=session_id)
+
+
 @router.post(
     "/sessions/{session_id}/messages",
     response_model=CommandResponse,
