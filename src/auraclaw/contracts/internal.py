@@ -111,6 +111,7 @@ class SessionFeedRequest(ContractModel):
     session_id: str
     from_version: int = Field(default=1, ge=1)
     limit: int = Field(default=100, ge=1, le=1000)
+    event_types: tuple[str, ...] | None = None
 
 
 class SessionFeedResponse(ContractModel):

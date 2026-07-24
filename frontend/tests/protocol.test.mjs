@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   appendUniqueEvent,
+  approvalFromTranscript,
   buildRestoredTranscript,
   createCommandId,
   createSseParser,
@@ -21,6 +22,7 @@ import {
   runtimeEventRunId,
   reconcileAssistantWithResult,
   safeCurl,
+  transcriptFromApiMessages,
   transcriptFromTimeline,
   truncateTitle,
   upsertChatSessionIndex,
@@ -323,5 +325,57 @@ test("restores multi-turn chat transcript from timeline canonical events", () =>
   assert.deepEqual(
     fallback.filter((item) => item.role !== "system").map((item) => [item.role, item.content]),
     [["user", "回退问题"], ["assistant", "回退答案"]],
+  );
+});
+
+test("prefers transcript API messages over timeline and maps pending approval", () => {
+  assert.deepEqual(
+    transcriptFromApiMessages([
+      { role: "user", content: "问" },
+      { role: "assistant", content: "答", run_id: "run-9" },
+      { role: "system", content: "忽略" },
+    ]),
+    [
+      { role: "user", content: "问" },
+      { role: "assistant", content: "答", runId: "run-9" },
+    ],
+  );
+  const restored = buildRestoredTranscript({
+    goal: "不应使用",
+    resultSummary: "也不应使用",
+    sessionId: "ses_api",
+    transcriptMessages: [
+      { role: "user", content: "API 问" },
+      { role: "assistant", content: "API 答", run_id: "run-api" },
+    ],
+    timelineEntries: [
+      {
+        kind: "canonical_event",
+        timestamp: "2026-07-21T10:00:01Z",
+        type: "session.created",
+        detail: { goal: "Timeline 问" },
+      },
+    ],
+  });
+  assert.deepEqual(
+    restored.filter((item) => item.role !== "system").map((item) => item.content),
+    ["API 问", "API 答"],
+  );
+  assert.deepEqual(
+    approvalFromTranscript({
+      approval_id: "apr_1",
+      tool_name: "shell",
+      reason: "needs review",
+      status: "waiting",
+    }),
+    {
+      approvalId: "apr_1",
+      toolName: "shell",
+      reason: "needs review",
+      risk: "",
+      redactedArguments: null,
+      expectedEffect: "",
+      status: "waiting",
+    },
   );
 });

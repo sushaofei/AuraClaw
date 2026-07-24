@@ -112,7 +112,11 @@ def get_task_command_gateway() -> TaskCommandGateway:
 
 
 def get_task_query_service() -> TaskQueryService:
-    return TaskQueryService(get_task_projection(), get_collaboration_projection())
+    return TaskQueryService(
+        get_task_projection(),
+        get_collaboration_projection(),
+        get_event_store(),
+    )
 
 
 @lru_cache
