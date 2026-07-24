@@ -25,6 +25,7 @@ MIGRATIONS = tuple(
         "migrations/0001_initial.sql",
         "migrations/0002_m1_fact_query.sql",
         "migrations/0008_multi_run_sessions.sql",
+        "migrations/0016_m9_skill_projection.sql",
     )
 )
 pytestmark = pytest.mark.skipif(DATABASE_URL is None, reason="PostgreSQL test URL not configured")
@@ -54,6 +55,13 @@ def test_postgres_concurrent_idempotency_outbox_snapshot_and_rebuild() -> None:
             )
             if run_status_column is None:
                 await connection.execute(MIGRATIONS[2])
+            skill_column = await connection.fetchval(
+                """SELECT 1 FROM information_schema.columns
+                WHERE table_schema = 'projection' AND table_name = 'task_view'
+                  AND column_name = 'skill_activations'"""
+            )
+            if skill_column is None:
+                await connection.execute(MIGRATIONS[3])
         finally:
             await connection.close()
 
@@ -97,6 +105,7 @@ def test_postgres_concurrent_idempotency_outbox_snapshot_and_rebuild() -> None:
             assert before["artifact_refs"] == after["artifact_refs"] == []
             assert before["result_ref"] is after["result_ref"] is None
             assert before["error"] is after["error"] is None
+            assert before["skill_activations"] == after["skill_activations"] == []
         finally:
             await store.close()
             await projection.close()

@@ -271,6 +271,8 @@ class SkillResolver:
             resolved_tools=resolved_tools,
             resolved_resources=resolved_resources,
             policy_version=policy_version,
+            max_steps=manifest.max_steps,
+            timeout_seconds=manifest.timeout_seconds,
         )
 
 
