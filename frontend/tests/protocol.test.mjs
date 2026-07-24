@@ -379,3 +379,44 @@ test("prefers transcript API messages over timeline and maps pending approval", 
     },
   );
 });
+
+test("falls back to timeline when transcript API returns no messages", () => {
+  const restored = buildRestoredTranscript({
+    goal: "回退 Goal",
+    resultSummary: "回退 Result",
+    sessionId: "ses_fallback_timeline",
+    transcriptMessages: [],
+    timelineEntries: [
+      {
+        kind: "canonical_event",
+        timestamp: "2026-07-21T10:00:01Z",
+        type: "session.created",
+        detail: { goal: "第一问" },
+      },
+      {
+        kind: "canonical_event",
+        timestamp: "2026-07-21T10:00:02Z",
+        type: "model.output.completed",
+        correlation: { run_id: "run-1" },
+        detail: { output: "第一答" },
+      },
+      {
+        kind: "canonical_event",
+        timestamp: "2026-07-21T10:00:03Z",
+        type: "user.message.appended",
+        detail: { message: "第二问" },
+      },
+      {
+        kind: "canonical_event",
+        timestamp: "2026-07-21T10:00:04Z",
+        type: "model.output.completed",
+        correlation: { run_id: "run-2" },
+        detail: { output: "第二答" },
+      },
+    ],
+  });
+  assert.deepEqual(
+    restored.filter((item) => item.role !== "system").map((item) => item.content),
+    ["第一问", "第一答", "第二问", "第二答"],
+  );
+});
