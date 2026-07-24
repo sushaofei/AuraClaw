@@ -22,6 +22,26 @@ export function redact(value: unknown): unknown;
 export function safeCurl(input: { method: string; url: string; headers?: Record<string, string>; body?: unknown }): string;
 export function createSseParser(onEvent: (event: { id: string; event: string; data: string }) => void): { push(chunk: string): void; remaining(): string };
 export function runtimeDelta(event: string, data: Record<string, unknown>): string;
+export function runtimeEventRunId(data: Record<string, unknown> | null | undefined): string;
+export function applyChatDelta<T extends {
+  id?: string;
+  role: string;
+  content: string;
+  streaming?: boolean;
+  runId?: string;
+}>(
+  messages: T[],
+  input: {
+    delta: string;
+    runId?: string;
+    createId?: (operation?: string) => string;
+    finalizedRunIds?: Iterable<string> | Set<string>;
+  },
+): T[];
+export function finalizeChatRuns<T extends { role: string; streaming?: boolean; runId?: string }>(
+  messages: T[],
+  runIds?: Iterable<string>,
+): T[];
 export function appendUniqueEvent<T extends { id?: string }>(entries: T[], entry: T, limit?: number): T[];
 export function resultText(result: Record<string, unknown> | null): string;
 export function retryAfterMs(value: string | null | undefined, fallback?: number): number;
@@ -45,10 +65,10 @@ export function removeChatSessionIndex(
 ): ChatSessionIndexEntry[];
 export function transcriptFromTimeline(
   timelineEntries: Array<Record<string, unknown>> | null | undefined,
-): Array<{ role: "user" | "assistant"; content: string }>;
+): Array<{ role: "user" | "assistant"; content: string; runId?: string }>;
 export function buildRestoredTranscript(input: {
   goal?: string;
   resultSummary?: string;
   sessionId?: string;
   timelineEntries?: Array<Record<string, unknown>> | null;
-}): Array<{ role: "user" | "assistant" | "system"; content: string }>;
+}): Array<{ role: "user" | "assistant" | "system"; content: string; runId?: string }>;
