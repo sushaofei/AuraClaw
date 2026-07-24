@@ -133,6 +133,9 @@ class SkillBindingResolver(Protocol):
         publisher: str | None = None,
         role: str,
         policy_version: str,
+        subject: str = "agent-runtime",
+        correlation_id: str = "skill.resolve",
+        active_skill_names: tuple[str, ...] = (),
     ) -> SkillBinding: ...
 
     async def list_resources(

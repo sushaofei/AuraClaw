@@ -12,6 +12,7 @@ from auraclaw.action.capability_catalog import (
 )
 from auraclaw.action.mcp import HandsMcpServer
 from auraclaw.action.mcp_primitives import McpResourceRegistry
+from auraclaw.action.ports import PolicyEvaluation
 from auraclaw.action.skill_packages import (
     HmacSkillSignatureVerifier,
     SkillPackage,
@@ -36,6 +37,7 @@ from auraclaw.contracts.skills import (
     SkillResourceRequirement,
     SkillToolRequirement,
 )
+from auraclaw.contracts.tools import PolicyDecision
 from auraclaw.control.ports import RuntimeAssignment
 from auraclaw.infrastructure.artifacts.store import (
     ArtifactStore,
@@ -54,6 +56,19 @@ class _UnusedGateway:
     async def cancel(self, tool_invocation_id: str) -> bool:
         del tool_invocation_id
         return False
+
+
+class _SkillPolicy:
+    def __init__(self) -> None:
+        self.attributes: dict[str, object] = {}
+
+    async def evaluate_action(self, **arguments: object) -> PolicyEvaluation:
+        self.attributes = dict(arguments["attributes"])  # type: ignore[arg-type]
+        return PolicyEvaluation(
+            decision=PolicyDecision.ALLOW,
+            decision_id="skill-policy-1",
+            policy_version="policy-43",
+        )
 
 
 def _assignment() -> RuntimeAssignment:
@@ -295,18 +310,30 @@ def test_skill_resolver_pins_highest_compatible_dependencies() -> None:
                 ),
             ),
         )
-        binding = await SkillResolver(registry, store).resolve(
+        skill_policy = _SkillPolicy()
+        binding = await SkillResolver(
+            registry,
+            store,
+            policy=skill_policy,
+        ).resolve(
             tenant_id="tenant-a",
             name="release.prepare",
             version=">=1.4,<2",
             role="worker",
             policy_version="policy-42",
+            subject="runtime-1",
+            correlation_id="run-1",
+            active_skill_names=("audit.prepare",),
         )
 
         assert binding.skill_version == "1.5.0"
         assert binding.resolved_tools[0].version == "2.4.0"
         assert binding.resolved_resources[0].capability_id == "cap-resource"
-        assert binding.policy_version == "policy-42"
+        assert binding.policy_version == "policy-43"
+        assert binding.policy_decision_id == "skill-policy-1"
+        assert skill_policy.attributes["active_skill_names"] == [
+            "audit.prepare"
+        ]
 
         denied_package = _package(verifier, version="2.0.0")
         denied_manifest = denied_package.manifest.model_copy(

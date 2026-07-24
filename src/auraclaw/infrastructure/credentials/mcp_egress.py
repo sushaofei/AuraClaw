@@ -154,6 +154,9 @@ class ManagedMcpEgressAdapter:
         if server.oauth is None or server.credential_ref is None:
             raise ValueError("MCP egress server requires managed OAuth configuration")
         _validate_https_url(server.endpoint)
+        _validate_https_url(server.oauth.protected_resource_metadata_url)
+        _validate_https_url(server.oauth.authorization_server_metadata_url)
+        _validate_https_url(server.oauth.issuer)
         _validate_https_url(server.oauth.token_endpoint)
         _validate_https_url(server.oauth.resource)
         if _origin(server.endpoint) != _origin(server.oauth.resource):
@@ -164,6 +167,7 @@ class ManagedMcpEgressAdapter:
         self._max_response_bytes = max_response_bytes
         self._token: _CachedToken | None = None
         self._token_lock = asyncio.Lock()
+        self._discovery_complete = False
 
     @property
     def credential_provider(self) -> str:
@@ -222,6 +226,7 @@ class ManagedMcpEgressAdapter:
             await close()
 
     async def _access_token(self, client_secret: str) -> str:
+        await self._discover_oauth()
         now = datetime.now(UTC)
         if self._token is not None and self._token.expires_at > now:
             return self._token.value
@@ -272,6 +277,66 @@ class ManagedMcpEgressAdapter:
                 expires_at=now + timedelta(seconds=max(1, expires_in - 30)),
             )
             return token
+
+    async def _discover_oauth(self) -> None:
+        if self._discovery_complete:
+            return
+        async with self._token_lock:
+            if self._discovery_complete:
+                return
+            oauth = self._server.oauth
+            assert oauth is not None
+            protected = await self._send_pinned(
+                "GET",
+                oauth.protected_resource_metadata_url,
+                headers={"Accept": "application/json"},
+                content=b"",
+            )
+            protected_payload = _oauth_metadata(
+                protected,
+                self._max_response_bytes,
+                "protected Resource",
+            )
+            if protected_payload.get("resource") != oauth.resource:
+                raise CredentialAccessError(
+                    "MCP protected Resource metadata does not match resource"
+                )
+            authorization_servers = protected_payload.get(
+                "authorization_servers", []
+            )
+            if (
+                not isinstance(authorization_servers, list)
+                or oauth.issuer not in authorization_servers
+            ):
+                raise CredentialAccessError(
+                    "MCP protected Resource metadata does not trust issuer"
+                )
+            authorization = await self._send_pinned(
+                "GET",
+                oauth.authorization_server_metadata_url,
+                headers={"Accept": "application/json"},
+                content=b"",
+            )
+            authorization_payload = _oauth_metadata(
+                authorization,
+                self._max_response_bytes,
+                "authorization server",
+            )
+            if authorization_payload.get("issuer") != oauth.issuer:
+                raise CredentialAccessError("MCP OAuth issuer metadata does not match")
+            if authorization_payload.get("token_endpoint") != oauth.token_endpoint:
+                raise CredentialAccessError(
+                    "MCP OAuth token endpoint metadata does not match"
+                )
+            grants = authorization_payload.get(
+                "grant_types_supported",
+                ["client_credentials"],
+            )
+            if not isinstance(grants, list) or "client_credentials" not in grants:
+                raise CredentialAccessError(
+                    "MCP OAuth server does not support client credentials"
+                )
+            self._discovery_complete = True
 
     async def _send_pinned(
         self,
@@ -352,12 +417,30 @@ def _decode_mcp_response(
     content_type = response.headers.get("content-type", "").split(";", 1)[0]
     try:
         if content_type == "text/event-stream":
-            data = b"\n".join(
-                line.removeprefix(b"data:").strip()
+            events = [
+                json.loads(line.removeprefix(b"data:").strip())
                 for line in response.content.splitlines()
                 if line.startswith(b"data:")
-            )
-            payload = json.loads(data)
+            ]
+            notifications = [
+                event
+                for event in events
+                if isinstance(event, dict)
+                and isinstance(event.get("method"), str)
+                and str(event["method"]).startswith("notifications/")
+            ]
+            responses = [
+                event
+                for event in events
+                if isinstance(event, dict) and "id" in event
+            ]
+            if len(responses) != 1:
+                raise CredentialAccessError(
+                    "MCP event stream must contain exactly one response"
+                )
+            payload = dict(responses[0])
+            if notifications:
+                payload["_auraclaw_notifications"] = notifications
         elif content_type in {"application/json", ""}:
             payload = json.loads(response.content)
         else:
@@ -367,6 +450,31 @@ def _decode_mcp_response(
     if not isinstance(payload, dict):
         raise CredentialAccessError("MCP response must contain a JSON object")
     return payload
+
+
+def _oauth_metadata(
+    response: McpEgressResponse,
+    max_response_bytes: int,
+    kind: str,
+) -> dict[str, Any]:
+    if not 200 <= response.status_code < 300:
+        raise CredentialAccessError(f"MCP OAuth {kind} discovery failed")
+    if len(response.content) > max_response_bytes:
+        raise CredentialAccessError(f"MCP OAuth {kind} metadata exceeds limit")
+    if response.headers.get("content-type", "").split(";", 1)[0] not in {
+        "",
+        "application/json",
+    }:
+        raise CredentialAccessError(f"MCP OAuth {kind} metadata is not JSON")
+    try:
+        payload = json.loads(response.content)
+    except json.JSONDecodeError as exc:
+        raise CredentialAccessError(
+            f"MCP OAuth {kind} metadata is invalid"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise CredentialAccessError(f"MCP OAuth {kind} metadata is not an object")
+    return dict(payload)
 
 
 def _contains_forbidden_key(value: Any) -> bool:
