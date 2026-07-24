@@ -16,7 +16,10 @@ import {
   removeChatSessionIndex,
   resultText,
   retryAfterMs,
+  applyChatDelta,
+  finalizeChatRuns,
   runtimeDelta,
+  runtimeEventRunId,
   safeCurl,
   upsertChatSessionIndex,
 } from "./lib/protocol.mjs";
@@ -34,7 +37,13 @@ type RequestEntry = {
   curl: string;
 };
 type StreamEntry = { id: string; event: string; data: Json; receivedAt: string; replay: boolean };
-type ChatMessage = { id: string; role: "user" | "assistant" | "system"; content: string; streaming?: boolean };
+type ChatMessage = {
+  id: string;
+  role: "user" | "assistant" | "system";
+  content: string;
+  streaming?: boolean;
+  runId?: string;
+};
 
 const STORAGE_KEY = "auraclaw-console-v1";
 const CRITICAL_METRICS = new Set([
@@ -128,8 +137,16 @@ export function AuraClawConsole() {
   const streamAbort = useRef<AbortController | null>(null);
   const lastEventId = useRef("");
   const seenEventIds = useRef(new Set<string>());
+  const finalizedRunIds = useRef(new Set<string>());
   const pendingApprovalRef = useRef<ApprovalRequest | null>(null);
   const taskRef = useRef<Json | null>(null);
+
+  const markRunsFinalized = useCallback((...runIds: Array<string | undefined | null>) => {
+    for (const value of runIds) {
+      const runId = String(value ?? "").trim();
+      if (runId) finalizedRunIds.current.add(runId);
+    }
+  }, []);
 
   const navigatePanel = useCallback((panel: string) => {
     setActivePanel(panel);
@@ -339,7 +356,7 @@ export function AuraClawConsole() {
       const { data } = await api("/v1/tasks", { method: "POST", body: request, headers: { "Idempotency-Key": key } });
       const created = asJson(data);
       const id = String(created.session_id ?? "");
-      setSessionId(id); setTask(created); setEvents([]); setTimeline([]); setResult(null); setChatResult(null); setStreamCursor(""); setResultEtag(""); taskEtag.current = ""; lastEventId.current = ""; seenEventIds.current.clear();
+      setSessionId(id); setTask(created); setEvents([]); setTimeline([]); setResult(null); setChatResult(null); setStreamCursor(""); setResultEtag(""); taskEtag.current = ""; lastEventId.current = ""; seenEventIds.current.clear(); finalizedRunIds.current.clear();
       if (mode === "create") {
         setCreateResponse(created);
         setCreateIdempotencyKey(createCommandId("create-task"));
@@ -520,13 +537,13 @@ export function AuraClawConsole() {
           if (payloadType) applyApprovalFromEvent(payloadType, data);
           const delta = runtimeDelta(frame.event, data);
           if (delta) {
-            setChatMessages((current) => {
-              const last = current.at(-1);
-              if (last?.role === "assistant" && last.streaming) {
-                return [...current.slice(0, -1), { ...last, content: `${last.content}${delta}` }];
-              }
-              return [...current, { id: createCommandId("assistant"), role: "assistant", content: delta, streaming: true }];
-            });
+            const runId = runtimeEventRunId(data);
+            setChatMessages((current) => applyChatDelta(current, {
+              delta,
+              runId,
+              createId: createCommandId,
+              finalizedRunIds: finalizedRunIds.current,
+            }));
           }
         });
         const reader = response.body.getReader();
@@ -604,10 +621,15 @@ export function AuraClawConsole() {
           runStatus: afterMessage?.run_status,
         });
       }
-      setChatMessages((current) => [
-        ...current.map((item) => item.streaming ? { ...item, streaming: false } : item),
-        { id: createCommandId("user"), role: "user", content: query },
-      ]);
+      setChatMessages((current) => {
+        for (const item of current) {
+          if (item.role === "assistant" && item.runId) finalizedRunIds.current.add(item.runId);
+        }
+        return [
+          ...finalizeChatRuns(current),
+          { id: createCommandId("user"), role: "user", content: query },
+        ];
+      });
       setChatInput("");
       setChatResult(null);
       setChatStatus("connecting");
@@ -629,6 +651,7 @@ export function AuraClawConsole() {
     setResultEtag("");
     lastEventId.current = "";
     seenEventIds.current.clear();
+    finalizedRunIds.current.clear();
     setEvents([]);
     setPendingApproval(null);
     setChatApprovalFeedback("");
@@ -653,12 +676,20 @@ export function AuraClawConsole() {
       } catch {
         timelineEntries = [];
       }
-      setChatMessages(buildRestoredTranscript({
+      const restored = buildRestoredTranscript({
         goal: String(nextTask.goal ?? ""),
         resultSummary: summary,
         sessionId: id,
         timelineEntries,
-      }).map((item) => ({ ...item, id: createCommandId(`restore-${item.role}`) })));
+      }).map((item) => ({ ...item, id: createCommandId(`restore-${item.role}`) }));
+      for (const item of restored) {
+        if (item.role === "assistant" && item.runId) finalizedRunIds.current.add(item.runId);
+      }
+      const activeRunId = String(nextTask.run_id ?? "").trim();
+      if (activeRunId && ACTIVE_RUN_STATUSES.has(String(nextTask.run_status ?? ""))) {
+        finalizedRunIds.current.delete(activeRunId);
+      }
+      setChatMessages(restored);
       rememberSession(id, {
         goal: String(nextTask.goal ?? ""),
         status: nextTask.status,
@@ -705,6 +736,7 @@ export function AuraClawConsole() {
     taskEtag.current = "";
     lastEventId.current = "";
     seenEventIds.current.clear();
+    finalizedRunIds.current.clear();
     setNotice("已开始新对话；历史会话索引仍保留在本机。");
   };
 
@@ -778,7 +810,7 @@ export function AuraClawConsole() {
         const status = String(currentTask?.run_status ?? "");
         const sessionStatus = String(currentTask?.status ?? "");
         if (status === WAITING_FOR_HUMAN || sessionStatus === WAITING_FOR_HUMAN) {
-          setChatMessages((current) => current.map((item) => item.streaming ? { ...item, streaming: false } : item));
+          setChatMessages((current) => finalizeChatRuns(current));
           setChatStatus("awaiting_approval");
           await resolvePendingApproval(sessionId);
           return;
@@ -790,7 +822,9 @@ export function AuraClawConsole() {
         const loaded = await loadResult(true);
         const finalResult = loaded?.result ?? result;
         if (finalResult) setChatResult(finalResult);
-        setChatMessages((current) => current.map((item) => item.streaming ? { ...item, streaming: false } : item));
+        const completedRunId = String(currentTask?.run_id ?? finalResult?.run_id ?? "");
+        markRunsFinalized(completedRunId);
+        setChatMessages((current) => finalizeChatRuns(current, completedRunId ? [completedRunId] : undefined));
         setChatStatus(status);
         setPendingApproval(null);
         streamAbort.current?.abort();
@@ -805,7 +839,7 @@ export function AuraClawConsole() {
       cancelled = true;
       if (timer !== undefined) window.clearTimeout(timer);
     };
-  }, [chatStatus, loadResult, loadTask, resolvePendingApproval, result, resultPollMs, sessionId, task]);
+  }, [chatStatus, loadResult, loadTask, markRunsFinalized, resolvePendingApproval, result, resultPollMs, sessionId, task]);
 
   const copyJson = (value: unknown) => navigator.clipboard.writeText(JSON.stringify(redact(value), null, 2));
 

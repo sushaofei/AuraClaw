@@ -8,6 +8,8 @@ import {
   extractApprovalRequest,
   filterTimeline,
   findPendingApproval,
+  applyChatDelta,
+  finalizeChatRuns,
   loadChatSessionIndex,
   metricSeries,
   normalizeBaseUrl,
@@ -16,6 +18,7 @@ import {
   resultText,
   retryAfterMs,
   runtimeDelta,
+  runtimeEventRunId,
   safeCurl,
   transcriptFromTimeline,
   truncateTitle,
@@ -50,6 +53,52 @@ test("deduplicates replayed events and extracts streaming deltas", () => {
   assert.deepEqual(appendUniqueEvent(entries, { ...first, id: "session:2" }).map((entry) => entry.id), ["session:1", "session:2"]);
   assert.equal(runtimeDelta(first.event, first.data), "你好");
   assert.equal(runtimeDelta("tool.progress", first.data), "");
+});
+
+test("merges streaming deltas by run_id and drops late tails after finalize", () => {
+  assert.equal(runtimeEventRunId({ run_id: "run-a", payload: { delta: "x" } }), "run-a");
+  assert.equal(runtimeEventRunId({ correlation: { run_id: "run-b" } }), "run-b");
+
+  let messages = applyChatDelta([], {
+    delta: "你好",
+    runId: "run-1",
+    createId: () => "a1",
+  });
+  messages = applyChatDelta(messages, { delta: "，世界", runId: "run-1" });
+  assert.deepEqual(messages.map((item) => [item.role, item.content, item.runId, item.streaming]), [
+    ["assistant", "你好，世界", "run-1", true],
+  ]);
+
+  messages = [
+    ...finalizeChatRuns(messages, ["run-1"]),
+    { id: "u1", role: "user", content: "好的" },
+  ];
+  const finalized = new Set(["run-1"]);
+  messages = applyChatDelta(messages, {
+    delta: "迟到尾巴",
+    runId: "run-1",
+    createId: () => "a-late",
+    finalizedRunIds: finalized,
+  });
+  assert.deepEqual(
+    messages.map((item) => [item.role, item.content]),
+    [["assistant", "你好，世界"], ["user", "好的"]],
+  );
+
+  messages = applyChatDelta(messages, {
+    delta: "第二轮",
+    runId: "run-2",
+    createId: () => "a2",
+    finalizedRunIds: finalized,
+  });
+  assert.deepEqual(
+    messages.map((item) => [item.role, item.content, item.runId]),
+    [
+      ["assistant", "你好，世界", "run-1"],
+      ["user", "好的", undefined],
+      ["assistant", "第二轮", "run-2"],
+    ],
+  );
 });
 
 test("normalizes result text and Retry-After delays", () => {
@@ -189,6 +238,7 @@ test("restores multi-turn chat transcript from timeline canonical events", () =>
       kind: "canonical_event",
       timestamp: "2026-07-21T10:00:02Z",
       type: "model.output.completed",
+      correlation: { run_id: "run-1" },
       detail: { output: "第一答" },
     },
     {
@@ -201,14 +251,15 @@ test("restores multi-turn chat transcript from timeline canonical events", () =>
       kind: "canonical_event",
       timestamp: "2026-07-21T10:00:04Z",
       type: "model.output.completed",
+      correlation: { run_id: "run-2" },
       detail: { output: "第二答" },
     },
   ];
   assert.deepEqual(transcriptFromTimeline(timeline), [
     { role: "user", content: "第一问" },
-    { role: "assistant", content: "第一答" },
+    { role: "assistant", content: "第一答", runId: "run-1" },
     { role: "user", content: "第二问" },
-    { role: "assistant", content: "第二答" },
+    { role: "assistant", content: "第二答", runId: "run-2" },
   ]);
   const restored = buildRestoredTranscript({
     goal: "不应使用",
