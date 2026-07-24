@@ -48,7 +48,7 @@ def test_migration_runner_is_locked_idempotent_and_detects_drift(tmp_path: Path)
             PostgresMigrationRunner(database_url, migration_dir).apply(),
             PostgresMigrationRunner(database_url, migration_dir).apply(),
         )
-        assert sorted((len(first), len(second))) == [0, 14]
+        assert sorted((len(first), len(second))) == [0, 15]
         runner = PostgresMigrationRunner(database_url, migration_dir)
         assert await runner.apply() == ()
         assert {item.state for item in await runner.status()} == {"applied"}
