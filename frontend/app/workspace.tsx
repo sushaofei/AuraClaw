@@ -682,19 +682,35 @@ export function AuraClawConsole() {
       }
       const summary = resultText(loaded?.result ?? null) || String(nextTask.result_summary ?? "");
       if (loaded?.result) setChatResult(loaded.result);
-      const transcriptMessages = Array.isArray(transcriptPayload?.messages)
+      let transcriptMessages = Array.isArray(transcriptPayload?.messages)
         ? (transcriptPayload.messages as Json[])
         : [];
-      const pendingFromTranscript = approvalFromTranscript(
+      let pendingFromTranscript = approvalFromTranscript(
         transcriptPayload?.pending_approval && typeof transcriptPayload.pending_approval === "object"
           ? (transcriptPayload.pending_approval as Json)
           : null,
       );
+      // Transcript may 404 on stale backends; fall back to Timeline so multi-turn
+      // history is not reduced to goal + latest result_summary.
+      let timelineEntries: Json[] = [];
+      if (transcriptMessages.length === 0) {
+        try {
+          const { data } = await api(`/v1/operations/sessions/${encodeURIComponent(id)}/timeline`, { quiet: true });
+          timelineEntries = Array.isArray(asJson(data).entries) ? (asJson(data).entries as Json[]) : [];
+          setTimeline(timelineEntries);
+          if (!pendingFromTranscript) {
+            pendingFromTranscript = findPendingApproval(timelineEntries);
+          }
+        } catch {
+          timelineEntries = [];
+        }
+      }
       const restored = buildRestoredTranscript({
         goal: String(nextTask.goal ?? ""),
         resultSummary: summary,
         sessionId: id,
         transcriptMessages,
+        timelineEntries,
       }).map((item) => ({ ...item, id: createCommandId(`restore-${item.role}`) }));
       for (const item of restored) {
         if (item.role === "assistant" && item.runId) finalizedRunIds.current.add(item.runId);
