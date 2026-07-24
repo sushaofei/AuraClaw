@@ -128,12 +128,16 @@ class SessionInternalService:
         )
 
     async def feed(self, request: SessionFeedRequest) -> SessionFeedResponse:
+        # Fetch one extra row so next_version can be derived without a second query.
+        page_size = request.limit
         events = await self._event_store.load(
             request.context.tenant_id,
             request.session_id,
             from_version=request.from_version,
+            event_types=request.event_types,
+            limit=page_size + 1,
         )
-        page = events[: request.limit]
+        page = events[:page_size]
         next_version = None
         if len(events) > len(page) and page:
             next_version = page[-1].aggregate_version + 1
