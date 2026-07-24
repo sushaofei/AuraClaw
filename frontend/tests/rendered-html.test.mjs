@@ -30,3 +30,21 @@ test("server-renders the AuraClaw console shell", async () => {
   assert.match(html, /Metrics/);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton|Your site is taking shape/i);
 });
+
+test("server-renders the Model Skill delivery lab", async () => {
+  const workerUrl = new URL("../dist/server/index.js", import.meta.url);
+  workerUrl.searchParams.set("skill-test", `${process.pid}-${Date.now()}`);
+  const { default: worker } = await import(workerUrl.href);
+  const response = await worker.fetch(
+    new Request("http://localhost/model-skills", { headers: { accept: "text/html" } }),
+    { ASSETS: { fetch: async () => new Response("Not found", { status: 404 }) } },
+    { waitUntil() {}, passThroughOnException() {} },
+  );
+  const html = await response.text();
+  assert.equal(response.status, 200);
+  assert.match(html, /配置如何抵达 Agent/);
+  assert.match(html, /Model Skills/);
+  assert.match(html, /CONFIG/);
+  assert.match(html, /skill:\/\/ct-model\/model\.supplier-risk-warning/);
+  assert.match(html, /model\.supplier-score/);
+});

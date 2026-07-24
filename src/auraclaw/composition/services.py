@@ -32,9 +32,17 @@ from auraclaw.action.mcp_http import (
     create_hands_mcp_app,
 )
 from auraclaw.action.mcp_primitives import McpResourceRegistry
+from auraclaw.action.model_skill_compiler import (
+    ModelSkillCompiler,
+    ModelSkillPublisher,
+)
 from auraclaw.action.policy import PolicyEngine
 from auraclaw.action.remote_mcp import ManagedRemoteMcpTransport
 from auraclaw.action.resource_gateway import ManagedResourceGateway
+from auraclaw.action.skill_packages import (
+    HmacSkillSignatureVerifier,
+    SkillPackageRegistry,
+)
 from auraclaw.action.tool_gateway import ToolGateway, ToolRegistry
 from auraclaw.admin.internal_service import OwnerAdminService
 from auraclaw.api.dependencies import (
@@ -94,6 +102,7 @@ from auraclaw.infrastructure.delivery import (
 from auraclaw.infrastructure.delivery.remote_sinks import CredentialProxyWebhookSink
 from auraclaw.infrastructure.delivery.sinks import ParentSessionResultSink
 from auraclaw.infrastructure.hands.local import LocalHandsService
+from auraclaw.infrastructure.model_sources.mysql import MySqlModelSkillSource
 from auraclaw.infrastructure.observability.stores import InMemoryObservabilityStore
 from auraclaw.infrastructure.persistence.memory_control_store import InMemoryControlStateStore
 from auraclaw.infrastructure.persistence.postgres_admin_store import (
@@ -842,7 +851,58 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         artifacts=artifacts,
         policy=policy if isinstance(policy, RemotePolicyClient) else None,
     )
+    configured_signing_key = (
+        settings.model_skill_signing_key.get_secret_value().encode()
+        if settings.model_skill_signing_key is not None
+        else None
+    )
+    if (
+        settings.deployment_profile == "production"
+        and settings.model_skill_source_configured
+        and configured_signing_key is None
+    ):
+        raise ValueError(
+            "Production Model Skill source requires AURACLAW_MODEL_SKILL_SIGNING_KEY"
+        )
+    model_skill_signer = HmacSkillSignatureVerifier(
+        {
+            "ct-model": (
+                configured_signing_key
+                or b"auraclaw-development-model-skill-key"
+            )
+        }
+    )
+    skill_registry = SkillPackageRegistry(
+        artifacts=artifacts,
+        signature_verifier=model_skill_signer,
+        resources=resources,
+    )
+    model_skill_publisher: ModelSkillPublisher | None = None
+    if settings.model_skill_source_configured:
+        mysql_password = settings.model_skill_mysql_password
+        if (
+            settings.model_skill_mysql_host is None
+            or settings.model_skill_mysql_user is None
+            or mysql_password is None
+            or settings.model_skill_mysql_database is None
+        ):
+            raise ValueError("Model Skill MySQL source configuration is incomplete")
+        model_skill_publisher = ModelSkillPublisher(
+            MySqlModelSkillSource(
+                host=settings.model_skill_mysql_host,
+                port=settings.model_skill_mysql_port,
+                user=settings.model_skill_mysql_user,
+                password=mysql_password.get_secret_value(),
+                database=settings.model_skill_mysql_database,
+                tenant_id=settings.model_skill_source_tenant_id,
+                include_drafts=settings.model_skill_include_drafts,
+            ),
+            ModelSkillCompiler(model_skill_signer),
+            skill_registry,
+            target_tenant_id=settings.model_skill_target_tenant_id,
+        )
     registry = ToolRegistry((capability_search_tool(),))
+
     async def initialize_registry() -> None:
         if tool_registry_store is not None:
             await tool_registry_store.load_into(registry)
@@ -856,6 +916,8 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
                         policy=policy,
                     )
                 )
+        if model_skill_publisher is not None:
+            await model_skill_publisher.reconcile()
 
     app.state.remote_mcp_transports = {}
     app.state.catalog_reconciler = None
@@ -924,6 +986,23 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
     )
     app.state.capability_catalog = capability_catalog
     app.state.resource_gateway = resource_gateway
+    app.state.skill_registry = skill_registry
+    app.state.model_skill_publisher = model_skill_publisher
+    periodic_jobs: list[
+        tuple[str, float, Callable[[], Awaitable[int | None]]]
+    ] = []
+    if model_skill_publisher is not None:
+
+        async def reconcile_model_skills() -> int:
+            return len(await model_skill_publisher.reconcile())
+
+        periodic_jobs.append(
+            (
+                "model-skills",
+                settings.model_skill_reconcile_interval_seconds,
+                reconcile_model_skills,
+            )
+        )
     if credential_proxy is not None and isinstance(policy, RemotePolicyClient):
         reconciler = McpCatalogReconciler(
             catalog=capability_catalog,
@@ -944,8 +1023,62 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
             await reconciler.reconcile_all()
 
         app.state.initialize = initialize_remote_catalog
-        app.state.tick = reconciler.reconcile_all
-        app.state.worker_interval = settings.mcp_reconcile_interval_seconds
+        periodic_jobs.append(
+            (
+                "mcp-catalog",
+                settings.mcp_reconcile_interval_seconds,
+                reconciler.reconcile_all,
+            )
+        )
+    if periodic_jobs:
+        initialize_periodic_jobs = app.state.initialize
+        next_due: dict[str, float] = {}
+
+        async def initialize_and_schedule() -> None:
+            await initialize_periodic_jobs()
+            now = asyncio.get_running_loop().time()
+            next_due.update(
+                {
+                    name: now + interval
+                    for name, interval, _run in periodic_jobs
+                }
+            )
+
+        async def reconcile_due_jobs() -> int:
+            now = asyncio.get_running_loop().time()
+            due = [
+                (name, interval, run)
+                for name, interval, run in periodic_jobs
+                if now >= next_due[name]
+            ]
+            if not due:
+                return 0
+            outcomes = await asyncio.gather(
+                *(run() for _name, _interval, run in due),
+                return_exceptions=True,
+            )
+            finished_at = asyncio.get_running_loop().time()
+            completed = 0
+            failures: list[BaseException] = []
+            for (name, interval, _run), outcome in zip(
+                due,
+                outcomes,
+                strict=True,
+            ):
+                next_due[name] = finished_at + interval
+                if isinstance(outcome, BaseException):
+                    failures.append(outcome)
+                elif outcome is not None:
+                    completed += outcome
+            if failures:
+                raise failures[0]
+            return completed
+
+        app.state.initialize = initialize_and_schedule
+        app.state.tick = reconcile_due_jobs
+        app.state.worker_interval = min(
+            interval for _name, interval, _run in periodic_jobs
+        )
     app.mount("/", mcp_app)
     return app
 

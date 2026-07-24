@@ -7,6 +7,7 @@ from typing import Any, Protocol
 
 from auraclaw.contracts.capabilities import CapabilityDescriptor, McpServerDefinition
 from auraclaw.contracts.mcp import McpResourceContent, McpTrustedContext
+from auraclaw.contracts.model_skills import ModelSkillSnapshot
 from auraclaw.contracts.tools import (
     ApprovalRecord,
     ArtifactRef,
@@ -144,3 +145,7 @@ class ResourcePolicyEvaluator(Protocol):
         correlation_id: str,
         attributes: dict[str, object],
     ) -> PolicyEvaluation: ...
+
+
+class ModelSkillSource(Protocol):
+    async def load_snapshots(self) -> tuple[ModelSkillSnapshot, ...]: ...

@@ -43,20 +43,34 @@ export default defineConfig(async () => {
   // Wrangler snapshots its log path while the Cloudflare plugin is imported.
   const { cloudflare } = await import("@cloudflare/vite-plugin");
   const devApiTarget = process.env.AURACLAW_DEV_API_TARGET;
+  const devMcpTarget = process.env.AURACLAW_DEV_MCP_TARGET;
 
   return {
     server: {
       ...(isCodexSeatbeltSandbox
         ? { watch: { useFsEvents: false, usePolling: true } }
         : {}),
-      ...(devApiTarget
+      ...(devApiTarget || devMcpTarget
         ? {
             proxy: {
-              "/auraclaw-api": {
-                target: devApiTarget,
-                changeOrigin: true,
-                rewrite: (path: string) => path.replace(/^\/auraclaw-api/, ""),
-              },
+              ...(devApiTarget
+                ? {
+                    "/auraclaw-api": {
+                      target: devApiTarget,
+                      changeOrigin: true,
+                      rewrite: (path: string) => path.replace(/^\/auraclaw-api/, ""),
+                    },
+                  }
+                : {}),
+              ...(devMcpTarget
+                ? {
+                    "/auraclaw-mcp": {
+                      target: devMcpTarget,
+                      changeOrigin: true,
+                      rewrite: () => "/mcp",
+                    },
+                  }
+                : {}),
             },
           }
         : {}),

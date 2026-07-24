@@ -116,6 +116,20 @@ class SkillPackageRegistry:
         if existing is not None:
             if existing.package_digest != digest:
                 raise VersionConflictError("Skill version is immutable")
+            if existing.status == SkillPublicationStatus.REVOKED:
+                reactivated = existing.model_copy(
+                    update={"status": SkillPublicationStatus.ACTIVE}
+                )
+                self._publications[key] = reactivated
+                self._packages[key] = normalized
+                if self._resources is not None:
+                    for resource in _package_resources(
+                        tenant_id,
+                        normalized,
+                        digest,
+                    ):
+                        self._resources.register_resource(resource)
+                return reactivated
             return existing
         archive = _package_archive(normalized)
         artifact_ref = await self._artifacts.put(
@@ -388,7 +402,11 @@ def _validate_package(
     if "manifest.json" not in files or "SKILL.md" not in files:
         raise SchemaValidationError("Skill package requires manifest.json and SKILL.md")
     for path, content in files.items():
-        if path in {"manifest.json", "SKILL.md"} or path.endswith(".md"):
+        if (
+            path in {"manifest.json", "SKILL.md"}
+            or path.endswith(".md")
+            or path.endswith(".json")
+        ):
             try:
                 content.decode("utf-8")
             except UnicodeDecodeError as exc:
@@ -445,7 +463,7 @@ def _package_resources(
                 name=path,
                 mime_type=(
                     "application/json"
-                    if path == "manifest.json"
+                    if path.endswith(".json")
                     else "text/markdown"
                     if path.endswith(".md")
                     else "application/octet-stream"
@@ -464,14 +482,14 @@ def _package_resources(
                     uri=f"{prefix}/{aliases.get(path, path)}",
                     mime_type=(
                         "application/json"
-                        if path == "manifest.json"
+                        if path.endswith(".json")
                         else "text/markdown"
                         if path.endswith(".md")
                         else "application/octet-stream"
                     ),
                     **(
                         {"text": content.decode()}
-                        if path == "manifest.json" or path.endswith(".md")
+                        if path.endswith(".json") or path.endswith(".md")
                         else {"blob": base64.b64encode(content).decode()}
                     ),
                 ),
