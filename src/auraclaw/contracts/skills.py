@@ -113,6 +113,19 @@ class SkillBinding(ContractModel):
     resolved_tools: tuple[ResolvedSkillTool, ...] = ()
     resolved_resources: tuple[ResolvedSkillResource, ...] = ()
     policy_version: str
+    max_steps: int = Field(ge=1, le=1000)
+    timeout_seconds: int = Field(ge=1, le=86400)
+
+
+class SkillActivation(ContractModel):
+    skill_activation_id: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^ska_[A-Za-z0-9_-]+$",
+    )
+    activation_key: str = Field(min_length=1, max_length=128)
+    binding: SkillBinding
+    input_digest: str = Field(pattern=_DIGEST)
 
 
 def is_semver(value: str) -> bool:

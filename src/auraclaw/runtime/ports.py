@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import Any, Protocol
 
 from auraclaw.contracts.events import CanonicalEvent, NewEvent
+from auraclaw.contracts.skills import SkillBinding
 from auraclaw.control.ports import RuntimeAssignment, RuntimeCheckpoint
 
 
@@ -120,6 +121,19 @@ class CapabilityClient(ToolClient, Protocol):
     async def list_tools(
         self, assignment: RuntimeAssignment
     ) -> list[dict[str, Any]]: ...
+
+
+class SkillBindingResolver(Protocol):
+    async def resolve(
+        self,
+        *,
+        tenant_id: str,
+        name: str,
+        version: str = "*",
+        publisher: str | None = None,
+        role: str,
+        policy_version: str,
+    ) -> SkillBinding: ...
 
     async def list_resources(
         self, assignment: RuntimeAssignment
