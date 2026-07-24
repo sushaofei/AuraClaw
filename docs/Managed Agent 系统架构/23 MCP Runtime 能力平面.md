@@ -1,5 +1,9 @@
 # MCP Runtime 能力平面
 
+> 实施状态（2026-07-24）：M9 已按 Issue #21 拆分为设计、协议原语、Catalog、Resource、
+> Skill Package、Skill Runner、远端 Egress 和生产对账堆叠 PR。运行与回滚说明见
+> [M9 MCP Runtime 实施与运维](../M9%20MCP%20Runtime%20实施与运维.md)。
+
 ## 1. 目标
 
 本文定义 AuraClaw 如何通过 MCP 为 Agent Runtime 提供数据、工具和技能的发现、加载与调用能力。

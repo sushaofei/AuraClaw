@@ -43,6 +43,7 @@ class _Sender:
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
         self.redirect = False
+        self.sse = False
 
     async def send(self, **request: object) -> McpEgressResponse:
         self.calls.append(request)
@@ -52,6 +53,25 @@ class _Sender:
                 status_code=302,
                 headers={"location": "https://attacker.example/mcp"},
                 content=b"",
+            )
+        if url == "https://mcp.example/.well-known/oauth-protected-resource":
+            return McpEgressResponse(
+                status_code=200,
+                headers={"content-type": "application/json"},
+                content=(
+                    b'{"resource":"https://mcp.example/v1/mcp",'
+                    b'"authorization_servers":["https://auth.example"]}'
+                ),
+            )
+        if url == "https://auth.example/.well-known/oauth-authorization-server":
+            return McpEgressResponse(
+                status_code=200,
+                headers={"content-type": "application/json"},
+                content=(
+                    b'{"issuer":"https://auth.example",'
+                    b'"token_endpoint":"https://auth.example/oauth/token",'
+                    b'"grant_types_supported":["client_credentials"]}'
+                ),
             )
         if url == "https://auth.example/oauth/token":
             return McpEgressResponse(
@@ -64,6 +84,16 @@ class _Sender:
             )
         authorization = str(request["headers"])  # type: ignore[index]
         assert "Bearer remote-access-token" in authorization
+        if self.sse:
+            return McpEgressResponse(
+                status_code=200,
+                headers={"content-type": "text/event-stream"},
+                content=(
+                    b'data: {"jsonrpc":"2.0","method":'
+                    b'"notifications/tools/list_changed","params":{}}\n\n'
+                    b'data: {"jsonrpc":"2.0","id":1,"result":{"tools":[]}}\n\n'
+                ),
+            )
         return McpEgressResponse(
             status_code=200,
             headers={"content-type": "application/json"},
@@ -82,6 +112,13 @@ def _server() -> McpServerDefinition:
         endpoint="https://mcp.example/v1/mcp",
         credential_ref="vault/github-mcp#client_secret",
         oauth=McpOAuthConfiguration(
+            protected_resource_metadata_url=(
+                "https://mcp.example/.well-known/oauth-protected-resource"
+            ),
+            authorization_server_metadata_url=(
+                "https://auth.example/.well-known/oauth-authorization-server"
+            ),
+            issuer="https://auth.example",
             token_endpoint="https://auth.example/oauth/token",
             client_id="auraclaw-hands",
             resource="https://mcp.example/v1/mcp",
@@ -119,10 +156,23 @@ class _AllowPolicy:
 class _Credentials:
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
+        self.notifications = False
 
     async def invoke(self, **arguments: object) -> dict[str, object]:
         self.calls.append(arguments)
-        return {"jsonrpc": "2.0", "id": 7, "result": {"tools": []}}
+        response: dict[str, object] = {
+            "jsonrpc": "2.0",
+            "id": 7,
+            "result": {"tools": []},
+        }
+        if self.notifications:
+            response["_auraclaw_notifications"] = [
+                {
+                    "method": "notifications/tools/list_changed",
+                    "params": {},
+                }
+            ]
+        return response
 
     def redact(self, value: object) -> object:
         return value
@@ -179,12 +229,16 @@ def test_mcp_egress_uses_resource_indicator_pins_dns_and_hides_tokens() -> None:
         assert [call["approved_ip"] for call in sender.calls] == [
             "93.184.216.34",
             "93.184.216.34",
+            "93.184.216.34",
+            "93.184.216.34",
         ]
-        token_body = parse_qs(bytes(sender.calls[0]["content"]).decode())
+        token_body = parse_qs(bytes(sender.calls[2]["content"]).decode())
         assert token_body["resource"] == ["https://mcp.example/v1/mcp"]
         assert token_body["client_secret"] == ["oauth-client-secret"]
-        assert sender.calls[1]["url"] == "https://mcp.example/v1/mcp"
+        assert sender.calls[3]["url"] == "https://mcp.example/v1/mcp"
         assert resolver.calls == [
+            ("mcp.example", 443),
+            ("auth.example", 443),
             ("auth.example", 443),
             ("mcp.example", 443),
         ]
@@ -205,6 +259,12 @@ def test_mcp_egress_uses_resource_indicator_pins_dns_and_hides_tokens() -> None:
                 if call["url"] == "https://auth.example/oauth/token"
             ]
         ) == 1
+        sender.sse = True
+        streamed = await adapter(_request(), "oauth-client-secret")
+        assert streamed["result"] == {"tools": []}
+        assert streamed["_auraclaw_notifications"][0]["method"] == (
+            "notifications/tools/list_changed"
+        )
         with pytest.raises(CredentialAccessError):
             await proxy.invoke(
                 tenant_id="tenant-b",
@@ -309,6 +369,19 @@ def test_hands_remote_transport_passes_only_reference_and_policy_evidence() -> N
             credentials=credentials,
             policy=_AllowPolicy(),
         )
+        notifications: list[tuple[str, str]] = []
+
+        async def handle(
+            server_id: str,
+            method: str,
+            params: dict[str, object],
+        ) -> bool:
+            del params
+            notifications.append((server_id, method))
+            return True
+
+        transport.set_notification_handler(handle)
+        credentials.notifications = True
         response = await transport.send(
             McpJsonRpcRequest(id=7, method="tools/list"),
             trusted_context=_trusted(),
@@ -319,6 +392,9 @@ def test_hands_remote_transport_passes_only_reference_and_policy_evidence() -> N
         assert call["policy_decision_id"] == "policy-remote-1"
         assert call["tool_name"] == "mcp:github-mcp"
         assert "oauth-client-secret" not in repr(call)
+        assert notifications == [
+            ("github-mcp", "notifications/tools/list_changed")
+        ]
 
         with pytest.raises(PolicyDeniedError, match="tenant scope"):
             await transport.send(

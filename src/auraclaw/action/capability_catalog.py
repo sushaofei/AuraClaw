@@ -183,6 +183,20 @@ class RoutedHandsExecutor:
         executor = self._routes.get(invocation.tool_name, self._default)
         return await executor.execute(invocation, capability)
 
+    def replace_owner_routes(
+        self,
+        owner: str,
+        routes: Mapping[str, HandsExecutor],
+    ) -> None:
+        prefix = f"{owner}:"
+        if not routes:
+            self._routes = {
+                name: executor
+                for name, executor in self._routes.items()
+                if not getattr(executor, "route_owner", "").startswith(prefix)
+            }
+        self._routes.update(routes)
+
 
 def capability_search_tool() -> ToolCapability:
     return ToolCapability(

@@ -111,6 +111,14 @@ class SkillRunner:
             publisher=publisher,
             role=assignment.role,
             policy_version=self._policy_version,
+            subject=assignment.runtime_id,
+            correlation_id=assignment.run_id,
+            active_skill_names=tuple(
+                str(event.payload.get("skill_name"))
+                for event in events
+                if event.type == "skill.activated"
+                and event.run_id == assignment.run_id
+            ),
         )
         activation = SkillActivation(
             skill_activation_id=_activation_id(assignment, activation_key),
@@ -287,6 +295,7 @@ class SkillRunner:
             "skill_version": activation.binding.skill_version,
             "package_digest": activation.binding.package_digest,
             "policy_version": activation.binding.policy_version,
+            "policy_decision_id": activation.binding.policy_decision_id,
             **payload,
         }
         await self._session.append(
