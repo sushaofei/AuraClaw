@@ -7,6 +7,7 @@ import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import PurePosixPath
 from typing import Protocol
 
@@ -20,6 +21,7 @@ from auraclaw.contracts.capabilities import (
     CapabilityDescriptor,
     CapabilityKind,
     CapabilityStatus,
+    CapabilityTrustLevel,
 )
 from auraclaw.contracts.errors import (
     NotFoundError,
@@ -210,6 +212,34 @@ class SkillPackageRegistry:
             )
         )
 
+    def capability_descriptors(
+        self, tenant_id: str
+    ) -> tuple[CapabilityDescriptor, ...]:
+        return tuple(
+            _skill_descriptor(publication)
+            for publication in sorted(
+                self._publications.values(),
+                key=lambda item: (
+                    item.manifest.name,
+                    _semver(item.manifest.version),
+                ),
+            )
+            if publication.tenant_id == tenant_id
+            and publication.status == SkillPublicationStatus.ACTIVE
+        )
+
+    def get_capability(
+        self, tenant_id: str, capability_id: str
+    ) -> CapabilityDescriptor | None:
+        return next(
+            (
+                descriptor
+                for descriptor in self.capability_descriptors(tenant_id)
+                if descriptor.capability_id == capability_id
+            ),
+            None,
+        )
+
     def load_part(
         self,
         tenant_id: str,
@@ -356,6 +386,8 @@ def skill_package_digest(package: SkillPackage) -> str:
 def version_satisfies(version: str, constraint: str) -> bool:
     if constraint.strip() in {"", "*"}:
         return True
+    if constraint.strip() == version:
+        return True
     current = _semver(version)
     for raw_clause in constraint.split(","):
         clause = raw_clause.strip()
@@ -445,6 +477,46 @@ def _package_archive(package: SkillPackage) -> bytes:
 
 def _package_key(tenant_id: str, manifest: SkillManifest) -> tuple[str, str, str, str]:
     return tenant_id, manifest.publisher, manifest.name, manifest.version
+
+
+def _skill_descriptor(publication: PublishedSkill) -> CapabilityDescriptor:
+    manifest = publication.manifest
+    identity = (
+        f"{publication.tenant_id}:{manifest.publisher}:"
+        f"{manifest.name}:{manifest.version}"
+    )
+    return CapabilityDescriptor(
+        capability_id=f"cap_{hashlib.sha256(identity.encode()).hexdigest()[:32]}",
+        kind=CapabilityKind.SKILL,
+        server_id="auraclaw-skill-registry",
+        canonical_name=manifest.name,
+        version=manifest.version,
+        content_digest=publication.package_digest,
+        title=manifest.name,
+        description=manifest.description,
+        tags=tuple(manifest.applies_when),
+        tenant_id=publication.tenant_id,
+        trust_level=CapabilityTrustLevel.TENANT_VERIFIED,
+        classification=manifest.data_classification,
+        permission="read-only",
+        risk_level=manifest.risk_level,
+        status=CapabilityStatus.ACTIVE,
+        source_revision=publication.package_digest,
+        updated_at=datetime.now(UTC),
+        metadata={
+            "model_contract": {
+                "publisher": manifest.publisher,
+                "name": manifest.name,
+                "version": manifest.version,
+                "applies_when": list(manifest.applies_when),
+                "not_when": list(manifest.not_when),
+                "input_schema": manifest.input_schema,
+                "allowed_roles": list(manifest.allowed_roles),
+                "max_steps": manifest.max_steps,
+                "timeout_seconds": manifest.timeout_seconds,
+            }
+        },
+    )
 
 
 def _package_resources(
