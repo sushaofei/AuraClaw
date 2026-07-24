@@ -1,0 +1,113 @@
+name: close-linked-issues
+
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
+
+jobs:
+  close-linked-issues:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Close issues referenced by closing keywords
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const sources = [pr.title || "", pr.body || ""];
+
+            const { data: commits } = await github.rest.pulls.listCommits({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pr.number,
+              per_page: 100,
+            });
+            for (const item of commits) {
+              sources.push(item.commit?.message || "");
+            }
+
+            const text = sources.join("\n");
+            // GitHub closing keywords, including non-default base branches.
+            const pattern =
+              /(?:^|[^\w/])(?:close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved)\s*:?\s*(?:(?:[\w.-]+\/[\w.-]+)?#(\d+)|https?:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/issues\/(\d+))/gi;
+
+            const seen = new Set();
+            const targets = [];
+            let match;
+            while ((match = pattern.exec(text)) !== null) {
+              const sameRepoNumber = match[1];
+              const crossOwner = match[2];
+              const crossRepo = match[3];
+              const crossNumber = match[4];
+              if (sameRepoNumber) {
+                const number = Number(sameRepoNumber);
+                const key = `${context.repo.owner}/${context.repo.repo}#${number}`;
+                if (!seen.has(key)) {
+                  seen.add(key);
+                  targets.push({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    number,
+                  });
+                }
+              } else if (crossOwner && crossRepo && crossNumber) {
+                const number = Number(crossNumber);
+                const key = `${crossOwner}/${crossRepo}#${number}`;
+                if (!seen.has(key)) {
+                  seen.add(key);
+                  targets.push({ owner: crossOwner, repo: crossRepo, number });
+                }
+              }
+            }
+
+            if (targets.length === 0) {
+              core.info(`No closing-keyword issue references found in PR #${pr.number}`);
+              return;
+            }
+
+            const comment =
+              `Closed automatically because PR #${pr.number} merged into \`${pr.base.ref}\`.\n\n` +
+              `GitHub only auto-closes via \`Closes\`/\`Fixes\`/\`Resolves\` when merging into the default branch; ` +
+              `this workflow mirrors that behavior for \`${pr.base.ref}\`.`;
+
+            for (const target of targets) {
+              if (
+                target.owner !== context.repo.owner ||
+                target.repo !== context.repo.repo
+              ) {
+                core.info(`Skipping cross-repo issue ${target.owner}/${target.repo}#${target.number}`);
+                continue;
+              }
+              const { data: issue } = await github.rest.issues.get({
+                owner: target.owner,
+                repo: target.repo,
+                issue_number: target.number,
+              });
+              if (issue.pull_request) {
+                core.info(`Skipping #${target.number} because it is a pull request`);
+                continue;
+              }
+              if (issue.state === "closed") {
+                core.info(`Issue #${target.number} is already closed`);
+                continue;
+              }
+              await github.rest.issues.createComment({
+                owner: target.owner,
+                repo: target.repo,
+                issue_number: target.number,
+                body: comment,
+              });
+              await github.rest.issues.update({
+                owner: target.owner,
+                repo: target.repo,
+                issue_number: target.number,
+                state: "closed",
+                state_reason: "completed",
+              });
+              core.info(`Closed issue #${target.number}`);
+            }
