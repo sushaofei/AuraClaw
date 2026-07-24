@@ -148,6 +148,29 @@ def test_event_store_load_supports_type_filter_and_limit() -> None:
     asyncio.run(scenario())
 
 
+def test_postgres_event_store_filters_on_event_type_column() -> None:
+    async def scenario() -> None:
+        from auraclaw.infrastructure.persistence.postgres_event_store import (
+            PostgresEventStore,
+        )
+
+        store = PostgresEventStore("postgresql://unused")
+        pool = AsyncMock()
+        pool.fetch = AsyncMock(return_value=[])
+        store.pool = AsyncMock(return_value=pool)  # type: ignore[method-assign]
+        await store.load(
+            "tenant-1",
+            "ses_1",
+            event_types=("session.created", "model.output.completed"),
+            limit=10,
+        )
+        query, *_params = pool.fetch.await_args.args
+        assert "event_type = ANY" in query
+        assert "type = ANY" not in query.replace("event_type = ANY", "")
+
+    asyncio.run(scenario())
+
+
 def test_session_feed_pushes_limit_to_store() -> None:
     async def scenario() -> None:
         store = InMemoryEventStore()
