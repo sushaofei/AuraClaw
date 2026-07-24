@@ -36,7 +36,7 @@ def test_s4_migrations_up_down_roundtrip_in_isolated_postgres() -> None:
                     raise
                 await asyncio.sleep(0.1)
         try:
-            for number in range(1, 15):
+            for number in range(1, 16):
                 matches = sorted(MIGRATIONS.glob(f"{number:04d}_*.sql"))
                 migration = next(
                     item for item in matches if not item.name.endswith(".down.sql")
@@ -51,6 +51,9 @@ def test_s4_migrations_up_down_roundtrip_in_isolated_postgres() -> None:
             )
             assert await connection.fetchval(
                 "SELECT to_regclass('policy.active_bundle') IS NOT NULL"
+            )
+            assert await connection.fetchval(
+                "SELECT to_regclass('hands.capability_catalog') IS NOT NULL"
             )
             assert await connection.fetchval(
                 """SELECT count(*)=2 FROM information_schema.columns
@@ -68,7 +71,7 @@ def test_s4_migrations_up_down_roundtrip_in_isolated_postgres() -> None:
                     'finalize_claim_expires_at')"""
             )
 
-            for number in range(14, 9, -1):
+            for number in range(15, 9, -1):
                 down = next(MIGRATIONS.glob(f"{number:04d}_*.down.sql"))
                 await connection.execute(down.read_text())
 
@@ -80,6 +83,9 @@ def test_s4_migrations_up_down_roundtrip_in_isolated_postgres() -> None:
             )
             assert not await connection.fetchval(
                 "SELECT to_regclass('policy.active_bundle') IS NOT NULL"
+            )
+            assert not await connection.fetchval(
+                "SELECT to_regclass('hands.capability_catalog') IS NOT NULL"
             )
             assert not await connection.fetchval(
                 """SELECT EXISTS(SELECT 1 FROM information_schema.columns
