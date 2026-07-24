@@ -147,6 +147,25 @@ class CapabilityClient(ToolClient, Protocol):
         arguments: dict[str, str] | None = None,
     ) -> dict[str, Any]: ...
 
+    async def load_skill_manifest(
+        self,
+        assignment: RuntimeAssignment,
+        *,
+        publisher: str,
+        name: str,
+        version: str,
+    ) -> dict[str, Any]: ...
+
+    async def load_skill_part(
+        self,
+        assignment: RuntimeAssignment,
+        *,
+        publisher: str,
+        name: str,
+        version: str,
+        path: str,
+    ) -> list[dict[str, Any]]: ...
+
 
 class RuntimeEventPublisher(Protocol):
     async def publish(self, event: RuntimeEvent) -> None: ...
