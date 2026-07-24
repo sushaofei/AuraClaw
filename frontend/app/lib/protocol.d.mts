@@ -42,6 +42,20 @@ export function finalizeChatRuns<T extends { role: string; streaming?: boolean; 
   messages: T[],
   runIds?: Iterable<string>,
 ): T[];
+export function reconcileAssistantWithResult<T extends {
+  id?: string;
+  role: string;
+  content: string;
+  streaming?: boolean;
+  runId?: string;
+}>(
+  messages: T[],
+  input: {
+    runId?: string;
+    resultSummary?: string;
+    createId?: (operation?: string) => string;
+  },
+): T[];
 export function appendUniqueEvent<T extends { id?: string }>(entries: T[], entry: T, limit?: number): T[];
 export function resultText(result: Record<string, unknown> | null): string;
 export function retryAfterMs(value: string | null | undefined, fallback?: number): number;

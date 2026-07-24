@@ -19,6 +19,7 @@ import {
   retryAfterMs,
   runtimeDelta,
   runtimeEventRunId,
+  reconcileAssistantWithResult,
   safeCurl,
   transcriptFromTimeline,
   truncateTitle,
@@ -101,6 +102,47 @@ test("merges streaming deltas by run_id and drops late tails after finalize", ()
   );
 });
 
+test("reconciles truncated streaming bubbles with authoritative Result text", () => {
+  const truncated = [
+    { id: "u1", role: "user", content: "你好呀" },
+    {
+      id: "a1",
+      role: "assistant",
+      content: "你好呀！很高兴见到你。无论是",
+      streaming: true,
+      runId: "run-1",
+    },
+  ];
+  const reconciled = reconcileAssistantWithResult(truncated, {
+    runId: "run-1",
+    resultSummary: "你好呀！很高兴见到你。无论是需要信息还是日常交流，我都很乐意与你对话。",
+  });
+  assert.deepEqual(
+    reconciled.map((item) => [item.role, item.content, item.streaming, item.runId]),
+    [
+      ["user", "你好呀", undefined, undefined],
+      [
+        "assistant",
+        "你好呀！很高兴见到你。无论是需要信息还是日常交流，我都很乐意与你对话。",
+        false,
+        "run-1",
+      ],
+    ],
+  );
+
+  const created = reconcileAssistantWithResult([{ id: "u1", role: "user", content: "hi" }], {
+    runId: "run-2",
+    resultSummary: "完整答案",
+    createId: () => "a-new",
+  });
+  assert.deepEqual(
+    created.map((item) => [item.id, item.role, item.content, item.streaming]),
+    [
+      ["u1", "user", "hi", undefined],
+      ["a-new", "assistant", "完整答案", false],
+    ],
+  );
+});
 test("normalizes result text and Retry-After delays", () => {
   assert.equal(resultText({ result_summary: "最终答案" }), "最终答案");
   assert.equal(resultText({ output: "fallback" }), "fallback");

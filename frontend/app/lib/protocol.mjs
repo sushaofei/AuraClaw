@@ -127,6 +127,44 @@ export function finalizeChatRuns(messages, runIds) {
   });
 }
 
+/**
+ * Align the assistant bubble with authoritative Result text after a run completes.
+ * Runtime Event streams are not a delivery guarantee; Result is.
+ */
+export function reconcileAssistantWithResult(messages, { runId, resultSummary, createId }) {
+  const text = String(resultSummary ?? "").trim();
+  const run = String(runId ?? "").trim();
+  const current = [...finalizeChatRuns(messages, run ? [run] : undefined)];
+  if (!text) return current;
+
+  let index = run
+    ? current.findLastIndex((item) => item?.role === "assistant" && item.runId === run)
+    : -1;
+  if (index < 0) {
+    index = current.findLastIndex((item) => item?.role === "assistant");
+  }
+  if (index < 0) {
+    return [
+      ...current,
+      {
+        id: typeof createId === "function" ? createId("assistant") : `assistant-${Date.now()}`,
+        role: "assistant",
+        content: text,
+        streaming: false,
+        ...(run ? { runId: run } : {}),
+      },
+    ];
+  }
+  const matched = current[index];
+  current[index] = {
+    ...matched,
+    content: text,
+    streaming: false,
+    runId: matched.runId || run || undefined,
+  };
+  return current;
+}
+
 export function appendUniqueEvent(entries, entry, limit = 500) {
   if (entry.id && entries.some((item) => item.id === entry.id)) return entries;
   return [...entries, entry].slice(-limit);
