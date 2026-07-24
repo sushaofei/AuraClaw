@@ -3,6 +3,9 @@
 > 实施状态（2026-07-24）：M9 已按 Issue #21 拆分为设计、协议原语、Catalog、Resource、
 > Skill Package、Skill Runner、远端 Egress 和生产对账堆叠 PR。运行与回滚说明见
 > [M9 MCP Runtime 实施与运维](../M9%20MCP%20Runtime%20实施与运维.md)。
+>
+> Capability Plane 与普通任务决策循环的接入由
+> [GitHub Issue #31](https://github.com/sushaofei/AuraClaw/issues/31) 跟踪。
 
 ## 1. 目标
 
@@ -351,6 +354,50 @@ Runtime 搜索 Skill 摘要
 
 Skill Runner 不创建独立事实源。步骤进度可以发 Runtime Event；需要恢复的步骤游标进入 Checkpoint，
 技能激活、终态、重要决策和结果进入 Canonical Event。
+
+### 4.6 Capability-Aware Agent Loop
+
+普通任务不预加载全量目录。Runtime 每轮只向模型暴露四个稳定控制能力和已经显式加载的业务
+Tool：
+
+```text
+auraclaw.capabilities.search
+auraclaw.capabilities.load
+auraclaw.skills.activate
+auraclaw.resources.read
+```
+
+`search` 和 `load` 通过 Action Hands 执行。后两者是 Runtime control tools：模型只能提出请求，
+Runtime 使用可信 Assignment、固定 binding 和 Capability Client 完成激活或读取，不能由模型提供
+tenant、Role、Policy、Credential、Server URL 或任意 URI。
+
+任务循环为：
+
+```text
+Model turn
+ -> 无 capability request：写最终 model.output.completed
+ -> search：返回 bounded summary
+ -> load：按 capability_id 返回权威 Tool Schema / Skill / Resource 契约
+ -> Tool：Schema 进入下一轮 ModelRequest.tools 后才允许调用
+ -> Skill：Resolver 固定依赖，Runtime 写 skill.activated 后注入签名说明
+ -> Resource：只读取已加载 URI/template，经 Context Policy 后进入下一轮
+ -> Tool/control result 写入 Transcript
+ -> next Model turn
+```
+
+中间轮次使用内部 `model.turn.completed` Canonical Event，包含可恢复的 assistant Tool Call；
+`tool.call.completed` 按 `tool_invocation_id` 配对为下一轮 Tool Message。只有没有待执行调用的终止
+轮次写用户可见的 `model.output.completed`，中间 delta 不向用户流式发布。
+
+Run Checkpoint 保存 `turn_index`、phase、累计预算、候选/已加载 binding、活动 Skill、
+pending call index 和 Runtime Event sequence。Model、Tool 或控制调用完成后先保存 Checkpoint，
+再写对应 Canonical Event；恢复时复用原 `model_call_id`、`tool_invocation_id` 和
+`idempotency_key`。相同调用连续重复超过上限、搜索/加载预算或 Run step/token/cost/deadline
+预算耗尽时停止。
+
+Resource 内容始终是不可信数据。即使 Gateway 已完成 ACL、Policy、DLP 和扫描，Runtime Context
+Policy 仍会截断大文本，并对带 `prompt_injection` finding 的正文执行 withheld；证据事件只保存
+capability id、URI、digest、revision、classification、Policy decision 和 Artifact Ref。
 
 ## 5. 契约和状态归属
 

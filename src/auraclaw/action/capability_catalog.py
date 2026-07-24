@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any, Protocol
 
 from auraclaw.action.ports import CapabilityCatalogStore, HandsExecutor
 from auraclaw.contracts.capabilities import (
@@ -11,6 +12,7 @@ from auraclaw.contracts.capabilities import (
     CapabilityStatus,
     McpServerDefinition,
 )
+from auraclaw.contracts.skills import SkillBinding
 from auraclaw.contracts.tools import (
     RiskLevel,
     ToolCapability,
@@ -19,7 +21,35 @@ from auraclaw.contracts.tools import (
 )
 
 CAPABILITY_SEARCH_TOOL_NAME = "auraclaw.capabilities.search"
+CAPABILITY_LOAD_TOOL_NAME = "auraclaw.capabilities.load"
+SKILL_RESOLVE_TOOL_NAME = "auraclaw.skills.resolve"
 _TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_.-]+")
+
+
+class SkillCatalogSource(Protocol):
+    def capability_descriptors(
+        self, tenant_id: str
+    ) -> tuple[CapabilityDescriptor, ...]: ...
+
+    def get_capability(
+        self, tenant_id: str, capability_id: str
+    ) -> CapabilityDescriptor | None: ...
+
+
+class SkillResolverPort(Protocol):
+    async def resolve(
+        self,
+        *,
+        tenant_id: str,
+        name: str,
+        version: str = "*",
+        publisher: str | None = None,
+        role: str,
+        policy_version: str,
+        subject: str = "agent-runtime",
+        correlation_id: str = "skill.resolve",
+        active_skill_names: tuple[str, ...] = (),
+    ) -> SkillBinding: ...
 
 
 class InMemoryCapabilityCatalogStore:
@@ -71,6 +101,22 @@ class InMemoryCapabilityCatalogStore:
             )
             if capability.tenant_id is None or capability.tenant_id == tenant_id
         )
+
+    async def get_capability(
+        self, tenant_id: str, capability_id: str
+    ) -> CapabilityDescriptor | None:
+        capability = self._capabilities.get(capability_id)
+        if capability is None:
+            return None
+        server = self._servers.get(capability.server_id)
+        if (
+            server is None
+            or not server.enabled
+            or server.status not in {CapabilityStatus.ACTIVE, CapabilityStatus.DEGRADED}
+            or capability.tenant_id not in {None, tenant_id}
+        ):
+            return None
+        return capability
 
 
 class CapabilityCatalog:
@@ -136,10 +182,22 @@ class CapabilityCatalog:
         )
         return tuple(capability for _score_value, capability in ranked[:limit])
 
+    async def get(
+        self, *, tenant_id: str, capability_id: str
+    ) -> CapabilityDescriptor | None:
+        capability = await self._store.get_capability(tenant_id, capability_id)
+        if capability is None or capability.status not in {
+            CapabilityStatus.ACTIVE,
+            CapabilityStatus.DEGRADED,
+        }:
+            return None
+        return capability
+
 
 @dataclass(frozen=True)
 class CapabilitySearchExecutor:
     catalog: CapabilityCatalog
+    skills: SkillCatalogSource | None = None
 
     async def execute(
         self,
@@ -152,18 +210,103 @@ class CapabilitySearchExecutor:
         permissions = tuple(
             str(value) for value in arguments.get("required_permissions", ())
         )
-        results = await self.catalog.search(
-            tenant_id=invocation.tenant_id,
-            query=str(arguments.get("query", "")),
-            kinds=kinds,
-            required_permissions=permissions,
-            limit=int(arguments.get("limit", 10)),
+        query = str(arguments.get("query", ""))
+        results = list(
+            await self.catalog.search(
+                tenant_id=invocation.tenant_id,
+                query=query,
+                kinds=kinds,
+                required_permissions=permissions,
+                limit=50,
+            )
         )
+        if self.skills is not None and (
+            not kinds or CapabilityKind.SKILL in kinds
+        ):
+            query_tokens = _tokens(query)
+            for descriptor in self.skills.capability_descriptors(
+                invocation.tenant_id
+            ):
+                if permissions and descriptor.permission not in permissions:
+                    continue
+                if query_tokens and _score(descriptor, query_tokens) == 0:
+                    continue
+                results.append(descriptor)
+        query_tokens = _tokens(query)
+        results.sort(
+            key=lambda item: (
+                -_score(item, query_tokens),
+                item.status == CapabilityStatus.DEGRADED,
+                item.canonical_name,
+                item.version,
+            )
+        )
+        limit = int(arguments.get("limit", 10))
         return {
             "capabilities": [
-                descriptor.as_search_result() for descriptor in results
+                descriptor.as_search_result() for descriptor in results[:limit]
             ]
         }
+
+
+@dataclass(frozen=True)
+class CapabilityLoadExecutor:
+    catalog: CapabilityCatalog
+    skills: SkillCatalogSource | None = None
+
+    async def execute(
+        self,
+        invocation: ToolInvocation,
+        capability: ToolCapability,
+    ) -> dict[str, object]:
+        del capability
+        loaded: list[dict[str, Any]] = []
+        raw_ids = tuple(invocation.arguments.get("capability_ids", ()))
+        if len(raw_ids) > 8:
+            raise ValueError("Capability load limit is 8")
+        for raw_id in raw_ids:
+            capability_id = str(raw_id)
+            descriptor = await self.catalog.get(
+                tenant_id=invocation.tenant_id,
+                capability_id=capability_id,
+            )
+            if descriptor is None and self.skills is not None:
+                descriptor = self.skills.get_capability(
+                    invocation.tenant_id, capability_id
+                )
+            if descriptor is not None:
+                loaded.append(_load_result(descriptor))
+        return {"capabilities": loaded}
+
+
+@dataclass(frozen=True)
+class SkillResolveExecutor:
+    resolver: SkillResolverPort
+
+    async def execute(
+        self,
+        invocation: ToolInvocation,
+        capability: ToolCapability,
+    ) -> dict[str, object]:
+        del capability
+        arguments = invocation.arguments
+        binding = await self.resolver.resolve(
+            tenant_id=invocation.tenant_id,
+            name=str(arguments["name"]),
+            version=str(arguments.get("version", "*")),
+            publisher=_optional(arguments.get("publisher")),
+            role=str(arguments["role"]),
+            policy_version=str(arguments.get("policy_version", "runtime")),
+            subject=invocation.actor_id,
+            correlation_id=invocation.run_id,
+            active_skill_names=tuple(
+                str(value) for value in arguments.get("active_skill_names", ())
+            ),
+        )
+        dump = getattr(binding, "model_dump", None)
+        if not callable(dump):
+            raise TypeError("Skill resolver returned an invalid binding")
+        return {"binding": dump(mode="json")}
 
 
 class RoutedHandsExecutor:
@@ -241,6 +384,97 @@ def capability_search_tool() -> ToolCapability:
         runtime_location="hands",
         owner="platform",
     )
+
+
+def capability_load_tool() -> ToolCapability:
+    return ToolCapability(
+        name=CAPABILITY_LOAD_TOOL_NAME,
+        version="1",
+        description=(
+            "Load authoritative contracts for a bounded set of capability ids "
+            "returned by capability search."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "capability_ids": {
+                    "type": "array",
+                    "items": {"type": "string", "maxLength": 256},
+                    "maxItems": 8,
+                }
+            },
+            "required": ["capability_ids"],
+            "additionalProperties": False,
+        },
+        output_schema={"type": "object"},
+        permission=ToolPermission.READ_ONLY,
+        risk_level=RiskLevel.LOW,
+        runtime_location="hands",
+        owner="platform",
+    )
+
+
+def skill_resolve_tool() -> ToolCapability:
+    return ToolCapability(
+        name=SKILL_RESOLVE_TOOL_NAME,
+        version="1",
+        description="Resolve an exact Skill binding for the trusted Agent Runtime.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "minLength": 1, "maxLength": 256},
+                "version": {"type": "string", "maxLength": 128},
+                "publisher": {"type": "string", "maxLength": 128},
+                "role": {"type": "string", "minLength": 1, "maxLength": 64},
+                "policy_version": {"type": "string", "maxLength": 128},
+                "active_skill_names": {
+                    "type": "array",
+                    "items": {"type": "string", "maxLength": 256},
+                },
+            },
+            "required": ["name", "role"],
+            "additionalProperties": False,
+        },
+        output_schema={"type": "object"},
+        permission=ToolPermission.READ_ONLY,
+        risk_level=RiskLevel.LOW,
+        runtime_location="hands",
+        owner="platform-internal",
+    )
+
+
+def _load_result(descriptor: CapabilityDescriptor) -> dict[str, Any]:
+    result = descriptor.as_search_result()
+    raw_source = descriptor.metadata.get("source", {})
+    source = dict(raw_source) if isinstance(raw_source, dict) else {}
+    if descriptor.kind == CapabilityKind.TOOL:
+        result["model_tool"] = {
+            "type": "function",
+            "function": {
+                "name": descriptor.canonical_name,
+                "description": descriptor.description,
+                "parameters": source.get("inputSchema", {"type": "object"}),
+            },
+        }
+    elif descriptor.kind == CapabilityKind.RESOURCE:
+        result["resource"] = {"uri": source.get("uri")}
+    elif descriptor.kind == CapabilityKind.RESOURCE_TEMPLATE:
+        result["resource"] = {
+            "uri_template": (
+                descriptor.metadata.get("uri_template")
+                or source.get("uriTemplate")
+            )
+        }
+    elif descriptor.kind == CapabilityKind.SKILL:
+        raw_contract = descriptor.metadata.get("model_contract", {})
+        result["skill"] = (
+            dict(raw_contract) if isinstance(raw_contract, dict) else {}
+        )
+    return result
+
+
+def _optional(value: object) -> str | None:
+    return None if value is None else str(value)
 
 
 def _tokens(value: str) -> tuple[str, ...]:
