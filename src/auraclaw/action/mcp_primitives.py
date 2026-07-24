@@ -56,6 +56,9 @@ class McpResourceRegistry:
             raise ValueError("Resource content URI must match the descriptor URI")
         self._resources[uri] = resource
 
+    def unregister_resource(self, uri: str) -> bool:
+        return self._resources.pop(uri, None) is not None
+
     def register_template(self, template: RegisteredResourceTemplate) -> None:
         uri_template = template.descriptor.uri_template
         if uri_template in self._templates:
