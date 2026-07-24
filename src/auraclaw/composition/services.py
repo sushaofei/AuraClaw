@@ -302,7 +302,7 @@ def _task_api_app(settings: Settings) -> FastAPI:
         approval_notifier=policy,
     )
     gateway = TaskCommandGateway(task_service)
-    query = TaskQueryService(task_projection, collaboration_projection)
+    query = TaskQueryService(task_projection, collaboration_projection, remote_session)
     observability = ObservabilityService(InMemoryObservabilityStore(), remote_session)
     app.dependency_overrides[get_task_command_gateway] = lambda: gateway
     app.dependency_overrides[get_task_projection] = lambda: task_projection

@@ -80,7 +80,13 @@ class RemoteSessionEventStore:
         raise RuntimeError(f"remote Session adapter does not permit {operation}")
 
     async def load(
-        self, tenant_id: str, session_id: str, *, from_version: int = 1
+        self,
+        tenant_id: str,
+        session_id: str,
+        *,
+        from_version: int = 1,
+        event_types: Sequence[str] | None = None,
+        limit: int | None = None,
     ) -> list[CanonicalEvent]:
         context = InternalRequestContext(
             tenant_id=tenant_id,
@@ -91,6 +97,9 @@ class RemoteSessionEventStore:
         )
         events: list[CanonicalEvent] = []
         cursor: int | None = from_version
+        remaining = limit
+        page_limit = 1000 if remaining is None else min(1000, remaining)
+        types = tuple(event_types) if event_types is not None else None
         while cursor is not None:
             response = await self._contract.call(
                 "/internal/v1/session/feed",
@@ -98,11 +107,18 @@ class RemoteSessionEventStore:
                     context=context,
                     session_id=session_id,
                     from_version=cursor,
-                    limit=1000,
+                    limit=page_limit,
+                    event_types=types,
                 ),
                 SessionFeedResponse,
             )
-            events.extend(canonical_event_from_dict(dict(event)) for event in response.events)
+            batch = [canonical_event_from_dict(dict(event)) for event in response.events]
+            events.extend(batch)
+            if remaining is not None:
+                remaining -= len(batch)
+                if remaining <= 0:
+                    return events[:limit]
+                page_limit = min(1000, remaining)
             cursor = response.next_version
         return events
 

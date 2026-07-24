@@ -37,7 +37,13 @@ class ClaimedOutboxRecord:
 
 class EventStore(Protocol):
     async def load(
-        self, tenant_id: str, session_id: str, *, from_version: int = 1
+        self,
+        tenant_id: str,
+        session_id: str,
+        *,
+        from_version: int = 1,
+        event_types: Sequence[str] | None = None,
+        limit: int | None = None,
     ) -> list[CanonicalEvent]: ...
 
     async def load_all(self, tenant_id: str | None = None) -> list[CanonicalEvent]: ...

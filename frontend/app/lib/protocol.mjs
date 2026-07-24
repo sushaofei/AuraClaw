@@ -365,10 +365,53 @@ export function transcriptFromTimeline(timelineEntries) {
   return messages;
 }
 
-export function buildRestoredTranscript({ goal, resultSummary, sessionId, timelineEntries }) {
-  const fromTimeline = transcriptFromTimeline(timelineEntries);
-  const messages = fromTimeline.length
-    ? [...fromTimeline]
+export function transcriptFromApiMessages(apiMessages) {
+  const messages = [];
+  for (const item of apiMessages || []) {
+    const role = String(item?.role ?? "");
+    const content = String(item?.content ?? "").trim();
+    if (!content || (role !== "user" && role !== "assistant")) continue;
+    const runId = typeof item?.run_id === "string" && item.run_id.trim()
+      ? item.run_id.trim()
+      : (typeof item?.runId === "string" && item.runId.trim() ? item.runId.trim() : "");
+    messages.push({ role, content, ...(runId ? { runId } : {}) });
+  }
+  return messages;
+}
+
+export function approvalFromTranscript(pending) {
+  if (!pending || typeof pending !== "object") return null;
+  const approvalId = typeof pending.approval_id === "string"
+    ? pending.approval_id.trim()
+    : (typeof pending.approvalId === "string" ? pending.approvalId.trim() : "");
+  if (!approvalId) return null;
+  return {
+    approvalId,
+    toolName: typeof pending.tool_name === "string"
+      ? pending.tool_name
+      : (typeof pending.toolName === "string" ? pending.toolName : ""),
+    reason: typeof pending.reason === "string" ? pending.reason : "",
+    risk: typeof pending.risk === "string" ? pending.risk : "",
+    redactedArguments: pending.redacted_arguments ?? pending.redactedArguments ?? null,
+    expectedEffect: typeof pending.expected_effect === "string"
+      ? pending.expected_effect
+      : (typeof pending.expectedEffect === "string" ? pending.expectedEffect : ""),
+    status: typeof pending.status === "string" ? pending.status : "waiting",
+  };
+}
+
+export function buildRestoredTranscript({
+  goal,
+  resultSummary,
+  sessionId,
+  timelineEntries,
+  transcriptMessages,
+}) {
+  const fromApi = transcriptFromApiMessages(transcriptMessages);
+  const fromTimeline = fromApi.length ? [] : transcriptFromTimeline(timelineEntries);
+  const source = fromApi.length ? fromApi : fromTimeline;
+  const messages = source.length
+    ? [...source]
     : (() => {
         const fallback = [];
         const goalText = String(goal || "").trim();
@@ -380,9 +423,9 @@ export function buildRestoredTranscript({ goal, resultSummary, sessionId, timeli
   const sid = String(sessionId || "").trim();
   messages.push({
     role: "system",
-    content: fromTimeline.length
+    content: source.length
       ? `已恢复 Session ${sid}。对话按 Canonical Event 时间序重建；进行中的 Runtime Event 将继续流式追加。`.trim()
-      : `已恢复 Session ${sid}。Timeline 未提供完整对话，已回退到 Goal / Result；可重放的 Runtime Event 将重新显示。`.trim(),
+      : `已恢复 Session ${sid}。Transcript 未提供完整对话，已回退到 Goal / Result；可重放的 Runtime Event 将重新显示。`.trim(),
   });
   return messages;
 }

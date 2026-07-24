@@ -33,19 +33,33 @@ class PostgresEventStore(LazyPool):
     """PostgreSQL canonical log with command dedup and transactional outbox."""
 
     async def load(
-        self, tenant_id: str, session_id: str, *, from_version: int = 1
+        self,
+        tenant_id: str,
+        session_id: str,
+        *,
+        from_version: int = 1,
+        event_types: Sequence[str] | None = None,
+        limit: int | None = None,
     ) -> list[CanonicalEvent]:
         pool = await self.pool()
-        rows = await pool.fetch(
-            """
+        params: list[Any] = [tenant_id, session_id, from_version]
+        clauses = [
+            "tenant_id = $1",
+            "session_id = $2",
+            "aggregate_version >= $3",
+        ]
+        if event_types is not None:
+            params.append(list(event_types))
+            clauses.append(f"type = ANY(${len(params)}::text[])")
+        query = f"""
             SELECT * FROM session_core.canonical_event
-            WHERE tenant_id = $1 AND session_id = $2 AND aggregate_version >= $3
+            WHERE {' AND '.join(clauses)}
             ORDER BY aggregate_version
-            """,
-            tenant_id,
-            session_id,
-            from_version,
-        )
+        """
+        if limit is not None:
+            params.append(limit)
+            query += f" LIMIT ${len(params)}"
+        rows = await pool.fetch(query, *params)
         return [event_from_record(row) for row in rows]
 
     async def load_all(self, tenant_id: str | None = None) -> list[CanonicalEvent]:

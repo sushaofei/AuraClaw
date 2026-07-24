@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   appendUniqueEvent,
+  approvalFromTranscript,
   buildRestoredTranscript,
   createCommandId,
   createSseParser,
@@ -451,28 +452,35 @@ export function AuraClawConsole() {
     } finally { if (!quiet) setBusy(""); }
   }, [api, navigatePanel]);
 
-  const resolvePendingApproval = useCallback(async (targetSessionId: string) => {
+  const resolvePendingApproval = useCallback(async (
+    targetSessionId: string,
+    preloaded?: ApprovalRequest | null,
+  ) => {
     if (!targetSessionId.trim()) return null;
     if (pendingApprovalRef.current) return pendingApprovalRef.current;
     try {
-      const { data } = await api(`/v1/operations/sessions/${encodeURIComponent(targetSessionId)}/timeline`, { quiet: true });
-      const entries = Array.isArray(asJson(data).entries) ? (asJson(data).entries as Json[]) : [];
-      setTimeline(entries);
-      const pending = findPendingApproval(entries);
-      if (pending) {
-        setPendingApproval(pending);
-        setApprovalId(pending.approvalId);
+      const pending = preloaded ?? null;
+      let resolved = pending;
+      if (!resolved) {
+        const { data } = await api(`/v1/operations/sessions/${encodeURIComponent(targetSessionId)}/timeline`, { quiet: true });
+        const entries = Array.isArray(asJson(data).entries) ? (asJson(data).entries as Json[]) : [];
+        setTimeline(entries);
+        resolved = findPendingApproval(entries);
+      }
+      if (resolved) {
+        setPendingApproval(resolved);
+        setApprovalId(resolved.approvalId);
         setChatStatus("awaiting_approval");
         setChatMessages((current) => {
-          if (current.some((item) => item.content.includes(pending.approvalId))) return current;
+          if (current.some((item) => item.content.includes(resolved.approvalId))) return current;
           return [...current, {
             id: createCommandId("chat-system"),
             role: "system",
-            content: `需要人工审批：${pending.toolName || "tool"}（${pending.approvalId}）${pending.reason ? ` — ${pending.reason}` : ""}`,
+            content: `需要人工审批：${resolved.toolName || "tool"}（${resolved.approvalId}）${resolved.reason ? ` — ${resolved.reason}` : ""}`,
           }];
         });
       }
-      return pending;
+      return resolved;
     } catch {
       return null;
     }
@@ -660,28 +668,33 @@ export function AuraClawConsole() {
     setSessionId(id);
     setBusy("task");
     try {
-      const nextTask = await loadTask(true, id);
+      const [nextTask, loaded, transcriptPayload] = await Promise.all([
+        loadTask(true, id),
+        loadResult(true, id),
+        api(`/v1/tasks/${encodeURIComponent(id)}/transcript`, { quiet: true })
+          .then(({ data }) => asJson(data))
+          .catch(() => null),
+      ]);
       if (!nextTask) {
         setChatStatus("failed");
         setNotice(`无法恢复 Session：${id}`);
         return;
       }
-      const loaded = await loadResult(true, id);
       const summary = resultText(loaded?.result ?? null) || String(nextTask.result_summary ?? "");
       if (loaded?.result) setChatResult(loaded.result);
-      let timelineEntries: Json[] = [];
-      try {
-        const { data } = await api(`/v1/operations/sessions/${encodeURIComponent(id)}/timeline`, { quiet: true });
-        timelineEntries = Array.isArray(asJson(data).entries) ? (asJson(data).entries as Json[]) : [];
-        setTimeline(timelineEntries);
-      } catch {
-        timelineEntries = [];
-      }
+      const transcriptMessages = Array.isArray(transcriptPayload?.messages)
+        ? (transcriptPayload.messages as Json[])
+        : [];
+      const pendingFromTranscript = approvalFromTranscript(
+        transcriptPayload?.pending_approval && typeof transcriptPayload.pending_approval === "object"
+          ? (transcriptPayload.pending_approval as Json)
+          : null,
+      );
       const restored = buildRestoredTranscript({
         goal: String(nextTask.goal ?? ""),
         resultSummary: summary,
         sessionId: id,
-        timelineEntries,
+        transcriptMessages,
       }).map((item) => ({ ...item, id: createCommandId(`restore-${item.role}`) }));
       for (const item of restored) {
         if (item.role === "assistant" && item.runId) finalizedRunIds.current.add(item.runId);
@@ -700,7 +713,7 @@ export function AuraClawConsole() {
       const sessionStatus = String(nextTask.status ?? "");
       if (run === WAITING_FOR_HUMAN || sessionStatus === WAITING_FOR_HUMAN) {
         setChatStatus("awaiting_approval");
-        await resolvePendingApproval(id);
+        await resolvePendingApproval(id, pendingFromTranscript);
         if (!streamAbort.current) void startStream(id, false);
         setNotice(`已恢复并等待人工审批：${id}`);
         return;

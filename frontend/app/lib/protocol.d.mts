@@ -80,9 +80,16 @@ export function removeChatSessionIndex(
 export function transcriptFromTimeline(
   timelineEntries: Array<Record<string, unknown>> | null | undefined,
 ): Array<{ role: "user" | "assistant"; content: string; runId?: string }>;
+export function transcriptFromApiMessages(
+  apiMessages: Array<Record<string, unknown>> | null | undefined,
+): Array<{ role: "user" | "assistant"; content: string; runId?: string }>;
+export function approvalFromTranscript(
+  pending: Record<string, unknown> | null | undefined,
+): ApprovalRequest | null;
 export function buildRestoredTranscript(input: {
   goal?: string;
   resultSummary?: string;
   sessionId?: string;
   timelineEntries?: Array<Record<string, unknown>> | null;
+  transcriptMessages?: Array<Record<string, unknown>> | null;
 }): Array<{ role: "user" | "assistant" | "system"; content: string; runId?: string }>;
