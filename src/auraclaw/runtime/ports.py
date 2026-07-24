@@ -116,6 +116,38 @@ class ToolClient(Protocol):
     ) -> dict[str, Any]: ...
 
 
+class CapabilityClient(ToolClient, Protocol):
+    async def list_tools(
+        self, assignment: RuntimeAssignment
+    ) -> list[dict[str, Any]]: ...
+
+    async def list_resources(
+        self, assignment: RuntimeAssignment
+    ) -> list[dict[str, Any]]: ...
+
+    async def list_resource_templates(
+        self, assignment: RuntimeAssignment
+    ) -> list[dict[str, Any]]: ...
+
+    async def read_resource(
+        self,
+        assignment: RuntimeAssignment,
+        uri: str,
+    ) -> list[dict[str, Any]]: ...
+
+    async def list_prompts(
+        self, assignment: RuntimeAssignment
+    ) -> list[dict[str, Any]]: ...
+
+    async def get_prompt(
+        self,
+        assignment: RuntimeAssignment,
+        name: str,
+        *,
+        arguments: dict[str, str] | None = None,
+    ) -> dict[str, Any]: ...
+
+
 class RuntimeEventPublisher(Protocol):
     async def publish(self, event: RuntimeEvent) -> None: ...
 
