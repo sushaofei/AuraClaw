@@ -11,7 +11,11 @@ from pathlib import PurePosixPath
 from typing import Protocol
 
 from auraclaw.action.mcp_primitives import McpResourceRegistry, RegisteredResource
-from auraclaw.action.ports import ArtifactWriter, CapabilityCatalogStore
+from auraclaw.action.ports import (
+    ArtifactWriter,
+    CapabilityCatalogStore,
+    ResourcePolicyEvaluator,
+)
 from auraclaw.contracts.capabilities import (
     CapabilityDescriptor,
     CapabilityKind,
@@ -32,6 +36,7 @@ from auraclaw.contracts.skills import (
     SkillManifest,
     SkillPublicationStatus,
 )
+from auraclaw.contracts.tools import PolicyDecision
 
 _VERSION_CLAUSE = re.compile(
     r"^(>=|<=|>|<|==|=)?(0|[1-9]\d*)"
@@ -222,9 +227,11 @@ class SkillResolver:
         self,
         registry: SkillPackageRegistry,
         catalog: CapabilityCatalogStore,
+        policy: ResourcePolicyEvaluator | None = None,
     ) -> None:
         self._registry = registry
         self._catalog = catalog
+        self._policy = policy
 
     async def resolve(
         self,
@@ -235,6 +242,9 @@ class SkillResolver:
         publisher: str | None = None,
         role: str,
         policy_version: str,
+        subject: str = "agent-runtime",
+        correlation_id: str = "skill.resolve",
+        active_skill_names: tuple[str, ...] = (),
     ) -> SkillBinding:
         publication = next(
             (
@@ -262,6 +272,39 @@ class SkillResolver:
             _resolve_resource(requirement.uri_template, capabilities)
             for requirement in manifest.required_resources
         )
+        policy_decision_id: str | None = None
+        if self._policy is not None:
+            evaluation = await self._policy.evaluate_action(
+                tenant_id=tenant_id,
+                subject=subject,
+                action="skill.activate",
+                resource=(
+                    f"skill:{manifest.publisher}/{manifest.name}/"
+                    f"{manifest.version}"
+                ),
+                input_digest=publication.package_digest.removeprefix("sha256:"),
+                correlation_id=correlation_id,
+                attributes={
+                    "active_skill_names": list(active_skill_names),
+                    "classification": manifest.data_classification,
+                    "required_resources": [
+                        item.uri_template
+                        for item in manifest.required_resources
+                    ],
+                    "required_tools": [
+                        item.name for item in manifest.required_tools
+                    ],
+                    "risk_level": manifest.risk_level,
+                    "role": role,
+                },
+            )
+            if evaluation.decision not in {
+                PolicyDecision.ALLOW,
+                PolicyDecision.ALLOW_WITH_CONSTRAINTS,
+            }:
+                raise PolicyDeniedError("Skill activation policy denied binding")
+            policy_version = evaluation.policy_version
+            policy_decision_id = evaluation.decision_id
         return SkillBinding(
             skill_name=manifest.name,
             skill_version=manifest.version,
@@ -271,6 +314,7 @@ class SkillResolver:
             resolved_tools=resolved_tools,
             resolved_resources=resolved_resources,
             policy_version=policy_version,
+            policy_decision_id=policy_decision_id,
             max_steps=manifest.max_steps,
             timeout_seconds=manifest.timeout_seconds,
         )

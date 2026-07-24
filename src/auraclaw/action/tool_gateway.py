@@ -48,6 +48,7 @@ class ApprovalReader(Protocol):
 class ToolRegistry:
     def __init__(self, capabilities: tuple[ToolCapability, ...] = ()) -> None:
         self._capabilities: dict[tuple[str, str], ToolCapability] = {}
+        self._discoverable: set[tuple[str, str]] = set()
         for capability in capabilities:
             self.register(capability)
 
@@ -56,6 +57,7 @@ class ToolRegistry:
         if key in self._capabilities:
             raise ValueError(f"Tool already registered: {capability.name}@{capability.version}")
         self._capabilities[key] = capability
+        self._discoverable.add(key)
 
     def get(self, name: str, version: str) -> ToolCapability:
         try:
@@ -63,10 +65,46 @@ class ToolRegistry:
         except KeyError as exc:
             raise PolicyDeniedError(f"Tool is not registered: {name}@{version}") from exc
 
+    def replace_owner(
+        self,
+        owner: str,
+        capabilities: tuple[ToolCapability, ...],
+    ) -> None:
+        self._discoverable.difference_update(
+            key
+            for key, capability in self._capabilities.items()
+            if capability.owner == owner
+        )
+        for capability in capabilities:
+            key = (capability.name, capability.version)
+            existing = self._capabilities.get(key)
+            if existing is not None and existing != capability:
+                raise ValueError(
+                    f"Tool version changed without version bump: "
+                    f"{capability.name}@{capability.version}"
+                )
+            if existing is None:
+                self._capabilities[key] = capability
+            self._discoverable.add(key)
+
+    def revoke_owner(self, owner: str) -> None:
+        removed = {
+            key
+            for key, capability in self._capabilities.items()
+            if capability.owner == owner
+        }
+        self._capabilities = {
+            key: capability
+            for key, capability in self._capabilities.items()
+            if key not in removed
+        }
+        self._discoverable.difference_update(removed)
+
     def discover(self, *, permissions: tuple[ToolPermission, ...] = ()) -> list[ToolCapability]:
         values = [
             item
-            for item in self._capabilities.values()
+            for key, item in self._capabilities.items()
+            if key in self._discoverable
             if not permissions or item.permission in permissions
         ]
         return sorted(values, key=lambda item: (item.name, item.version))

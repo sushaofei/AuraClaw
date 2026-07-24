@@ -23,6 +23,7 @@ from auraclaw.action.capability_catalog import (
     RoutedHandsExecutor,
     capability_search_tool,
 )
+from auraclaw.action.catalog_reconciler import McpCatalogReconciler
 from auraclaw.action.mcp import HandsMcpServer
 from auraclaw.action.mcp_http import (
     SignedLeaseWorkloadAuthenticator,
@@ -175,6 +176,7 @@ WORKER_SERVICES = {
     "orchestrator",
     "agent-runtime",
     "delivery-worker",
+    "action-hands",
 }
 
 DATABASE_SERVICES = {
@@ -856,19 +858,21 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
                 )
 
     app.state.remote_mcp_transports = {}
+    app.state.catalog_reconciler = None
     app.state.initialize = initialize_registry
+    routed_hands = RoutedHandsExecutor(
+        LocalHandsService(workspace_root=Path.cwd()),
+        {
+            CAPABILITY_SEARCH_TOOL_NAME: CapabilitySearchExecutor(
+                capability_catalog
+            )
+        },
+    )
     gateway = ToolGateway(
         registry=registry,
         policy=policy,
         approvals=EmptyApprovalReader(),
-        hands=RoutedHandsExecutor(
-            LocalHandsService(workspace_root=Path.cwd()),
-            {
-                CAPABILITY_SEARCH_TOOL_NAME: CapabilitySearchExecutor(
-                    capability_catalog
-                )
-            },
-        ),
+        hands=routed_hands,
         artifacts=artifacts,
         credential_proxy=credential_proxy,
         invocation_store=invocation_store,
@@ -920,6 +924,28 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
     )
     app.state.capability_catalog = capability_catalog
     app.state.resource_gateway = resource_gateway
+    if credential_proxy is not None and isinstance(policy, RemotePolicyClient):
+        reconciler = McpCatalogReconciler(
+            catalog=capability_catalog,
+            store=capability_catalog_store,
+            transports=app.state.remote_mcp_transports,
+            resource_cache=resource_gateway,
+            tool_registry=registry,
+            hands_router=routed_hands,
+        )
+        app.state.catalog_reconciler = reconciler
+
+        async def initialize_remote_catalog() -> None:
+            await initialize_registry()
+            for transport in app.state.remote_mcp_transports.values():
+                transport.set_notification_handler(
+                    reconciler.handle_notification
+                )
+            await reconciler.reconcile_all()
+
+        app.state.initialize = initialize_remote_catalog
+        app.state.tick = reconciler.reconcile_all
+        app.state.worker_interval = settings.mcp_reconcile_interval_seconds
     app.mount("/", mcp_app)
     return app
 
