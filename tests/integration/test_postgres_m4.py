@@ -38,6 +38,7 @@ MIGRATIONS = tuple(
         "migrations/0004_m3_tool_artifact_approval.sql",
         "migrations/0005_m4_collaboration_review.sql",
         "migrations/0008_multi_run_sessions.sql",
+        "migrations/0016_m9_skill_projection.sql",
     )
 )
 pytestmark = pytest.mark.skipif(DATABASE_URL is None, reason="PostgreSQL test URL not configured")
@@ -54,13 +55,19 @@ async def _apply_migrations() -> None:
             "projection.approval_view",
             "projection.collaboration_view",
         )
-        for migration, relation in zip(MIGRATIONS[:-1], checks, strict=True):
+        for migration, relation in zip(MIGRATIONS[:-2], checks, strict=True):
             if await connection.fetchval("SELECT to_regclass($1)", relation) is None:
                 await connection.execute(migration)
         if await connection.fetchval(
             """SELECT 1 FROM information_schema.columns
             WHERE table_schema='projection' AND table_name='task_view'
               AND column_name='run_status'"""
+        ) is None:
+            await connection.execute(MIGRATIONS[-2])
+        if await connection.fetchval(
+            """SELECT 1 FROM information_schema.columns
+            WHERE table_schema='projection' AND table_name='task_view'
+              AND column_name='skill_activations'"""
         ) is None:
             await connection.execute(MIGRATIONS[-1])
     finally:

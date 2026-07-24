@@ -52,6 +52,7 @@ class PostgresTaskProjection(LazyPool):
                     view["result_ref"] = json_loads(row["result_ref"])
                     view["artifact_refs"] = json_loads(row["artifact_refs"])
                     view["error"] = json_loads(row["error"])
+                    view["skill_activations"] = json_loads(row["skill_activations"])
                 current_version = int(view["projection_version"])
                 if event.aggregate_version != current_version + 1:
                     raise ProjectionGapError(
@@ -68,9 +69,9 @@ class PostgresTaskProjection(LazyPool):
                      result_summary, result_ref,
                      artifact_refs, error, delivery_status, delivery_id,
                      delivery_attempt_count, delivery_response_summary,
-                     source_version, source_event_id, projected_at)
+                     skill_activations, source_version, source_event_id, projected_at)
                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14::jsonb,
-                            $15::jsonb,$16,$17,$18,$19,$20,$21,$22)
+                            $15::jsonb,$16,$17,$18,$19,$20::jsonb,$21,$22,$23)
                     ON CONFLICT (tenant_id, session_id) DO UPDATE SET
                       run_id=EXCLUDED.run_id, status=EXCLUDED.status, goal=EXCLUDED.goal,
                       role=EXCLUDED.role, parent_session_id=EXCLUDED.parent_session_id,
@@ -82,6 +83,7 @@ class PostgresTaskProjection(LazyPool):
                       delivery_id=EXCLUDED.delivery_id,
                       delivery_attempt_count=EXCLUDED.delivery_attempt_count,
                       delivery_response_summary=EXCLUDED.delivery_response_summary,
+                      skill_activations=EXCLUDED.skill_activations,
                       source_version=EXCLUDED.source_version,
                       source_event_id=EXCLUDED.source_event_id,
                       projected_at=EXCLUDED.projected_at""",
@@ -104,6 +106,7 @@ class PostgresTaskProjection(LazyPool):
                     view.get("delivery_id"),
                     view.get("delivery_attempt_count", 0),
                     view.get("delivery_response_summary"),
+                    json_dumps(view.get("skill_activations", [])),
                     event.aggregate_version,
                     event.event_id,
                     event.occurred_at,
@@ -147,6 +150,7 @@ class PostgresTaskProjection(LazyPool):
             "delivery_id": row["delivery_id"],
             "delivery_attempt_count": int(row["delivery_attempt_count"]),
             "delivery_response_summary": row["delivery_response_summary"],
+            "skill_activations": list(json_loads(row["skill_activations"])),
             "projection_version": int(row["source_version"]),
             "projected_at": row["projected_at"].isoformat(),
         }
