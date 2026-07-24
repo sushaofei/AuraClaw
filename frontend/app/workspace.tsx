@@ -14,6 +14,7 @@ import {
   normalizeBaseUrl,
   redact,
   removeChatSessionIndex,
+  reconcileAssistantWithResult,
   resultText,
   retryAfterMs,
   applyChatDelta,
@@ -824,7 +825,12 @@ export function AuraClawConsole() {
         if (finalResult) setChatResult(finalResult);
         const completedRunId = String(currentTask?.run_id ?? finalResult?.run_id ?? "");
         markRunsFinalized(completedRunId);
-        setChatMessages((current) => finalizeChatRuns(current, completedRunId ? [completedRunId] : undefined));
+        const summary = resultText(finalResult ?? null);
+        setChatMessages((current) => reconcileAssistantWithResult(current, {
+          runId: completedRunId,
+          resultSummary: summary,
+          createId: createCommandId,
+        }));
         setChatStatus(status);
         setPendingApproval(null);
         streamAbort.current?.abort();
