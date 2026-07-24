@@ -5,6 +5,7 @@ from auraclaw.contracts.capabilities import (
     CapabilityKind,
     CapabilityStatus,
     CapabilityTrustLevel,
+    McpOAuthConfiguration,
     McpServerDefinition,
 )
 from auraclaw.infrastructure.persistence.postgres_common import (
@@ -45,7 +46,16 @@ class PostgresCapabilityCatalogStore(LazyPool):
             json_dumps(server.allowed_prompt_prefixes),
             server.status.value,
             server.enabled,
-            json_dumps(server.metadata),
+            json_dumps(
+                {
+                    **server.metadata,
+                    **(
+                        {"_auraclaw_oauth": server.oauth.model_dump(mode="json")}
+                        if server.oauth is not None
+                        else {}
+                    ),
+                }
+            ),
         )
 
     async def get_server(self, server_id: str) -> McpServerDefinition | None:
@@ -146,6 +156,8 @@ class PostgresCapabilityCatalogStore(LazyPool):
 
 
 def _server(row: object) -> McpServerDefinition:
+    metadata = dict(json_loads(row["metadata"]))  # type: ignore[index]
+    oauth_payload = metadata.pop("_auraclaw_oauth", None)
     return McpServerDefinition(
         server_id=str(row["server_id"]),  # type: ignore[index]
         tenant_id=row["tenant_id"],  # type: ignore[index]
@@ -153,6 +165,11 @@ def _server(row: object) -> McpServerDefinition:
         endpoint=str(row["endpoint"]),  # type: ignore[index]
         protocol_revision=str(row["protocol_revision"]),  # type: ignore[index]
         credential_ref=row["credential_ref"],  # type: ignore[index]
+        oauth=(
+            McpOAuthConfiguration.model_validate(oauth_payload)
+            if oauth_payload is not None
+            else None
+        ),
         trust_level=CapabilityTrustLevel(str(row["trust_level"])),  # type: ignore[index]
         allowed_tool_prefixes=tuple(
             json_loads(row["allowed_tool_prefixes"])  # type: ignore[index]
@@ -165,7 +182,7 @@ def _server(row: object) -> McpServerDefinition:
         ),
         status=CapabilityStatus(str(row["status"])),  # type: ignore[index]
         enabled=bool(row["enabled"]),  # type: ignore[index]
-        metadata=dict(json_loads(row["metadata"])),  # type: ignore[index]
+        metadata=metadata,
     )
 
 

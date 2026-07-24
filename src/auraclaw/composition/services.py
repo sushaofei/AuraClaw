@@ -32,6 +32,7 @@ from auraclaw.action.mcp_http import (
 )
 from auraclaw.action.mcp_primitives import McpResourceRegistry
 from auraclaw.action.policy import PolicyEngine
+from auraclaw.action.remote_mcp import ManagedRemoteMcpTransport
 from auraclaw.action.resource_gateway import ManagedResourceGateway
 from auraclaw.action.tool_gateway import ToolGateway, ToolRegistry
 from auraclaw.admin.internal_service import OwnerAdminService
@@ -81,6 +82,7 @@ from auraclaw.infrastructure.clients.session import (
     RemoteSessionEventStore,
     RemoteSessionOutboxSource,
 )
+from auraclaw.infrastructure.credentials.mcp_egress import ManagedMcpEgressAdapter
 from auraclaw.infrastructure.credentials.proxy import CredentialProxy, InMemoryVault
 from auraclaw.infrastructure.credentials.vault import HashiCorpVault
 from auraclaw.infrastructure.credentials.webhook import ManagedWebhookCredentialAdapter
@@ -839,11 +841,22 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         policy=policy if isinstance(policy, RemotePolicyClient) else None,
     )
     registry = ToolRegistry((capability_search_tool(),))
-    if tool_registry_store is not None:
-        async def initialize_registry() -> None:
+    async def initialize_registry() -> None:
+        if tool_registry_store is not None:
             await tool_registry_store.load_into(registry)
+        for server in settings.mcp_egress_servers:
+            await capability_catalog.register_server(server)
+            if credential_proxy is not None and isinstance(policy, RemotePolicyClient):
+                app.state.remote_mcp_transports[server.server_id] = (
+                    ManagedRemoteMcpTransport(
+                        server,
+                        credentials=credential_proxy,
+                        policy=policy,
+                    )
+                )
 
-        app.state.initialize = initialize_registry
+    app.state.remote_mcp_transports = {}
+    app.state.initialize = initialize_registry
     gateway = ToolGateway(
         registry=registry,
         policy=policy,
@@ -969,10 +982,15 @@ def _credential_proxy_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
             bearer_token=token or secrets.token_urlsafe(32),
             service_identity=ServiceIdentity.CREDENTIAL_PROXY,
         )
+    mcp_adapters = {
+        f"mcp:{server.server_id}": ManagedMcpEgressAdapter(server)
+        for server in settings.mcp_egress_servers
+    }
     closeables: tuple[Any, ...] = (
         *((registry,) if registry is not None else ()),
         *((vault,) if isinstance(vault, HashiCorpVault) else ()),
         *((policy,) if policy is not None else ()),
+        *mcp_adapters.values(),
     )
     app = _base_service_app(
         spec,
@@ -987,7 +1005,8 @@ def _credential_proxy_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         adapters={
             "webhook": ManagedWebhookCredentialAdapter(
                 allowed_hosts=settings.allowed_credential_egress_hosts
-            )
+            ),
+            **mcp_adapters,
         },
         policy=policy,
     )

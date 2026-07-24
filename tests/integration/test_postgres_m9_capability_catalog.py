@@ -13,6 +13,7 @@ from auraclaw.contracts.capabilities import (
     CapabilityKind,
     CapabilityStatus,
     CapabilityTrustLevel,
+    McpOAuthConfiguration,
     McpServerDefinition,
 )
 from auraclaw.infrastructure.persistence.postgres_capability_catalog import (
@@ -49,6 +50,12 @@ def test_postgres_capability_catalog_is_shared_and_tenant_scoped() -> None:
                     tenant_id=tenant_id,
                     title="Tenant MCP",
                     endpoint="https://tenant.example/mcp",
+                    credential_ref=f"vault/{server_id}#client_secret",
+                    oauth=McpOAuthConfiguration(
+                        token_endpoint="https://auth.tenant.example/oauth/token",
+                        client_id="auraclaw",
+                        resource="https://tenant.example/mcp",
+                    ),
                     trust_level=CapabilityTrustLevel.TENANT_VERIFIED,
                     status=CapabilityStatus.ACTIVE,
                     enabled=True,
@@ -85,6 +92,10 @@ def test_postgres_capability_catalog_is_shared_and_tenant_scoped() -> None:
                 tenant_id=f"other-{suffix}",
                 query="release",
             ) == ()
+            loaded_server = await store_b.get_server(server_id)
+            assert loaded_server is not None
+            assert loaded_server.oauth is not None
+            assert loaded_server.oauth.resource == "https://tenant.example/mcp"
         finally:
             await store_a.close()
             await store_b.close()
