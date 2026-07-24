@@ -24,6 +24,8 @@ Specialist Runtime
 | Context Builder | 从 Session、Artifact 和 Retrieval 构建当前上下文 |
 | Model Client | 通过 Model Gateway 发起模型调用和接收增量 |
 | Tool Client | 发现工具、发起调用、关联结果和取消 |
+| Capability Client | 经内部 MCP 发现和读取 Resource、Tool、Prompt 与 Skill Package |
+| Skill Resolver / Runner | 固定技能版本和依赖，渐进加载说明并驱动 Harness 步骤 |
 | Session Client | 读取历史、追加模型/计划/状态事件 |
 | Checkpoint Manager | 保存可恢复 Harness 状态和引用 |
 | Runtime Event Publisher | 发布 Token、进度和短期状态 |
@@ -55,6 +57,10 @@ Specialist Runtime
 - 资源规格和 Tool Permission。
 
 Runtime 内仅允许：当前 Prompt、短期缓存、连接状态和可丢弃中间计算。
+
+Runtime 只连接内部 MCP Capability Gateway，不注册或直连第三方 MCP Server。Skill 激活后固定包摘要、
+Tool/Resource 依赖和 Policy 版本；Catalog 更新不得在同一 Run 内静默替换绑定。详细设计见
+[[23 MCP Runtime 能力平面]]。
 
 ## 幂等与所有权
 
