@@ -91,6 +91,10 @@ Agent Runtime
 
 Tool Result 返回 Agent Runtime 的同步/关联响应不可由 Runtime Event Bus 替代。
 
+Tool Gateway 是 MCP Capability Gateway 的行动子集。Resource 读取、Skill Package 加载和目录检索
+与 Tool 共用认证、Policy、路由、脱敏和审计边界，但不进入 Tool Invocation 副作用状态机。完整映射见
+[[23 MCP Runtime 能力平面]]。
+
 ## 重试边界
 
 - 连接建立失败等传输错误可由 Gateway 重试。
