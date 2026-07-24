@@ -16,12 +16,18 @@ from fastapi.responses import JSONResponse
 
 from auraclaw import __version__
 from auraclaw.action.capability_catalog import (
+    CAPABILITY_LOAD_TOOL_NAME,
     CAPABILITY_SEARCH_TOOL_NAME,
+    SKILL_RESOLVE_TOOL_NAME,
     CapabilityCatalog,
+    CapabilityLoadExecutor,
     CapabilitySearchExecutor,
     InMemoryCapabilityCatalogStore,
     RoutedHandsExecutor,
+    SkillResolveExecutor,
+    capability_load_tool,
     capability_search_tool,
+    skill_resolve_tool,
 )
 from auraclaw.action.catalog_reconciler import McpCatalogReconciler
 from auraclaw.action.mcp import HandsMcpServer
@@ -42,6 +48,7 @@ from auraclaw.action.resource_gateway import ManagedResourceGateway
 from auraclaw.action.skill_packages import (
     HmacSkillSignatureVerifier,
     SkillPackageRegistry,
+    SkillResolver,
 )
 from auraclaw.action.tool_gateway import ToolGateway, ToolRegistry
 from auraclaw.admin.internal_service import OwnerAdminService
@@ -160,6 +167,7 @@ from auraclaw.projection.collaboration.projector import InMemoryCollaborationPro
 from auraclaw.projection.ports import ApprovalViewReader, CollaborationReader, TaskReader
 from auraclaw.projection.relay import OutboxRelay
 from auraclaw.projection.task.projector import InMemoryTaskProjection
+from auraclaw.runtime.capability_controller import RuntimeCapabilityController
 from auraclaw.runtime.harness import AgentHarness
 from auraclaw.runtime.mcp_client import HandsMcpClient, HttpMcpTransport
 from auraclaw.session.internal_service import SessionInternalService
@@ -901,7 +909,18 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
             skill_registry,
             target_tenant_id=settings.model_skill_target_tenant_id,
         )
-    registry = ToolRegistry((capability_search_tool(),))
+    skill_resolver = SkillResolver(
+        skill_registry,
+        capability_catalog_store,
+        policy if isinstance(policy, RemotePolicyClient) else None,
+    )
+    registry = ToolRegistry(
+        (
+            capability_search_tool(),
+            capability_load_tool(),
+            skill_resolve_tool(),
+        )
+    )
 
     async def initialize_registry() -> None:
         if tool_registry_store is not None:
@@ -926,8 +945,14 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         LocalHandsService(workspace_root=Path.cwd()),
         {
             CAPABILITY_SEARCH_TOOL_NAME: CapabilitySearchExecutor(
-                capability_catalog
-            )
+                capability_catalog,
+                skills=skill_registry,
+            ),
+            CAPABILITY_LOAD_TOOL_NAME: CapabilityLoadExecutor(
+                capability_catalog,
+                skills=skill_registry,
+            ),
+            SKILL_RESOLVE_TOOL_NAME: SkillResolveExecutor(skill_resolver),
         },
     )
     gateway = ToolGateway(
@@ -1538,6 +1563,7 @@ def _runtime_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         model=model,
         tools=hands,
         runtime_events=providers.get_runtime_event_publisher(),
+        capability_controller=RuntimeCapabilityController(hands),
     )
     worker = RemoteRuntimeWorker(control, harness)
     app = _base_service_app(

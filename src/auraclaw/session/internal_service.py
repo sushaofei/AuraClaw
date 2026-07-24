@@ -36,6 +36,8 @@ DEFAULT_EVENT_ALLOWLIST: Mapping[ServiceIdentity, tuple[str, ...]] = {
         "run.",
         "model.",
         "tool.",
+        "skill.",
+        "context.",
         "child.",
         "runtime.",
     ),

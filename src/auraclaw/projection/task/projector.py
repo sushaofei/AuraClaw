@@ -22,6 +22,7 @@ KNOWN_TASK_EVENTS = {
     "run.requested",
     "run.scheduled",
     "run.started",
+    "model.turn.completed",
     "model.output.completed",
     "tool.call.requested",
     "tool.call.completed",

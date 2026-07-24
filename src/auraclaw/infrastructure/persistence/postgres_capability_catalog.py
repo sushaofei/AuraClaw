@@ -154,6 +154,21 @@ class PostgresCapabilityCatalogStore(LazyPool):
         )
         return tuple(_capability(row) for row in rows)
 
+    async def get_capability(
+        self, tenant_id: str, capability_id: str
+    ) -> CapabilityDescriptor | None:
+        pool = await self.pool()
+        row = await pool.fetchrow(
+            """SELECT c.* FROM hands.capability_catalog AS c
+            JOIN hands.downstream_mcp_server AS s ON s.server_id=c.server_id
+            WHERE c.capability_id=$1
+              AND (c.tenant_id IS NULL OR c.tenant_id=$2)
+              AND s.enabled AND s.status IN ('active','degraded')""",
+            capability_id,
+            tenant_id,
+        )
+        return _capability(row) if row is not None else None
+
 
 def _server(row: object) -> McpServerDefinition:
     metadata = dict(json_loads(row["metadata"]))  # type: ignore[index]

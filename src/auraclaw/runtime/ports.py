@@ -122,22 +122,6 @@ class CapabilityClient(ToolClient, Protocol):
         self, assignment: RuntimeAssignment
     ) -> list[dict[str, Any]]: ...
 
-
-class SkillBindingResolver(Protocol):
-    async def resolve(
-        self,
-        *,
-        tenant_id: str,
-        name: str,
-        version: str = "*",
-        publisher: str | None = None,
-        role: str,
-        policy_version: str,
-        subject: str = "agent-runtime",
-        correlation_id: str = "skill.resolve",
-        active_skill_names: tuple[str, ...] = (),
-    ) -> SkillBinding: ...
-
     async def list_resources(
         self, assignment: RuntimeAssignment
     ) -> list[dict[str, Any]]: ...
@@ -182,6 +166,32 @@ class SkillBindingResolver(Protocol):
         version: str,
         path: str,
     ) -> list[dict[str, Any]]: ...
+
+    async def resolve_skill(
+        self,
+        assignment: RuntimeAssignment,
+        *,
+        name: str,
+        version: str = "*",
+        publisher: str | None = None,
+        active_skill_names: tuple[str, ...] = (),
+    ) -> SkillBinding: ...
+
+
+class SkillBindingResolver(Protocol):
+    async def resolve(
+        self,
+        *,
+        tenant_id: str,
+        name: str,
+        version: str = "*",
+        publisher: str | None = None,
+        role: str,
+        policy_version: str,
+        subject: str = "agent-runtime",
+        correlation_id: str = "skill.resolve",
+        active_skill_names: tuple[str, ...] = (),
+    ) -> SkillBinding: ...
 
 
 class RuntimeEventPublisher(Protocol):
