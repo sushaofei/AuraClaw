@@ -85,6 +85,7 @@ flowchart TD
 ### 公共契约
 
 - [[22 Shared Event and State Contracts]]
+- [[23 MCP Runtime 能力平面]]
 
 ## 事实与状态归属
 
@@ -129,6 +130,8 @@ service identity、数据库角色、健康检查和最小 Secret 文件挂载�
 - Projection、Control、Hands Invocation、Policy、Credential Audit、Artifact Metadata、Delivery 各有唯一写入者。
 - Task Query 由 `task-api` 使用 `task_query_ro` 只读 Projection；Orchestrator 只消费 Runnable Outbox/Feed。
 - Runtime 到 Hands 使用 MCP 2025-11-25 Streamable HTTP；MCP 不替代 Invocation Store、Lease 或 Canonical Event。
+- Runtime 只连接内部 MCP Capability Gateway；外部数据、工具和技能经受管 Catalog、Policy、
+  Credential Proxy 与 Artifact 边界接入，不能由 Runtime 直连第三方 MCP Server。
 - Artifact Service 使用 PostgreSQL 保存业务元数据、SeaweedFS S3 保存对象；生产不依赖本地共享目录。
 - Policy 对高风险、凭证和外发动作 fail closed；Credential Proxy 不提供返回明文 Secret 的接口。
 - 所有内部写调用携带 tenant、command/operation id、expected version、actor、correlation 和 causation；
