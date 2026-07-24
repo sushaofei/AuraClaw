@@ -15,6 +15,14 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from auraclaw import __version__
+from auraclaw.action.capability_catalog import (
+    CAPABILITY_SEARCH_TOOL_NAME,
+    CapabilityCatalog,
+    CapabilitySearchExecutor,
+    InMemoryCapabilityCatalogStore,
+    RoutedHandsExecutor,
+    capability_search_tool,
+)
 from auraclaw.action.mcp import HandsMcpServer
 from auraclaw.action.mcp_http import (
     SignedLeaseWorkloadAuthenticator,
@@ -88,6 +96,9 @@ from auraclaw.infrastructure.persistence.postgres_admin_store import (
 )
 from auraclaw.infrastructure.persistence.postgres_artifact_repository import (
     PostgresArtifactRepository,
+)
+from auraclaw.infrastructure.persistence.postgres_capability_catalog import (
+    PostgresCapabilityCatalogStore,
 )
 from auraclaw.infrastructure.persistence.postgres_control_store import PostgresControlStateStore
 from auraclaw.infrastructure.persistence.postgres_credential_registry import (
@@ -770,6 +781,9 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
     artifacts: ArtifactStore | RemoteArtifactWriter
     invocation_store: PostgresInvocationStore | None = None
     tool_registry_store: PostgresToolRegistryStore | None = None
+    capability_catalog_store: (
+        InMemoryCapabilityCatalogStore | PostgresCapabilityCatalogStore
+    ) = InMemoryCapabilityCatalogStore()
     if settings.deployment_profile == "production":
         hands_token = settings.workload_token_value(
             ServiceIdentity.ACTION_HANDS.value
@@ -788,12 +802,22 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
             tool_registry_store = PostgresToolRegistryStore(
                 settings.resolved_database_url
             )
+            capability_catalog_store = PostgresCapabilityCatalogStore(
+                settings.resolved_database_url
+            )
         closeables = (
             policy,
             credential_proxy,
             artifacts,
             *((invocation_store,) if invocation_store is not None else ()),
             *((tool_registry_store,) if tool_registry_store is not None else ()),
+            *(
+                (capability_catalog_store,)
+                if isinstance(
+                    capability_catalog_store, PostgresCapabilityCatalogStore
+                )
+                else ()
+            ),
         )
     else:
         policy = PolicyEngine(version="s3-v1")
@@ -805,7 +829,8 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         settings,
         closeables=closeables,
     )
-    registry = ToolRegistry()
+    capability_catalog = CapabilityCatalog(capability_catalog_store)
+    registry = ToolRegistry((capability_search_tool(),))
     if tool_registry_store is not None:
         async def initialize_registry() -> None:
             await tool_registry_store.load_into(registry)
@@ -815,7 +840,14 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         registry=registry,
         policy=policy,
         approvals=EmptyApprovalReader(),
-        hands=LocalHandsService(workspace_root=Path.cwd()),
+        hands=RoutedHandsExecutor(
+            LocalHandsService(workspace_root=Path.cwd()),
+            {
+                CAPABILITY_SEARCH_TOOL_NAME: CapabilitySearchExecutor(
+                    capability_catalog
+                )
+            },
+        ),
         artifacts=artifacts,
         credential_proxy=credential_proxy,
         invocation_store=invocation_store,
@@ -860,6 +892,7 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         HandsMcpServer(registry=registry, gateway=gateway),
         authenticator=authenticator,
     )
+    app.state.capability_catalog = capability_catalog
     app.mount("/", mcp_app)
     return app
 
