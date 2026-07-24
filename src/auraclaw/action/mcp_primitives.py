@@ -84,10 +84,13 @@ class McpResourceRegistry:
         ]
 
     def read(self, tenant_id: str, uri: str) -> tuple[McpResourceContent, ...]:
+        return self.get_resource(tenant_id, uri).contents
+
+    def get_resource(self, tenant_id: str, uri: str) -> RegisteredResource:
         resource = self._resources.get(uri)
         if resource is None or not _visible_to(resource.tenant_ids, tenant_id):
             raise KeyError(f"Resource not found: {uri}")
-        return resource.contents
+        return resource
 
 
 class McpPromptRegistry:

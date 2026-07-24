@@ -30,7 +30,9 @@ from auraclaw.action.mcp_http import (
     WorkloadAuthenticator,
     create_hands_mcp_app,
 )
+from auraclaw.action.mcp_primitives import McpResourceRegistry
 from auraclaw.action.policy import PolicyEngine
+from auraclaw.action.resource_gateway import ManagedResourceGateway
 from auraclaw.action.tool_gateway import ToolGateway, ToolRegistry
 from auraclaw.admin.internal_service import OwnerAdminService
 from auraclaw.api.dependencies import (
@@ -830,6 +832,12 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         closeables=closeables,
     )
     capability_catalog = CapabilityCatalog(capability_catalog_store)
+    resources = McpResourceRegistry()
+    resource_gateway = ManagedResourceGateway(
+        resources,
+        artifacts=artifacts,
+        policy=policy if isinstance(policy, RemotePolicyClient) else None,
+    )
     registry = ToolRegistry((capability_search_tool(),))
     if tool_registry_store is not None:
         async def initialize_registry() -> None:
@@ -889,10 +897,16 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
             ),
         )
     mcp_app = create_hands_mcp_app(
-        HandsMcpServer(registry=registry, gateway=gateway),
+        HandsMcpServer(
+            registry=registry,
+            gateway=gateway,
+            resources=resources,
+            resource_reader=resource_gateway,
+        ),
         authenticator=authenticator,
     )
     app.state.capability_catalog = capability_catalog
+    app.state.resource_gateway = resource_gateway
     app.mount("/", mcp_app)
     return app
 

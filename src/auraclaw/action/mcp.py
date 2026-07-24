@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import Any
 
 from auraclaw.action.mcp_primitives import McpPromptRegistry, McpResourceRegistry
+from auraclaw.action.ports import McpResourceReader
 from auraclaw.action.tool_gateway import ToolGateway, ToolRegistry
 from auraclaw.contracts.errors import AuraClawError
 from auraclaw.contracts.mcp import (
@@ -25,6 +26,7 @@ class HandsMcpServer:
         registry: ToolRegistry,
         gateway: ToolGateway,
         resources: McpResourceRegistry | None = None,
+        resource_reader: McpResourceReader | None = None,
         prompts: McpPromptRegistry | None = None,
         page_size: int = 50,
     ) -> None:
@@ -33,6 +35,7 @@ class HandsMcpServer:
         self._registry = registry
         self._gateway = gateway
         self._resources = resources or McpResourceRegistry()
+        self._resource_reader = resource_reader
         self._prompts = prompts or McpPromptRegistry()
         self._page_size = page_size
         self._initialized_runtimes: set[str] = set()
@@ -57,7 +60,7 @@ class HandsMcpServer:
             if request.method == "resources/templates/list":
                 return self._list_resource_templates(request, trusted_context)
             if request.method == "resources/read":
-                return self._read_resource(request, trusted_context)
+                return await self._read_resource(request, trusted_context)
             if request.method == "prompts/list":
                 return self._list_prompts(request, trusted_context)
             if request.method == "prompts/get":
@@ -167,16 +170,18 @@ class HandsMcpServer:
             result=_page_result("resourceTemplates", page, next_cursor),
         )
 
-    def _read_resource(
+    async def _read_resource(
         self,
         request: McpJsonRpcRequest,
         trusted: McpTrustedContext,
     ) -> McpJsonRpcResponse:
         uri = str(request.params["uri"])
-        contents = [
-            content.as_mcp()
-            for content in self._resources.read(trusted.tenant_id, uri)
-        ]
+        registered = (
+            await self._resource_reader.read(trusted, uri)
+            if self._resource_reader is not None
+            else self._resources.read(trusted.tenant_id, uri)
+        )
+        contents = [content.as_mcp() for content in registered]
         return McpJsonRpcResponse(id=request.id, result={"contents": contents})
 
     def _list_prompts(

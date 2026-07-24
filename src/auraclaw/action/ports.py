@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import Any, Protocol
 
 from auraclaw.contracts.capabilities import CapabilityDescriptor, McpServerDefinition
+from auraclaw.contracts.mcp import McpResourceContent, McpTrustedContext
 from auraclaw.contracts.tools import (
     ApprovalRecord,
     ArtifactRef,
@@ -121,3 +122,25 @@ class CapabilityCatalogStore(Protocol):
     async def list_capabilities(
         self, tenant_id: str
     ) -> tuple[CapabilityDescriptor, ...]: ...
+
+
+class McpResourceReader(Protocol):
+    async def read(
+        self,
+        trusted_context: McpTrustedContext,
+        uri: str,
+    ) -> tuple[McpResourceContent, ...]: ...
+
+
+class ResourcePolicyEvaluator(Protocol):
+    async def evaluate_action(
+        self,
+        *,
+        tenant_id: str,
+        subject: str,
+        action: str,
+        resource: str,
+        input_digest: str,
+        correlation_id: str,
+        attributes: dict[str, object],
+    ) -> PolicyEvaluation: ...
