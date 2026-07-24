@@ -14,8 +14,11 @@ from auraclaw.contracts.mcp import (
     McpTransport,
     McpTrustedContext,
 )
+from auraclaw.contracts.skills import SkillBinding
 from auraclaw.control.ports import RuntimeAssignment
 from auraclaw.runtime.ports import ToolCall
+
+_SKILL_RESOLVE_TOOL_NAME = "auraclaw.skills.resolve"
 
 
 class HandsMcpClient:
@@ -249,6 +252,40 @@ class HandsMcpClient:
             raise ValueError("Skill part path is unsafe")
         uri = f"skill://{publisher}/{name}/{version}/{path}"
         return await self.read_resource(assignment, uri)
+
+    async def resolve_skill(
+        self,
+        assignment: RuntimeAssignment,
+        *,
+        name: str,
+        version: str = "*",
+        publisher: str | None = None,
+        active_skill_names: tuple[str, ...] = (),
+    ) -> SkillBinding:
+        result = await self.execute(
+            assignment,
+            ToolCall(
+                tool_invocation_id=(
+                    f"resolve_{assignment.run_id}_{name.replace('.', '_')}"
+                ),
+                name=_SKILL_RESOLVE_TOOL_NAME,
+                version="1",
+                arguments={
+                    "name": name,
+                    "version": version,
+                    **({"publisher": publisher} if publisher is not None else {}),
+                    "role": assignment.role,
+                    "policy_version": "runtime",
+                    "active_skill_names": list(active_skill_names),
+                },
+            ),
+        )
+        content = result.get("content")
+        payload = dict(content) if isinstance(content, dict) else result
+        binding = payload.get("binding")
+        if not isinstance(binding, dict):
+            raise AuraClawError("Skill resolver did not return a binding")
+        return SkillBinding.model_validate(binding)
 
     async def execute(
         self,
