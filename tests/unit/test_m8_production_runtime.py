@@ -171,7 +171,12 @@ def test_settings_only_accept_provider_neutral_model_names(monkeypatch: pytest.M
 
 def test_named_env_files_select_resources_without_environment_label(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Process env (e.g. CI release-gate) must not shadow the named env files under test.
+    monkeypatch.delenv("AURACLAW_STORAGE_BACKEND", raising=False)
+    monkeypatch.delenv("AURACLAW_RUNTIME_EVENT_BACKEND", raising=False)
+
     development = tmp_path / ".env.development"
     production = tmp_path / ".env.production"
     development.write_text(

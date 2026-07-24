@@ -65,6 +65,68 @@ export function runtimeDelta(event, data) {
   return typeof payload?.delta === "string" ? payload.delta : "";
 }
 
+export function runtimeEventRunId(data) {
+  if (!data || typeof data !== "object") return "";
+  if (typeof data.run_id === "string" && data.run_id.trim()) return data.run_id.trim();
+  const correlation = data.correlation;
+  if (correlation && typeof correlation === "object" && typeof correlation.run_id === "string") {
+    return correlation.run_id.trim();
+  }
+  return "";
+}
+
+/**
+ * Merge a model.output.delta into chat bubbles, keyed by run_id.
+ * Drops late deltas for already-finalized runs so follow-up user turns
+ * cannot be interleaved with a previous answer's streaming tail.
+ */
+export function applyChatDelta(messages, { delta, runId, createId, finalizedRunIds }) {
+  const text = String(delta ?? "");
+  if (!text) return messages;
+  const current = Array.isArray(messages) ? messages : [];
+  const run = String(runId ?? "").trim();
+  const finalized = finalizedRunIds instanceof Set ? finalizedRunIds : new Set(finalizedRunIds || []);
+  if (run && finalized.has(run)) return current;
+
+  const matchIndex = run
+    ? current.findLastIndex((item) => item?.role === "assistant" && item.runId === run)
+    : current.findLastIndex((item) => item?.role === "assistant" && item.streaming);
+  if (matchIndex >= 0) {
+    const matched = current[matchIndex];
+    if (!matched.streaming && run && finalized.has(run)) return current;
+    const next = current.slice();
+    next[matchIndex] = {
+      ...matched,
+      content: `${matched.content}${text}`,
+      streaming: true,
+      runId: matched.runId || run || undefined,
+    };
+    return next;
+  }
+
+  return [
+    ...current,
+    {
+      id: typeof createId === "function" ? createId("assistant") : `assistant-${Date.now()}`,
+      role: "assistant",
+      content: text,
+      streaming: true,
+      ...(run ? { runId: run } : {}),
+    },
+  ];
+}
+
+export function finalizeChatRuns(messages, runIds) {
+  const targets = new Set(
+    [...(runIds || [])].map((value) => String(value || "").trim()).filter(Boolean),
+  );
+  return (messages || []).map((item) => {
+    if (item?.role !== "assistant" || !item.streaming) return item;
+    if (targets.size && item.runId && !targets.has(item.runId)) return item;
+    return { ...item, streaming: false };
+  });
+}
+
 export function appendUniqueEvent(entries, entry, limit = 500) {
   if (entry.id && entries.some((item) => item.id === entry.id)) return entries;
   return [...entries, entry].slice(-limit);
@@ -250,6 +312,7 @@ export function transcriptFromTimeline(timelineEntries) {
     if (kind && kind !== "canonical_event") continue;
     const type = String(entry?.type ?? "");
     const detail = asObject(entry?.detail ?? entry?.payload ?? entry);
+    const runId = runtimeEventRunId(entry) || runtimeEventRunId(asObject(entry?.correlation));
     if (type === "session.created") {
       const content = String(detail.goal ?? "").trim();
       if (content) messages.push({ role: "user", content });
@@ -258,7 +321,7 @@ export function transcriptFromTimeline(timelineEntries) {
       if (content) messages.push({ role: "user", content });
     } else if (type === "model.output.completed") {
       const content = String(detail.output ?? detail.completed_output ?? "").trim();
-      if (content) messages.push({ role: "assistant", content });
+      if (content) messages.push({ role: "assistant", content, ...(runId ? { runId } : {}) });
     }
   }
   return messages;
