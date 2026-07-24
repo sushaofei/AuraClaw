@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from typing import Any
 
@@ -209,6 +210,45 @@ class HandsMcpClient:
             trusted_context=self._trusted_context(assignment),
         )
         return _unwrap(response)
+
+    async def load_skill_manifest(
+        self,
+        assignment: RuntimeAssignment,
+        *,
+        publisher: str,
+        name: str,
+        version: str,
+    ) -> dict[str, Any]:
+        contents = await self.load_skill_part(
+            assignment,
+            publisher=publisher,
+            name=name,
+            version=version,
+            path="manifest",
+        )
+        if len(contents) != 1 or not isinstance(contents[0].get("text"), str):
+            raise AuraClawError("Skill manifest Resource is not textual")
+        try:
+            value = json.loads(str(contents[0]["text"]))
+        except json.JSONDecodeError as exc:
+            raise AuraClawError("Skill manifest Resource is not valid JSON") from exc
+        if not isinstance(value, dict):
+            raise AuraClawError("Skill manifest Resource must contain an object")
+        return value
+
+    async def load_skill_part(
+        self,
+        assignment: RuntimeAssignment,
+        *,
+        publisher: str,
+        name: str,
+        version: str,
+        path: str,
+    ) -> list[dict[str, Any]]:
+        if not path or path.startswith("/") or ".." in path.split("/") or "\\" in path:
+            raise ValueError("Skill part path is unsafe")
+        uri = f"skill://{publisher}/{name}/{version}/{path}"
+        return await self.read_resource(assignment, uri)
 
     async def execute(
         self,

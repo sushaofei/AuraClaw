@@ -101,6 +101,7 @@ class ManagedResourceGateway:
         parsed = urlsplit(uri)
         if not parsed.scheme or parsed.scheme not in self._allowed_schemes:
             raise PolicyDeniedError("Resource URI scheme is not allowed")
+        self._registry.get_resource(trusted_context.tenant_id, uri)
         cache_key = (
             trusted_context.tenant_id,
             trusted_context.root_session_id,
@@ -113,10 +114,10 @@ class ManagedResourceGateway:
             return tuple(_with_cache_hit(content, True) for content in cached.contents)
 
         async with self._lock:
+            resource = self._registry.get_resource(trusted_context.tenant_id, uri)
             cached = self._cache.get(cache_key)
             if cached is not None and cached.expires_at > time.monotonic():
                 return tuple(_with_cache_hit(content, True) for content in cached.contents)
-            resource = self._registry.get_resource(trusted_context.tenant_id, uri)
             classification = str(
                 _auraclaw_meta(resource.descriptor.meta).get(
                     "classification", "internal"

@@ -94,6 +94,26 @@ def test_resource_gateway_enriches_scans_caches_and_invalidates() -> None:
 
         cached = await gateway.read(_trusted(), uri)
         assert cached[0].meta["auraclaw"]["cacheHit"] is True
+        assert registry.unregister_resource(uri) is True
+        with pytest.raises(KeyError):
+            await gateway.read(_trusted(), uri)
+        registry.register_resource(
+            RegisteredResource(
+                descriptor=McpResourceDescriptor(
+                    uri=uri,
+                    name="release",
+                    mime_type="text/plain",
+                ),
+                contents=(
+                    McpResourceContent(
+                        uri=uri,
+                        mime_type="text/plain",
+                        text="restored",
+                    ),
+                ),
+                tenant_ids=("tenant-a",),
+            )
+        )
         assert await gateway.invalidate(uri, tenant_id="tenant-a") == 1
         refreshed = await gateway.read(_trusted(), uri)
         assert refreshed[0].meta["auraclaw"]["cacheHit"] is False
