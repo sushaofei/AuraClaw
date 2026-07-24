@@ -18,7 +18,7 @@ from auraclaw.runtime.ports import ToolCall
 
 
 class HandsMcpClient:
-    """Agent Runtime MCP Client; it has no Tool handler or Sandbox dependency."""
+    """Runtime Capability Client with no Tool handler or Sandbox dependency."""
 
     def __init__(self, transport: McpTransport) -> None:
         self._transport = transport
@@ -62,12 +62,153 @@ class HandsMcpClient:
         return result
 
     async def list_tools(self, assignment: RuntimeAssignment) -> list[dict[str, Any]]:
+        tools: list[dict[str, Any]] = []
+        cursor: str | None = None
+        while True:
+            page, cursor = await self.list_tools_page(assignment, cursor=cursor)
+            tools.extend(page)
+            if cursor is None:
+                return tools
+
+    async def list_tools_page(
+        self,
+        assignment: RuntimeAssignment,
+        *,
+        cursor: str | None = None,
+    ) -> tuple[list[dict[str, Any]], str | None]:
         await self._ensure_initialized(assignment)
         response = await self._transport.send(
-            McpJsonRpcRequest(id=self._next_id(), method="tools/list"),
+            McpJsonRpcRequest(
+                id=self._next_id(),
+                method="tools/list",
+                params=_cursor_params(cursor),
+            ),
             trusted_context=self._trusted_context(assignment),
         )
-        return list(_unwrap(response).get("tools", []))
+        return _unwrap_page(response, "tools")
+
+    async def list_resources(
+        self, assignment: RuntimeAssignment
+    ) -> list[dict[str, Any]]:
+        resources: list[dict[str, Any]] = []
+        cursor: str | None = None
+        while True:
+            page, cursor = await self.list_resources_page(assignment, cursor=cursor)
+            resources.extend(page)
+            if cursor is None:
+                return resources
+
+    async def list_resources_page(
+        self,
+        assignment: RuntimeAssignment,
+        *,
+        cursor: str | None = None,
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        await self._ensure_initialized(assignment)
+        response = await self._transport.send(
+            McpJsonRpcRequest(
+                id=self._next_id(),
+                method="resources/list",
+                params=_cursor_params(cursor),
+            ),
+            trusted_context=self._trusted_context(assignment),
+        )
+        return _unwrap_page(response, "resources")
+
+    async def list_resource_templates(
+        self, assignment: RuntimeAssignment
+    ) -> list[dict[str, Any]]:
+        templates: list[dict[str, Any]] = []
+        cursor: str | None = None
+        while True:
+            page, cursor = await self.list_resource_templates_page(
+                assignment, cursor=cursor
+            )
+            templates.extend(page)
+            if cursor is None:
+                return templates
+
+    async def list_resource_templates_page(
+        self,
+        assignment: RuntimeAssignment,
+        *,
+        cursor: str | None = None,
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        await self._ensure_initialized(assignment)
+        response = await self._transport.send(
+            McpJsonRpcRequest(
+                id=self._next_id(),
+                method="resources/templates/list",
+                params=_cursor_params(cursor),
+            ),
+            trusted_context=self._trusted_context(assignment),
+        )
+        return _unwrap_page(response, "resourceTemplates")
+
+    async def read_resource(
+        self,
+        assignment: RuntimeAssignment,
+        uri: str,
+    ) -> list[dict[str, Any]]:
+        await self._ensure_initialized(assignment)
+        response = await self._transport.send(
+            McpJsonRpcRequest(
+                id=self._next_id(),
+                method="resources/read",
+                params={"uri": uri},
+            ),
+            trusted_context=self._trusted_context(assignment),
+        )
+        return list(_unwrap(response).get("contents", []))
+
+    async def list_prompts(
+        self, assignment: RuntimeAssignment
+    ) -> list[dict[str, Any]]:
+        prompts: list[dict[str, Any]] = []
+        cursor: str | None = None
+        while True:
+            page, cursor = await self.list_prompts_page(assignment, cursor=cursor)
+            prompts.extend(page)
+            if cursor is None:
+                return prompts
+
+    async def list_prompts_page(
+        self,
+        assignment: RuntimeAssignment,
+        *,
+        cursor: str | None = None,
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        await self._ensure_initialized(assignment)
+        response = await self._transport.send(
+            McpJsonRpcRequest(
+                id=self._next_id(),
+                method="prompts/list",
+                params=_cursor_params(cursor),
+            ),
+            trusted_context=self._trusted_context(assignment),
+        )
+        return _unwrap_page(response, "prompts")
+
+    async def get_prompt(
+        self,
+        assignment: RuntimeAssignment,
+        name: str,
+        *,
+        arguments: Mapping[str, str] | None = None,
+    ) -> dict[str, Any]:
+        await self._ensure_initialized(assignment)
+        response = await self._transport.send(
+            McpJsonRpcRequest(
+                id=self._next_id(),
+                method="prompts/get",
+                params={
+                    "name": name,
+                    "arguments": dict(arguments or {}),
+                },
+            ),
+            trusted_context=self._trusted_context(assignment),
+        )
+        return _unwrap(response)
 
     async def execute(
         self,
@@ -163,3 +304,17 @@ def _unwrap(response: McpJsonRpcResponse) -> dict[str, Any]:
             detail=str(response.error.data),
         )
     return dict(response.result or {})
+
+
+def _unwrap_page(
+    response: McpJsonRpcResponse,
+    key: str,
+) -> tuple[list[dict[str, Any]], str | None]:
+    result = _unwrap(response)
+    raw_cursor = result.get("nextCursor")
+    cursor = str(raw_cursor) if raw_cursor is not None else None
+    return list(result.get(key, [])), cursor
+
+
+def _cursor_params(cursor: str | None) -> dict[str, Any]:
+    return {"cursor": cursor} if cursor is not None else {}
