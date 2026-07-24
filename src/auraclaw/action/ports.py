@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Protocol
 
+from auraclaw.contracts.capabilities import CapabilityDescriptor, McpServerDefinition
 from auraclaw.contracts.tools import (
     ApprovalRecord,
     ArtifactRef,
@@ -102,3 +103,21 @@ class CredentialInvoker(Protocol):
     ) -> Any: ...
 
     def redact(self, value: Any) -> Any: ...
+
+
+class CapabilityCatalogStore(Protocol):
+    async def upsert_server(self, server: McpServerDefinition) -> None: ...
+
+    async def get_server(self, server_id: str) -> McpServerDefinition | None: ...
+
+    async def list_servers(self, tenant_id: str) -> tuple[McpServerDefinition, ...]: ...
+
+    async def replace_capabilities(
+        self,
+        server_id: str,
+        capabilities: tuple[CapabilityDescriptor, ...],
+    ) -> None: ...
+
+    async def list_capabilities(
+        self, tenant_id: str
+    ) -> tuple[CapabilityDescriptor, ...]: ...
