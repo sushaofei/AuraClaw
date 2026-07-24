@@ -50,6 +50,11 @@ KNOWN_TASK_EVENTS = {
     "review.completed",
     "join.completed",
     "parent.result.received",
+    "skill.activated",
+    "skill.completed",
+    "skill.failed",
+    "skill.cancelled",
+    "context.resource.used",
     "delivery.attempting",
     "delivery.retrying",
     "delivery.succeeded",
@@ -140,6 +145,7 @@ class InMemoryTaskProjection:
             "delivery_id": None,
             "delivery_attempt_count": 0,
             "delivery_response_summary": None,
+            "skill_activations": [],
             "projection_version": 0,
         }
 
@@ -323,6 +329,42 @@ class InMemoryTaskProjection:
             )
         elif event.type == "session.closed":
             view.update(status=SessionStatus.CLOSED.value, current_stage="closed")
+        elif event.type == "skill.activated":
+            activations = list(view.get("skill_activations", []))
+            activations.append(
+                {
+                    "skill_activation_id": payload["skill_activation_id"],
+                    "activation_key": payload["activation_key"],
+                    "skill_name": payload["skill_name"],
+                    "skill_version": payload["skill_version"],
+                    "package_digest": payload["package_digest"],
+                    "policy_version": payload["policy_version"],
+                    "status": "active",
+                }
+            )
+            view["skill_activations"] = activations
+        elif event.type in {
+            "skill.completed",
+            "skill.failed",
+            "skill.cancelled",
+        }:
+            activations = [
+                {
+                    **activation,
+                    **(
+                        {
+                            "status": event.type.removeprefix("skill."),
+                            "artifact_refs": payload.get("artifact_refs", []),
+                            "output_summary": payload.get("output_summary"),
+                        }
+                        if activation.get("skill_activation_id")
+                        == payload["skill_activation_id"]
+                        else {}
+                    ),
+                }
+                for activation in view.get("skill_activations", [])
+            ]
+            view["skill_activations"] = activations
         elif event.type.startswith("delivery."):
             if event.run_id != view.get("run_id"):
                 return
