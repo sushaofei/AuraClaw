@@ -309,20 +309,47 @@ Gateway 的短期 Replay Buffer，不为每个浏览器创建 Kafka Consumer。
 Event 回写，并通过 Task/Result Query 的 `delivery_status`、`delivery_id`、attempt count 与响应
 摘要查询。Sink 只保存 `credential_ref`，Job 不保存 Secret。
 
-## PostgreSQL
+## 主存储（MySQL / PostgreSQL）
 
 存储配置支持两种形式：
 
-- `AURACLAW_DATABASE_URL=postgresql+asyncpg://...`
+- `AURACLAW_DATABASE_URL=mysql+aiomysql://...` 或 `postgresql+asyncpg://...`
 - `DB_HOST`、`DB_PORT`、`DB_USER`、`DB_PWD`、`DB_NAME`
 
-当存在完整 `DB_*` 配置时默认启用 PostgreSQL；可设置
-`AURACLAW_STORAGE_BACKEND=memory` 强制使用开发内存适配器。首次启动前，按顺序应用：
+方言选择：
 
-开发和生产使用各自配置文件中的 `DB_NAME`，应用不根据环境标签切换数据库。
+- `AURACLAW_DB_DIALECT=mysql|postgres`（默认 **mysql**）
+- `AURACLAW_STORAGE_BACKEND=auto|memory|mysql|postgres`
+
+当存在完整 `DB_*` 且 `storage_backend=auto` 时启用 SQL 存储，方言默认 MySQL。
+继续使用 PostgreSQL 时请显式设置 `AURACLAW_STORAGE_BACKEND=postgres`（或
+`AURACLAW_DB_DIALECT=postgres` 且 URL scheme 为 postgresql）。
+`MYSQL_DB_*` 仅用于 Model Skill 外部只读源，与主存储无关——切主库时改 `DB_*` /
+`AURACLAW_DATABASE_URL`，不要改 `MYSQL_DB_*`。密码中的 `#`、`,` 由
+`Settings.resolved_database_url` 自动 URL 编码。
+
+迁移：
+
+```bash
+# MySQL（默认目录 migrations/mysql）
+uv run auraclaw migrate up
+
+# PostgreSQL
+AURACLAW_STORAGE_BACKEND=postgres uv run auraclaw migrate up --directory migrations
+```
+
+首次启动前按版本顺序应用 migrations。开发和生产使用各自配置文件中的 `DB_NAME`。
+
+PostgreSQL 脚本在 `migrations/`；MySQL 对照脚本在 `migrations/mysql/`（表名使用
+`schema_table` 前缀，例如 `session_core_canonical_event`）。生产角色授权：
+
+- MySQL：`deploy/mysql/roles.sql`（意图文档）；托管实例若拒绝通配 GRANT，使用
+  `uv run python scripts/apply_mysql_roles.py` 按前缀展开到具体表
+- PostgreSQL：`deploy/postgres/roles.sql`
 
 ```text
 migrations/0001_initial.sql
+migrations/mysql/0001_initial.sql
 migrations/0002_m1_fact_query.sql
 migrations/0003_m2_managed_runtime.sql
 migrations/0004_m3_tool_artifact_approval.sql

@@ -15,7 +15,11 @@ Docker Compose 不提供 Kubernetes HPA、PDB 或 NetworkPolicy。本方案以�
 
 - Docker Engine 与 Compose v2；
 - 已推送且使用 digest 或不可变 Git SHA 标记的 AuraClaw 镜像；
-- PostgreSQL 已执行 `deploy/postgres/roles.sql`，各服务使用独立角色 DSN；
+- 主存储已执行角色授权：MySQL 用 `deploy/mysql/roles.sql`，PostgreSQL 用
+  `deploy/postgres/roles.sql`；各服务注入独立角色 DSN（`mysql+aiomysql://` 或
+  `postgresql://`）；
+- Compose `migrate` 默认目录为 `/app/migrations/mysql`（目标 `0016`）。PostgreSQL
+  部署需设置 `AURACLAW_MIGRATIONS_DIRECTORY=/app/migrations`；
 - Kafka/Replay Router、SeaweedFS、Vault 和模型出口可从 `auraclaw-platform` 网络访问；
 - 部署机存在被 `.gitignore` 排除的 `.env.production`，变量名参考 `.env.example`；
 - Secret 不写入 Compose、镜像、命令参数或日志。
@@ -45,26 +49,30 @@ docker compose --env-file .env.production \
 
 docker compose --env-file .env.production \
   -f compose.production.yml run --rm migrate migrate status \
-  --directory /app/migrations
+  --directory /app/migrations/mysql
 
 docker compose --env-file .env.production \
   -f compose.production.yml run --rm migrate migrate up \
-  --target 0014 --directory /app/migrations
+  --target 0016 --directory /app/migrations/mysql
 ```
 
-迁移进程只挂载 migration admin DSN。它使用 PostgreSQL advisory lock 防止并发迁移，使用
-checksum ledger 阻止已执行文件漂移；重复运行是幂等的。当前 `0001`–`0014` 均为 expand
-迁移。滚动窗口内不得删除 N-1 仍读取的列、事件字段或内部 API；contract 迁移只能在旧版本
-实例归零且兼容窗口结束后，以后续显式迁移执行。
+迁移进程只挂载 migration admin DSN。MySQL 使用 `GET_LOCK`、PostgreSQL 使用 advisory lock
+防止并发迁移，checksum ledger 阻止已执行文件漂移；重复运行是幂等的。当前 `0001`–`0016`
+均为 expand 迁移。滚动窗口内不得删除 N-1 仍读取的列、事件字段或内部 API；contract 迁移
+只能在旧版本实例归零且兼容窗口结束后，以后续显式迁移执行。
 
 Secret 生成目录必须与 `.env.production` 的 `AURACLAW_SECRET_DIR` 一致；目录权限为 `0700`，
-27 个文件权限为 `0600`，文件内容不会输出。既有数据库如果已由旧流程完整执行到 `0014`、但
+27 个文件权限为 `0600`，文件内容不会输出。既有数据库如果已由旧流程完整执行到目标版本、但
 尚无 migration ledger，先确认 `status` 全部显示 pending，再且仅再执行一次：
 
 ```bash
+# MySQL（默认）
 docker compose --env-file .env.production -f compose.production.yml \
   --profile migrate run --rm migrate migrate baseline \
-  --target 0014 --confirm-existing-schema --directory /app/migrations
+  --target 0016 --confirm-existing-schema --directory /app/migrations/mysql
+
+# PostgreSQL：把 directory 换成 /app/migrations，并设置
+# AURACLAW_MIGRATIONS_DIRECTORY=/app/migrations
 ```
 
 全新库、未知来源库、部分迁移库或 checksum 不一致时禁止 baseline。

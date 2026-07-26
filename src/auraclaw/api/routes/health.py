@@ -25,7 +25,7 @@ async def readiness(request: Request) -> JSONResponse:
                 "storage": getattr(
                     request.app.state,
                     "storage_label",
-                    "postgres" if settings.postgres_enabled else "memory",
+                    settings.storage_label,
                 ),
             },
         )
@@ -44,7 +44,7 @@ async def readiness(request: Request) -> JSONResponse:
         status_code=200 if ready else 503,
         content={
             "status": "ready" if ready else "degraded",
-            "storage": "postgres" if settings.postgres_enabled else "memory",
+            "storage": settings.storage_label,
             "runtime_events": "kafka" if settings.kafka_enabled else "memory",
             "runtime_event_bus_ready": runtime_events_ready,
             "runtime_event_producer_ready": bool(

@@ -80,7 +80,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.runtime_worker_ready = True
         logging.getLogger(__name__).info(
             "runtime worker started (storage=%s, runtime_events=%s, model_provider=%s)",
-            "postgres" if settings.postgres_enabled else "memory",
+            settings.storage_label,
             "kafka" if settings.kafka_enabled else "memory",
             settings.model_provider,
         )
