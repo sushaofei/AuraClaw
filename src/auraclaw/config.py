@@ -124,11 +124,12 @@ class Settings(BaseSettings):
     artifact_base_url: str = "http://127.0.0.1:8009"
     delivery_base_url: str = "http://127.0.0.1:8011"
     log_level: str = "INFO"
-    storage_backend: Literal["auto", "memory", "postgres"] = "auto"
-    database_url: str = "postgresql+asyncpg://auraclaw:auraclaw@localhost:5432/auraclaw"
+    storage_backend: Literal["auto", "memory", "postgres", "mysql"] = "auto"
+    db_dialect: Literal["mysql", "postgres"] = "mysql"
+    database_url: str = "mysql+aiomysql://auraclaw:auraclaw@localhost:3306/auraclaw"
     migration_database_url: SecretStr | None = None
     db_host: str | None = Field(default=None, validation_alias="DB_HOST")
-    db_port: int = Field(default=5432, validation_alias="DB_PORT")
+    db_port: int = Field(default=3306, validation_alias="DB_PORT")
     db_user: str | None = Field(default=None, validation_alias="DB_USER")
     db_password: str | None = Field(default=None, validation_alias="DB_PWD")
     db_name: str | None = Field(default=None, validation_alias="DB_NAME")
@@ -198,13 +199,33 @@ class Settings(BaseSettings):
         return self
 
     @property
+    def resolved_db_dialect(self) -> Literal["mysql", "postgres"]:
+        if self.storage_backend == "postgres":
+            return "postgres"
+        if self.storage_backend == "mysql":
+            return "mysql"
+        url = (self.database_url or "").lower()
+        if url.startswith("postgresql:") or url.startswith("postgres:") or "+asyncpg" in url:
+            return "postgres"
+        if url.startswith("mysql:") or "+aiomysql" in url or "+asyncmy" in url or "+pymysql" in url:
+            return "mysql"
+        return self.db_dialect
+
+    @property
     def resolved_database_url(self) -> str:
         if self.db_host and self.db_user and self.db_password is not None and self.db_name:
             user = quote(self.db_user, safe="")
             password = quote(self.db_password, safe="")
             database = quote(self.db_name, safe="")
+            dialect = self.resolved_db_dialect
+            if dialect == "mysql":
+                return (
+                    f"mysql+aiomysql://{user}:{password}"
+                    f"@{self.db_host}:{self.db_port}/{database}"
+                )
             return (
-                f"postgresql+asyncpg://{user}:{password}@{self.db_host}:{self.db_port}/{database}"
+                f"postgresql+asyncpg://{user}:{password}"
+                f"@{self.db_host}:{self.db_port}/{database}"
             )
         return self.database_url
 
@@ -215,12 +236,27 @@ class Settings(BaseSettings):
         return self.resolved_database_url
 
     @property
-    def postgres_enabled(self) -> bool:
+    def sql_storage_enabled(self) -> bool:
         if self.storage_backend == "memory":
             return False
-        if self.storage_backend == "postgres":
+        if self.storage_backend in {"postgres", "mysql"}:
             return True
         return bool(self.db_host and self.db_user and self.db_name)
+
+    @property
+    def postgres_enabled(self) -> bool:
+        """True when primary SQL storage is PostgreSQL (backward-compatible name)."""
+        return self.sql_storage_enabled and self.resolved_db_dialect == "postgres"
+
+    @property
+    def mysql_enabled(self) -> bool:
+        return self.sql_storage_enabled and self.resolved_db_dialect == "mysql"
+
+    @property
+    def storage_label(self) -> str:
+        if not self.sql_storage_enabled:
+            return "memory"
+        return self.resolved_db_dialect
 
     @property
     def kafka_enabled(self) -> bool:

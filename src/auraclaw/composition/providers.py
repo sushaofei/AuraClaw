@@ -54,7 +54,7 @@ RuntimeReplayStore = ReplayRuntimeEventBus | PostgresRuntimeEventStore
 @lru_cache
 def get_event_store() -> Store:
     settings = get_settings()
-    if settings.postgres_enabled:
+    if settings.sql_storage_enabled:
         return PostgresEventStore(settings.resolved_database_url)
     return InMemoryEventStore()
 
@@ -62,7 +62,7 @@ def get_event_store() -> Store:
 @lru_cache
 def get_task_projection() -> Projection:
     settings = get_settings()
-    if settings.postgres_enabled:
+    if settings.sql_storage_enabled:
         return PostgresTaskProjection(settings.resolved_database_url)
     return InMemoryTaskProjection()
 
@@ -70,7 +70,7 @@ def get_task_projection() -> Projection:
 @lru_cache
 def get_approval_projection() -> ApprovalProjection:
     settings = get_settings()
-    if settings.postgres_enabled:
+    if settings.sql_storage_enabled:
         return PostgresApprovalProjection(settings.resolved_database_url)
     return InMemoryApprovalProjection()
 
@@ -78,7 +78,7 @@ def get_approval_projection() -> ApprovalProjection:
 @lru_cache
 def get_collaboration_projection() -> CollaborationProjection:
     settings = get_settings()
-    if settings.postgres_enabled:
+    if settings.sql_storage_enabled:
         return PostgresCollaborationProjection(settings.resolved_database_url)
     return InMemoryCollaborationProjection()
 
@@ -122,7 +122,7 @@ def get_task_query_service() -> TaskQueryService:
 @lru_cache
 def get_runtime_replay_bus() -> RuntimeReplayStore:
     settings = get_settings()
-    if settings.postgres_enabled:
+    if settings.sql_storage_enabled:
         return PostgresRuntimeEventStore(
             settings.resolved_database_url,
             retention_events=settings.runtime_event_retention_events,
@@ -208,7 +208,7 @@ def get_model_gateway() -> ModelGateway:
 @lru_cache
 def get_control_store() -> ControlStore:
     settings = get_settings()
-    if settings.postgres_enabled:
+    if settings.sql_storage_enabled:
         return PostgresControlStateStore(settings.resolved_database_url)
     return InMemoryControlStateStore()
 
@@ -255,7 +255,7 @@ def build_runtime_worker() -> RuntimeWorker:
 @lru_cache
 def get_observability_store() -> ObservabilityStore:
     settings = get_settings()
-    if settings.postgres_enabled:
+    if settings.sql_storage_enabled:
         return PostgresObservabilityStore(settings.resolved_database_url)
     return InMemoryObservabilityStore()
 

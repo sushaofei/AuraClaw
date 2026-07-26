@@ -11,7 +11,8 @@ from auraclaw.config import get_settings
 from auraclaw.contracts.internal import ServiceIdentity
 from auraclaw.infrastructure.clients.admin import RemoteAdminClient
 from auraclaw.infrastructure.persistence.migration_runner import (
-    PostgresMigrationRunner,
+    create_migration_runner,
+    default_migrations_directory,
 )
 from auraclaw.infrastructure.persistence.postgres_event_store import PostgresEventStore
 from auraclaw.infrastructure.projection.postgres_task_store import PostgresTaskProjection
@@ -39,8 +40,8 @@ async def _run_projection_command(
         finally:
             await client.aclose()
         return
-    if not settings.postgres_enabled:
-        raise SystemExit("projection maintenance requires PostgreSQL storage configuration")
+    if not settings.sql_storage_enabled:
+        raise SystemExit("projection maintenance requires SQL storage configuration")
     event_store = PostgresEventStore(settings.resolved_database_url)
     projector = PostgresTaskProjection(settings.resolved_database_url)
     try:
@@ -125,7 +126,7 @@ async def _run_migration_command(
     action: str,
     *,
     target: str | None,
-    directory: str,
+    directory: str | None,
     confirm_existing_schema: bool = False,
 ) -> None:
     settings = get_settings()
@@ -136,9 +137,12 @@ async def _run_migration_command(
         raise SystemExit(
             "production migration requires AURACLAW_MIGRATION_DATABASE_URL"
         )
-    runner = PostgresMigrationRunner(
+    migration_dir = Path(directory) if directory else default_migrations_directory(
+        settings.resolved_db_dialect if settings.sql_storage_enabled else settings.db_dialect
+    )
+    runner = create_migration_runner(
         settings.resolved_migration_database_url,
-        Path(directory),
+        migration_dir,
     )
     if action == "status":
         for item in await runner.status():
@@ -179,7 +183,11 @@ def build_parser() -> argparse.ArgumentParser:
     migrate = subcommands.add_parser("migrate")
     migrate.add_argument("action", choices=("status", "up", "baseline"))
     migrate.add_argument("--target")
-    migrate.add_argument("--directory", default="migrations")
+    migrate.add_argument(
+        "--directory",
+        default=None,
+        help="Migration directory (default: migrations/ or migrations/mysql/ by dialect)",
+    )
     migrate.add_argument("--confirm-existing-schema", action="store_true")
     for command in SERVICE_BY_COMMAND:
         if command == "projection":

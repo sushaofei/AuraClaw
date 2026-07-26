@@ -71,6 +71,8 @@ class PostgresControlStateStore(_LazyPool):
         limit: int = 1,
         claim_ttl: timedelta = timedelta(seconds=30),
     ) -> list[ClaimedRunnable]:
+        if self.dialect == "mysql":
+            return await self._claim_mysql(worker_id, limit=limit, claim_ttl=claim_ttl)
         pool = await self.pool()
         rows = await pool.fetch(
             """
@@ -103,6 +105,58 @@ class PostgresControlStateStore(_LazyPool):
             for row in rows
         ]
 
+    async def _claim_mysql(
+        self,
+        worker_id: str,
+        *,
+        limit: int,
+        claim_ttl: timedelta,
+    ) -> list[ClaimedRunnable]:
+        pool = await self.pool()
+        token = uuid4().hex
+        claimed: list[ClaimedRunnable] = []
+        async with pool.acquire() as connection, connection.transaction():
+            rows = await connection.fetch(
+                """
+                SELECT task_id FROM control.runnable_item
+                WHERE available_at <= now()
+                  AND (status = 'queued'
+                       OR (status = 'claimed' AND claim_expires_at <= now()))
+                ORDER BY priority DESC, available_at, task_id
+                FOR UPDATE SKIP LOCKED LIMIT $1
+                """,
+                limit,
+            )
+            for row in rows:
+                task_id = str(row["task_id"])
+                await connection.execute(
+                    """
+                    UPDATE control.runnable_item
+                    SET status='claimed', claimed_by=$2, claim_token=$3,
+                        claim_expires_at=now() + $4, attempt=attempt + 1
+                    WHERE task_id=$1
+                    """,
+                    task_id,
+                    worker_id,
+                    token,
+                    claim_ttl,
+                )
+                refreshed = await connection.fetchrow(
+                    "SELECT * FROM control.runnable_item WHERE task_id=$1",
+                    task_id,
+                )
+                if refreshed is None:
+                    continue
+                claimed.append(
+                    ClaimedRunnable(
+                        item=self._item_from_row(refreshed),
+                        claimed_by=worker_id,
+                        claim_token=str(refreshed["claim_token"]),
+                        claim_expires_at=refreshed["claim_expires_at"],
+                    )
+                )
+        return claimed
+
     async def reschedule(
         self,
         task_id: str,
@@ -133,6 +187,8 @@ class PostgresControlStateStore(_LazyPool):
     async def acquire_lease(
         self, resource_id: str, owner: str, *, ttl: timedelta
     ) -> RuntimeLease | None:
+        if self.dialect == "mysql":
+            return await self._acquire_lease_mysql(resource_id, owner, ttl=ttl)
         pool = await self.pool()
         lease_id = f"lea_{uuid4().hex}"
         row = await pool.fetchrow(
@@ -154,6 +210,57 @@ class PostgresControlStateStore(_LazyPool):
             owner,
             ttl,
         )
+        return self._lease_from_row(row) if row is not None else None
+
+    async def _acquire_lease_mysql(
+        self, resource_id: str, owner: str, *, ttl: timedelta
+    ) -> RuntimeLease | None:
+        pool = await self.pool()
+        lease_id = f"lea_{uuid4().hex}"
+        async with pool.acquire() as connection, connection.transaction():
+            existing = await connection.fetchrow(
+                """SELECT resource_id, expires_at FROM control.runtime_lease
+                WHERE resource_id=$1 FOR UPDATE""",
+                resource_id,
+            )
+            if existing is None:
+                await connection.execute(
+                    """
+                    INSERT INTO control.runtime_lease
+                      (resource_id, lease_id, lease_owner, expires_at,
+                       fencing_token, lease_version)
+                    VALUES ($1,$2,$3,now() + $4,1,1)
+                    """,
+                    resource_id,
+                    lease_id,
+                    owner,
+                    ttl,
+                )
+            else:
+                expired = await connection.fetchval(
+                    """SELECT EXISTS(SELECT 1 FROM control.runtime_lease
+                    WHERE resource_id=$1 AND expires_at <= now())""",
+                    resource_id,
+                )
+                if not expired:
+                    return None
+                await connection.execute(
+                    """
+                    UPDATE control.runtime_lease
+                    SET lease_id=$2, lease_owner=$3, expires_at=now() + $4,
+                        fencing_token=fencing_token + 1,
+                        lease_version=lease_version + 1
+                    WHERE resource_id=$1
+                    """,
+                    resource_id,
+                    lease_id,
+                    owner,
+                    ttl,
+                )
+            row = await connection.fetchrow(
+                "SELECT * FROM control.runtime_lease WHERE resource_id=$1",
+                resource_id,
+            )
         return self._lease_from_row(row) if row is not None else None
 
     async def renew_lease(self, lease: RuntimeLease, *, ttl: timedelta) -> RuntimeLease:
@@ -234,37 +341,76 @@ class PostgresControlStateStore(_LazyPool):
             )
             if int(active) >= int(capacity):
                 return False
-            inserted = await connection.fetchval(
-                """
-                INSERT INTO control.assignment
-                  (task_id, tenant_id, root_session_id, session_id, run_id, runtime_id,
-                   lease_id, assignment_status, assigned_at, deadline, fencing_token,
-                   role, resource_profile)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,'assigned',now(),$8,$9,$10,$11::jsonb)
-                ON CONFLICT (task_id) DO UPDATE SET
-                  runtime_id=EXCLUDED.runtime_id, lease_id=EXCLUDED.lease_id,
-                  assignment_status='assigned', assigned_at=now(), started_at=NULL,
-                  completed_at=NULL, deadline=EXCLUDED.deadline,
-                  fencing_token=EXCLUDED.fencing_token, role=EXCLUDED.role,
-                  resource_profile=EXCLUDED.resource_profile
-                WHERE control.assignment.assignment_status
-                  IN ('expired','completed','failed')
-                RETURNING task_id
-                """,
-                task_id,
-                assignment.tenant_id,
-                assignment.root_session_id,
-                assignment.session_id,
-                assignment.run_id,
-                assignment.runtime_id,
-                assignment.lease_id,
-                assignment.deadline,
-                assignment.fencing_token,
-                assignment.role,
-                _json(assignment.resource_profile),
-            )
-            if inserted is None:
-                return False
+            if self.dialect == "mysql":
+                existing_status = await connection.fetchval(
+                    """SELECT assignment_status FROM control.assignment
+                    WHERE task_id=$1 FOR UPDATE""",
+                    task_id,
+                )
+                if existing_status is not None and str(existing_status) not in {
+                    "expired",
+                    "completed",
+                    "failed",
+                }:
+                    return False
+                await connection.execute(
+                    """
+                    INSERT INTO control.assignment
+                      (task_id, tenant_id, root_session_id, session_id, run_id, runtime_id,
+                       lease_id, assignment_status, assigned_at, deadline, fencing_token,
+                       role, resource_profile)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,'assigned',now(),$8,$9,$10,$11::jsonb)
+                    ON CONFLICT (task_id) DO UPDATE SET
+                      runtime_id=EXCLUDED.runtime_id, lease_id=EXCLUDED.lease_id,
+                      assignment_status='assigned', assigned_at=now(), started_at=NULL,
+                      completed_at=NULL, deadline=EXCLUDED.deadline,
+                      fencing_token=EXCLUDED.fencing_token, role=EXCLUDED.role,
+                      resource_profile=EXCLUDED.resource_profile
+                    """,
+                    task_id,
+                    assignment.tenant_id,
+                    assignment.root_session_id,
+                    assignment.session_id,
+                    assignment.run_id,
+                    assignment.runtime_id,
+                    assignment.lease_id,
+                    assignment.deadline,
+                    assignment.fencing_token,
+                    assignment.role,
+                    _json(assignment.resource_profile),
+                )
+            else:
+                inserted = await connection.fetchval(
+                    """
+                    INSERT INTO control.assignment
+                      (task_id, tenant_id, root_session_id, session_id, run_id, runtime_id,
+                       lease_id, assignment_status, assigned_at, deadline, fencing_token,
+                       role, resource_profile)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,'assigned',now(),$8,$9,$10,$11::jsonb)
+                    ON CONFLICT (task_id) DO UPDATE SET
+                      runtime_id=EXCLUDED.runtime_id, lease_id=EXCLUDED.lease_id,
+                      assignment_status='assigned', assigned_at=now(), started_at=NULL,
+                      completed_at=NULL, deadline=EXCLUDED.deadline,
+                      fencing_token=EXCLUDED.fencing_token, role=EXCLUDED.role,
+                      resource_profile=EXCLUDED.resource_profile
+                    WHERE control.assignment.assignment_status
+                      IN ('expired','completed','failed')
+                    RETURNING task_id
+                    """,
+                    task_id,
+                    assignment.tenant_id,
+                    assignment.root_session_id,
+                    assignment.session_id,
+                    assignment.run_id,
+                    assignment.runtime_id,
+                    assignment.lease_id,
+                    assignment.deadline,
+                    assignment.fencing_token,
+                    assignment.role,
+                    _json(assignment.resource_profile),
+                )
+                if inserted is None:
+                    return False
             await connection.execute(
                 """UPDATE control.runnable_item SET status='assigned',
                 claim_token=NULL,claim_expires_at=NULL WHERE task_id=$1""",
@@ -327,6 +473,8 @@ class PostgresControlStateStore(_LazyPool):
     async def claim_assignments(
         self, runtime_id: str, role: str, *, limit: int = 1
     ) -> list[ClaimedAssignment]:
+        if self.dialect == "mysql":
+            return await self._claim_assignments_mysql(runtime_id, role, limit=limit)
         pool = await self.pool()
         rows = await pool.fetch(
             """WITH candidates AS (
@@ -359,20 +507,75 @@ class PostgresControlStateStore(_LazyPool):
                 )
         return claimed
 
+    async def _claim_assignments_mysql(
+        self, runtime_id: str, role: str, *, limit: int
+    ) -> list[ClaimedAssignment]:
+        pool = await self.pool()
+        claimed: list[ClaimedAssignment] = []
+        task_ids: list[str] = []
+        async with pool.acquire() as connection, connection.transaction():
+            rows = await connection.fetch(
+                """
+                SELECT task_id FROM control.assignment
+                WHERE runtime_id=$1 AND role=$2 AND assignment_status='assigned'
+                ORDER BY assigned_at, task_id
+                FOR UPDATE SKIP LOCKED LIMIT $3
+                """,
+                runtime_id,
+                role,
+                limit,
+            )
+            task_ids = [str(row["task_id"]) for row in rows]
+            for task_id in task_ids:
+                await connection.execute(
+                    """
+                    UPDATE control.assignment
+                    SET assignment_status='running',
+                        started_at=COALESCE(started_at, now())
+                    WHERE task_id=$1
+                    """,
+                    task_id,
+                )
+        for task_id in task_ids:
+            assignment = await self.get_assignment(task_id)
+            if assignment is None:
+                continue
+            lease_expires_at = await pool.fetchval(
+                "SELECT expires_at FROM control.runtime_lease WHERE lease_id=$1",
+                assignment.lease_id,
+            )
+            assignment = replace(assignment, lease_expires_at=lease_expires_at)
+            claimed.append(ClaimedAssignment(task_id=task_id, assignment=assignment))
+        return claimed
+
     async def finish_assignment(self, task_id: str, outcome: str) -> None:
         pool = await self.pool()
         async with pool.acquire() as connection, connection.transaction():
             if outcome in {"completed", "failed", "cancelled"}:
-                await connection.execute(
-                    """DELETE FROM control.runtime_lease AS lease
-                    USING control.assignment AS assignment
-                    WHERE assignment.task_id=$1
-                      AND lease.resource_id=(
-                        'session:' || assignment.tenant_id || ':' || assignment.session_id
-                      )
-                      AND lease.lease_id=assignment.lease_id""",
-                    task_id,
-                )
+                if self.dialect == "mysql":
+                    await connection.execute(
+                        """
+                        DELETE lease FROM control.runtime_lease AS lease
+                        INNER JOIN control.assignment AS assignment
+                          ON lease.lease_id=assignment.lease_id
+                         AND lease.resource_id=CONCAT(
+                               'session:', assignment.tenant_id, ':', assignment.session_id
+                             )
+                        WHERE assignment.task_id=$1
+                        """,
+                        task_id,
+                    )
+                else:
+                    await connection.execute(
+                        """DELETE FROM control.runtime_lease AS lease
+                        USING control.assignment AS assignment
+                        WHERE assignment.task_id=$1
+                          AND lease.resource_id=(
+                            'session:' || assignment.tenant_id || ':' || assignment.session_id
+                          )
+                          AND lease.lease_id=assignment.lease_id""",
+                        task_id,
+                    )
             await connection.execute(
                 """UPDATE control.assignment SET assignment_status=$2, completed_at=now()
                 WHERE task_id=$1""",
@@ -425,6 +628,8 @@ class PostgresControlStateStore(_LazyPool):
     async def reserve_capacity(self, scope: str, amount: int, *, limit: int) -> bool:
         if amount < 0:
             return False
+        if self.dialect == "mysql":
+            return await self._reserve_capacity_mysql(scope, amount, limit=limit)
         pool = await self.pool()
         row = await pool.fetchval(
             """
@@ -441,6 +646,37 @@ class PostgresControlStateStore(_LazyPool):
         )
         return row is not None and int(row) <= limit
 
+    async def _reserve_capacity_mysql(
+        self, scope: str, amount: int, *, limit: int
+    ) -> bool:
+        pool = await self.pool()
+        async with pool.acquire() as connection, connection.transaction():
+            current = await connection.fetchval(
+                """SELECT reserved FROM control.capacity_reservation
+                WHERE scope=$1 FOR UPDATE""",
+                scope,
+            )
+            if current is None:
+                if amount > limit:
+                    return False
+                await connection.execute(
+                    """INSERT INTO control.capacity_reservation (scope,reserved)
+                    VALUES ($1,$2)""",
+                    scope,
+                    amount,
+                )
+                return True
+            next_reserved = int(current) + amount
+            if next_reserved > limit:
+                return False
+            await connection.execute(
+                """UPDATE control.capacity_reservation
+                SET reserved=$2, updated_at=now() WHERE scope=$1""",
+                scope,
+                next_reserved,
+            )
+            return True
+
     async def release_capacity(self, scope: str, amount: int) -> None:
         pool = await self.pool()
         await pool.execute(
@@ -453,6 +689,44 @@ class PostgresControlStateStore(_LazyPool):
     async def save_checkpoint(self, checkpoint: RuntimeCheckpoint) -> None:
         pool = await self.pool()
         resource_id = f"session:{checkpoint.tenant_id}:{checkpoint.session_id}"
+        if self.dialect == "mysql":
+            async with pool.acquire() as connection, connection.transaction():
+                lease_ok = await connection.fetchval(
+                    """SELECT EXISTS(SELECT 1 FROM control.runtime_lease
+                    WHERE resource_id=$1 AND fencing_token=$2 AND expires_at > now())""",
+                    resource_id,
+                    checkpoint.fencing_token,
+                )
+                if not lease_ok:
+                    raise FencingTokenError("checkpoint rejected for stale Runtime")
+                current = await connection.fetchval(
+                    """SELECT fencing_token FROM control.runtime_checkpoint
+                    WHERE tenant_id=$1 AND session_id=$2 AND run_id=$3
+                    FOR UPDATE""",
+                    checkpoint.tenant_id,
+                    checkpoint.session_id,
+                    checkpoint.run_id,
+                )
+                if current is not None and int(current) > checkpoint.fencing_token:
+                    raise FencingTokenError("checkpoint rejected for stale Runtime")
+                await connection.execute(
+                    """
+                    INSERT INTO control.runtime_checkpoint
+                      (tenant_id,session_id,run_id,fencing_token,phase,state,updated_at)
+                    VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7)
+                    ON CONFLICT (tenant_id,session_id,run_id) DO UPDATE SET
+                      fencing_token=EXCLUDED.fencing_token, phase=EXCLUDED.phase,
+                      state=EXCLUDED.state, updated_at=EXCLUDED.updated_at
+                    """,
+                    checkpoint.tenant_id,
+                    checkpoint.session_id,
+                    checkpoint.run_id,
+                    checkpoint.fencing_token,
+                    checkpoint.phase,
+                    _json(checkpoint.state),
+                    checkpoint.updated_at,
+                )
+            return
         saved = await pool.fetchval(
             """
             INSERT INTO control.runtime_checkpoint
@@ -530,33 +804,62 @@ class PostgresControlStateStore(_LazyPool):
                 "SELECT resource_id FROM control.runtime_lease WHERE expires_at <= now()"
             )
             resources = [str(row["resource_id"]) for row in rows]
-            if not resources:
-                return 0
-            repaired = await connection.fetch(
-                """UPDATE control.assignment SET assignment_status='expired', completed_at=now()
-                WHERE ('session:' || tenant_id || ':' || session_id) = ANY($1::text[])
-                  AND assignment_status IN ('assigned','running') RETURNING task_id""",
-                resources,
-            )
-            task_ids = [str(row["task_id"]) for row in repaired]
-            if task_ids:
-                await connection.execute(
+            repaired_count = 0
+            task_ids: list[str] = []
+            if resources:
+                if self.dialect == "mysql":
+                    result = await connection.execute(
+                        """UPDATE control.assignment
+                        SET assignment_status='expired', completed_at=now()
+                        WHERE CONCAT('session:', tenant_id, ':', session_id) = ANY($1::text[])
+                          AND assignment_status IN ('assigned','running')""",
+                        resources,
+                    )
+                    repaired_count = int(str(result).rsplit(" ", 1)[-1])
+                    task_rows = await connection.fetch(
+                        """SELECT task_id FROM control.assignment
+                        WHERE CONCAT('session:', tenant_id, ':', session_id) = ANY($1::text[])
+                          AND assignment_status='expired'""",
+                        resources,
+                    )
+                    task_ids = [str(row["task_id"]) for row in task_rows]
+                else:
+                    repaired = await connection.fetch(
+                        """UPDATE control.assignment
+                        SET assignment_status='expired', completed_at=now()
+                        WHERE ('session:' || tenant_id || ':' || session_id) = ANY($1::text[])
+                          AND assignment_status IN ('assigned','running') RETURNING task_id""",
+                        resources,
+                    )
+                    task_ids = [str(row["task_id"]) for row in repaired]
+                    repaired_count = len(task_ids)
+                if task_ids:
+                    await connection.execute(
+                        """UPDATE control.runnable_item
+                        SET status='queued', claimed_by=NULL, claim_token=NULL,
+                            claim_expires_at=NULL, available_at=now()
+                        WHERE task_id=ANY($1::text[])""",
+                        task_ids,
+                    )
+            if self.dialect == "mysql":
+                claim_result = await connection.execute(
                     """UPDATE control.runnable_item
-                    SET status='queued', claimed_by=NULL, claim_token=NULL,
-                        claim_expires_at=NULL, available_at=now()
-                    WHERE task_id=ANY($1::text[])""",
-                    task_ids,
-                )
-            recovered_claims = await connection.fetchval(
-                """WITH recovered AS (
-                    UPDATE control.runnable_item
                     SET status='queued',claimed_by=NULL,claim_token=NULL,
                         claim_expires_at=NULL,available_at=now()
-                    WHERE status='claimed' AND claim_expires_at <= now()
-                    RETURNING task_id
-                ) SELECT count(*) FROM recovered"""
-            )
-            return len(task_ids) + int(recovered_claims or 0)
+                    WHERE status='claimed' AND claim_expires_at <= now()"""
+                )
+                recovered_claims = int(str(claim_result).rsplit(" ", 1)[-1])
+            else:
+                recovered_claims = await connection.fetchval(
+                    """WITH recovered AS (
+                        UPDATE control.runnable_item
+                        SET status='queued',claimed_by=NULL,claim_token=NULL,
+                            claim_expires_at=NULL,available_at=now()
+                        WHERE status='claimed' AND claim_expires_at <= now()
+                        RETURNING task_id
+                    ) SELECT count(*) FROM recovered"""
+                )
+            return repaired_count + int(recovered_claims or 0)
 
     @staticmethod
     def _lease_from_row(row: Any) -> RuntimeLease:
