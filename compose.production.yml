@@ -22,7 +22,7 @@ x-common-environment: &common-environment
   AURACLAW_DEPLOYMENT_PROFILE: production
   AURACLAW_HOST: 0.0.0.0
   AURACLAW_LOG_LEVEL: ${AURACLAW_LOG_LEVEL:-INFO}
-  AURACLAW_STORAGE_BACKEND: postgres
+  AURACLAW_STORAGE_BACKEND: ${AURACLAW_STORAGE_BACKEND:-mysql}
   AURACLAW_SESSION_BASE_URL: http://session:8001
   AURACLAW_PROJECTION_BASE_URL: http://projection-worker:8002
   AURACLAW_CONTROL_BASE_URL: http://orchestrator:8003
@@ -69,7 +69,15 @@ services:
       AURACLAW_MIGRATION_DATABASE_URL_FILE: /run/secrets/migration_database_url
     secrets:
       - migration_database_url
-    command: ["migrate", "up", "--target", "0014", "--directory", "/app/migrations"]
+    command:
+      [
+        "migrate",
+        "up",
+        "--target",
+        "${AURACLAW_MIGRATE_TARGET:-0016}",
+        "--directory",
+        "${AURACLAW_MIGRATIONS_DIRECTORY:-/app/migrations/mysql}",
+      ]
     deploy:
       restart_policy:
         condition: on-failure
