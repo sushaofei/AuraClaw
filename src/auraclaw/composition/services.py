@@ -303,7 +303,7 @@ def _task_api_app(settings: Settings) -> FastAPI:
     if settings.deployment_profile == "development":
         return app
     token = settings.workload_token_value(ServiceIdentity.TASK_API.value)
-    config_ready = bool(token and settings.postgres_enabled)
+    config_ready = bool(token and settings.sql_storage_enabled)
     remote_session = RemoteSessionEventStore(
         settings.session_base_url,
         service_identity=ServiceIdentity.TASK_API,
@@ -317,7 +317,7 @@ def _task_api_app(settings: Settings) -> FastAPI:
     task_projection: TaskReader
     approval_projection: ApprovalViewReader
     collaboration_projection: CollaborationReader
-    if settings.postgres_enabled:
+    if settings.sql_storage_enabled:
         task_projection = PostgresTaskProjection(settings.resolved_database_url)
         approval_projection = PostgresApprovalProjection(settings.resolved_database_url)
         collaboration_projection = PostgresCollaborationProjection(
@@ -351,7 +351,7 @@ def _task_api_app(settings: Settings) -> FastAPI:
         policy,
         *(
             (task_projection, approval_projection, collaboration_projection)
-            if settings.postgres_enabled
+            if settings.sql_storage_enabled
             else ()
         ),
     )
@@ -379,10 +379,13 @@ def _readiness(name: str, settings: Settings) -> tuple[bool, dict[str, str]]:
     dependencies: dict[str, str] = {}
     ready = True
     if name in DATABASE_SERVICES:
-        database_ready = settings.postgres_enabled or settings.deployment_profile == "development"
+        database_ready = (
+            settings.sql_storage_enabled
+            or settings.deployment_profile == "development"
+        )
         dependencies["postgres"] = (
             "ready"
-            if settings.postgres_enabled
+            if settings.sql_storage_enabled
             else "development-memory"
             if settings.deployment_profile == "development"
             else "missing"
@@ -732,11 +735,11 @@ def _session_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
 def _orchestrator_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
     store = (
         PostgresControlStateStore(settings.resolved_database_url)
-        if settings.postgres_enabled
+        if settings.sql_storage_enabled
         else InMemoryControlStateStore()
     )
     key = _development_lease_key(settings)
-    closeables: tuple[Any, ...] = (store,) if settings.postgres_enabled else ()
+    closeables: tuple[Any, ...] = (store,) if settings.sql_storage_enabled else ()
     tick: Callable[[], Awaitable[int | None]] = store.recover_expired
     if settings.deployment_profile == "production":
         token = settings.workload_token_value(ServiceIdentity.ORCHESTRATOR.value)
@@ -820,7 +823,7 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         artifacts = RemoteArtifactWriter(
             settings.artifact_base_url, bearer_token=hands_token
         )
-        if settings.postgres_enabled:
+        if settings.sql_storage_enabled:
             invocation_store = PostgresInvocationStore(settings.resolved_database_url)
             tool_registry_store = PostgresToolRegistryStore(
                 settings.resolved_database_url
@@ -1111,7 +1114,7 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
 def _policy_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
     store = (
         PostgresPolicyStateStore(settings.resolved_database_url)
-        if settings.postgres_enabled
+        if settings.sql_storage_enabled
         else None
     )
     app = _base_service_app(
@@ -1142,7 +1145,7 @@ def _policy_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
 def _credential_proxy_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
     registry = (
         PostgresCredentialRegistry(settings.resolved_database_url)
-        if settings.postgres_enabled
+        if settings.sql_storage_enabled
         else None
     )
     vault: InMemoryVault | HashiCorpVault
@@ -1231,14 +1234,14 @@ def _artifact_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
     )
     repository = (
         PostgresArtifactRepository(settings.resolved_database_url)
-        if settings.postgres_enabled
+        if settings.sql_storage_enabled
         else None
     )
     admin_store = (
         PostgresAdminOperationStore(
             settings.resolved_database_url, schema="artifact"
         )
-        if settings.postgres_enabled
+        if settings.sql_storage_enabled
         else None
     )
     verifier = (
@@ -1329,14 +1332,14 @@ def _delivery_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
     )
     store = (
         PostgresDeliveryJobStore(settings.resolved_database_url)
-        if settings.postgres_enabled
+        if settings.sql_storage_enabled
         else InMemoryDeliveryJobStore()
     )
     admin_store = (
         PostgresAdminOperationStore(
             settings.resolved_database_url, schema="delivery"
         )
-        if settings.postgres_enabled
+        if settings.sql_storage_enabled
         else None
     )
     policy = RemotePolicyClient(
@@ -1360,7 +1363,7 @@ def _delivery_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         ),
     )
     closeables: tuple[Any, ...] = (session, policy, credentials)
-    if settings.postgres_enabled:
+    if settings.sql_storage_enabled:
         closeables += (store, admin_store)
     app = _base_service_app(
         spec,
@@ -1405,7 +1408,7 @@ def _projection_app(
     *,
     worker_interval: float,
 ) -> FastAPI:
-    if not settings.postgres_enabled:
+    if not settings.sql_storage_enabled:
         return _base_service_app(spec, settings, worker_interval=worker_interval)
     projector = providers.get_task_projection()
     admin_store = PostgresAdminOperationStore(
@@ -1485,7 +1488,7 @@ def _model_gateway_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
     policy: RemotePolicyClient | None = None
     state = (
         PostgresModelStateStore(settings.resolved_database_url)
-        if settings.postgres_enabled
+        if settings.sql_storage_enabled
         else None
     )
     if settings.deployment_profile == "production":

@@ -53,6 +53,16 @@ REQUIRED = (
 )
 
 
+def _dsn_username(value: str) -> str | None:
+    normalized = (
+        value.replace("postgresql+asyncpg://", "postgresql://")
+        .replace("mysql+aiomysql://", "mysql://")
+        .replace("mysql+asyncmy://", "mysql://")
+        .replace("mysql+pymysql://", "mysql://")
+    )
+    return urlsplit(normalized).username
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="validate AuraClaw production Compose inputs")
     parser.add_argument("--env-file", default=".env.production")
@@ -80,7 +90,7 @@ def main() -> int:
         value = values[variable]
         if not value:
             continue
-        username = urlsplit(value.replace("postgresql+asyncpg://", "postgresql://")).username
+        username = _dsn_username(value)
         if username != expected_role:
             failures.append(f"{variable} must authenticate as {expected_role}")
         if value in role_urls:

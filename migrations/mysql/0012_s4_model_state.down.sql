@@ -1,0 +1,5 @@
+BEGIN;
+
+DROP SCHEMA IF EXISTS model_gateway CASCADE;
+
+COMMIT;
