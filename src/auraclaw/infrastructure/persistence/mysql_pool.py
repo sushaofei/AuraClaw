@@ -29,17 +29,23 @@ _SCHEMA_TABLE = re.compile(
     r")\.([a-zA-Z_][a-zA-Z0-9_]*)\b"
 )
 _PG_CAST = re.compile(
-    r"::(?:jsonb|json|text\[\]|timestamptz|interval|integer|bigint|boolean|int|text)"
+    r"::(?:jsonb|json|text\[\]|timestamptz|interval|integer|bigint|boolean|int|text)\b"
 )
 _INTERVAL_LITERAL = re.compile(r"interval\s+'([^']+)'", re.IGNORECASE)
 _UPDATE_RETURNING = re.compile(
-    r"^\s*UPDATE\s+(\S+)\s+SET\s+.+\s+WHERE\s+(.+?)\s+RETURNING\s+(.+?)\s*$",
+    r"^\s*UPDATE\s+(\S+)(?:\s+(?!SET\b)\w+)?\s+SET\s+.+\s+WHERE\s+(.+?)\s+RETURNING\s+(.+?)\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
+_DELETE_RETURNING = re.compile(
+    r"^\s*DELETE\s+FROM\s+(\S+)(?:\s+AS\s+(\w+))?\s+WHERE\s+(.+?)\s+RETURNING\s+(.+?)\s*$",
     re.IGNORECASE | re.DOTALL,
 )
 _CONCAT_FOUR = re.compile(
     r"\('([^']*)'\s*\|\|\s*([a-zA-Z_][\w.]*)\s*\|\|\s*'([^']*)'\s*\|\|\s*([a-zA-Z_][\w.]*)\)"
 )
 _CONCAT_TWO = re.compile(r"'([^']*)'\s*\|\|\s*([a-zA-Z_][\w.]*)")
+_JSON_TEXT = re.compile(r"(\w+(?:\.\w+)?)\s*->>\s*'([^']+)'")
+_JSON_PATH = re.compile(r"(\w+(?:\.\w+)?)\s*->\s*'([^']+)'")
 
 
 def _convert_arg(value: Any) -> Any:
@@ -104,7 +110,8 @@ def _expand_any(query: str, args: Sequence[Any]) -> tuple[str, tuple[Any, ...]]:
         last = match.end()
     pieces.append(query[last:])
     sql = "".join(pieces)
-    sql = re.sub(r"=\s*IN\s*\(", "IN (", sql, flags=re.IGNORECASE)
+    # `col=ANY($1)` becomes `col=IN (...)`; normalize to `col IN (...)`.
+    sql = re.sub(r"=\s*IN\s*\(", " IN (", sql, flags=re.IGNORECASE)
     return sql, tuple(new_args)
 
 
@@ -153,6 +160,11 @@ def _prepare_mysql_sql(query: str) -> str:
         r"JSON_CONTAINS(\1, $\2)",
         sql,
     )
+    sql = _JSON_TEXT.sub(
+        r"JSON_UNQUOTE(JSON_EXTRACT(\1, '$.\2'))",
+        sql,
+    )
+    sql = _JSON_PATH.sub(r"JSON_EXTRACT(\1, '$.\2')", sql)
     sql = _CONCAT_FOUR.sub(r"CONCAT('\1', \2, '\3', \4)", sql)
     sql = _CONCAT_TWO.sub(r"CONCAT('\1', \2)", sql)
     # MySQL: LIMIT must precede FOR UPDATE [SKIP LOCKED]; Postgres allows either order.
@@ -219,25 +231,41 @@ class MysqlConnection:
 
     async def fetch(self, query: str, *args: Any) -> list[MysqlRecord]:
         stripped = query.strip()
-        if "RETURNING" in stripped.upper() and stripped.upper().startswith("UPDATE"):
+        upper = stripped.upper()
+        if "RETURNING" in upper and upper.startswith("UPDATE"):
             matched = _UPDATE_RETURNING.match(stripped)
             if matched is not None:
                 await self.execute(query, *args)
                 table, where, returning = matched.group(1), matched.group(2), matched.group(3)
-                select = (
-                    f"SELECT {returning.strip()} FROM {table} WHERE {where}"
-                    if returning.strip() != "*"
-                    else f"SELECT * FROM {table} WHERE {where}"
-                )
-                # Alias-qualified RETURNING (a.task_id) → strip alias for SELECT list.
-                select = re.sub(r"\b\w+\.(\w+)", r"\1", select, count=0)
-                # Prefer explicit column list when RETURNING used table aliases.
-                if returning.strip() != "*" and "." in returning:
+                ret = returning.strip()
+                if ret == "*" or ret.endswith(".*"):
+                    select = f"SELECT * FROM {table} WHERE {where}"
+                elif "." in ret:
+                    cols = ", ".join(
+                        part.strip().split(".")[-1] for part in ret.split(",")
+                    )
+                    select = f"SELECT {cols} FROM {table} WHERE {where}"
+                else:
+                    select = f"SELECT {ret} FROM {table} WHERE {where}"
+                return await self.fetch(select, *args)
+        if "RETURNING" in upper and upper.startswith("DELETE"):
+            matched = _DELETE_RETURNING.match(stripped)
+            if matched is not None:
+                table = matched.group(1)
+                where = matched.group(3)
+                returning = matched.group(4).strip()
+                if returning == "*" or returning.endswith(".*"):
+                    select = f"SELECT * FROM {table} WHERE {where}"
+                elif "." in returning:
                     cols = ", ".join(
                         part.strip().split(".")[-1] for part in returning.split(",")
                     )
                     select = f"SELECT {cols} FROM {table} WHERE {where}"
-                return await self.fetch(select, *args)
+                else:
+                    select = f"SELECT {returning} FROM {table} WHERE {where}"
+                rows = await self.fetch(select, *args)
+                await self.execute(query, *args)
+                return rows
         sql, params = _compile(query, args)
         async with self._connection.cursor(aiomysql.DictCursor) as cursor:
             await cursor.execute(sql, params)
@@ -254,7 +282,9 @@ class MysqlConnection:
             result = await self.execute(query, *args)
             count = int(str(result).rsplit(" ", 1)[-1])
             return "1" if count > 0 else None
-        if "RETURNING" in query.upper() and upper.startswith("UPDATE"):
+        if "RETURNING" in query.upper() and (
+            upper.startswith("UPDATE") or upper.startswith("DELETE")
+        ):
             row = await self.fetchrow(query, *args)
             if row is None:
                 return None
