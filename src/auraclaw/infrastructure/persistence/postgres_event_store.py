@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import timedelta
@@ -135,8 +136,10 @@ class PostgresEventStore(LazyPool):
         pool = await self.pool()
         async with pool.acquire() as connection, connection.transaction():
             lock_key = f"{context.tenant_id}:{context.operation}:{context.command_id}"
+            mysql_lock = hashlib.sha256(lock_key.encode("utf-8")).hexdigest()
             if self.dialect == "mysql":
-                locked = await connection.fetchval("SELECT GET_LOCK($1, 30)", lock_key)
+                # MySQL GET_LOCK names are capped at 64 chars.
+                locked = await connection.fetchval("SELECT GET_LOCK($1, 30)", mysql_lock)
                 if not locked:
                     raise RuntimeError("failed to acquire command lock")
             else:
@@ -261,7 +264,7 @@ class PostgresEventStore(LazyPool):
                 return AppendResult(events=canonical, command_result=dict(command_result))
             finally:
                 if self.dialect == "mysql":
-                    await connection.execute("SELECT RELEASE_LOCK($1)", lock_key)
+                    await connection.execute("SELECT RELEASE_LOCK($1)", mysql_lock)
 
     async def pending_outbox(self) -> list[PostgresOutboxRecord]:
         pool = await self.pool()

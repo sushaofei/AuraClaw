@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import os
-from urllib.parse import quote
+from urllib.parse import quote, unquote, urlparse
 
 import aiomysql  # type: ignore[import-untyped]
 import pytest
 from pymysql.err import OperationalError
 
+from auraclaw.config import get_settings
 from auraclaw.infrastructure.persistence.mysql_roles import apply_mysql_roles
 
 ROLE_TARGETS = {
@@ -29,15 +30,38 @@ ROLE_PASSWORD = os.environ.get("AURACLAW_MYSQL_ROLE_SMOKE_PWD", "auraclaw-role-s
 
 
 def _admin() -> tuple[str, str, str, int, str] | None:
-    host = os.environ.get("MYSQL_DB_HOST") or os.environ.get("AURACLAW_MYSQL_SMOKE_HOST")
-    user = os.environ.get("MYSQL_DB_USER")
-    password = os.environ.get("MYSQL_DB_PWD")
-    port = int(os.environ.get("MYSQL_DB_PORT") or "3306")
-    database = os.environ.get("AURACLAW_MYSQL_SMOKE_DB") or "auraclaw_dev"
+    """Admin connection for GRANT smoke — prefer primary-storage Settings/DB_*."""
+    settings = get_settings()
+    if settings.mysql_enabled:
+        parsed = urlparse(settings.resolved_database_url)
+        if parsed.hostname and parsed.username is not None and parsed.password is not None:
+            database = (parsed.path or "/").lstrip("/") or "auraclaw_dev"
+            return (
+                parsed.hostname,
+                unquote(parsed.username),
+                unquote(parsed.password),
+                parsed.port or 3306,
+                database,
+            )
+
+    host = (
+        os.environ.get("AURACLAW_MYSQL_SMOKE_HOST")
+        or os.environ.get("DB_HOST")
+        or os.environ.get("MYSQL_DB_HOST")
+    )
+    user = os.environ.get("DB_USER") or os.environ.get("MYSQL_DB_USER")
+    password = os.environ.get("DB_PWD")
+    if password is None:
+        password = os.environ.get("MYSQL_DB_PWD")
+    port = int(os.environ.get("DB_PORT") or os.environ.get("MYSQL_DB_PORT") or "3306")
+    database = (
+        os.environ.get("AURACLAW_MYSQL_SMOKE_DB")
+        or os.environ.get("DB_NAME")
+        or "auraclaw_dev"
+    )
     if not host or not user or password is None:
         return None
     return host, user, password, port, database
-
 
 ADMIN = _admin()
 pytestmark = pytest.mark.skipif(ADMIN is None, reason="MySQL admin smoke not configured")

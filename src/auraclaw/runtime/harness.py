@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from auraclaw.contracts.errors import (
     BudgetExceededError,
+    ModelProviderError,
     RuntimeCancelledError,
 )
 from auraclaw.contracts.events import NewEvent
@@ -101,12 +102,18 @@ class AgentHarness:
             )
             await self._inject(InjectionPoint.BEFORE_MODEL)
             await self._guard(assignment)
+            messages = self._build_messages(events)
+            if not messages:
+                raise ModelProviderError(
+                    "model request has no user/assistant messages "
+                    f"(session={assignment.session_id} run={assignment.run_id})"
+                )
             response = await self._model.generate(
                 ModelRequest(
                     model_call_id=model_call_id,
                     tenant_id=assignment.tenant_id,
                     run_id=assignment.run_id,
-                    messages=self._build_messages(events),
+                    messages=messages,
                     policy=self._policy,
                     max_output_tokens=assignment.budget.max_output_tokens,
                 )

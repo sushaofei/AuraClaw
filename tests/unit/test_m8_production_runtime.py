@@ -13,6 +13,7 @@ from auraclaw.composition.services import RemoteRuntimeWorker
 from auraclaw.config import Settings, get_settings
 from auraclaw.contracts.errors import (
     ModelAuthenticationError,
+    ModelProviderError,
     ModelRateLimitError,
     ModelTimeoutError,
 )
@@ -173,9 +174,19 @@ def test_named_env_files_select_resources_without_environment_label(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Process env (e.g. CI release-gate) must not shadow the named env files under test.
-    monkeypatch.delenv("AURACLAW_STORAGE_BACKEND", raising=False)
-    monkeypatch.delenv("AURACLAW_RUNTIME_EVENT_BACKEND", raising=False)
+    # Process env (e.g. CI release-gate / local .env) must not shadow named files.
+    for name in (
+        "AURACLAW_STORAGE_BACKEND",
+        "AURACLAW_RUNTIME_EVENT_BACKEND",
+        "AURACLAW_DB_DIALECT",
+        "AURACLAW_DATABASE_URL",
+        "DB_NAME",
+        "DB_HOST",
+        "DB_USER",
+        "DB_PWD",
+        "DB_PORT",
+    ):
+        monkeypatch.delenv(name, raising=False)
 
     development = tmp_path / ".env.development"
     production = tmp_path / ".env.production"
@@ -358,21 +369,33 @@ def test_openai_compatible_provider_sends_thinking_disabled() -> None:
 
 
 @pytest.mark.parametrize(
-    ("status", "error"),
-    [(401, ModelAuthenticationError), (403, ModelAuthenticationError), (429, ModelRateLimitError)],
+    ("status", "error", "body"),
+    [
+        (401, ModelAuthenticationError, b""),
+        (403, ModelAuthenticationError, b""),
+        (429, ModelRateLimitError, b""),
+        (
+            400,
+            ModelProviderError,
+            (
+                b'{"error":{"message":"The request parameter messages is '
+                b'invalid or missing.","code":"400002"}}'
+            ),
+        ),
+    ],
 )
 def test_openai_compatible_provider_maps_status_errors(
-    status: int, error: type[Exception]
+    status: int, error: type[Exception], body: bytes
 ) -> None:
     async def handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(status)
+        return httpx.Response(status, content=body)
 
     async def scenario() -> None:
         client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
         provider = OpenAICompatibleProvider(
             base_url="https://models.example/v1", model="model", client=client
         )
-        with pytest.raises(error):
+        with pytest.raises(error) as raised:
             await provider.generate(
                 ModelRequest(
                     model_call_id="model-error",
@@ -382,6 +405,9 @@ def test_openai_compatible_provider_maps_status_errors(
                 ),
                 credential="secret",
             )
+        if status == 400:
+            assert "400002" in str(raised.value)
+            assert "messages" in str(raised.value)
         await client.aclose()
 
     asyncio.run(scenario())

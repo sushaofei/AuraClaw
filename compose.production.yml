@@ -74,7 +74,7 @@ services:
         "migrate",
         "up",
         "--target",
-        "${AURACLAW_MIGRATE_TARGET:-0016}",
+        "${AURACLAW_MIGRATE_TARGET:-0017}",
         "--directory",
         "${AURACLAW_MIGRATIONS_DIRECTORY:-/app/migrations/mysql}",
       ]

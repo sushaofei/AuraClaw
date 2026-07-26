@@ -62,7 +62,12 @@ QUERY_ROLE = ("TASK_QUERY_DATABASE_URL", "auraclaw_task_query_ro")
 
 def _configured_url(name: str) -> str | None:
     value = os.getenv(name) or DOTENV.get(name)
-    return asyncpg_url(value) if value else None
+    if not value:
+        return None
+    lowered = value.lower()
+    if lowered.startswith("mysql:") or "mysql+" in lowered:
+        return None
+    return asyncpg_url(value)
 
 
 async def _assert_hardened_login(
@@ -144,6 +149,8 @@ async def _assert_write_denied(
 
 
 def test_production_roles_enforce_owner_and_query_boundaries() -> None:
+    if SETTINGS.mysql_enabled or not SETTINGS.postgres_enabled:
+        pytest.skip("PostgreSQL role grant matrix requires postgres primary storage")
     required_names = (*ROLE_TARGETS, QUERY_ROLE[0])
     urls = {name: _configured_url(name) for name in required_names}
     missing = [name for name, url in urls.items() if url is None]
