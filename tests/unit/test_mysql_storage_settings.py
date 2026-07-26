@@ -107,6 +107,36 @@ def test_mysql_sql_preserves_interval_cast_as_date_add() -> None:
     assert "::interval" not in sql.lower()
 
 
+def test_mysql_sql_cast_word_boundary_keeps_integer_and_jsonb() -> None:
+    assert "::integer" not in _prepare_mysql_sql("SELECT $1::integer").lower()
+    assert "erval" not in _prepare_mysql_sql("SELECT now() + $1::interval")
+    assert "jsonb" not in _prepare_mysql_sql("SELECT $1::jsonb").lower()
+    prepared_json = _prepare_mysql_sql("SELECT $1::json")
+    assert "::json" not in prepared_json.lower()
+
+
+def test_mysql_sql_adapts_json_arrow_operators() -> None:
+    sql = _prepare_mysql_sql(
+        "SELECT count(*) FROM session_core.outbox "
+        "WHERE $1::text IS NULL OR payload->>'tenant_id'=$1"
+    )
+    assert "JSON_UNQUOTE(JSON_EXTRACT(payload, '$.tenant_id'))" in sql
+    assert "->>" not in sql
+    assert "::text" not in sql.lower()
+
+
+def test_mysql_any_expand_keeps_space_before_in() -> None:
+    from auraclaw.infrastructure.persistence.mysql_pool import _compile
+
+    sql, params = _compile(
+        "SELECT 1 FROM t WHERE capability_id=ANY($1::text[]) AND server_id<>$2",
+        (["a", "b"], "srv"),
+    )
+    assert "capability_id IN (%s, %s)" in sql
+    assert "capability_idIN" not in sql
+    assert params == ("a", "b", "srv")
+
+
 def test_mysql_roles_sql_render_substitutes_database() -> None:
     from auraclaw.infrastructure.persistence.mysql_roles import render_roles_sql
 
