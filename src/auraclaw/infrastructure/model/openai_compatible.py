@@ -72,6 +72,8 @@ class OpenAICompatibleProvider:
                 },
                 json=payload,
             ) as response:
+                if response.is_error:
+                    await response.aread()
                 self._raise_for_status(response)
                 async for data in self._stream_data(response):
                     provider_usage = data.get("usage")
@@ -136,9 +138,33 @@ class OpenAICompatibleProvider:
         if response.status_code == 429:
             raise ModelRateLimitError("model provider rate limit or quota was exhausted")
         if response.is_error:
+            detail = OpenAICompatibleProvider._error_detail(response)
             raise ModelProviderError(
-                f"model provider returned HTTP {response.status_code}"
+                f"model provider returned HTTP {response.status_code}{detail}"
             )
+
+    @staticmethod
+    def _error_detail(response: httpx.Response) -> str:
+        try:
+            raw = (response.content or b"").decode("utf-8", errors="replace").strip()
+        except Exception:
+            return ""
+        if not raw:
+            return ""
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            return f": {raw[:300]}"
+        error = payload.get("error") if isinstance(payload, dict) else None
+        if isinstance(error, dict):
+            message = error.get("message") or error.get("message_zh") or error
+            code = error.get("code")
+            if code:
+                return f": [{code}] {message}"
+            return f": {message}"
+        if isinstance(error, str):
+            return f": {error}"
+        return f": {raw[:300]}"
 
     @staticmethod
     async def _stream_data(response: httpx.Response) -> AsyncIterator[dict[str, Any]]:

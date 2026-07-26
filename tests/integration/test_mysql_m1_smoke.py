@@ -10,6 +10,7 @@ from uuid import uuid4
 
 import pytest
 
+from auraclaw.config import get_settings
 from auraclaw.contracts.commands import CommandContext
 from auraclaw.contracts.events import Actor, NewEvent
 from auraclaw.contracts.state import Visibility
@@ -23,13 +24,31 @@ from auraclaw.infrastructure.projection.postgres_task_store import PostgresTaskP
 
 
 def _mysql_url() -> str | None:
-    host = os.environ.get("MYSQL_DB_HOST") or os.environ.get("AURACLAW_MYSQL_SMOKE_HOST")
+    """Resolve primary MySQL DSN from Settings / DB_* / explicit smoke overrides.
+
+    Do not use MYSQL_DB_NAME — that is the Model Skill read-only source database.
+    """
+    settings = get_settings()
+    if settings.mysql_enabled:
+        return settings.resolved_database_url
+
+    host = (
+        os.environ.get("AURACLAW_MYSQL_SMOKE_HOST")
+        or os.environ.get("DB_HOST")
+        or os.environ.get("MYSQL_DB_HOST")
+    )
     if not host:
         return None
-    user = os.environ.get("MYSQL_DB_USER") or os.environ.get("DB_USER")
-    password = os.environ.get("MYSQL_DB_PWD") or os.environ.get("DB_PWD")
-    port = os.environ.get("MYSQL_DB_PORT") or os.environ.get("DB_PORT") or "3306"
-    database = os.environ.get("AURACLAW_MYSQL_SMOKE_DB") or "auraclaw_dev"
+    user = os.environ.get("DB_USER") or os.environ.get("MYSQL_DB_USER")
+    password = os.environ.get("DB_PWD")
+    if password is None:
+        password = os.environ.get("MYSQL_DB_PWD")
+    port = os.environ.get("DB_PORT") or os.environ.get("MYSQL_DB_PORT") or "3306"
+    database = (
+        os.environ.get("AURACLAW_MYSQL_SMOKE_DB")
+        or os.environ.get("DB_NAME")
+        or "auraclaw_dev"
+    )
     if not user or password is None:
         return None
     return (
@@ -40,7 +59,6 @@ def _mysql_url() -> str | None:
 
 MYSQL_URL = _mysql_url()
 pytestmark = pytest.mark.skipif(MYSQL_URL is None, reason="MySQL smoke URL not configured")
-
 
 async def _cleanup_session(store: PostgresEventStore, tenant: str) -> None:
     pool = await store.pool()

@@ -74,7 +74,16 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def _settings(**values: object) -> Settings:
-    return Settings(_env_file=None, **values)
+    # Clear ambient MYSQL_DB_* so production composition tests stay isolated
+    # when a developer shell has Model Skill DB credentials exported.
+    defaults: dict[str, object] = {
+        "model_skill_mysql_host": None,
+        "model_skill_mysql_user": None,
+        "model_skill_mysql_password": None,
+        "model_skill_mysql_database": None,
+    }
+    defaults.update(values)
+    return Settings(_env_file=None, **defaults)
 
 
 class _DeterministicModel:
