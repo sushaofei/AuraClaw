@@ -96,6 +96,17 @@ def test_mysql_sql_moves_limit_before_for_update() -> None:
     assert "FOR UPDATE SKIP LOCKED LIMIT" not in sql.upper()
 
 
+def test_mysql_sql_preserves_interval_cast_as_date_add() -> None:
+    sql = _prepare_mysql_sql(
+        "INSERT INTO streaming.connection_registry "
+        "(connection_id, tenant_id, session_id, owner_id, cursor_sequence, expires_at) "
+        "VALUES ($1, $2, $3, $4, $5, now() + $6::interval)"
+    )
+    assert "DATE_ADD(UTC_TIMESTAMP(6), INTERVAL $6 MICROSECOND)" in sql
+    assert "erval" not in sql
+    assert "::interval" not in sql.lower()
+
+
 def test_mysql_roles_sql_render_substitutes_database() -> None:
     from auraclaw.infrastructure.persistence.mysql_roles import render_roles_sql
 
