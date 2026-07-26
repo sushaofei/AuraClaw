@@ -180,11 +180,31 @@ class PostgresObservabilityStore(_LazyPool):
 
     async def metric_snapshot(self) -> list[MetricPoint]:
         pool = await self.pool()
-        rows = await pool.fetch(
-            """SELECT DISTINCT ON (metric_name,coalesce(tenant_id,''),coalesce(session_id,''))
-            * FROM observability.metric_point
-            ORDER BY metric_name,coalesce(tenant_id,''),coalesce(session_id,''),observed_at DESC"""
-        )
+        if self.dialect == "mysql":
+            rows = await pool.fetch(
+                """SELECT m.* FROM observability.metric_point m
+                INNER JOIN (
+                  SELECT metric_name,
+                         COALESCE(tenant_id, '') AS tenant_key,
+                         COALESCE(session_id, '') AS session_key,
+                         MAX(observed_at) AS max_observed_at
+                  FROM observability.metric_point
+                  GROUP BY metric_name, COALESCE(tenant_id, ''), COALESCE(session_id, '')
+                ) latest
+                  ON latest.metric_name = m.metric_name
+                 AND latest.tenant_key = COALESCE(m.tenant_id, '')
+                 AND latest.session_key = COALESCE(m.session_id, '')
+                 AND latest.max_observed_at = m.observed_at"""
+            )
+        else:
+            rows = await pool.fetch(
+                """SELECT DISTINCT ON (
+                     metric_name, coalesce(tenant_id,''), coalesce(session_id,'')
+                   )
+                * FROM observability.metric_point
+                ORDER BY metric_name, coalesce(tenant_id,''), coalesce(session_id,''),
+                         observed_at DESC"""
+            )
         return [
             MetricPoint(
                 name=str(row["metric_name"]), value=float(row["value"]),
