@@ -264,6 +264,16 @@ class MysqlConnection:
             return None
         return next(iter(row.values()))
 
+    async def executemany(self, query: str, args_seq: Sequence[Sequence[Any]]) -> str:
+        if not args_seq:
+            return "OK 0"
+        compiled = [_compile(query, tuple(args)) for args in args_seq]
+        sql = compiled[0][0]
+        params_list = [params for _, params in compiled]
+        async with self._connection.cursor(aiomysql.DictCursor) as cursor:
+            await cursor.executemany(sql, params_list)
+            return f"OK {cursor.rowcount}"
+
     @asynccontextmanager
     async def transaction(self) -> AsyncIterator[MysqlConnection]:
         if self._in_transaction:
@@ -300,6 +310,10 @@ class MysqlPool:
     async def fetchval(self, query: str, *args: Any) -> Any:
         async with self.acquire() as connection:
             return await connection.fetchval(query, *args)
+
+    async def executemany(self, query: str, args_seq: Sequence[Sequence[Any]]) -> str:
+        async with self.acquire() as connection:
+            return await connection.executemany(query, args_seq)
 
     @asynccontextmanager
     async def acquire(self) -> AsyncIterator[MysqlConnection]:
