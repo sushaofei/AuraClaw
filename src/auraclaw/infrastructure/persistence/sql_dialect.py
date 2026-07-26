@@ -27,7 +27,7 @@ _SCHEMA_TABLE = re.compile(
 )
 _PG_PLACEHOLDER = re.compile(r"\$(\d+)")
 _PG_CAST = re.compile(
-    r"::(?:jsonb|json|text\[\]|text|int|integer|bigint|boolean|timestamptz|interval)"
+    r"::(?:jsonb|json|text\[\]|timestamptz|interval|integer|bigint|boolean|int|text)"
 )
 _INTERVAL_LITERAL = re.compile(
     r"interval\s+'([^']+)'",
