@@ -379,7 +379,10 @@ def _readiness(name: str, settings: Settings) -> tuple[bool, dict[str, str]]:
     dependencies: dict[str, str] = {}
     ready = True
     if name in DATABASE_SERVICES:
-        database_ready = settings.sql_storage_enabled or settings.deployment_profile == "development"
+        database_ready = (
+            settings.sql_storage_enabled
+            or settings.deployment_profile == "development"
+        )
         dependencies["postgres"] = (
             "ready"
             if settings.sql_storage_enabled

@@ -131,17 +131,32 @@ class PostgresPolicyStateStore(LazyPool):
             request.decision_id,
             request.context.tenant_id,
         )
+        if row is None:
+            return PolicyValidateDecisionResponse(
+                valid=False,
+                decision="deny",
+                policy_version="unknown",
+                constraints={},
+                expires_at=datetime.now(UTC),
+            )
         valid = bool(
-            row is not None
-            and row["action"] == request.action
+            row["action"] == request.action
             and row["resource"] == request.resource
             and row["expires_at"] > datetime.now(UTC)
             and row["decision"] in {"allow", "allow_with_constraints"}
         )
+        if not valid:
+            return PolicyValidateDecisionResponse(
+                valid=False,
+                decision="deny",
+                policy_version=str(row["policy_version"]),
+                constraints={},
+                expires_at=row["expires_at"],
+            )
         return PolicyValidateDecisionResponse(
-            valid=valid,
-            decision=str(row["decision"]) if valid else "deny",
-            policy_version=str(row["policy_version"]) if row is not None else "unknown",
-            constraints=dict(json_loads(row["constraints"])) if valid else {},
-            expires_at=row["expires_at"] if row is not None else datetime.now(UTC),
+            valid=True,
+            decision=str(row["decision"]),
+            policy_version=str(row["policy_version"]),
+            constraints=dict(json_loads(row["constraints"])),
+            expires_at=row["expires_at"],
         )

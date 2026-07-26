@@ -85,5 +85,7 @@ class LazyPool:
         if self._mysql is not None:
             await self._mysql.close()
         if self._pool is not None and self._dialect == "postgres":
-            await self._pool.close()  # type: ignore[union-attr]
+            postgres_pool = self._pool
+            assert isinstance(postgres_pool, asyncpg.Pool)
+            await postgres_pool.close()
             self._pool = None

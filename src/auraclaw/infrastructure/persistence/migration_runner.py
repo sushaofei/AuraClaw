@@ -240,7 +240,7 @@ class MysqlMigrationRunner:
         self._migrations = discover_migrations(directory)
 
     async def status(self) -> tuple[MigrationStatus, ...]:
-        import aiomysql
+        import aiomysql  # type: ignore[import-untyped]
 
         connection = await aiomysql.connect(**self._params)
         try:
@@ -271,7 +271,7 @@ class MysqlMigrationRunner:
             connection.close()
 
     async def apply(self, target: str | None = None) -> tuple[str, ...]:
-        import aiomysql
+        import aiomysql  # type: ignore[import-untyped]
 
         selected = tuple(
             migration
@@ -318,7 +318,7 @@ class MysqlMigrationRunner:
         return tuple(applied)
 
     async def baseline(self, target: str) -> tuple[str, ...]:
-        import aiomysql
+        import aiomysql  # type: ignore[import-untyped]
 
         selected = tuple(
             migration for migration in self._migrations if migration.version <= target
