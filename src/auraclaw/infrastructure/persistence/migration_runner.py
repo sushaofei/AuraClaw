@@ -271,7 +271,7 @@ class MysqlMigrationRunner:
             connection.close()
 
     async def apply(self, target: str | None = None) -> tuple[str, ...]:
-        import aiomysql  # type: ignore[import-untyped]
+        import aiomysql
 
         selected = tuple(
             migration
@@ -318,7 +318,7 @@ class MysqlMigrationRunner:
         return tuple(applied)
 
     async def baseline(self, target: str) -> tuple[str, ...]:
-        import aiomysql  # type: ignore[import-untyped]
+        import aiomysql
 
         selected = tuple(
             migration for migration in self._migrations if migration.version <= target
