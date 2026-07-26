@@ -29,7 +29,7 @@ _SCHEMA_TABLE = re.compile(
     r")\.([a-zA-Z_][a-zA-Z0-9_]*)\b"
 )
 _PG_CAST = re.compile(
-    r"::(?:jsonb|json|text\[\]|text|int|integer|bigint|boolean|timestamptz|interval)"
+    r"::(?:jsonb|json|text\[\]|timestamptz|interval|integer|bigint|boolean|int|text)"
 )
 _INTERVAL_LITERAL = re.compile(r"interval\s+'([^']+)'", re.IGNORECASE)
 _UPDATE_RETURNING = re.compile(
