@@ -1,0 +1,34 @@
+# Temporary override when Kafka advertised.listeners is localhost:9092.
+# Prefer fixing the broker to advertise its reachable IP, then drop this file.
+services:
+  agent-runtime:
+    entrypoint:
+      [
+        "python",
+        "/opt/auraclaw-deploy/kafka_localhost_proxy.py",
+        "runtime",
+        "run",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8004",
+      ]
+    command: []
+    volumes:
+      - ./deploy/kafka_localhost_proxy.py:/opt/auraclaw-deploy/kafka_localhost_proxy.py:ro
+
+  streaming-gateway:
+    entrypoint:
+      [
+        "python",
+        "/opt/auraclaw-deploy/kafka_localhost_proxy.py",
+        "streaming",
+        "run",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8010",
+      ]
+    command: []
+    volumes:
+      - ./deploy/kafka_localhost_proxy.py:/opt/auraclaw-deploy/kafka_localhost_proxy.py:ro

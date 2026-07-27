@@ -212,6 +212,8 @@ services:
 
   agent-runtime:
     <<: *auraclaw-service
+    # platform network is required to reach host Kafka / Redis / MySQL CIDRs
+    networks: [auraclaw, platform]
     environment:
       <<: *common-environment
       AURACLAW_HEALTH_PORT: "8004"

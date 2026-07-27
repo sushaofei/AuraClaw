@@ -202,6 +202,77 @@ def test_task_api_can_atomically_create_a_session_and_request_its_first_run() ->
     asyncio.run(scenario())
 
 
+def test_task_api_can_append_user_message_and_cancel_run() -> None:
+    async def scenario() -> None:
+        service = SessionInternalService(
+            InMemoryEventStore(),
+            lease_verifier=_verifier(),
+        )
+        await service.append(
+            SessionAppendRequest(
+                context=_context(ServiceIdentity.TASK_API),
+                root_session_id="session-s1-followup",
+                session_id="session-s1-followup",
+                run_id="run-s1-followup",
+                command_id="command-create-followup",
+                expected_version=0,
+                operation="task.create",
+                actor_type="user",
+                actor_id="user-s1",
+                events=(
+                    EventInput(type="session.created", payload={"goal": "test"}),
+                    EventInput(type="run.requested", payload={"run_id": "run-s1-followup"}),
+                ),
+                command_result={"accepted": True},
+            )
+        )
+        message = await service.append(
+            SessionAppendRequest(
+                context=_context(ServiceIdentity.TASK_API),
+                root_session_id="session-s1-followup",
+                session_id="session-s1-followup",
+                run_id="run-s1-followup",
+                command_id="command-append-followup",
+                expected_version=2,
+                operation="append_message",
+                actor_type="user",
+                actor_id="user-s1",
+                events=(
+                    EventInput(
+                        type="user.message.appended",
+                        payload={"message": "你好"},
+                    ),
+                ),
+                command_result={"accepted": True},
+            )
+        )
+        cancel = await service.append(
+            SessionAppendRequest(
+                context=_context(ServiceIdentity.TASK_API),
+                root_session_id="session-s1-followup",
+                session_id="session-s1-followup",
+                run_id="run-s1-followup",
+                command_id="command-cancel-followup",
+                expected_version=3,
+                operation="cancel",
+                actor_type="user",
+                actor_id="user-s1",
+                events=(
+                    EventInput(
+                        type="run.cancelled",
+                        payload={"run_id": "run-s1-followup", "reason": "stop"},
+                    ),
+                ),
+                command_result={"accepted": True},
+            )
+        )
+
+        assert [event["type"] for event in message.events] == ["user.message.appended"]
+        assert [event["type"] for event in cancel.events] == ["run.cancelled"]
+
+    asyncio.run(scenario())
+
+
 def test_session_rejects_event_spoofing_bad_signatures_and_stale_fencing() -> None:
     async def scenario() -> None:
         service = SessionInternalService(

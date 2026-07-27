@@ -33,6 +33,16 @@ from auraclaw.runtime.ports import (
 )
 
 
+def _error_payload(error: BaseException) -> str:
+    message = getattr(error, "message", None)
+    if not isinstance(message, str) or not message.strip():
+        message = str(error).strip() or type(error).__name__
+    detail = getattr(error, "detail", None)
+    if isinstance(detail, str) and detail.strip() and detail.strip() != message:
+        return f"{message}: {detail.strip()}"
+    return message.strip()
+
+
 class InjectionPoint(StrEnum):
     BEFORE_MODEL = "before_model"
     AFTER_MODEL = "after_model"
@@ -577,7 +587,7 @@ class AgentHarness:
                                 "policy_decision_id": binding.get(
                                     "policy_decision_id"
                                 ),
-                                "error": type(error).__name__,
+                                "error": _error_payload(error),
                             },
                         )
                     ],
@@ -591,7 +601,7 @@ class AgentHarness:
             "run.failed",
             {
                 "run_id": assignment.run_id,
-                "error": type(error).__name__,
+                "error": _error_payload(error),
             },
             identity=assignment.run_id,
             visibility=Visibility.USER,

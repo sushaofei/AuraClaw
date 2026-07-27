@@ -60,9 +60,54 @@ const WAITING_FOR_HUMAN = "waiting_for_human";
 const TERMINAL_SESSION_STATUSES = new Set(["closed"]);
 const GENERATING_CHAT_STATUSES = new Set(["connecting", "generating", "reconnecting"]);
 const PANELS = new Set(["chat", "create", "task", "stream", "timeline", "metrics", "history"]);
+const LEGACY_LOCAL_API = /^https?:\/\/(127\.0\.0\.1|localhost):8000\/?$/i;
+
+function defaultApiBaseUrl(): string {
+  if (typeof window === "undefined") return "http://localhost:3000/auraclaw-api";
+  return `${window.location.origin}/auraclaw-api`;
+}
+
+function resolveStoredBaseUrl(saved: unknown): string {
+  const value = String(saved ?? "").trim();
+  if (!value || LEGACY_LOCAL_API.test(value)) return defaultApiBaseUrl();
+  return value;
+}
 
 function asJson(value: unknown): Json {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Json) : {};
+}
+
+class ApiError extends Error {
+  status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
+
+function isNotFoundError(error: unknown): boolean {
+  if (error instanceof ApiError) return error.status === 404;
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  return /404|not\s*found|page not found/i.test(message);
+}
+
+function apiFailureMessage(status: number, payload: Json, rawText: string): string {
+  const detail = payload.message ?? payload.detail;
+  if (typeof detail === "string" && detail.trim()) {
+    const text = detail.trim();
+    if (status === 404 || /page not found/i.test(text)) {
+      return "资源不存在（404）";
+    }
+    if (/^<!DOCTYPE|<html[\s>]/i.test(text)) {
+      return `HTTP ${status}`;
+    }
+    return text.length > 240 ? `${text.slice(0, 240)}…` : text;
+  }
+  if (status === 404) return "资源不存在（404）";
+  if (rawText && /^<!DOCTYPE|<html[\s>]/i.test(rawText)) return `HTTP ${status}`;
+  return `HTTP ${status}`;
 }
 
 function displayTime(value?: unknown) {
@@ -93,7 +138,7 @@ function EmptyState({ title, detail }: { title: string; detail: string }) {
 }
 
 export function AuraClawConsole() {
-  const [baseUrl, setBaseUrl] = useState("http://127.0.0.1:8000");
+  const [baseUrl, setBaseUrl] = useState(defaultApiBaseUrl);
   const [tenant, setTenant] = useState("local");
   const [actor, setActor] = useState("local-user");
   const [correlation, setCorrelation] = useState("");
@@ -161,7 +206,7 @@ export function AuraClawConsole() {
       const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
       queueMicrotask(() => {
         if (!active) return;
-        if (saved.baseUrl) setBaseUrl(saved.baseUrl);
+        setBaseUrl(resolveStoredBaseUrl(saved.baseUrl));
         if (saved.tenant) setTenant(saved.tenant);
         if (saved.actor) setActor(saved.actor);
         if (saved.sessionId) setSessionId(saved.sessionId);
@@ -257,7 +302,7 @@ export function AuraClawConsole() {
       }
       if (!response.ok && response.status !== 202) {
         const payload = asJson(data);
-        const error = new Error(String(payload.message ?? payload.detail ?? `HTTP ${response.status}`));
+        const error = new ApiError(apiFailureMessage(response.status, payload, text), response.status);
         if (!options.quiet) setNotice(`请求失败 ${response.status}：${error.message}`);
         throw error;
       }
@@ -299,14 +344,36 @@ export function AuraClawConsole() {
       taskEtag.current = response.headers.get("etag") ?? taskEtag.current;
       if (!quiet) setNotice("任务视图已刷新");
       return nextTask;
+    } catch (error) {
+      if (isNotFoundError(error)) {
+        if (sessionId === targetSessionId.trim()) setTask(null);
+        setChatSessions((current) => {
+          if (!current.some((item) => item.sessionId === targetSessionId.trim())) return current;
+          return removeChatSessionIndex(localStorage, tenant, targetSessionId.trim());
+        });
+        if (!quiet) setNotice(`Session 不存在，已从本机索引移除：${targetSessionId.trim()}`);
+        return null;
+      }
+      throw error;
     } finally {
       if (!quiet) setBusy("");
     }
-  }, [api, rememberSession, sessionId]);
+  }, [api, rememberSession, sessionId, tenant]);
 
   const isVersionConflict = (error: unknown) => {
     const message = error instanceof Error ? error.message : String(error ?? "");
     return /expected Session version|version conflict|409/i.test(message);
+  };
+
+  const versionFromConflict = (error: unknown): number | null => {
+    const message = error instanceof Error ? error.message : String(error ?? "");
+    const match = message.match(/got\s+(\d+)/i);
+    return match ? Number(match[1]) : null;
+  };
+
+  const isBusyRunError = (error: unknown) => {
+    const message = error instanceof Error ? error.message : String(error ?? "");
+    return /cannot request run for Session in (runnable|pending|running|retry_wait|paused)/i.test(message);
   };
 
   const postSessionCommand = async (
@@ -329,7 +396,12 @@ export function AuraClawConsole() {
     } catch (error) {
       if (!isVersionConflict(error)) throw error;
       const refreshed = await loadTask(true, targetSessionId, true);
-      const nextVersion = Number(refreshed?.projection_version ?? 0);
+      const fromConflict = versionFromConflict(error);
+      const nextVersion = Math.max(
+        Number(refreshed?.projection_version ?? 0),
+        fromConflict ?? 0,
+        expectedVersion + 1,
+      );
       await api(path, {
         method: "POST",
         body,
@@ -581,6 +653,7 @@ export function AuraClawConsole() {
     try {
       let targetSessionId = sessionId.trim();
       const currentTask = targetSessionId ? await loadTask(true, targetSessionId, true) : null;
+      const sessionMissing = Boolean(targetSessionId && !currentTask);
       const sessionStatus = String(currentTask?.status ?? "");
       const runStatusValue = String(currentTask?.run_status ?? "");
 
@@ -598,8 +671,20 @@ export function AuraClawConsole() {
         return;
       }
 
-      if (!targetSessionId || (currentTask && TERMINAL_SESSION_STATUSES.has(sessionStatus))) {
+      if (!targetSessionId || sessionMissing || (currentTask && TERMINAL_SESSION_STATUSES.has(sessionStatus))) {
         const continuesAfterTerminal = Boolean(targetSessionId && currentTask && TERMINAL_SESSION_STATUSES.has(sessionStatus));
+        if (sessionMissing) {
+          setSessionId("");
+          setTask(null);
+          setChatMessages((current) => [
+            ...current,
+            {
+              id: createCommandId("chat-system"),
+              role: "system",
+              content: `原 Session 在服务端不存在（可能已过期或来自其他环境），已自动创建新对话。`,
+            },
+          ]);
+        }
         const created = await createTask(query, "chat");
         if (!created) return;
         targetSessionId = created.id;
@@ -616,13 +701,36 @@ export function AuraClawConsole() {
           expectedVersion,
         );
         const afterMessage = await loadTask(true, targetSessionId, true);
-        await postSessionCommand(
-          targetSessionId,
-          `/v1/sessions/${encodeURIComponent(targetSessionId)}/runs`,
-          undefined,
-          "chat-run",
-          Number(afterMessage?.projection_version ?? expectedVersion + 1),
+        // Projection can lag behind Session head; never go backwards after append.
+        const runVersion = Math.max(
+          Number(afterMessage?.projection_version ?? 0),
+          expectedVersion + 1,
         );
+        try {
+          await postSessionCommand(
+            targetSessionId,
+            `/v1/sessions/${encodeURIComponent(targetSessionId)}/runs`,
+            undefined,
+            "chat-run",
+            runVersion,
+          );
+        } catch (error) {
+          if (!isBusyRunError(error)) throw error;
+          setChatMessages((current) => [
+            ...finalizeChatRuns(current),
+            { id: createCommandId("user"), role: "user", content: query },
+            {
+              id: createCommandId("chat-system"),
+              role: "system",
+              content: "当前 Session 仍有未完成 Run，消息已追加；已重新连接实时流。",
+            },
+          ]);
+          setChatInput("");
+          setChatStatus("connecting");
+          if (!streamAbort.current) void startStream(targetSessionId, false);
+          setNotice("当前 Run 尚未结束；追问消息已保留在 Session，请等待完成。");
+          return;
+        }
         await loadTask(true, targetSessionId, true);
         rememberSession(targetSessionId, {
           title: query,
@@ -641,6 +749,9 @@ export function AuraClawConsole() {
       });
       setChatInput("");
       setChatResult(null);
+      // Drop previous-run Result cache so follow-up poll cannot 304 into the old answer.
+      setResult(null);
+      setResultEtag("");
       setChatStatus("connecting");
       if (!streamAbort.current) void startStream(targetSessionId, false);
       setNotice(`问题已提交：${targetSessionId}`);
@@ -850,14 +961,17 @@ export function AuraClawConsole() {
           return;
         }
         const loaded = await loadResult(true);
-        const finalResult = loaded?.result ?? result;
+        const finalResult = loaded?.result ?? null;
         if (finalResult) setChatResult(finalResult);
         const completedRunId = String(currentTask?.run_id ?? finalResult?.run_id ?? "");
         markRunsFinalized(completedRunId);
-        const summary = resultText(finalResult ?? null);
+        const summary = resultText(finalResult);
+        // Prefer Task View summary when Result body was a 304/empty race; never
+        // reuse a prior-run Result object from React state.
+        const authoritativeSummary = summary || String(currentTask?.result_summary ?? "").trim();
         setChatMessages((current) => reconcileAssistantWithResult(current, {
           runId: completedRunId,
-          resultSummary: summary,
+          resultSummary: authoritativeSummary,
           createId: createCommandId,
         }));
         setChatStatus(status);
@@ -874,7 +988,7 @@ export function AuraClawConsole() {
       cancelled = true;
       if (timer !== undefined) window.clearTimeout(timer);
     };
-  }, [chatStatus, loadResult, loadTask, markRunsFinalized, resolvePendingApproval, result, resultPollMs, sessionId, task]);
+  }, [chatStatus, loadResult, loadTask, markRunsFinalized, resolvePendingApproval, resultPollMs, sessionId, task]);
 
   const copyJson = (value: unknown) => navigator.clipboard.writeText(JSON.stringify(redact(value), null, 2));
 

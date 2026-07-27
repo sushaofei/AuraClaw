@@ -479,7 +479,14 @@ class PostgresControlStateStore(_LazyPool):
         rows = await pool.fetch(
             """WITH candidates AS (
                 SELECT task_id FROM control.assignment
-                WHERE runtime_id=$1 AND role=$2 AND assignment_status='assigned'
+                WHERE runtime_id=$1 AND role=$2
+                  AND (
+                    assignment_status='assigned'
+                    OR (
+                      assignment_status='running'
+                      AND started_at <= now() - interval '5 seconds'
+                    )
+                  )
                 ORDER BY assigned_at, task_id
                 FOR UPDATE SKIP LOCKED LIMIT $3
             )
@@ -517,7 +524,14 @@ class PostgresControlStateStore(_LazyPool):
             rows = await connection.fetch(
                 """
                 SELECT task_id FROM control.assignment
-                WHERE runtime_id=$1 AND role=$2 AND assignment_status='assigned'
+                WHERE runtime_id=$1 AND role=$2
+                  AND (
+                    assignment_status='assigned'
+                    OR (
+                      assignment_status='running'
+                      AND started_at <= DATE_SUB(UTC_TIMESTAMP(6), INTERVAL 5 SECOND)
+                    )
+                  )
                 ORDER BY assigned_at, task_id
                 FOR UPDATE SKIP LOCKED LIMIT $3
                 """,
@@ -804,6 +818,44 @@ class PostgresControlStateStore(_LazyPool):
                 "SELECT resource_id FROM control.runtime_lease WHERE expires_at <= now()"
             )
             resources = [str(row["resource_id"]) for row in rows]
+            # Also reclaim work held by runtimes that stopped heartbeating (e.g. after
+            # rolling recreate) so Sessions do not wait out the full lease TTL.
+            stale_heartbeat = (
+                "DATE_SUB(UTC_TIMESTAMP(6), INTERVAL 30 SECOND)"
+                if self.dialect == "mysql"
+                else "now() - interval '30 seconds'"
+            )
+            stale_rows = await connection.fetch(
+                f"""SELECT DISTINCT CONCAT('session:', a.tenant_id, ':', a.session_id) AS resource_id
+                FROM control.assignment a
+                LEFT JOIN control.runtime_instance r ON r.runtime_id = a.runtime_id
+                WHERE a.assignment_status IN ('assigned', 'running')
+                  AND (
+                    r.runtime_id IS NULL
+                    OR r.last_heartbeat_at IS NULL
+                    OR r.last_heartbeat_at <= {stale_heartbeat}
+                  )"""
+            )
+            for row in stale_rows:
+                resource_id = str(row["resource_id"])
+                if resource_id not in resources:
+                    resources.append(resource_id)
+            if stale_rows and self.dialect == "mysql":
+                await connection.execute(
+                    f"""UPDATE control.runtime_lease
+                    SET expires_at = DATE_SUB(UTC_TIMESTAMP(6), INTERVAL 1 SECOND)
+                    WHERE resource_id = ANY($1::text[])
+                      AND expires_at > UTC_TIMESTAMP(6)""",
+                    [str(row["resource_id"]) for row in stale_rows],
+                )
+            elif stale_rows:
+                await connection.execute(
+                    """UPDATE control.runtime_lease
+                    SET expires_at = now() - interval '1 second'
+                    WHERE resource_id = ANY($1::text[])
+                      AND expires_at > now()""",
+                    [str(row["resource_id"]) for row in stale_rows],
+                )
             repaired_count = 0
             task_ids: list[str] = []
             if resources:

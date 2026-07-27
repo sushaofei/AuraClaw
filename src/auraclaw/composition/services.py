@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import secrets
 import socket
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -15,6 +16,8 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from auraclaw import __version__
+
+logger = logging.getLogger(__name__)
 from auraclaw.action.capability_catalog import (
     CAPABILITY_LOAD_TOOL_NAME,
     CAPABILITY_SEARCH_TOOL_NAME,
@@ -258,14 +261,30 @@ class RemoteRuntimeWorker:
             await self._control.heartbeat()
         assignments = await self._control.claim(limit=1)
         for assignment in assignments:
+            task_id = (
+                f"{assignment.tenant_id}:{assignment.session_id}:{assignment.run_id}"
+            )
             try:
                 await self._harness.execute(assignment)
             except Exception as exc:
-                task_id = (
-                    f"{assignment.tenant_id}:{assignment.session_id}:{assignment.run_id}"
-                )
-                await self._harness.record_failure(assignment, exc)
-                await self._control.finish_assignment(task_id, "failed")
+                try:
+                    await self._harness.record_failure(assignment, exc)
+                except Exception:
+                    # Keep assignment running so reclaim/lease recovery can retry.
+                    # Finishing here without a terminal Session event leaves the
+                    # Session stuck in runnable forever.
+                    logger.exception(
+                        "failed to record run failure for %s; leaving assignment running",
+                        task_id,
+                    )
+                    raise
+                try:
+                    await self._control.finish_assignment(task_id, "failed")
+                except Exception:
+                    logger.exception(
+                        "failed to disposition assignment %s after recorded failure",
+                        task_id,
+                    )
                 raise
         return len(assignments)
 

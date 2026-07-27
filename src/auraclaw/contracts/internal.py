@@ -30,6 +30,7 @@ class ServiceIdentity(StrEnum):
 
 class InternalErrorCode(StrEnum):
     INVALID_REQUEST = "invalid_request"
+    INVALID_TRANSITION = "invalid_transition"
     UNAUTHORIZED = "unauthorized"
     FORBIDDEN = "forbidden"
     NOT_FOUND = "not_found"
