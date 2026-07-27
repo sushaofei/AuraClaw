@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import base64
 import binascii
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from auraclaw.action.mcp_primitives import McpPromptRegistry, McpResourceRegistry
@@ -49,8 +49,10 @@ class HandsMcpServer:
         try:
             if request.method == "initialize":
                 return self._initialize(request, trusted_context)
+            # Lease-authenticated calls may land on a different replica than the
+            # prior initialize. Treat a verified lease as enough to continue.
             if trusted_context.runtime_id not in self._initialized_runtimes:
-                return self._error(request, -32002, "MCP session is not initialized")
+                self._initialized_runtimes.add(trusted_context.runtime_id)
             if request.method == "ping":
                 return McpJsonRpcResponse(id=request.id, result={})
             if request.method == "tools/list":
@@ -241,9 +243,9 @@ class HandsMcpServer:
         invocation_id = str(meta.get("toolInvocationId", ""))
         if not invocation_id:
             raise ValueError("toolInvocationId is required")
-        deadline = trusted.deadline
+        deadline = _optional_utc(trusted.deadline)
         if meta.get("deadline"):
-            requested_deadline = datetime.fromisoformat(str(meta["deadline"]))
+            requested_deadline = _as_utc(datetime.fromisoformat(str(meta["deadline"])))
             deadline = (
                 min(deadline, requested_deadline)
                 if deadline is not None
@@ -304,6 +306,16 @@ class HandsMcpServer:
 
 def _optional_string(value: object) -> str | None:
     return str(value) if value is not None else None
+
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+def _optional_utc(value: datetime | None) -> datetime | None:
+    return None if value is None else _as_utc(value)
 
 
 def _encode_cursor(offset: int) -> str:

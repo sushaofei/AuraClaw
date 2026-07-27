@@ -15,16 +15,38 @@ AuraClaw 的独立纯前端测试与监控工作台。它只调用公开 HTTP/SS
 
 需要 Node.js 22.13 或更高版本。
 
+### 仅前端联调远程生产栈（推荐 / 默认）
+
+后端调试统一使用 `.host.env` 中的 `AURACLAW_HOST`（当前为 `10.244.16.131`）上的 Compose 容器，不要再本地起 Python 后端服务。
+
+读取仓库根目录 `.host.env` 的 `AURACLAW_HOST`，代理到 `http://<host>:8080`（无需 SSH 隧道；会自动设置 `NO_PROXY` 绕过本机 HTTP 代理）：
+
 ```bash
 npm ci
-AURACLAW_DEV_API_TARGET=http://127.0.0.1:8000 npm run dev
+npm run dev:remote
 ```
 
-打开开发服务器输出的地址，在页面顶部将 API 地址设为当前站点 Origin 加 `/auraclaw-api`，再配置 tenant 和 actor。该路径只在设置了 `AURACLAW_DEV_API_TARGET` 的本地开发服务器中代理到后端。后端用于真实 Streaming 联调时通过以下命令启动：
+Cursor / VS Code：
+
+- Debug：**AuraClaw: Frontend → remote containers (10.244.16.131)**（或 compound **AuraClaw: Debug against remote containers**）
+- Tasks：`Remote containers: ps` / `logs` / `restart` / `health`
+
+打开 http://localhost:3000 ，页面顶部 API endpoint 默认为：
+
+`http://localhost:3000/auraclaw-api`
+
+Tenant / Actor 默认 `local` / `local-user`，点「检查连接」即可。
+
+### 前端 + 本地后端（已弃用，仅特殊需要）
+
+本地后端 launch 配置已隐藏。若必须本地联调：
 
 ```bash
+AURACLAW_DEV_API_TARGET=http://127.0.0.1:8000 npm run dev
 uv run uvicorn auraclaw.main:app --reload
 ```
+
+`/auraclaw-api` 只在设置了 `AURACLAW_DEV_API_TARGET`（或 `npm run dev:remote`）时由开发服务器代理到后端。
 
 后端始终使用统一 Runtime Worker、Model Gateway 与 Runtime Event 发布链；本地和部署环境
 只通过各自 `.env.development` / `.env.production` 文件选择资源，文件内容不含环境标签。

@@ -13,10 +13,13 @@ from auraclaw.contracts.internal import LeaseAssertion
 
 
 def _canonical_claims(assertion: LeaseAssertion) -> bytes:
+    expires_at = assertion.expires_at
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=UTC)
     return json.dumps(
         {
             "audience": assertion.audience,
-            "expires_at": assertion.expires_at.astimezone(UTC).isoformat(),
+            "expires_at": expires_at.astimezone(UTC).isoformat(),
             "fencing_token": assertion.fencing_token,
             "key_id": assertion.key_id,
             "lease_id": assertion.lease_id,
@@ -104,7 +107,10 @@ class LeaseAssertionVerifier:
             raise AuthorizationError("lease assertion scope mismatch")
         if lease_id is not None and assertion.lease_id != lease_id:
             raise LeaseConflictError("lease assertion id mismatch")
-        if assertion.expires_at <= datetime.now(UTC):
+        expires_at = assertion.expires_at
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=UTC)
+        if expires_at <= datetime.now(UTC):
             raise LeaseConflictError("lease assertion expired")
         expected = base64.urlsafe_b64encode(
             hmac.new(key, _canonical_claims(assertion), hashlib.sha256).digest()
