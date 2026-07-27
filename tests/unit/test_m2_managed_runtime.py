@@ -9,7 +9,12 @@ from auraclaw.contracts.commands import CommandContext
 from auraclaw.contracts.errors import FencingTokenError
 from auraclaw.contracts.events import Actor, NewEvent
 from auraclaw.control.orchestrator import LocalRuntimeProvisioner, ManagedOrchestrator
-from auraclaw.control.ports import RuntimeCheckpoint
+from auraclaw.control.ports import (
+    RuntimeAssignment,
+    RuntimeCheckpoint,
+    RuntimeInstance,
+    RuntimeLease,
+)
 from auraclaw.gateways.task.admission import AllowAllAdmissionController
 from auraclaw.infrastructure.persistence.memory_control_store import InMemoryControlStateStore
 from auraclaw.infrastructure.persistence.memory_event_store import InMemoryEventStore
@@ -350,5 +355,198 @@ def test_runtime_worker_renews_lease_during_slow_model_calls() -> None:
         refreshed = await projection.get_task("tenant-m2", str(task["session_id"]))
         assert refreshed is not None
         assert refreshed["run_status"] == "completed"
+
+    asyncio.run(scenario())
+
+
+def test_claim_reclaims_orphan_running_assignment_after_grace() -> None:
+    async def scenario() -> None:
+        control = InMemoryControlStateStore()
+        control.orphan_running_grace = timedelta(0)
+        runtime = RuntimeInstance(
+            runtime_id="runtime-orphan",
+            runtime_type="agent",
+            role="root",
+            node_id="n1",
+            capabilities={},
+            capacity=1,
+        )
+        await control.register_runtime(runtime)
+        assignment = RuntimeAssignment(
+            tenant_id="tenant-m2",
+            root_session_id="ses_root",
+            session_id="ses_1",
+            run_id="run_1",
+            runtime_id=runtime.runtime_id,
+            lease_id="lea_1",
+            fencing_token=1,
+            role="root",
+            resource_profile={},
+        )
+        task_id = "tenant-m2:ses_1:run_1"
+        control._assignments[task_id] = (assignment, "running")
+        control._assignment_started_at[task_id] = datetime.now(UTC) - timedelta(
+            seconds=1
+        )
+
+        claimed = await control.claim_assignments(runtime.runtime_id, "root", limit=1)
+        assert len(claimed) == 1
+        assert claimed[0].task_id == task_id
+
+    asyncio.run(scenario())
+
+
+def test_recover_expired_reclaims_missing_or_stale_runtime_not_live() -> None:
+    async def scenario() -> None:
+        control = InMemoryControlStateStore()
+        control.stale_heartbeat_after = timedelta(milliseconds=20)
+        live = RuntimeInstance(
+            runtime_id="runtime-live",
+            runtime_type="agent",
+            role="root",
+            node_id="n1",
+            capabilities={},
+            capacity=1,
+        )
+        dead = RuntimeInstance(
+            runtime_id="runtime-dead",
+            runtime_type="agent",
+            role="root",
+            node_id="n2",
+            capabilities={},
+            capacity=1,
+        )
+        await control.register_runtime(live)
+        await control.register_runtime(dead)
+
+        live_assignment = RuntimeAssignment(
+            tenant_id="tenant-m2",
+            root_session_id="ses_root",
+            session_id="ses_live",
+            run_id="run_live",
+            runtime_id=live.runtime_id,
+            lease_id="lea_live",
+            fencing_token=1,
+            role="root",
+            resource_profile={},
+        )
+        dead_assignment = RuntimeAssignment(
+            tenant_id="tenant-m2",
+            root_session_id="ses_root",
+            session_id="ses_dead",
+            run_id="run_dead",
+            runtime_id=dead.runtime_id,
+            lease_id="lea_dead",
+            fencing_token=1,
+            role="root",
+            resource_profile={},
+        )
+        missing_assignment = RuntimeAssignment(
+            tenant_id="tenant-m2",
+            root_session_id="ses_root",
+            session_id="ses_missing",
+            run_id="run_missing",
+            runtime_id="runtime-gone",
+            lease_id="lea_missing",
+            fencing_token=1,
+            role="root",
+            resource_profile={},
+        )
+        now = datetime.now(UTC)
+        control._leases = {
+            "session:tenant-m2:ses_live": RuntimeLease(
+                resource_id="session:tenant-m2:ses_live",
+                lease_id="lea_live",
+                owner="orch",
+                fencing_token=1,
+                expires_at=now + timedelta(minutes=5),
+            ),
+            "session:tenant-m2:ses_dead": RuntimeLease(
+                resource_id="session:tenant-m2:ses_dead",
+                lease_id="lea_dead",
+                owner="orch",
+                fencing_token=1,
+                expires_at=now + timedelta(minutes=5),
+            ),
+            "session:tenant-m2:ses_missing": RuntimeLease(
+                resource_id="session:tenant-m2:ses_missing",
+                lease_id="lea_missing",
+                owner="orch",
+                fencing_token=1,
+                expires_at=now + timedelta(minutes=5),
+            ),
+        }
+        control._assignments = {
+            "t:ses_live:run_live": (live_assignment, "running"),
+            "t:ses_dead:run_dead": (dead_assignment, "running"),
+            "t:ses_missing:run_missing": (missing_assignment, "running"),
+        }
+        control._runtimes[dead.runtime_id] = (
+            dead,
+            now - timedelta(milliseconds=50),
+        )
+
+        repaired = await control.recover_expired()
+        assert repaired == 2
+        assert control._assignments["t:ses_live:run_live"][1] == "running"
+        assert control._assignments["t:ses_dead:run_dead"][1] == "expired"
+        assert control._assignments["t:ses_missing:run_missing"][1] == "expired"
+
+    asyncio.run(scenario())
+
+
+def test_remote_runtime_worker_heartbeats_during_slow_execute() -> None:
+    async def scenario() -> None:
+        from auraclaw.composition.services import RemoteRuntimeWorker
+
+        heartbeats = 0
+
+        class FakeControl:
+            runtime_id = "runtime-remote"
+
+            async def register(self) -> None:
+                return None
+
+            async def heartbeat(self) -> None:
+                nonlocal heartbeats
+                heartbeats += 1
+
+            async def claim(self, *, limit: int = 1) -> list[RuntimeAssignment]:
+                del limit
+                return [
+                    RuntimeAssignment(
+                        tenant_id="tenant-m2",
+                        root_session_id="ses_root",
+                        session_id="ses_1",
+                        run_id="run_1",
+                        runtime_id=self.runtime_id,
+                        lease_id="lea_1",
+                        fencing_token=1,
+                        role="root",
+                        resource_profile={},
+                    )
+                ]
+
+            async def finish_assignment(self, task_id: str, outcome: str) -> None:
+                del task_id, outcome
+
+        class SlowHarness:
+            async def execute(self, assignment: RuntimeAssignment) -> None:
+                del assignment
+                await asyncio.sleep(0.12)
+
+            async def record_failure(
+                self, assignment: RuntimeAssignment, exc: Exception
+            ) -> None:
+                del assignment, exc
+
+        worker = RemoteRuntimeWorker(
+            FakeControl(),  # type: ignore[arg-type]
+            SlowHarness(),  # type: ignore[arg-type]
+            heartbeat_interval=timedelta(milliseconds=30),
+        )
+        assert await worker.tick() == 1
+        # register path skips the idle heartbeat; keep_alive must still pulse.
+        assert heartbeats >= 2
 
     asyncio.run(scenario())
