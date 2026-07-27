@@ -34,11 +34,15 @@ class InMemoryControlStateStore:
         self._leases: dict[str, RuntimeLease] = {}
         self._lease_counters: dict[str, int] = {}
         self._assignments: dict[str, tuple[RuntimeAssignment, str]] = {}
+        self._assignment_started_at: dict[str, datetime] = {}
         self._runtimes: dict[str, tuple[RuntimeInstance, datetime]] = {}
         self._capacity: dict[str, int] = {}
         self._checkpoints: dict[tuple[str, str, str], RuntimeCheckpoint] = {}
         self._cancellations: set[tuple[str, str, str]] = set()
         self._lock = asyncio.Lock()
+        # Match PostgresControlStateStore reclaim windows.
+        self.orphan_running_grace = timedelta(seconds=5)
+        self.stale_heartbeat_after = timedelta(seconds=30)
 
     async def enqueue(self, item: RunnableItem) -> bool:
         async with self._lock:
@@ -225,15 +229,24 @@ class InMemoryControlStateStore:
         self, runtime_id: str, role: str, *, limit: int = 1
     ) -> list[ClaimedAssignment]:
         async with self._lock:
+            now = _now()
             claimed: list[ClaimedAssignment] = []
             for task_id, (assignment, status) in self._assignments.items():
-                if (
-                    status not in {"assigned", "running"}
-                    or assignment.runtime_id != runtime_id
-                    or assignment.role != role
-                ):
+                if assignment.runtime_id != runtime_id or assignment.role != role:
+                    continue
+                if status == "assigned":
+                    pass
+                elif status == "running":
+                    started_at = self._assignment_started_at.get(task_id)
+                    if (
+                        started_at is None
+                        or started_at > now - self.orphan_running_grace
+                    ):
+                        continue
+                else:
                     continue
                 self._assignments[task_id] = (assignment, "running")
+                self._assignment_started_at.setdefault(task_id, now)
                 claimed.append(
                     ClaimedAssignment(task_id=task_id, assignment=assignment)
                 )
@@ -248,6 +261,7 @@ class InMemoryControlStateStore:
                 assignment = entry[0]
                 self._assignments[task_id] = (assignment, outcome)
                 if outcome in {"completed", "failed", "cancelled"}:
+                    self._assignment_started_at.pop(task_id, None)
                     resource_id = f"session:{assignment.tenant_id}:{assignment.session_id}"
                     lease = self._leases.get(resource_id)
                     if lease is not None and lease.lease_id == assignment.lease_id:
@@ -327,13 +341,25 @@ class InMemoryControlStateStore:
                 for resource_id, lease in self._leases.items()
                 if lease.expires_at <= now
             }
+            for _task_id, (assignment, status) in list(self._assignments.items()):
+                if status not in {"assigned", "running"}:
+                    continue
+                resource_id = f"session:{assignment.tenant_id}:{assignment.session_id}"
+                runtime_entry = self._runtimes.get(assignment.runtime_id)
+                if runtime_entry is None:
+                    expired_resources.add(resource_id)
+                    continue
+                _, heartbeat_at = runtime_entry
+                if heartbeat_at <= now - self.stale_heartbeat_after:
+                    expired_resources.add(resource_id)
             for resource_id in expired_resources:
-                del self._leases[resource_id]
+                self._leases.pop(resource_id, None)
             repaired = 0
             for task_id, (assignment, status) in list(self._assignments.items()):
                 resource_id = f"session:{assignment.tenant_id}:{assignment.session_id}"
                 if resource_id in expired_resources and status in {"assigned", "running"}:
                     self._assignments[task_id] = (assignment, "expired")
+                    self._assignment_started_at.pop(task_id, None)
                     queued = self._queue.get(task_id)
                     if queued is not None:
                         self._queue[task_id] = (queued[0], "queued", None)

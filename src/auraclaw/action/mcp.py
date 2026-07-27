@@ -243,7 +243,7 @@ class HandsMcpServer:
         invocation_id = str(meta.get("toolInvocationId", ""))
         if not invocation_id:
             raise ValueError("toolInvocationId is required")
-        deadline = _as_utc(trusted.deadline)
+        deadline = _optional_utc(trusted.deadline)
         if meta.get("deadline"):
             requested_deadline = _as_utc(datetime.fromisoformat(str(meta["deadline"])))
             deadline = (
@@ -308,12 +308,14 @@ def _optional_string(value: object) -> str | None:
     return str(value) if value is not None else None
 
 
-def _as_utc(value: datetime | None) -> datetime | None:
-    if value is None:
-        return None
+def _as_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
     return value.astimezone(UTC)
+
+
+def _optional_utc(value: datetime | None) -> datetime | None:
+    return None if value is None else _as_utc(value)
 
 
 def _encode_cursor(offset: int) -> str:

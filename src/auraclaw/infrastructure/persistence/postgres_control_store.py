@@ -818,15 +818,19 @@ class PostgresControlStateStore(_LazyPool):
                 "SELECT resource_id FROM control.runtime_lease WHERE expires_at <= now()"
             )
             resources = [str(row["resource_id"]) for row in rows]
-            # Also reclaim work held by runtimes that stopped heartbeating (e.g. after
-            # rolling recreate) so Sessions do not wait out the full lease TTL.
+            # Reclaim work held by missing/dead runtimes (e.g. after rolling
+            # recreate). Live workers must heartbeat during execute; the stale
+            # window is intentionally below a typical model-call duration only
+            # because RemoteRuntimeWorker keeps last_heartbeat_at fresh.
             stale_heartbeat = (
                 "DATE_SUB(UTC_TIMESTAMP(6), INTERVAL 30 SECOND)"
                 if self.dialect == "mysql"
                 else "now() - interval '30 seconds'"
             )
             stale_rows = await connection.fetch(
-                f"""SELECT DISTINCT CONCAT('session:', a.tenant_id, ':', a.session_id) AS resource_id
+                f"""SELECT DISTINCT CONCAT(
+                        'session:', a.tenant_id, ':', a.session_id
+                    ) AS resource_id
                 FROM control.assignment a
                 LEFT JOIN control.runtime_instance r ON r.runtime_id = a.runtime_id
                 WHERE a.assignment_status IN ('assigned', 'running')
@@ -842,7 +846,7 @@ class PostgresControlStateStore(_LazyPool):
                     resources.append(resource_id)
             if stale_rows and self.dialect == "mysql":
                 await connection.execute(
-                    f"""UPDATE control.runtime_lease
+                    """UPDATE control.runtime_lease
                     SET expires_at = DATE_SUB(UTC_TIMESTAMP(6), INTERVAL 1 SECOND)
                     WHERE resource_id = ANY($1::text[])
                       AND expires_at > UTC_TIMESTAMP(6)""",

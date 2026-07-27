@@ -170,3 +170,22 @@ def test_mysql_roles_sql_render_substitutes_database() -> None:
     assert "`auraclaw_dev`.`session_core_%`" in rendered
     assert "'s3cret'" in rendered
     assert "`auraclaw`.`" not in rendered
+
+
+def test_outbox_nack_backoff_caps_exponent_before_power() -> None:
+    """MySQL evaluates POWER before LEAST; cap the exponent to avoid DOUBLE overflow."""
+    import inspect
+
+    from auraclaw.infrastructure.persistence.postgres_event_store import (
+        PostgresEventStore,
+    )
+
+    source = inspect.getsource(PostgresEventStore.mark_outbox_failed)
+    assert "LEAST(publish_attempt, 6)" in source
+    normalized = "".join(source.upper().split())
+    assert "POWER(2,LEAST(PUBLISH_ATTEMPT,6))" in normalized
+    for attempt in (0, 1, 6, 7, 1024, 10_000):
+        delay = min(60, 2 ** min(attempt, 6))
+        assert delay <= 60
+        if attempt >= 6:
+            assert delay == 60

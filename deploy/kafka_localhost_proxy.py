@@ -55,7 +55,7 @@ def _serve(upstream_host: str, upstream_port: int) -> None:
     while True:
         try:
             client, _ = server.accept()
-        except socket.timeout:
+        except TimeoutError:
             continue
         threading.Thread(
             target=_handle,

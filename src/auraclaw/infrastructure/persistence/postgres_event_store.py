@@ -328,7 +328,9 @@ class PostgresEventStore(LazyPool):
             return
         await pool.execute(
             """UPDATE session_core.outbox SET publish_attempt = publish_attempt + 1,
-            next_attempt_at = now() + interval '1 second' * LEAST(60, power(2, LEAST(publish_attempt, 6)))
+            next_attempt_at = now() + interval '1 second' * LEAST(
+                60, power(2, LEAST(publish_attempt, 6))
+            )
             WHERE outbox_id = $1""",
             outbox_id,
         )
