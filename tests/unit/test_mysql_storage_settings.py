@@ -137,6 +137,32 @@ def test_mysql_any_expand_keeps_space_before_in() -> None:
     assert params == ("a", "b", "srv")
 
 
+def test_mysql_quotes_reserved_usage_column() -> None:
+    from auraclaw.infrastructure.persistence.mysql_pool import _compile
+
+    prepared = _prepare_mysql_sql(
+        "UPDATE model_gateway.model_call SET status='completed',"
+        "provider=$3,model=$4,usage=$5::jsonb,response=$6::jsonb,updated_at=now() "
+        "WHERE tenant_id=$1 AND model_call_id=$2"
+    )
+    assert "`usage`=$5" in prepared
+    assert "`model_gateway_model_call`" in prepared
+    # Table containing "usage" in the name must stay intact.
+    budget = _prepare_mysql_sql(
+        "UPDATE model_gateway.usage_budget SET tokens_used=tokens_used+$2 WHERE tenant_id=$1"
+    )
+    assert "`model_gateway_usage_budget`" in budget
+    assert "`usage`" not in budget
+
+    sql, params = _compile(
+        "UPDATE model_gateway.model_call SET usage=$3::jsonb "
+        "WHERE tenant_id=$1 AND model_call_id=$2",
+        ("t", "c", '{"input_tokens":1}'),
+    )
+    assert "`usage`=%s" in sql
+    assert params == ('{"input_tokens":1}', "t", "c")
+
+
 def test_mysql_roles_sql_render_substitutes_database() -> None:
     from auraclaw.infrastructure.persistence.mysql_roles import render_roles_sql
 

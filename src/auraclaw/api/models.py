@@ -1,6 +1,6 @@
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class CreateTaskRequest(BaseModel):
@@ -65,6 +65,13 @@ class TaskView(BaseModel):
     delivery_response_summary: str | None = None
     projection_version: int
     projected_at: str
+
+    @field_validator("error", mode="before")
+    @classmethod
+    def coerce_error(cls, value: Any) -> dict[str, Any] | None:
+        if value is None or isinstance(value, dict):
+            return value
+        return {"message": str(value)}
 
 
 class ErrorResponse(BaseModel):

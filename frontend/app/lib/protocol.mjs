@@ -130,6 +130,10 @@ export function finalizeChatRuns(messages, runIds) {
 /**
  * Align the assistant bubble with authoritative Result text after a run completes.
  * Runtime Event streams are not a delivery guarantee; Result is.
+ *
+ * Never rewrite an assistant bubble that belongs to an earlier user turn: if Result
+ * arrives before the current-run streaming bubble exists, append after the latest
+ * user message instead of overwriting the previous answer.
  */
 export function reconcileAssistantWithResult(messages, { runId, resultSummary, createId }) {
   const text = String(resultSummary ?? "").trim();
@@ -137,11 +141,20 @@ export function reconcileAssistantWithResult(messages, { runId, resultSummary, c
   const current = [...finalizeChatRuns(messages, run ? [run] : undefined)];
   if (!text) return current;
 
+  const lastUserIndex = current.findLastIndex((item) => item?.role === "user");
   let index = run
     ? current.findLastIndex((item) => item?.role === "assistant" && item.runId === run)
     : -1;
+  // A Result for the current turn must never rewrite an earlier answer that sits
+  // above the latest user message (common when Result races ahead of SSE).
+  if (index >= 0 && lastUserIndex >= 0 && index < lastUserIndex) {
+    index = -1;
+  }
+  // Only reuse an unmatched assistant when it already trails the latest user turn
+  // (in-progress bubble for this follow-up). Earlier answers stay intact.
   if (index < 0) {
-    index = current.findLastIndex((item) => item?.role === "assistant");
+    const trailingAssistant = current.findLastIndex((item) => item?.role === "assistant");
+    if (trailingAssistant > lastUserIndex) index = trailingAssistant;
   }
   if (index < 0) {
     return [

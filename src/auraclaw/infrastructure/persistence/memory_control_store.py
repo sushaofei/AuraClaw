@@ -228,7 +228,7 @@ class InMemoryControlStateStore:
             claimed: list[ClaimedAssignment] = []
             for task_id, (assignment, status) in self._assignments.items():
                 if (
-                    status != "assigned"
+                    status not in {"assigned", "running"}
                     or assignment.runtime_id != runtime_id
                     or assignment.role != role
                 ):

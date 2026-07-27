@@ -313,12 +313,14 @@ class PostgresEventStore(LazyPool):
 
     async def mark_outbox_failed(self, outbox_id: int) -> None:
         pool = await self.pool()
+        # Cap the exponent: MySQL evaluates POWER() before LEAST(), so unbounded
+        # publish_attempt overflows DOUBLE (~2^1024) and breaks disposition.
         if self.dialect == "mysql":
             await pool.execute(
                 """UPDATE session_core.outbox SET publish_attempt = publish_attempt + 1,
                 next_attempt_at = DATE_ADD(
                     UTC_TIMESTAMP(6),
-                    INTERVAL LEAST(60, POWER(2, publish_attempt)) SECOND
+                    INTERVAL LEAST(60, POWER(2, LEAST(publish_attempt, 6))) SECOND
                 )
                 WHERE outbox_id = $1""",
                 outbox_id,
@@ -326,7 +328,7 @@ class PostgresEventStore(LazyPool):
             return
         await pool.execute(
             """UPDATE session_core.outbox SET publish_attempt = publish_attempt + 1,
-            next_attempt_at = now() + interval '1 second' * LEAST(60, power(2, publish_attempt))
+            next_attempt_at = now() + interval '1 second' * LEAST(60, power(2, LEAST(publish_attempt, 6)))
             WHERE outbox_id = $1""",
             outbox_id,
         )
@@ -414,11 +416,11 @@ class PostgresEventStore(LazyPool):
             "ack": "published_at=now()",
             "nack": (
                 "next_attempt_at=DATE_ADD(UTC_TIMESTAMP(6), "
-                "INTERVAL LEAST(60, POWER(2, publish_attempt)) SECOND)"
+                "INTERVAL LEAST(60, POWER(2, LEAST(publish_attempt, 6))) SECOND)"
                 if self.dialect == "mysql"
                 else (
                     "next_attempt_at=now() + interval '1 second' * "
-                    "LEAST(60, power(2, publish_attempt))"
+                    "LEAST(60, power(2, LEAST(publish_attempt, 6)))"
                 )
             ),
             "poison": "poisoned_at=now()",
