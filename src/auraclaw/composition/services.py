@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import secrets
 import socket
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -70,6 +71,7 @@ from auraclaw.contracts.internal import ServiceIdentity
 from auraclaw.contracts.mcp import McpTrustedContext
 from auraclaw.control.internal_service import ControlInternalService
 from auraclaw.control.orchestrator import ManagedOrchestrator, RegisteredRuntimeProvisioner
+from auraclaw.control.ports import RuntimeAssignment
 from auraclaw.control.runnable_feed import RunnableFeedConsumer
 from auraclaw.credential_proxy.internal_service import CredentialProxyInternalService
 from auraclaw.delivery.worker import ResultDeliveryWorker
@@ -173,6 +175,8 @@ from auraclaw.runtime.mcp_client import HandsMcpClient, HttpMcpTransport
 from auraclaw.session.internal_service import SessionInternalService
 from auraclaw.session.task_service import TaskService
 
+logger = logging.getLogger(__name__)
+
 SERVICE_BY_COMMAND = {
     "api": "task-api",
     "session": "session",
@@ -245,10 +249,15 @@ class RemoteRuntimeWorker:
         self,
         control: RemoteRuntimeControlClient,
         harness: AgentHarness,
+        *,
+        heartbeat_interval: timedelta | None = None,
     ) -> None:
         self._control = control
         self._harness = harness
         self._registered = False
+        # Must stay below recover_expired's stale-heartbeat window (30s), or a
+        # healthy long model call can be mistaken for a dead runtime.
+        self._heartbeat_interval = heartbeat_interval or timedelta(seconds=10)
 
     async def tick(self) -> int:
         if not self._registered:
@@ -258,16 +267,67 @@ class RemoteRuntimeWorker:
             await self._control.heartbeat()
         assignments = await self._control.claim(limit=1)
         for assignment in assignments:
+            task_id = (
+                f"{assignment.tenant_id}:{assignment.session_id}:{assignment.run_id}"
+            )
             try:
-                await self._harness.execute(assignment)
+                await self._execute_with_heartbeat(assignment)
             except Exception as exc:
-                task_id = (
-                    f"{assignment.tenant_id}:{assignment.session_id}:{assignment.run_id}"
-                )
-                await self._harness.record_failure(assignment, exc)
-                await self._control.finish_assignment(task_id, "failed")
+                try:
+                    await self._harness.record_failure(assignment, exc)
+                except Exception:
+                    # Keep assignment running so reclaim/lease recovery can retry.
+                    # Finishing here without a terminal Session event leaves the
+                    # Session stuck in runnable forever.
+                    logger.exception(
+                        "failed to record run failure for %s; leaving assignment running",
+                        task_id,
+                    )
+                    raise
+                try:
+                    await self._control.finish_assignment(task_id, "failed")
+                except Exception:
+                    logger.exception(
+                        "failed to disposition assignment %s after recorded failure",
+                        task_id,
+                    )
                 raise
         return len(assignments)
+
+    async def _execute_with_heartbeat(self, assignment: RuntimeAssignment) -> None:
+        stop = asyncio.Event()
+
+        async def keep_alive() -> None:
+            while not stop.is_set():
+                try:
+                    await asyncio.wait_for(
+                        stop.wait(),
+                        timeout=self._heartbeat_interval.total_seconds(),
+                    )
+                    return
+                except TimeoutError:
+                    try:
+                        await self._control.heartbeat()
+                    except Exception:
+                        # Transient control-plane blips must not stop keep-alive;
+                        # exiting here leaves last_heartbeat_at stale and
+                        # recover_expired can reclaim a still-running long call.
+                        logger.warning(
+                            "runtime heartbeat failed during execute "
+                            "for session=%s run=%s; will retry",
+                            assignment.session_id,
+                            assignment.run_id,
+                            exc_info=True,
+                        )
+
+        heartbeats = asyncio.create_task(
+            keep_alive(), name="remote-runtime-heartbeat"
+        )
+        try:
+            await self._harness.execute(assignment)
+        finally:
+            stop.set()
+            await heartbeats
 
 
 def _runtime_instance_identity(settings: Settings) -> tuple[str, str]:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections import defaultdict, deque
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import suppress
@@ -391,15 +392,21 @@ class PostgresRuntimeEventStore(LazyPool):
                     event.durable,
                     event.visibility,
                 )
-                if status == "INSERT 0 0":
+                # asyncpg: "INSERT 0 0"; aiomysql: "OK 0"
+                if status.rsplit(" ", 1)[-1] == "0":
                     return
+                # MySQL rejects LIMIT inside IN-subquery; keep newest N via anti-join.
                 await connection.execute(
-                    """DELETE FROM streaming.runtime_event
-                       WHERE tenant_id = $1 AND session_id = $2
-                         AND sequence NOT IN (
-                             SELECT sequence FROM streaming.runtime_event
-                             WHERE tenant_id = $1 AND session_id = $2
-                             ORDER BY sequence DESC LIMIT $3
+                    """DELETE FROM streaming.runtime_event AS victim
+                       WHERE victim.tenant_id = $1 AND victim.session_id = $2
+                         AND NOT EXISTS (
+                             SELECT 1 FROM (
+                                 SELECT sequence FROM streaming.runtime_event
+                                 WHERE tenant_id = $1 AND session_id = $2
+                                 ORDER BY sequence DESC
+                                 LIMIT $3
+                             ) AS kept
+                             WHERE kept.sequence = victim.sequence
                          )""",
                     event.tenant_id,
                     event.session_id,
@@ -409,6 +416,13 @@ class PostgresRuntimeEventStore(LazyPool):
             raise RuntimeEventRejectedError(
                 "runtime event sequence is already occupied"
             ) from exc
+        except Exception as exc:
+            # aiomysql / PyMySQL duplicate key on (tenant, session, sequence)
+            if type(exc).__name__ in {"IntegrityError", "UniqueViolationError"}:
+                raise RuntimeEventRejectedError(
+                    "runtime event sequence is already occupied"
+                ) from exc
+            raise
 
     async def ingest(self, event: RuntimeEvent) -> RuntimeEvent:
         """Assign the public cursor at the shared Kafka ingestion boundary."""
@@ -643,18 +657,31 @@ class KafkaStreamingIngestor:
         self._task = asyncio.create_task(self._run())
 
     async def _run(self) -> None:
+        logger = logging.getLogger(__name__)
         try:
             async for message in self._consumer:
-                data = json.loads(message.value.decode())
-                event = runtime_event_from_dict(dict(data))
-                ingest = getattr(self._target, "ingest", None)
-                if ingest is None:
-                    await self._target.publish(event)
-                else:
-                    await ingest(event)
-                await self._consumer.commit()
+                try:
+                    data = json.loads(message.value.decode())
+                    event = runtime_event_from_dict(dict(data))
+                    ingest = getattr(self._target, "ingest", None)
+                    if ingest is None:
+                        await self._target.publish(event)
+                    else:
+                        await ingest(event)
+                    await self._consumer.commit()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception(
+                        "runtime event ingest failed; skipping offset=%s",
+                        getattr(message, "offset", None),
+                    )
+                    with suppress(Exception):
+                        await self._consumer.commit()
         except asyncio.CancelledError:
             raise
+        except Exception:
+            logger.exception("runtime event consumer stopped")
 
     async def close(self) -> None:
         if self._task is not None:

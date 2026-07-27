@@ -254,11 +254,19 @@ producer、ingestor、总线以及统一 Runtime Worker 状态，且不会回显
 ```bash
 cd frontend
 npm ci
-npm run dev
+npm run dev:remote   # 默认：联调远程容器栈（.host.env → 10.244.16.131:8080）
+# npm run dev        # 仅特殊需要时再配本地后端
+```
+
+Cursor Debug 默认用 **AuraClaw: Frontend → remote containers (10.244.16.131)**；远程容器运维用 Tasks：`Remote containers: ps/logs/restart/health`，或：
+
+```bash
+./scripts/remote_compose.sh ps
+./scripts/remote_compose.sh logs -f task-api
 ```
 
 前端只调用公开 HTTP/SSE API，提供“智能问答”Streaming 测试页和“创建任务”Query / Result
-测试页，并支持 Session 控制、父子 Session、审批响应、断线回放、Timeline、Metrics 和脱敏请求历史。默认 API 地址为 `http://127.0.0.1:8000`，也可在页面运行时
+测试页，并支持 Session 控制、父子 Session、审批响应、断线回放、Timeline、Metrics 和脱敏请求历史。默认 API 地址为当前站点的 `/auraclaw-api`（由开发服务器代理到后端），也可在页面运行时
 配置。跨域部署需要后端或反向代理明确允许所需 Origin、Methods 和 Headers；详细说明见
 [frontend/README.md](frontend/README.md)。
 

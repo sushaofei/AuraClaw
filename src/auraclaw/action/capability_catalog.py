@@ -242,11 +242,14 @@ class CapabilitySearchExecutor:
             )
         )
         limit = int(arguments.get("limit", 10))
-        return {
-            "capabilities": [
-                descriptor.as_search_result() for descriptor in results[:limit]
-            ]
-        }
+        page = [descriptor.as_search_result() for descriptor in results[:limit]]
+        payload: dict[str, object] = {"capabilities": page}
+        if not page:
+            payload["hint"] = (
+                "No matching capabilities were found. Answer the user directly "
+                "without calling capability tools again."
+            )
+        return payload
 
 
 @dataclass(frozen=True)
@@ -374,7 +377,8 @@ def capability_search_tool() -> ToolCapability:
                 "capabilities": {
                     "type": "array",
                     "items": {"type": "object"},
-                }
+                },
+                "hint": {"type": "string"},
             },
             "required": ["capabilities"],
             "additionalProperties": False,

@@ -137,6 +137,32 @@ def test_mysql_any_expand_keeps_space_before_in() -> None:
     assert params == ("a", "b", "srv")
 
 
+def test_mysql_quotes_reserved_usage_column() -> None:
+    from auraclaw.infrastructure.persistence.mysql_pool import _compile
+
+    prepared = _prepare_mysql_sql(
+        "UPDATE model_gateway.model_call SET status='completed',"
+        "provider=$3,model=$4,usage=$5::jsonb,response=$6::jsonb,updated_at=now() "
+        "WHERE tenant_id=$1 AND model_call_id=$2"
+    )
+    assert "`usage`=$5" in prepared
+    assert "`model_gateway_model_call`" in prepared
+    # Table containing "usage" in the name must stay intact.
+    budget = _prepare_mysql_sql(
+        "UPDATE model_gateway.usage_budget SET tokens_used=tokens_used+$2 WHERE tenant_id=$1"
+    )
+    assert "`model_gateway_usage_budget`" in budget
+    assert "`usage`" not in budget
+
+    sql, params = _compile(
+        "UPDATE model_gateway.model_call SET usage=$3::jsonb "
+        "WHERE tenant_id=$1 AND model_call_id=$2",
+        ("t", "c", '{"input_tokens":1}'),
+    )
+    assert "`usage`=%s" in sql
+    assert params == ('{"input_tokens":1}', "t", "c")
+
+
 def test_mysql_roles_sql_render_substitutes_database() -> None:
     from auraclaw.infrastructure.persistence.mysql_roles import render_roles_sql
 
@@ -144,3 +170,46 @@ def test_mysql_roles_sql_render_substitutes_database() -> None:
     assert "`auraclaw_dev`.`session_core_%`" in rendered
     assert "'s3cret'" in rendered
     assert "`auraclaw`.`" not in rendered
+
+
+def test_outbox_nack_backoff_caps_exponent_before_power() -> None:
+    """mark_outbox_failed must emit capped POWER SQL even for huge publish_attempt."""
+    import asyncio
+
+    from auraclaw.infrastructure.persistence.postgres_event_store import (
+        PostgresEventStore,
+    )
+
+    class _RecordingPool:
+        def __init__(self) -> None:
+            self.statements: list[tuple[str, tuple[object, ...]]] = []
+
+        async def execute(self, sql: str, *args: object) -> str:
+            self.statements.append((sql, args))
+            return "UPDATE 1"
+
+    async def exercise(dialect: str) -> None:
+        store = PostgresEventStore.__new__(PostgresEventStore)
+        store._dialect = dialect  # type: ignore[attr-defined]
+        pool = _RecordingPool()
+
+        async def _pool() -> _RecordingPool:
+            return pool
+
+        store.pool = _pool  # type: ignore[method-assign]
+        # High attempt used to overflow MySQL DOUBLE via POWER(2, publish_attempt).
+        await store.mark_outbox_failed(outbox_id=42)
+        assert len(pool.statements) == 1
+        sql, args = pool.statements[0]
+        assert args == (42,)
+        normalized = "".join(sql.upper().split())
+        assert "POWER(2,LEAST(PUBLISH_ATTEMPT,6))" in normalized
+        assert "POWER(2,PUBLISH_ATTEMPT)" not in normalized
+        for attempt in (0, 1, 6, 7, 1024, 10_000):
+            delay = min(60, 2 ** min(attempt, 6))
+            assert delay <= 60
+            if attempt >= 6:
+                assert delay == 60
+
+    asyncio.run(exercise("mysql"))
+    asyncio.run(exercise("postgres"))

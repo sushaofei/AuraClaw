@@ -46,6 +46,18 @@ _CONCAT_FOUR = re.compile(
 _CONCAT_TWO = re.compile(r"'([^']*)'\s*\|\|\s*([a-zA-Z_][\w.]*)")
 _JSON_TEXT = re.compile(r"(\w+(?:\.\w+)?)\s*->>\s*'([^']+)'")
 _JSON_PATH = re.compile(r"(\w+(?:\.\w+)?)\s*->\s*'([^']+)'")
+# Column names that are MySQL reserved words (must be backtick-quoted).
+# Applied after schema.table → `schema_table` rewrite so table names like
+# `model_gateway_usage_budget` are not mangled.
+_MYSQL_RESERVED_COLUMNS = ("usage",)
+_RESERVED_COLUMN = re.compile(
+    r"(?<![`\w])(?:" + "|".join(_MYSQL_RESERVED_COLUMNS) + r")(?![`\w])",
+    re.IGNORECASE,
+)
+
+
+def _quote_mysql_reserved_columns(sql: str) -> str:
+    return _RESERVED_COLUMN.sub(lambda match: f"`{match.group(0).lower()}`", sql)
 
 
 def _convert_arg(value: Any) -> Any:
@@ -140,8 +152,16 @@ def _prepare_mysql_sql(query: str) -> str:
         sql = mysql_insert_ignore(sql)
     sql = re.sub(r"\s+RETURNING\s+[\w.\s,*]+$", "", sql, flags=re.IGNORECASE)
     sql = _SCHEMA_TABLE.sub(r"`\1_\2`", sql)
+    sql = _quote_mysql_reserved_columns(sql)
     sql = _PG_CAST.sub("", sql)
     sql = _INTERVAL_LITERAL.sub(lambda match: _mysql_interval_literal(match.group(1)), sql)
+    # Postgres: make_interval(secs => col) → MySQL: INTERVAL col SECOND
+    sql = re.sub(
+        r"make_interval\(\s*secs\s*=>\s*([a-zA-Z_][\w.]*)\s*\)",
+        r"INTERVAL \1 SECOND",
+        sql,
+        flags=re.IGNORECASE,
+    )
     sql = sql.replace("now()", "UTC_TIMESTAMP(6)")
     sql = re.sub(
         r"UTC_TIMESTAMP\(6\)\s*\+\s*\$(\d+)",

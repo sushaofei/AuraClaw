@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from typing import Any, TypeVar
+from typing import Any, NoReturn, TypeVar
 
 import httpx
 from fastapi import FastAPI, Request
@@ -10,7 +10,19 @@ from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 from starlette.responses import Response
 
-from auraclaw.contracts.errors import AuraClawError
+from auraclaw.contracts.errors import (
+    ApprovalValidationError,
+    ArtifactAccessError,
+    AuraClawError,
+    AuthorizationError,
+    CredentialAccessError,
+    FencingTokenError,
+    InvalidTransitionError,
+    LeaseConflictError,
+    NotFoundError,
+    PolicyDeniedError,
+    VersionConflictError,
+)
 from auraclaw.contracts.internal import (
     INTERNAL_API_VERSION,
     ContractModel,
@@ -53,11 +65,38 @@ def _error_code(exc: AuraClawError) -> InternalErrorCode:
         "lease_conflict": InternalErrorCode.LEASE_LOST,
         "credential_access_denied": InternalErrorCode.CREDENTIAL_DENIED,
         "artifact_access_denied": InternalErrorCode.ARTIFACT_DENIED,
+        "invalid_transition": InternalErrorCode.INVALID_TRANSITION,
     }
     try:
         return InternalErrorCode(exc.code)
     except ValueError:
         return aliases.get(exc.code, InternalErrorCode.INTERNAL_ERROR)
+
+
+def _raise_contract_error(response: httpx.Response) -> NoReturn:
+    try:
+        error = InternalError.model_validate(response.json())
+    except Exception as exc:
+        raise AuraClawError(
+            f"internal contract call failed with HTTP {response.status_code}",
+            detail=response.text[:500] or None,
+        ) from exc
+    detail = f"{error.code.value}: {error.detail or ''}".rstrip(": ")
+    mapping: dict[InternalErrorCode, type[AuraClawError]] = {
+        InternalErrorCode.NOT_FOUND: NotFoundError,
+        InternalErrorCode.VERSION_CONFLICT: VersionConflictError,
+        InternalErrorCode.INVALID_TRANSITION: InvalidTransitionError,
+        InternalErrorCode.FORBIDDEN: AuthorizationError,
+        InternalErrorCode.UNAUTHORIZED: AuthorizationError,
+        InternalErrorCode.LEASE_LOST: LeaseConflictError,
+        InternalErrorCode.STALE_FENCING_TOKEN: FencingTokenError,
+        InternalErrorCode.POLICY_DENIED: PolicyDeniedError,
+        InternalErrorCode.APPROVAL_INVALID: ApprovalValidationError,
+        InternalErrorCode.CREDENTIAL_DENIED: CredentialAccessError,
+        InternalErrorCode.ARTIFACT_DENIED: ArtifactAccessError,
+    }
+    exc_type = mapping.get(error.code, AuraClawError)
+    raise exc_type(error.message, detail=detail)
 
 
 def create_contract_app(
@@ -178,9 +217,5 @@ class HttpContractClient:
             headers=headers,
         )
         if response.is_error:
-            error = InternalError.model_validate(response.json())
-            raise AuraClawError(
-                error.message,
-                detail=f"{error.code.value}: {error.detail or ''}".rstrip(),
-            )
+            _raise_contract_error(response)
         return response_model.model_validate(response.json())

@@ -144,6 +144,46 @@ test("reconciles truncated streaming bubbles with authoritative Result text", ()
       ["a-new", "assistant", "完整答案", false],
     ],
   );
+
+  // Follow-up Result must not overwrite the previous turn when the new bubble
+  // has not been created yet (Result raced ahead of SSE deltas).
+  const multiTurn = [
+    { id: "u1", role: "user", content: "你好" },
+    { id: "a1", role: "assistant", content: "第一答", streaming: false, runId: "run-1" },
+    { id: "u2", role: "user", content: "介绍下自己" },
+  ];
+  const followUp = reconcileAssistantWithResult(multiTurn, {
+    runId: "run-2",
+    resultSummary: "第二答",
+    createId: () => "a2",
+  });
+  assert.deepEqual(
+    followUp.map((item) => [item.id, item.role, item.content, item.runId]),
+    [
+      ["u1", "user", "你好", undefined],
+      ["a1", "assistant", "第一答", "run-1"],
+      ["u2", "user", "介绍下自己", undefined],
+      ["a2", "assistant", "第二答", "run-2"],
+    ],
+  );
+
+  // In-progress bubble after the latest user turn can still be filled in place.
+  const inProgress = reconcileAssistantWithResult(
+    [
+      ...multiTurn,
+      { id: "a2-partial", role: "assistant", content: "第二", streaming: true },
+    ],
+    { runId: "run-2", resultSummary: "第二答完整" },
+  );
+  assert.deepEqual(
+    inProgress.map((item) => [item.id, item.role, item.content, item.streaming, item.runId]),
+    [
+      ["u1", "user", "你好", undefined, undefined],
+      ["a1", "assistant", "第一答", false, "run-1"],
+      ["u2", "user", "介绍下自己", undefined, undefined],
+      ["a2-partial", "assistant", "第二答完整", false, "run-2"],
+    ],
+  );
 });
 test("normalizes result text and Retry-After delays", () => {
   assert.equal(resultText({ result_summary: "最终答案" }), "最终答案");
