@@ -309,14 +309,16 @@ class RemoteRuntimeWorker:
                     try:
                         await self._control.heartbeat()
                     except Exception:
+                        # Transient control-plane blips must not stop keep-alive;
+                        # exiting here leaves last_heartbeat_at stale and
+                        # recover_expired can reclaim a still-running long call.
                         logger.warning(
                             "runtime heartbeat failed during execute "
-                            "for session=%s run=%s",
+                            "for session=%s run=%s; will retry",
                             assignment.session_id,
                             assignment.run_id,
                             exc_info=True,
                         )
-                        return
 
         heartbeats = asyncio.create_task(
             keep_alive(), name="remote-runtime-heartbeat"
