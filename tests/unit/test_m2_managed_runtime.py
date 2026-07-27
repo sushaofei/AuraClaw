@@ -499,6 +499,9 @@ def test_remote_runtime_worker_heartbeats_during_slow_execute() -> None:
     async def scenario() -> None:
         from auraclaw.composition.services import RemoteRuntimeWorker
 
+        # Event-driven: execute finishes only after keep-alive has recovered
+        # from one failure and delivered two successful pulses (no wall-clock race).
+        recovered = asyncio.Event()
         heartbeats = 0
         failures_left = 1
 
@@ -514,6 +517,8 @@ def test_remote_runtime_worker_heartbeats_during_slow_execute() -> None:
                     failures_left -= 1
                     raise ConnectionError("transient control-plane blip")
                 heartbeats += 1
+                if heartbeats >= 2:
+                    recovered.set()
 
             async def claim(self, *, limit: int = 1) -> list[RuntimeAssignment]:
                 del limit
@@ -537,7 +542,7 @@ def test_remote_runtime_worker_heartbeats_during_slow_execute() -> None:
         class SlowHarness:
             async def execute(self, assignment: RuntimeAssignment) -> None:
                 del assignment
-                await asyncio.sleep(0.15)
+                await asyncio.wait_for(recovered.wait(), timeout=2.0)
 
             async def record_failure(
                 self, assignment: RuntimeAssignment, exc: Exception
@@ -547,11 +552,11 @@ def test_remote_runtime_worker_heartbeats_during_slow_execute() -> None:
         worker = RemoteRuntimeWorker(
             FakeControl(),  # type: ignore[arg-type]
             SlowHarness(),  # type: ignore[arg-type]
-            heartbeat_interval=timedelta(milliseconds=30),
+            heartbeat_interval=timedelta(milliseconds=5),
         )
         assert await worker.tick() == 1
-        # One transient failure must not stop keep-alive; later pulses continue.
         assert failures_left == 0
         assert heartbeats >= 2
+        assert recovered.is_set()
 
     asyncio.run(scenario())
