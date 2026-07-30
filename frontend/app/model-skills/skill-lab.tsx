@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import Link from "next/link";
 
 type Json = Record<string, unknown>;
 type TestMode = "demo" | "live";
@@ -366,10 +367,10 @@ export function ModelSkillLab() {
   return (
     <main className="skill-lab-shell">
       <header className="topbar skill-lab-topbar">
-        <a className="brand" href="/">
+        <Link className="brand" href="/">
           <span className="brand-mark">AC</span>
           <div><strong>AuraClaw</strong><small>model skill delivery lab</small></div>
-        </a>
+        </Link>
         <div className="top-status">
           <span className={`signal ${steps.every((step) => step.state === "passed") ? "online" : ""}`} />
           <span>{mode === "live" ? "Live MCP" : "Demo snapshot"}</span>

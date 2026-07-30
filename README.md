@@ -462,3 +462,9 @@ Metrics Pipeline 和 Alert Receiver 通过同一观测端口接入。
 `dwd_pr_price_event_detail_di` 与 `dwd_pr_price_compare_pair_di`。Runtime 和 Skill
 都不接收数据库地址、凭证、表名或原始 SQL。完整流程与回滚见
 [M12 价格洞察业务 Skill 实施与运维](docs/M12%20价格洞察业务%20Skill%20实施与运维.md)。
+
+本机真实 DWD 可用 `scripts/seed_price_insight_mysql.py` 重复初始化；启动
+`AuraClaw: Debug local frontend + backend` 后访问
+`http://localhost:3000/price-insight`。外部模型端点不可用时，可仅在 development 设置
+`AURACLAW_DEVELOPMENT_MODEL_MODE=price-insight-scripted`，用固定模型决策序列验证真实的
+Agent Harness、Capability/Skill、Tool Gateway 与 MySQL 数据链路。

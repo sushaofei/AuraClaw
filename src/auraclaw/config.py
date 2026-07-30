@@ -196,6 +196,7 @@ class Settings(BaseSettings):
     model_base_url: str | None = None
     model_name: str | None = None
     model_provider: str = "openai_compatible"
+    development_model_mode: Literal["provider", "price-insight-scripted"] = "provider"
     model_timeout_seconds: float = 120.0
     model_tenant_token_limit_per_hour: int = Field(default=1_000_000, ge=1)
     # None omits the field; True/False maps to OpenAI-compatible thinking.type enabled/disabled.

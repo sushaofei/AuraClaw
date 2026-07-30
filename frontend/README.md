@@ -37,16 +37,19 @@ Cursor / VS Code：
 
 Tenant / Actor 默认 `local` / `local-user`，点「检查连接」即可。
 
-### 前端 + 本地后端（已弃用，仅特殊需要）
+### 价格洞察真实 DWD 本地联调
 
-本地后端 launch 配置已隐藏。若必须本地联调：
+本地 MySQL DWD 与 Agent Loop 调试使用 compound
+**AuraClaw: Debug local frontend + backend**，然后打开
+http://localhost:3000/price-insight 。也可分别启动：
 
 ```bash
 AURACLAW_DEV_API_TARGET=http://127.0.0.1:8000 npm run dev
-uv run uvicorn auraclaw.main:app --reload
+uv run auraclaw serve
 ```
 
 `/auraclaw-api` 只在设置了 `AURACLAW_DEV_API_TARGET`（或 `npm run dev:remote`）时由开发服务器代理到后端。
+该页面从 Canonical Timeline 读取 Capability/Skill/Tool 证据，不直接访问 MySQL。
 
 后端始终使用统一 Runtime Worker、Model Gateway 与 Runtime Event 发布链；本地和部署环境
 只通过各自 `.env.development` / `.env.production` 文件选择资源，文件内容不含环境标签。
