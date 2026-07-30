@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ProcurementPriceInsightSnapshot",
+  "type": "object",
+  "required": ["filter", "kpis", "analytics", "data_quality", "evidence"],
+  "properties": {
+    "filter": {"type": "object"},
+    "kpis": {"type": "array", "minItems": 8},
+    "analytics": {"type": "object", "required": ["price_compare_3d", "price_impact"]},
+    "data_quality": {"type": "object", "required": ["status", "findings"]},
+    "evidence": {"type": "array", "minItems": 2},
+    "recommendations": {"type": "array"}
+  },
+  "additionalProperties": false
+}

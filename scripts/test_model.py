@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Probe the OpenAI-compatible model configured for AuraClaw.
 
 Reads AURACLAW_MODEL_* from .env (or AURACLAW_ENV_FILE / env vars),
@@ -11,8 +10,6 @@ Examples:
   python3 scripts/test_model.py --prompt "用一句话介绍你自己"
   python3 scripts/test_model.py --env-file /path/to/.env
 """
-
-from __future__ import print_function, unicode_literals
 
 import argparse
 import json
@@ -32,7 +29,7 @@ def _load_env_file(path):
     values = {}
     if not path or not os.path.isfile(path):
         return values
-    with open(path, "r") as fh:
+    with open(path) as fh:
         for raw in fh:
             line = raw.strip()
             if not line or line.startswith("#") or "=" not in line:
@@ -83,7 +80,7 @@ def _print_non_stream(body_bytes, elapsed):
     except ValueError:
         print("RAW RESPONSE:")
         print(text)
-        print("elapsed_ms={0:.0f}".format(elapsed * 1000))
+        print(f"elapsed_ms={elapsed * 1000:.0f}")
         return 1
 
     choices = data.get("choices") or []
@@ -98,13 +95,13 @@ def _print_non_stream(body_bytes, elapsed):
     print("=== model reply ===")
     print(content if content else "(empty content)")
     print("=== meta ===")
-    print("finish_reason={0}".format(finish_reason))
-    print("usage={0}".format(json.dumps(usage, ensure_ascii=False)))
-    print("elapsed_ms={0:.0f}".format(elapsed * 1000))
+    print(f"finish_reason={finish_reason}")
+    print(f"usage={json.dumps(usage, ensure_ascii=False)}")
+    print(f"elapsed_ms={elapsed * 1000:.0f}")
     if data.get("id"):
-        print("id={0}".format(data.get("id")))
+        print("id={}".format(data.get("id")))
     if data.get("model"):
-        print("model={0}".format(data.get("model")))
+        print("model={}".format(data.get("model")))
     return 0 if content else 2
 
 
@@ -132,7 +129,7 @@ def _print_stream(resp, elapsed_started):
         try:
             chunk = json.loads(data)
         except ValueError:
-            print("bad sse chunk: {0}".format(data), file=sys.stderr)
+            print(f"bad sse chunk: {data}", file=sys.stderr)
             continue
         if chunk.get("model"):
             model_name = chunk.get("model")
@@ -154,13 +151,13 @@ def _print_stream(resp, elapsed_started):
     content = "".join(content_parts)
     print()
     print("=== meta ===")
-    print("finish_reason={0}".format(finish_reason))
-    print("usage={0}".format(json.dumps(usage, ensure_ascii=False)))
-    print("elapsed_ms={0:.0f}".format(elapsed * 1000))
+    print(f"finish_reason={finish_reason}")
+    print(f"usage={json.dumps(usage, ensure_ascii=False)}")
+    print(f"elapsed_ms={elapsed * 1000:.0f}")
     if first_token_at is not None:
-        print("ttft_ms={0:.0f}".format((first_token_at - elapsed_started) * 1000))
+        print(f"ttft_ms={(first_token_at - elapsed_started) * 1000:.0f}")
     if model_name:
-        print("model={0}".format(model_name))
+        print(f"model={model_name}")
     return 0 if content else 2
 
 
@@ -238,8 +235,8 @@ def main(argv=None):
         if not value
     ]
     if missing:
-        print("missing config: {0}".format(", ".join(missing)), file=sys.stderr)
-        print("env_file={0}".format(args.env_file), file=sys.stderr)
+        print("missing config: {}".format(", ".join(missing)), file=sys.stderr)
+        print(f"env_file={args.env_file}", file=sys.stderr)
         return 1
 
     url = _chat_completions_url(base_url)
@@ -255,20 +252,20 @@ def main(argv=None):
         url,
         data=body,
         headers={
-            "Authorization": "Bearer {0}".format(api_key),
+            "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
             "Accept": "text/event-stream" if args.stream else "application/json",
         },
     )
 
     print("=== request ===")
-    print("url={0}".format(url))
-    print("model={0}".format(model))
-    print("stream={0}".format(args.stream))
-    print("thinking={0}".format(thinking_enabled))
-    print("timeout_s={0}".format(timeout))
-    print("prompt={0}".format(args.prompt))
-    print("env_file={0}".format(args.env_file))
+    print(f"url={url}")
+    print(f"model={model}")
+    print(f"stream={args.stream}")
+    print(f"thinking={thinking_enabled}")
+    print(f"timeout_s={timeout}")
+    print(f"prompt={args.prompt}")
+    print(f"env_file={args.env_file}")
     print()
 
     context = ssl._create_unverified_context() if args.insecure else None
@@ -278,13 +275,13 @@ def main(argv=None):
         resp = urlopen(req, timeout=timeout, context=context)
     except HTTPError as exc:
         err_body = exc.read().decode("utf-8", errors="replace")
-        print("HTTP {0}".format(exc.code), file=sys.stderr)
+        print(f"HTTP {exc.code}", file=sys.stderr)
         print(err_body, file=sys.stderr)
-        print("elapsed_ms={0:.0f}".format((time.time() - started) * 1000), file=sys.stderr)
+        print(f"elapsed_ms={(time.time() - started) * 1000:.0f}", file=sys.stderr)
         return 1
     except URLError as exc:
-        print("request failed: {0}".format(exc), file=sys.stderr)
-        print("elapsed_ms={0:.0f}".format((time.time() - started) * 1000), file=sys.stderr)
+        print(f"request failed: {exc}", file=sys.stderr)
+        print(f"elapsed_ms={(time.time() - started) * 1000:.0f}", file=sys.stderr)
         return 1
 
     try:

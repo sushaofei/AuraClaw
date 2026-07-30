@@ -28,6 +28,7 @@ _SECRET_FILE_VARIABLES = {
     "AURACLAW_LEASE_SIGNING_KEY",
     "AURACLAW_MODEL_API_KEY",
     "AURACLAW_MODEL_SKILL_SIGNING_KEY",
+    "AURACLAW_PRICE_INSIGHT_MYSQL_PASSWORD",
     "AURACLAW_CREDENTIAL_VAULT_TOKEN",
     "MYSQL_DB_PWD",
     "SEAWEEDFS_ACCESS_KEY",
@@ -55,7 +56,9 @@ def load_secret_files(environ: dict[str, str] | None = None) -> None:
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_prefix="AURACLAW_", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=".env", env_prefix="AURACLAW_", extra="ignore"
+    )
 
     host: str = "127.0.0.1"
     port: int = 8000
@@ -118,6 +121,13 @@ class Settings(BaseSettings):
     model_skill_mysql_database: str | None = Field(
         default=None, validation_alias="MYSQL_DB_NAME"
     )
+    price_insight_source: Literal["auto", "disabled", "fixture", "mysql"] = "auto"
+    price_insight_target_tenant_id: str = Field(default="development", min_length=1)
+    price_insight_mysql_host: str | None = None
+    price_insight_mysql_port: int = Field(default=3306, ge=1, le=65535)
+    price_insight_mysql_user: str | None = None
+    price_insight_mysql_password: SecretStr | None = None
+    price_insight_mysql_database: str | None = None
     credential_vault_addr: str | None = None
     credential_vault_token: SecretStr | None = None
     credential_vault_mount: str = "secret"
@@ -151,12 +161,22 @@ class Settings(BaseSettings):
     seaweedfs_secret_key: SecretStr | None = Field(
         default=None, validation_alias="SEAWEEDFS_SECRET_KEY"
     )
-    seaweedfs_bucket: str = Field(default="auraclaw-artifacts", validation_alias="SEAWEEDFS_BUCKET")
-    seaweedfs_region: str = Field(default="us-east-1", validation_alias="SEAWEEDFS_REGION")
+    seaweedfs_bucket: str = Field(
+        default="auraclaw-artifacts", validation_alias="SEAWEEDFS_BUCKET"
+    )
+    seaweedfs_region: str = Field(
+        default="us-east-1", validation_alias="SEAWEEDFS_REGION"
+    )
     seaweedfs_use_ssl: bool = Field(default=False, validation_alias="SEAWEEDFS_USE_SSL")
-    seaweedfs_path_style: bool = Field(default=True, validation_alias="SEAWEEDFS_PATH_STYLE")
-    artifact_multipart_threshold: int = Field(default=16 * 1024 * 1024, ge=5 * 1024 * 1024)
-    artifact_multipart_part_size: int = Field(default=8 * 1024 * 1024, ge=5 * 1024 * 1024)
+    seaweedfs_path_style: bool = Field(
+        default=True, validation_alias="SEAWEEDFS_PATH_STYLE"
+    )
+    artifact_multipart_threshold: int = Field(
+        default=16 * 1024 * 1024, ge=5 * 1024 * 1024
+    )
+    artifact_multipart_part_size: int = Field(
+        default=8 * 1024 * 1024, ge=5 * 1024 * 1024
+    )
     runtime_event_backend: Literal["auto", "memory", "kafka"] = "auto"
     kafka_host: str | None = Field(default=None, validation_alias="KAFKA_HOST")
     kafka_port: int = Field(default=9092, validation_alias="KAFKA_PORT")
@@ -190,9 +210,15 @@ class Settings(BaseSettings):
             missing.append("SEAWEEDFS_HOST")
         if not self.seaweedfs_bucket.strip():
             missing.append("SEAWEEDFS_BUCKET")
-        if self.seaweedfs_access_key is None or not self.seaweedfs_access_key.get_secret_value():
+        if (
+            self.seaweedfs_access_key is None
+            or not self.seaweedfs_access_key.get_secret_value()
+        ):
             missing.append("SEAWEEDFS_ACCESS_KEY")
-        if self.seaweedfs_secret_key is None or not self.seaweedfs_secret_key.get_secret_value():
+        if (
+            self.seaweedfs_secret_key is None
+            or not self.seaweedfs_secret_key.get_secret_value()
+        ):
             missing.append("SEAWEEDFS_SECRET_KEY")
         if missing:
             raise ValueError(f"SeaweedFS backend requires: {', '.join(missing)}")
@@ -205,28 +231,36 @@ class Settings(BaseSettings):
         if self.storage_backend == "mysql":
             return "mysql"
         url = (self.database_url or "").lower()
-        if url.startswith("postgresql:") or url.startswith("postgres:") or "+asyncpg" in url:
+        if (
+            url.startswith("postgresql:")
+            or url.startswith("postgres:")
+            or "+asyncpg" in url
+        ):
             return "postgres"
-        if url.startswith("mysql:") or "+aiomysql" in url or "+asyncmy" in url or "+pymysql" in url:
+        if (
+            url.startswith("mysql:")
+            or "+aiomysql" in url
+            or "+asyncmy" in url
+            or "+pymysql" in url
+        ):
             return "mysql"
         return self.db_dialect
 
     @property
     def resolved_database_url(self) -> str:
-        if self.db_host and self.db_user and self.db_password is not None and self.db_name:
+        if (
+            self.db_host
+            and self.db_user
+            and self.db_password is not None
+            and self.db_name
+        ):
             user = quote(self.db_user, safe="")
             password = quote(self.db_password, safe="")
             database = quote(self.db_name, safe="")
             dialect = self.resolved_db_dialect
             if dialect == "mysql":
-                return (
-                    f"mysql+aiomysql://{user}:{password}"
-                    f"@{self.db_host}:{self.db_port}/{database}"
-                )
-            return (
-                f"postgresql+asyncpg://{user}:{password}"
-                f"@{self.db_host}:{self.db_port}/{database}"
-            )
+                return f"mysql+aiomysql://{user}:{password}@{self.db_host}:{self.db_port}/{database}"
+            return f"postgresql+asyncpg://{user}:{password}@{self.db_host}:{self.db_port}/{database}"
         return self.database_url
 
     @property
@@ -290,12 +324,16 @@ class Settings(BaseSettings):
     @property
     def seaweedfs_s3_endpoint(self) -> str:
         scheme = "https" if self.seaweedfs_use_ssl else "http"
-        return f"{scheme}://{self.seaweedfs_host or '127.0.0.1'}:{self.seaweedfs_s3_port}"
+        return (
+            f"{scheme}://{self.seaweedfs_host or '127.0.0.1'}:{self.seaweedfs_s3_port}"
+        )
 
     @property
     def allowed_cors_origins(self) -> list[str]:
         configured = [
-            origin.strip() for origin in self.cors_allow_origins.split(",") if origin.strip()
+            origin.strip()
+            for origin in self.cors_allow_origins.split(",")
+            if origin.strip()
         ]
         return configured
 
@@ -328,6 +366,24 @@ class Settings(BaseSettings):
             and self.model_skill_mysql_password is not None
             and self.model_skill_mysql_password.get_secret_value()
             and self.model_skill_mysql_database
+        )
+
+    @property
+    def resolved_price_insight_source(
+        self,
+    ) -> Literal["disabled", "fixture", "mysql"]:
+        if self.price_insight_source != "auto":
+            return self.price_insight_source
+        return "fixture" if self.deployment_profile == "development" else "disabled"
+
+    @property
+    def price_insight_mysql_configured(self) -> bool:
+        return bool(
+            self.price_insight_mysql_host
+            and self.price_insight_mysql_user
+            and self.price_insight_mysql_password is not None
+            and self.price_insight_mysql_password.get_secret_value()
+            and self.price_insight_mysql_database
         )
 
     def workload_token_value(self, service_name: str) -> str | None:

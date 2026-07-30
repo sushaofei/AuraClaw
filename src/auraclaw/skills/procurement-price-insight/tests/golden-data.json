@@ -1,0 +1,85 @@
+{
+  "tenant_id": "development",
+  "source_revision": "golden-price-insight/1.0.0",
+  "events": [
+    {
+      "price_line_id": "PL-001", "purchase_project_code": "P-001", "bid_section_id": "B-01",
+      "transaction_period": "2026-01", "org_code": "ORG-A", "region_code": "EAST",
+      "category_code": "STEEL", "category_name": "钢材", "material_code": "M-001",
+      "material_source_guid": "SRC-001", "material_name": "热轧卷板", "spec_model": "Q235B-3mm",
+      "supplier_code": "SUP-A", "standard_quantity": "100", "standard_uom_code": "TON",
+      "currency_code": "CNY", "tax_basis_code": "TAX_INCLUDED",
+      "current_purchase_unit_price": "4000", "current_purchase_amount": "400000"
+    },
+    {
+      "price_line_id": "PL-002", "purchase_project_code": "P-002", "bid_section_id": "B-02",
+      "transaction_period": "2026-02", "org_code": "ORG-A", "region_code": "EAST",
+      "category_code": "STEEL", "category_name": "钢材", "material_code": "M-001",
+      "material_source_guid": "SRC-001", "material_name": "热轧卷板", "spec_model": "Q235B-3mm",
+      "supplier_code": "SUP-B", "standard_quantity": "100", "standard_uom_code": "TON",
+      "currency_code": "CNY", "tax_basis_code": "TAX_INCLUDED",
+      "current_purchase_unit_price": "4400", "current_purchase_amount": "440000"
+    },
+    {
+      "price_line_id": "PL-003", "purchase_project_code": "P-003", "bid_section_id": "B-03",
+      "transaction_period": "2026-02", "org_code": "ORG-B", "region_code": "WEST",
+      "category_code": "STEEL", "category_name": "钢材", "material_code": "M-001",
+      "material_source_guid": "SRC-001", "material_name": "热轧卷板", "spec_model": "Q235B-3mm",
+      "supplier_code": "SUP-C", "standard_quantity": "100", "standard_uom_code": "TON",
+      "currency_code": "CNY", "tax_basis_code": "TAX_INCLUDED",
+      "current_purchase_unit_price": "3600", "current_purchase_amount": "360000"
+    },
+    {
+      "price_line_id": "PL-004", "purchase_project_code": "P-004", "bid_section_id": "B-04",
+      "transaction_period": "2026-02", "org_code": "ORG-A", "region_code": "EAST",
+      "category_code": "COPPER", "category_name": "铜材", "material_code": "M-002",
+      "material_source_guid": "SRC-002", "material_name": "电解铜", "spec_model": "Cu99.95",
+      "supplier_code": "SUP-D", "standard_quantity": "10", "standard_uom_code": "TON",
+      "currency_code": "CNY", "tax_basis_code": "TAX_INCLUDED",
+      "current_purchase_unit_price": "70000", "current_purchase_amount": "700000"
+    }
+  ],
+  "comparisons": [
+    {
+      "compare_pair_id": "CP-002", "price_line_id": "PL-002", "purchase_project_code": "P-002",
+      "transaction_period": "2026-02", "org_code": "ORG-A", "region_code": "EAST",
+      "category_code": "STEEL", "category_name": "钢材", "material_code": "M-001",
+      "material_name": "热轧卷板", "spec_model": "Q235B-3mm", "supplier_code": "SUP-B",
+      "standard_quantity": "100", "standard_uom_code": "TON", "currency_code": "CNY",
+      "tax_basis_code": "TAX_INCLUDED", "current_purchase_unit_price": "4400",
+      "current_purchase_amount": "440000", "benchmark_id": "BM-STEEL-202602",
+      "benchmark_version": "2026-02-v1", "benchmark_period": "2026-02",
+      "benchmark_statistic_type": "MEAN", "industry_avg_unit_price": "4000",
+      "industry_sample_count": 40, "confidence_level": "HIGH",
+      "benchmark_match_rule_code": "EXACT_STANDARD_MATERIAL", "benchmark_match_status": "MATCHED",
+      "is_selected": true, "material_match_score": "1.0",
+      "material_mapping_version": "map-v1", "rule_version": "rule-v1"
+    },
+    {
+      "compare_pair_id": "CP-003", "price_line_id": "PL-003", "purchase_project_code": "P-003",
+      "transaction_period": "2026-02", "org_code": "ORG-B", "region_code": "WEST",
+      "category_code": "STEEL", "category_name": "钢材", "material_code": "M-001",
+      "material_name": "热轧卷板", "spec_model": "Q235B-3mm", "supplier_code": "SUP-C",
+      "standard_quantity": "100", "standard_uom_code": "TON", "currency_code": "CNY",
+      "tax_basis_code": "TAX_INCLUDED", "current_purchase_unit_price": "3600",
+      "current_purchase_amount": "360000", "benchmark_id": "BM-STEEL-202602",
+      "benchmark_version": "2026-02-v1", "benchmark_period": "2026-02",
+      "benchmark_statistic_type": "MEAN", "industry_avg_unit_price": "4000",
+      "industry_sample_count": 40, "confidence_level": "HIGH",
+      "benchmark_match_rule_code": "EXACT_STANDARD_MATERIAL", "benchmark_match_status": "MATCHED",
+      "is_selected": true, "material_match_score": "1.0",
+      "material_mapping_version": "map-v1", "rule_version": "rule-v1"
+    },
+    {
+      "compare_pair_id": "CP-004", "price_line_id": "PL-004", "purchase_project_code": "P-004",
+      "transaction_period": "2026-02", "org_code": "ORG-A", "region_code": "EAST",
+      "category_code": "COPPER", "category_name": "铜材", "material_code": "M-002",
+      "material_name": "电解铜", "spec_model": "Cu99.95", "supplier_code": "SUP-D",
+      "standard_quantity": "10", "standard_uom_code": "TON", "currency_code": "CNY",
+      "tax_basis_code": "TAX_INCLUDED", "current_purchase_unit_price": "70000",
+      "current_purchase_amount": "700000", "benchmark_match_rule_code": "NO_BENCHMARK",
+      "benchmark_match_status": "UNCOMPARABLE", "is_selected": false,
+      "uncomparable_reason_code": "NO_MARKET_SAMPLE", "rule_version": "rule-v1"
+    }
+  ]
+}

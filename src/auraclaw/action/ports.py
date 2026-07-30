@@ -8,6 +8,7 @@ from typing import Any, Protocol
 from auraclaw.contracts.capabilities import CapabilityDescriptor, McpServerDefinition
 from auraclaw.contracts.mcp import McpResourceContent, McpTrustedContext
 from auraclaw.contracts.model_skills import ModelSkillSnapshot
+from auraclaw.contracts.price_insight import PriceInsightDataset, PriceInsightFilter
 from auraclaw.contracts.tools import (
     ApprovalRecord,
     ArtifactRef,
@@ -27,7 +28,9 @@ class PolicyEvaluation:
 
 
 class HandsExecutor(Protocol):
-    async def execute(self, invocation: ToolInvocation, capability: ToolCapability) -> Any: ...
+    async def execute(
+        self, invocation: ToolInvocation, capability: ToolCapability
+    ) -> Any: ...
 
 
 class PolicyEvaluator(Protocol):
@@ -37,7 +40,9 @@ class PolicyEvaluator(Protocol):
         self,
         capability: ToolCapability,
         invocation: ToolInvocation | None = None,
-    ) -> PolicyDecision | PolicyEvaluation | Awaitable[PolicyDecision | PolicyEvaluation]: ...
+    ) -> (
+        PolicyDecision | PolicyEvaluation | Awaitable[PolicyDecision | PolicyEvaluation]
+    ): ...
 
 
 @dataclass(frozen=True)
@@ -47,7 +52,9 @@ class InvocationBegin:
 
 
 class InvocationStore(Protocol):
-    async def begin(self, invocation: ToolInvocation, argument_digest: str) -> InvocationBegin: ...
+    async def begin(
+        self, invocation: ToolInvocation, argument_digest: str
+    ) -> InvocationBegin: ...
 
     async def set_status(
         self, invocation: ToolInvocation, status: str, *, error_code: str | None = None
@@ -153,3 +160,12 @@ class ResourcePolicyEvaluator(Protocol):
 
 class ModelSkillSource(Protocol):
     async def load_snapshots(self) -> tuple[ModelSkillSnapshot, ...]: ...
+
+
+class PriceInsightSource(Protocol):
+    async def load_dataset(
+        self,
+        *,
+        tenant_id: str,
+        filters: PriceInsightFilter,
+    ) -> PriceInsightDataset: ...

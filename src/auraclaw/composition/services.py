@@ -44,6 +44,13 @@ from auraclaw.action.model_skill_compiler import (
     ModelSkillPublisher,
 )
 from auraclaw.action.policy import PolicyEngine
+from auraclaw.action.ports import PriceInsightSource
+from auraclaw.action.price_insight import (
+    PriceInsightService,
+    PriceInsightToolExecutor,
+    price_insight_tool_descriptors,
+    price_insight_tools,
+)
 from auraclaw.action.remote_mcp import ManagedRemoteMcpTransport
 from auraclaw.action.resource_gateway import ManagedResourceGateway
 from auraclaw.action.skill_packages import (
@@ -66,11 +73,26 @@ from auraclaw.artifact.internal_service import (
 )
 from auraclaw.composition import providers
 from auraclaw.composition.api import create_app
+from auraclaw.composition.business_skills import (
+    PRICE_INSIGHT_SERVER_ID,
+    PRICE_INSIGHT_SKILL_DIR,
+    price_insight_resource_descriptors,
+    price_insight_resources,
+    signed_price_insight_package,
+)
 from auraclaw.config import Settings, get_settings
+from auraclaw.contracts.capabilities import (
+    CapabilityStatus,
+    CapabilityTrustLevel,
+    McpServerDefinition,
+)
 from auraclaw.contracts.internal import ServiceIdentity
 from auraclaw.contracts.mcp import McpTrustedContext
 from auraclaw.control.internal_service import ControlInternalService
-from auraclaw.control.orchestrator import ManagedOrchestrator, RegisteredRuntimeProvisioner
+from auraclaw.control.orchestrator import (
+    ManagedOrchestrator,
+    RegisteredRuntimeProvisioner,
+)
 from auraclaw.control.ports import RuntimeAssignment
 from auraclaw.control.runnable_feed import RunnableFeedConsumer
 from auraclaw.credential_proxy.internal_service import CredentialProxyInternalService
@@ -113,7 +135,9 @@ from auraclaw.infrastructure.delivery.sinks import ParentSessionResultSink
 from auraclaw.infrastructure.hands.local import LocalHandsService
 from auraclaw.infrastructure.model_sources.mysql import MySqlModelSkillSource
 from auraclaw.infrastructure.observability.stores import InMemoryObservabilityStore
-from auraclaw.infrastructure.persistence.memory_control_store import InMemoryControlStateStore
+from auraclaw.infrastructure.persistence.memory_control_store import (
+    InMemoryControlStateStore,
+)
 from auraclaw.infrastructure.persistence.postgres_admin_store import (
     PostgresAdminOperationStore,
 )
@@ -123,7 +147,9 @@ from auraclaw.infrastructure.persistence.postgres_artifact_repository import (
 from auraclaw.infrastructure.persistence.postgres_capability_catalog import (
     PostgresCapabilityCatalogStore,
 )
-from auraclaw.infrastructure.persistence.postgres_control_store import PostgresControlStateStore
+from auraclaw.infrastructure.persistence.postgres_control_store import (
+    PostgresControlStateStore,
+)
 from auraclaw.infrastructure.persistence.postgres_credential_registry import (
     PostgresCredentialRegistry,
 )
@@ -139,13 +165,19 @@ from auraclaw.infrastructure.persistence.postgres_policy_store import (
 from auraclaw.infrastructure.persistence.postgres_tool_registry import (
     PostgresToolRegistryStore,
 )
+from auraclaw.infrastructure.price_insight import (
+    JsonPriceInsightSource,
+    MySqlPriceInsightSource,
+)
 from auraclaw.infrastructure.projection.postgres_approval_store import (
     PostgresApprovalProjection,
 )
 from auraclaw.infrastructure.projection.postgres_collaboration_store import (
     PostgresCollaborationProjection,
 )
-from auraclaw.infrastructure.projection.postgres_task_store import PostgresTaskProjection
+from auraclaw.infrastructure.projection.postgres_task_store import (
+    PostgresTaskProjection,
+)
 from auraclaw.internal.http import create_contract_app
 from auraclaw.internal.routes import (
     admin_routes,
@@ -166,7 +198,11 @@ from auraclaw.observability.service import ObservabilityService
 from auraclaw.policy.internal_service import PolicyInternalService
 from auraclaw.projection.approval.projector import InMemoryApprovalProjection
 from auraclaw.projection.collaboration.projector import InMemoryCollaborationProjection
-from auraclaw.projection.ports import ApprovalViewReader, CollaborationReader, TaskReader
+from auraclaw.projection.ports import (
+    ApprovalViewReader,
+    CollaborationReader,
+    TaskReader,
+)
 from auraclaw.projection.relay import OutboxRelay
 from auraclaw.projection.task.projector import InMemoryTaskProjection
 from auraclaw.runtime.capability_controller import RuntimeCapabilityController
@@ -320,9 +356,7 @@ class RemoteRuntimeWorker:
                             exc_info=True,
                         )
 
-        heartbeats = asyncio.create_task(
-            keep_alive(), name="remote-runtime-heartbeat"
-        )
+        heartbeats = asyncio.create_task(keep_alive(), name="remote-runtime-heartbeat")
         try:
             await self._harness.execute(assignment)
         finally:
@@ -336,9 +370,13 @@ def _runtime_instance_identity(settings: Settings) -> tuple[str, str]:
         return settings.runtime_id, settings.runtime_node_id
     hostname = socket.gethostname()
     runtime_id = (
-        f"runtime-{hostname}" if settings.runtime_id == "runtime-local-1" else settings.runtime_id
+        f"runtime-{hostname}"
+        if settings.runtime_id == "runtime-local-1"
+        else settings.runtime_id
     )
-    node_id = hostname if settings.runtime_node_id == "local" else settings.runtime_node_id
+    node_id = (
+        hostname if settings.runtime_node_id == "local" else settings.runtime_node_id
+    )
     return runtime_id, node_id
 
 
@@ -346,10 +384,7 @@ def _configured_identities(
     settings: Settings, identities: tuple[ServiceIdentity, ...]
 ) -> dict[str, ServiceIdentity]:
     if settings.deployment_profile == "development":
-        return {
-            f"development-{identity.value}": identity
-            for identity in identities
-        }
+        return {f"development-{identity.value}": identity for identity in identities}
     configured: dict[str, ServiceIdentity] = {}
     for identity in identities:
         token = settings.workload_token_value(identity.value)
@@ -401,8 +436,8 @@ def _task_api_app(settings: Settings) -> FastAPI:
     app.dependency_overrides[get_task_command_gateway] = lambda: gateway
     app.dependency_overrides[get_task_projection] = lambda: task_projection
     app.dependency_overrides[get_task_query_service] = lambda: query
-    app.dependency_overrides[get_collaboration_projection] = (
-        lambda: collaboration_projection
+    app.dependency_overrides[get_collaboration_projection] = lambda: (
+        collaboration_projection
     )
     app.dependency_overrides[get_observability_service] = lambda: observability
     app.state.observability_service = observability
@@ -440,8 +475,7 @@ def _readiness(name: str, settings: Settings) -> tuple[bool, dict[str, str]]:
     ready = True
     if name in DATABASE_SERVICES:
         database_ready = (
-            settings.sql_storage_enabled
-            or settings.deployment_profile == "development"
+            settings.sql_storage_enabled or settings.deployment_profile == "development"
         )
         dependencies["postgres"] = (
             "ready"
@@ -456,11 +490,8 @@ def _readiness(name: str, settings: Settings) -> tuple[bool, dict[str, str]]:
             "ready" if settings.model_gateway_configured else "missing"
         )
         ready = ready and settings.model_gateway_configured
-        identity_ready = (
-            settings.deployment_profile == "development"
-            or bool(
-                settings.workload_token_value(ServiceIdentity.AGENT_RUNTIME.value)
-            )
+        identity_ready = settings.deployment_profile == "development" or bool(
+            settings.workload_token_value(ServiceIdentity.AGENT_RUNTIME.value)
         )
         dependencies["runtime_workload_identity"] = (
             "ready" if identity_ready else "missing"
@@ -482,16 +513,11 @@ def _readiness(name: str, settings: Settings) -> tuple[bool, dict[str, str]]:
             ServiceIdentity.POLICY,
             ServiceIdentity.DELIVERY_WORKER,
         )
-        identity_ready = (
-            settings.deployment_profile == "development"
-            or all(
-                settings.workload_token_value(identity.value)
-                for identity in required_identities
-            )
+        identity_ready = settings.deployment_profile == "development" or all(
+            settings.workload_token_value(identity.value)
+            for identity in required_identities
         )
-        dependencies["workload_identities"] = (
-            "ready" if identity_ready else "missing"
-        )
+        dependencies["workload_identities"] = "ready" if identity_ready else "missing"
         ready = ready and identity_ready
     if name == "orchestrator":
         lease_ready = (
@@ -510,45 +536,34 @@ def _readiness(name: str, settings: Settings) -> tuple[bool, dict[str, str]]:
         )
         ready = ready and lease_ready and identity_ready
     if name == "artifact-service":
-        storage_ready = settings.seaweedfs_enabled or settings.deployment_profile == "development"
+        storage_ready = (
+            settings.seaweedfs_enabled or settings.deployment_profile == "development"
+        )
         dependencies["seaweedfs"] = "ready" if storage_ready else "missing"
-        policy_identity_ready = (
-            settings.deployment_profile == "development"
-            or bool(
-                settings.workload_token_value(ServiceIdentity.ARTIFACT_SERVICE.value)
-            )
+        policy_identity_ready = settings.deployment_profile == "development" or bool(
+            settings.workload_token_value(ServiceIdentity.ARTIFACT_SERVICE.value)
         )
         dependencies["policy_workload_identity"] = (
             "ready" if policy_identity_ready else "missing"
         )
         ready = ready and storage_ready and policy_identity_ready
     if name == "projection-worker":
-        token_ready = (
-            settings.deployment_profile == "development"
-            or bool(
-                settings.workload_token_value(
-                    ServiceIdentity.PROJECTION_WORKER.value
-                )
-            )
+        token_ready = settings.deployment_profile == "development" or bool(
+            settings.workload_token_value(ServiceIdentity.PROJECTION_WORKER.value)
         )
         dependencies["session_workload_identity"] = (
             "ready" if token_ready else "missing"
         )
         ready = ready and token_ready
     if name == "agent-runtime":
-        token_ready = (
-            settings.deployment_profile == "development"
-            or bool(
-                settings.workload_token_value(ServiceIdentity.AGENT_RUNTIME.value)
-            )
+        token_ready = settings.deployment_profile == "development" or bool(
+            settings.workload_token_value(ServiceIdentity.AGENT_RUNTIME.value)
         )
         provider_secret_absent = (
             settings.deployment_profile == "development"
             or settings.model_api_key is None
         )
-        dependencies["workload_identity"] = (
-            "ready" if token_ready else "missing"
-        )
+        dependencies["workload_identity"] = "ready" if token_ready else "missing"
         dependencies["provider_secret_isolation"] = (
             "ready" if provider_secret_absent else "forbidden"
         )
@@ -568,9 +583,7 @@ def _readiness(name: str, settings: Settings) -> tuple[bool, dict[str, str]]:
         dependencies["lease_verifier"] = "ready" if lease_ready else "missing"
         downstream_identity_ready = (
             settings.deployment_profile == "development"
-            or bool(
-                settings.workload_token_value(ServiceIdentity.ACTION_HANDS.value)
-            )
+            or bool(settings.workload_token_value(ServiceIdentity.ACTION_HANDS.value))
         )
         dependencies["downstream_workload_identity"] = (
             "ready" if downstream_identity_ready else "missing"
@@ -586,24 +599,20 @@ def _readiness(name: str, settings: Settings) -> tuple[bool, dict[str, str]]:
             ServiceIdentity.CREDENTIAL_PROXY,
             ServiceIdentity.ARTIFACT_SERVICE,
         )
-        identity_ready = (
-            settings.deployment_profile == "development"
-            or all(settings.workload_token_value(item.value) for item in identities)
+        identity_ready = settings.deployment_profile == "development" or all(
+            settings.workload_token_value(item.value) for item in identities
         )
         dependencies["enforcement_identities"] = (
             "ready" if identity_ready else "missing"
         )
         ready = ready and identity_ready
     if name == "credential-proxy":
-        identity_ready = (
-            settings.deployment_profile == "development"
-            or all(
-                settings.workload_token_value(item.value)
-                for item in (
-                    ServiceIdentity.TASK_API,
-                    ServiceIdentity.ACTION_HANDS,
-                    ServiceIdentity.DELIVERY_WORKER,
-                )
+        identity_ready = settings.deployment_profile == "development" or all(
+            settings.workload_token_value(item.value)
+            for item in (
+                ServiceIdentity.TASK_API,
+                ServiceIdentity.ACTION_HANDS,
+                ServiceIdentity.DELIVERY_WORKER,
             )
         )
         vault_ready = (
@@ -611,24 +620,18 @@ def _readiness(name: str, settings: Settings) -> tuple[bool, dict[str, str]]:
             or bool(settings.credential_vault_addr)
             and settings.credential_vault_token is not None
         )
-        dependencies["caller_identities"] = (
-            "ready" if identity_ready else "missing"
-        )
+        dependencies["caller_identities"] = "ready" if identity_ready else "missing"
         dependencies["vault"] = "ready" if vault_ready else "missing"
-        policy_identity_ready = (
-            settings.deployment_profile == "development"
-            or bool(
-                settings.workload_token_value(ServiceIdentity.CREDENTIAL_PROXY.value)
-            )
+        policy_identity_ready = settings.deployment_profile == "development" or bool(
+            settings.workload_token_value(ServiceIdentity.CREDENTIAL_PROXY.value)
         )
         dependencies["policy_workload_identity"] = (
             "ready" if policy_identity_ready else "missing"
         )
         ready = ready and identity_ready and vault_ready and policy_identity_ready
     if name == "delivery-worker":
-        identity_ready = (
-            settings.deployment_profile == "development"
-            or bool(settings.workload_token_value(ServiceIdentity.DELIVERY_WORKER.value))
+        identity_ready = settings.deployment_profile == "development" or bool(
+            settings.workload_token_value(ServiceIdentity.DELIVERY_WORKER.value)
         )
         dependencies["delivery_workload_identity"] = (
             "ready" if identity_ready else "missing"
@@ -771,7 +774,9 @@ def _session_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         ledger=InMemoryFencingTokenLedger(),
         audience=("session", "runtime"),
     )
-    service = SessionInternalService(providers.get_event_store(), lease_verifier=verifier)
+    service = SessionInternalService(
+        providers.get_event_store(), lease_verifier=verifier
+    )
     identities = _configured_identities(
         settings,
         (
@@ -844,9 +849,7 @@ def _orchestrator_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
             ledger=InMemoryFencingTokenLedger(),
             audience=("control", "runtime"),
         ),
-        lease_signer=LeaseAssertionSigner(
-            key_id="development", signing_key=key
-        ),
+        lease_signer=LeaseAssertionSigner(key_id="development", signing_key=key),
     )
     contract_app = create_contract_app(
         "orchestrator",
@@ -874,9 +877,7 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         hands_token = settings.workload_token_value(
             ServiceIdentity.ACTION_HANDS.value
         ) or secrets.token_urlsafe(32)
-        policy = RemotePolicyClient(
-            settings.policy_base_url, bearer_token=hands_token
-        )
+        policy = RemotePolicyClient(settings.policy_base_url, bearer_token=hands_token)
         credential_proxy = RemoteCredentialProxy(
             settings.credential_proxy_base_url, bearer_token=hands_token
         )
@@ -899,9 +900,7 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
             *((tool_registry_store,) if tool_registry_store is not None else ()),
             *(
                 (capability_catalog_store,)
-                if isinstance(
-                    capability_catalog_store, PostgresCapabilityCatalogStore
-                )
+                if isinstance(capability_catalog_store, PostgresCapabilityCatalogStore)
                 else ()
             ),
         )
@@ -929,18 +928,23 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
     )
     if (
         settings.deployment_profile == "production"
-        and settings.model_skill_source_configured
+        and (
+            settings.model_skill_source_configured
+            or settings.resolved_price_insight_source != "disabled"
+        )
         and configured_signing_key is None
     ):
         raise ValueError(
-            "Production Model Skill source requires AURACLAW_MODEL_SKILL_SIGNING_KEY"
+            "Production Skill publication requires AURACLAW_MODEL_SKILL_SIGNING_KEY"
         )
     model_skill_signer = HmacSkillSignatureVerifier(
         {
             "ct-model": (
-                configured_signing_key
-                or b"auraclaw-development-model-skill-key"
-            )
+                configured_signing_key or b"auraclaw-development-model-skill-key"
+            ),
+            "platform": (
+                configured_signing_key or b"auraclaw-development-platform-skill-key"
+            ),
         }
     )
     skill_registry = SkillPackageRegistry(
@@ -977,11 +981,46 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         capability_catalog_store,
         policy if isinstance(policy, RemotePolicyClient) else None,
     )
+    price_insight_source: PriceInsightSource | None = None
+    resolved_price_source = settings.resolved_price_insight_source
+    if (
+        settings.deployment_profile == "production"
+        and resolved_price_source == "fixture"
+    ):
+        raise ValueError("Price Insight fixture source is development-only")
+    if resolved_price_source == "fixture":
+        price_insight_source = JsonPriceInsightSource(
+            PRICE_INSIGHT_SKILL_DIR / "tests" / "golden-data.json"
+        )
+    elif resolved_price_source == "mysql":
+        mysql_password = settings.price_insight_mysql_password
+        if (
+            not settings.price_insight_mysql_configured
+            or settings.price_insight_mysql_host is None
+            or settings.price_insight_mysql_user is None
+            or mysql_password is None
+            or settings.price_insight_mysql_database is None
+        ):
+            raise ValueError("Price Insight MySQL source configuration is incomplete")
+        price_insight_source = MySqlPriceInsightSource(
+            host=settings.price_insight_mysql_host,
+            port=settings.price_insight_mysql_port,
+            user=settings.price_insight_mysql_user,
+            password=mysql_password.get_secret_value(),
+            database=settings.price_insight_mysql_database,
+        )
+    if price_insight_source is not None:
+        for resource in price_insight_resources(
+            settings.price_insight_target_tenant_id
+        ):
+            resources.register_resource(resource)
+    price_tools = price_insight_tools() if price_insight_source is not None else ()
     registry = ToolRegistry(
         (
             capability_search_tool(),
             capability_load_tool(),
             skill_resolve_tool(),
+            *price_tools,
         )
     )
 
@@ -998,12 +1037,46 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
                         policy=policy,
                     )
                 )
+        if price_insight_source is not None:
+            tenant_id = settings.price_insight_target_tenant_id
+            await capability_catalog.register_server(
+                McpServerDefinition(
+                    server_id=PRICE_INSIGHT_SERVER_ID,
+                    tenant_id=tenant_id,
+                    title="AuraClaw Procurement Price Insight",
+                    endpoint="https://price-insight.internal/mcp",
+                    trust_level=CapabilityTrustLevel.PLATFORM,
+                    allowed_tool_prefixes=("procurement.price_insight.",),
+                    allowed_resource_schemes=("repo",),
+                    status=CapabilityStatus.ACTIVE,
+                    enabled=True,
+                )
+            )
+            await capability_catalog.replace_server_capabilities(
+                PRICE_INSIGHT_SERVER_ID,
+                (
+                    *price_insight_tool_descriptors(
+                        server_id=PRICE_INSIGHT_SERVER_ID,
+                        tenant_id=tenant_id,
+                    ),
+                    *price_insight_resource_descriptors(tenant_id),
+                ),
+            )
+            await skill_registry.publish(
+                tenant_id,
+                signed_price_insight_package(model_skill_signer),
+            )
         if model_skill_publisher is not None:
             await model_skill_publisher.reconcile()
 
     app.state.remote_mcp_transports = {}
     app.state.catalog_reconciler = None
     app.state.initialize = initialize_registry
+    price_executor = (
+        PriceInsightToolExecutor(PriceInsightService(price_insight_source))
+        if price_insight_source is not None
+        else None
+    )
     routed_hands = RoutedHandsExecutor(
         LocalHandsService(workspace_root=Path.cwd()),
         {
@@ -1016,6 +1089,11 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
                 skills=skill_registry,
             ),
             SKILL_RESOLVE_TOOL_NAME: SkillResolveExecutor(skill_resolver),
+            **(
+                {tool.name: price_executor for tool in price_tools}
+                if price_executor is not None
+                else {}
+            ),
         },
     )
     gateway = ToolGateway(
@@ -1076,9 +1154,7 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
     app.state.resource_gateway = resource_gateway
     app.state.skill_registry = skill_registry
     app.state.model_skill_publisher = model_skill_publisher
-    periodic_jobs: list[
-        tuple[str, float, Callable[[], Awaitable[int | None]]]
-    ] = []
+    periodic_jobs: list[tuple[str, float, Callable[[], Awaitable[int | None]]]] = []
     if model_skill_publisher is not None:
 
         async def reconcile_model_skills() -> int:
@@ -1105,9 +1181,7 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         async def initialize_remote_catalog() -> None:
             await initialize_registry()
             for transport in app.state.remote_mcp_transports.values():
-                transport.set_notification_handler(
-                    reconciler.handle_notification
-                )
+                transport.set_notification_handler(reconciler.handle_notification)
             await reconciler.reconcile_all()
 
         app.state.initialize = initialize_remote_catalog
@@ -1126,10 +1200,7 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
             await initialize_periodic_jobs()
             now = asyncio.get_running_loop().time()
             next_due.update(
-                {
-                    name: now + interval
-                    for name, interval, _run in periodic_jobs
-                }
+                {name: now + interval for name, interval, _run in periodic_jobs}
             )
 
         async def reconcile_due_jobs() -> int:
@@ -1298,9 +1369,7 @@ def _artifact_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         else None
     )
     admin_store = (
-        PostgresAdminOperationStore(
-            settings.resolved_database_url, schema="artifact"
-        )
+        PostgresAdminOperationStore(settings.resolved_database_url, schema="artifact")
         if settings.sql_storage_enabled
         else None
     )
@@ -1344,6 +1413,7 @@ def _artifact_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         multipart_threshold=settings.artifact_multipart_threshold,
         multipart_part_size=settings.artifact_multipart_part_size,
     )
+
     async def artifact_status(parameters: dict[str, Any]) -> dict[str, Any]:
         del parameters
         return {"storage": "seaweedfs", "metadata_owner": "artifact-service"}
@@ -1387,18 +1457,14 @@ def _delivery_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         service_identity=ServiceIdentity.DELIVERY_WORKER,
         bearer_token=bearer_token,
     )
-    outbox = RemoteSessionDeliveryOutboxSource(
-        session, worker_id="delivery-worker"
-    )
+    outbox = RemoteSessionDeliveryOutboxSource(session, worker_id="delivery-worker")
     store = (
         PostgresDeliveryJobStore(settings.resolved_database_url)
         if settings.sql_storage_enabled
         else InMemoryDeliveryJobStore()
     )
     admin_store = (
-        PostgresAdminOperationStore(
-            settings.resolved_database_url, schema="delivery"
-        )
+        PostgresAdminOperationStore(settings.resolved_database_url, schema="delivery")
         if settings.sql_storage_enabled
         else None
     )
@@ -1433,10 +1499,15 @@ def _delivery_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
     )
     app.state.session_access = "http"
     app.state.delivery_store_owner = True
+
     async def delivery_status(parameters: dict[str, Any]) -> dict[str, Any]:
         tenant_id = str(parameters.get("tenant_id", ""))
         session_id = str(parameters.get("session_id", ""))
-        jobs = await store.list_jobs(tenant_id, session_id) if tenant_id and session_id else []
+        jobs = (
+            await store.list_jobs(tenant_id, session_id)
+            if tenant_id and session_id
+            else []
+        )
         return {"jobs": len(jobs)}
 
     async def delivery_redrive(parameters: dict[str, Any]) -> dict[str, Any]:
