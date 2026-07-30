@@ -239,8 +239,14 @@ def _select_statement(
         arguments.append(filters.rule_version)
     selected_columns = ", ".join(columns)
     where = " AND ".join(clauses)
+    stable_id = "compare_pair_id" if include_benchmark else "price_line_id"
     return (
-        f"SELECT {selected_columns} FROM `{table}` WHERE {where} "
+        f"SELECT {selected_columns} FROM ("
+        f"SELECT {selected_columns}, "
+        f"ROW_NUMBER() OVER (PARTITION BY tenant_id, {stable_id} "
+        "ORDER BY dt DESC, etl_load_time DESC) AS _latest_rank "
+        f"FROM `{table}` WHERE {where}"
+        ") AS latest WHERE _latest_rank = 1 "
         "ORDER BY transaction_period, price_line_id",
         tuple(arguments),
     )
@@ -253,8 +259,8 @@ def _source_revision(
 ) -> str:
     payload = {
         "filter": filters.model_dump(mode="json"),
-        "event_ids": [row.price_line_id for row in events],
-        "comparison_ids": [row.compare_pair_id for row in comparisons],
+        "events": [row.model_dump(mode="json") for row in events],
+        "comparisons": [row.model_dump(mode="json") for row in comparisons],
     }
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode()
     return f"mysql-price-insight:{hashlib.sha256(encoded).hexdigest()[:16]}"

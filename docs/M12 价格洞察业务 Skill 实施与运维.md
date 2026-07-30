@@ -70,10 +70,32 @@ AURACLAW_PRICE_INSIGHT_MYSQL_PORT=3306
 AURACLAW_PRICE_INSIGHT_MYSQL_USER=
 AURACLAW_PRICE_INSIGHT_MYSQL_PASSWORD=
 AURACLAW_PRICE_INSIGHT_MYSQL_DATABASE=
+AURACLAW_DEVELOPMENT_MODEL_MODE=provider|price-insight-scripted
 ```
 
 `auto` 在 development 使用黄金数据，在 production 关闭。生产启用 `mysql` 时必须提供完整
 只读连接配置；密码可通过 `AURACLAW_PRICE_INSIGHT_MYSQL_PASSWORD_FILE` 注入。
+
+### 本地真实 DWD 与前端联调
+
+本机 MySQL 可重复应用 DDL 并写入隔离的黄金验证行：
+
+```bash
+PYTHONPATH=src uv run python scripts/seed_price_insight_mysql.py \
+  --tenant-id development
+```
+
+本地 `.env` 设置 `AURACLAW_PRICE_INSIGHT_SOURCE=mysql` 和完整的
+`AURACLAW_PRICE_INSIGHT_MYSQL_*` 后，执行 VS Code 的
+`AuraClaw: Debug local frontend + backend`，访问
+`http://localhost:3000/price-insight`。该页面通过标准 `/v1/tasks` 创建任务，并从
+Canonical Timeline 展示 Capability Search/Load、Skill Activate、数据质量、snapshot、
+八项 KPI 和 `mysql-price-insight:*` 数据修订证据。
+
+当外部模型端点不可用、只需做确定性框架回归时，可在 development 设置
+`AURACLAW_DEVELOPMENT_MODEL_MODE=price-insight-scripted`。这个模式只固定模型决策序列；
+Agent Harness、MCP Capability、签名 Skill、Tool Gateway 和 MySQL DWD 都仍走真实实现。
+production 始终使用配置的模型 Provider。
 
 ## 6. 扩展新业务场景
 
@@ -96,6 +118,8 @@ uv run ruff check .
 uv run mypy src/auraclaw
 uv run pytest
 uv run lint-imports
+npm --prefix frontend run lint
+npm --prefix frontend run build
 python /Users/tong/.codex/skills/.system/skill-creator/scripts/quick_validate.py \
   src/auraclaw/skills/procurement-price-insight
 ```

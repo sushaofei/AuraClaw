@@ -48,3 +48,22 @@ test("server-renders the Model Skill delivery lab", async () => {
   assert.match(html, /skill:\/\/ct-model\/model\.supplier-risk-warning/);
   assert.match(html, /model\.supplier-score/);
 });
+
+test("server-renders the MySQL DWD Price Insight lab", async () => {
+  const workerUrl = new URL("../dist/server/index.js", import.meta.url);
+  workerUrl.searchParams.set("price-test", `${process.pid}-${Date.now()}`);
+  const { default: worker } = await import(workerUrl.href);
+  const response = await worker.fetch(
+    new Request("http://localhost/price-insight", {
+      headers: { accept: "text/html" },
+    }),
+    { ASSETS: { fetch: async () => new Response("Not found", { status: 404 }) } },
+    { waitUntil() {}, passThroughOnException() {} },
+  );
+  const html = await response.text();
+  assert.equal(response.status, 200);
+  assert.match(html, /价格洞察智能体/);
+  assert.match(html, /MYSQL DWD|WAITING/);
+  assert.match(html, /Agent Loop 执行步骤/);
+  assert.match(html, /价格洞察关键指标/);
+});

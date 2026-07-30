@@ -2,6 +2,10 @@ from datetime import timedelta
 from functools import lru_cache
 
 from auraclaw.composition.adapters.runtime_worker import RuntimeWorker
+from auraclaw.composition.development_capabilities import (
+    build_development_capability_client,
+)
+from auraclaw.composition.development_model import DevelopmentPriceInsightModel
 from auraclaw.config import get_settings
 from auraclaw.control.orchestrator import LocalRuntimeProvisioner, ManagedOrchestrator
 from auraclaw.gateways.query.reader import TaskQueryService
@@ -37,9 +41,11 @@ from auraclaw.projection.approval.projector import CompositeProjection, InMemory
 from auraclaw.projection.collaboration.projector import InMemoryCollaborationProjection
 from auraclaw.projection.relay import OutboxRelay
 from auraclaw.projection.task.projector import InMemoryTaskProjection
+from auraclaw.runtime.capability_controller import RuntimeCapabilityController
 from auraclaw.runtime.clients import FencedSessionClient, FencedToolClient, IdempotentToolClient
 from auraclaw.runtime.harness import AgentHarness
 from auraclaw.runtime.model_gateway import ModelGateway, StaticCredentialResolver
+from auraclaw.runtime.ports import ModelClient
 from auraclaw.session.task_service import TaskService
 
 Store = InMemoryEventStore | PostgresEventStore
@@ -184,8 +190,13 @@ def get_streaming_gateway() -> StreamingGateway:
 
 
 @lru_cache
-def get_model_gateway() -> ModelGateway:
+def get_model_gateway() -> ModelClient:
     settings = get_settings()
+    if (
+        settings.deployment_profile == "development"
+        and settings.development_model_mode == "price-insight-scripted"
+    ):
+        return DevelopmentPriceInsightModel()
     if not settings.model_gateway_configured:
         raise RuntimeError("AURACLAW_MODEL_API_KEY, BASE_URL and NAME must be configured")
     assert settings.model_api_key is not None
@@ -235,12 +246,18 @@ def build_runtime_worker() -> RuntimeWorker:
         provisioner=LocalRuntimeProvisioner("local"),
         lease_ttl=timedelta(seconds=max(30.0, settings.model_timeout_seconds / 2)),
     )
+    capability_client = build_development_capability_client(settings)
     harness = AgentHarness(
         control_store=control,
         session=session,
         model=get_model_gateway(),
         tools=FencedToolClient(IdempotentToolClient(), control),
         runtime_events=get_runtime_event_publisher(),
+        capability_controller=(
+            RuntimeCapabilityController(capability_client)
+            if capability_client is not None
+            else None
+        ),
     )
     return RuntimeWorker(
         event_store=event_store,

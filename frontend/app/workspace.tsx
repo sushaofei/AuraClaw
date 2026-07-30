@@ -793,7 +793,7 @@ export function AuraClawConsole() {
       }
       const summary = resultText(loaded?.result ?? null) || String(nextTask.result_summary ?? "");
       if (loaded?.result) setChatResult(loaded.result);
-      let transcriptMessages = Array.isArray(transcriptPayload?.messages)
+      const transcriptMessages = Array.isArray(transcriptPayload?.messages)
         ? (transcriptPayload.messages as Json[])
         : [];
       let pendingFromTranscript = approvalFromTranscript(
