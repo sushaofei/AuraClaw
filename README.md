@@ -453,3 +453,12 @@ Vault 测试适配器；生产对象存储、企业 Vault 和外部 Connector �
 跨实例 PubSub 和通知渠道 Adapter 继续通过现有端口扩展。M6 提供持久 Observability/Audit
 Schema、主动告警、租户隔离 Timeline、Telemetry 保留和失败队列运维；外部 Trace Collector、
 Metrics Pipeline 和 Alert Receiver 通过同一观测端口接入。
+
+## 价格洞察业务 Skill
+
+价格洞察业务 Skill 由 `action-hands` 以平台签名包发布。开发环境的
+`AURACLAW_PRICE_INSIGHT_SOURCE=auto` 使用包内黄金数据；生产环境的 `auto` 默认关闭，
+显式设置为 `mysql` 后通过独立的 `AURACLAW_PRICE_INSIGHT_MYSQL_*` 只读账号访问
+`dwd_pr_price_event_detail_di` 与 `dwd_pr_price_compare_pair_di`。Runtime 和 Skill
+都不接收数据库地址、凭证、表名或原始 SQL。完整流程与回滚见
+[M12 价格洞察业务 Skill 实施与运维](docs/M12%20价格洞察业务%20Skill%20实施与运维.md)。

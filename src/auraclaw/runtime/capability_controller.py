@@ -257,36 +257,10 @@ class RuntimeCapabilityController:
                 ),
             )
             payload = _result_content(result)
-            loaded = dict(current.get("loaded", {}))
-            schema_bytes = sum(
-                len(
-                    json.dumps(
-                        item.get("model_tool"),
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    ).encode()
-                )
-                for item in loaded.values()
-                if isinstance(item, dict)
-                and isinstance(item.get("model_tool"), dict)
-            )
-            for item in payload.get("capabilities", ()):
-                if isinstance(item, dict) and str(item.get("capability_id")) in requested:
-                    model_tool = item.get("model_tool")
-                    if isinstance(model_tool, dict):
-                        size = len(
-                            json.dumps(
-                                model_tool,
-                                sort_keys=True,
-                                separators=(",", ":"),
-                            ).encode()
-                        )
-                        if schema_bytes + size > self._max_schema_bytes:
-                            continue
-                        schema_bytes += size
-                    loaded[str(item["capability_id"])] = dict(item)
-            current["loaded"] = dict(
-                list(loaded.items())[: self._max_loaded]
+            current["loaded"] = self._merge_loaded(
+                current,
+                payload.get("capabilities", ()),
+                allowed_ids=set(requested),
             )
             current["load_count"] = load_count + 1
             return CapabilityExecution(result=result, state=current)
@@ -322,9 +296,7 @@ class RuntimeCapabilityController:
                 **call.__dict__,
                 "version": str(loaded_tool["version"]),
                 "expected_side_effect": (
-                    "read"
-                    if loaded_tool.get("permission") == "read-only"
-                    else "write"
+                    "read" if loaded_tool.get("permission") == "read-only" else "write"
                 ),
             }
         )
@@ -389,9 +361,7 @@ class RuntimeCapabilityController:
         inputs = dict(call.arguments.get("inputs", {}))
         _validate_object(inputs, dict(contract.get("input_schema", {})))
         active = [
-            item
-            for item in state.get("active_skills", ())
-            if isinstance(item, dict)
+            item for item in state.get("active_skills", ()) if isinstance(item, dict)
         ]
         binding = await self._client.resolve_skill(
             assignment,
@@ -404,6 +374,46 @@ class RuntimeCapabilityController:
                 if isinstance(item.get("binding"), dict)
             ),
         )
+        dependency_ids = [
+            *(item.capability_id for item in binding.resolved_tools),
+            *(item.capability_id for item in binding.resolved_resources),
+        ]
+        if dependency_ids:
+            dependency_invocation_id = (
+                f"dep_{_digest({'activation': call.tool_invocation_id})[:32]}"
+            )
+            dependency_result = await self._client.execute(
+                assignment,
+                ToolCall(
+                    tool_invocation_id=dependency_invocation_id,
+                    name=CAPABILITY_LOAD,
+                    version="1",
+                    arguments={"capability_ids": dependency_ids},
+                    expected_side_effect="read",
+                    idempotency_key=dependency_invocation_id,
+                ),
+            )
+            dependency_payload = _result_content(dependency_result)
+            hydrated = self._merge_loaded(
+                state,
+                dependency_payload.get("capabilities", ()),
+                allowed_ids=set(dependency_ids),
+            )
+            missing = sorted(set(dependency_ids).difference(hydrated))
+            if missing:
+                return CapabilityExecution(
+                    result={
+                        "status": "denied",
+                        "error_code": "skill_dependency_load_failed",
+                        "summary": (
+                            "Skill dependencies could not be loaded within the "
+                            "Runtime capability budget."
+                        ),
+                        "missing_capability_ids": missing,
+                    },
+                    state=state,
+                )
+            state["loaded"] = hydrated
         activation_key = call.tool_invocation_id
         activation = SkillActivation(
             skill_activation_id=_activation_id(assignment, activation_key),
@@ -434,10 +444,44 @@ class RuntimeCapabilityController:
                 "skill_activation_id": activation.skill_activation_id,
                 "skill_name": binding.skill_name,
                 "skill_version": binding.skill_version,
+                "loaded_dependency_ids": dependency_ids,
             },
             state=state,
             events=(NewEvent(type="skill.activated", payload=payload),),
         )
+
+    def _merge_loaded(
+        self,
+        state: dict[str, Any],
+        capabilities: object,
+        *,
+        allowed_ids: set[str],
+    ) -> dict[str, Any]:
+        loaded = dict(state.get("loaded", {}))
+        schema_bytes = sum(
+            _model_tool_size(item) for item in loaded.values() if isinstance(item, dict)
+        )
+        items = capabilities if isinstance(capabilities, (list, tuple)) else ()
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            capability_id = str(item.get("capability_id", ""))
+            if capability_id not in allowed_ids:
+                continue
+            if capability_id not in loaded and len(loaded) >= self._max_loaded:
+                continue
+            model_tool = item.get("model_tool")
+            if isinstance(model_tool, dict):
+                previous = loaded.get(capability_id)
+                previous_size = (
+                    _model_tool_size(previous) if isinstance(previous, dict) else 0
+                )
+                size = _model_tool_size(item)
+                if schema_bytes - previous_size + size > self._max_schema_bytes:
+                    continue
+                schema_bytes = schema_bytes - previous_size + size
+            loaded[capability_id] = dict(item)
+        return loaded
 
     async def _read_resource(
         self,
@@ -447,10 +491,10 @@ class RuntimeCapabilityController:
     ) -> CapabilityExecution:
         capability_id = str(call.arguments.get("capability_id", ""))
         loaded = dict(state.get("loaded", {})).get(capability_id)
-        if (
-            not isinstance(loaded, dict)
-            or loaded.get("kind") not in {"resource", "resource_template"}
-        ):
+        if not isinstance(loaded, dict) or loaded.get("kind") not in {
+            "resource",
+            "resource_template",
+        }:
             return CapabilityExecution(
                 result={
                     "status": "denied",
@@ -475,9 +519,7 @@ class RuntimeCapabilityController:
         return CapabilityExecution(
             result={"status": "success", "contents": contextualized},
             state=state,
-            events=(
-                NewEvent(type="context.resource.used", payload=evidence),
-            ),
+            events=(NewEvent(type="context.resource.used", payload=evidence),),
         )
 
 
@@ -499,6 +541,19 @@ def _result_content(result: dict[str, Any]) -> dict[str, Any]:
     return dict(content) if isinstance(content, dict) else result
 
 
+def _model_tool_size(item: dict[str, Any]) -> int:
+    model_tool = item.get("model_tool")
+    if not isinstance(model_tool, dict):
+        return 0
+    return len(
+        json.dumps(
+            model_tool,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    )
+
+
 def _validate_object(value: dict[str, Any], schema: dict[str, Any]) -> None:
     if schema and schema.get("type") != "object":
         raise ValueError("Skill input schema must describe an object")
@@ -508,7 +563,9 @@ def _validate_object(value: dict[str, Any], schema: dict[str, Any]) -> None:
     if schema.get("additionalProperties") is False:
         extras = set(value).difference(dict(schema.get("properties", {})))
         if extras:
-            raise ValueError(f"Skill inputs contain unexpected fields: {sorted(extras)}")
+            raise ValueError(
+                f"Skill inputs contain unexpected fields: {sorted(extras)}"
+            )
     properties = schema.get("properties", {})
     if isinstance(properties, dict):
         for name, child_schema in properties.items():
@@ -518,9 +575,7 @@ def _validate_object(value: dict[str, Any], schema: dict[str, Any]) -> None:
                 and isinstance(child_schema.get("type"), str)
                 and not _matches_json_type(value[name], str(child_schema["type"]))
             ):
-                raise ValueError(
-                    f"Skill input {name} must be {child_schema['type']}"
-                )
+                raise ValueError(f"Skill input {name} must be {child_schema['type']}")
 
 
 def _matches_json_type(value: object, expected: str) -> bool:
@@ -582,12 +637,8 @@ def _contextualize_contents(
         raw_meta = item.get("_meta", {})
         meta = dict(raw_meta) if isinstance(raw_meta, dict) else {}
         raw_auraclaw = meta.get("auraclaw", {})
-        auraclaw = (
-            dict(raw_auraclaw) if isinstance(raw_auraclaw, dict) else {}
-        )
-        findings = {
-            str(value) for value in auraclaw.get("securityFindings", ())
-        }
+        auraclaw = dict(raw_auraclaw) if isinstance(raw_auraclaw, dict) else {}
+        findings = {str(value) for value in auraclaw.get("securityFindings", ())}
         if "prompt_injection" in findings:
             item.pop("text", None)
             item.pop("blob", None)
@@ -607,13 +658,8 @@ def _contextualize_contents(
     return contextualized
 
 
-def _activation_id(
-    assignment: RuntimeAssignment, activation_key: str
-) -> str:
-    value = (
-        f"{assignment.tenant_id}:{assignment.session_id}:"
-        f"{assignment.run_id}:{activation_key}"
-    )
+def _activation_id(assignment: RuntimeAssignment, activation_key: str) -> str:
+    value = f"{assignment.tenant_id}:{assignment.session_id}:{assignment.run_id}:{activation_key}"
     return f"ska_{hashlib.sha256(value.encode()).hexdigest()[:32]}"
 
 
