@@ -35,7 +35,7 @@ class RuntimeCapabilityController:
         client: CapabilityClient,
         *,
         max_candidates: int = 20,
-        max_loaded: int = 8,
+        max_loaded: int = 24,
         max_searches: int = 4,
         max_loads: int = 4,
         max_schema_bytes: int = 64 * 1024,
@@ -153,39 +153,64 @@ class RuntimeCapabilityController:
         state: dict[str, Any],
     ) -> tuple[dict[str, Any], ...]:
         messages: list[dict[str, Any]] = []
+        emitted: set[tuple[str, str, str, str]] = set()
         for item in state.get("active_skills", ()):
             if not isinstance(item, dict):
                 continue
             binding = item.get("binding")
             if not isinstance(binding, dict):
                 continue
-            parts = await self._client.load_skill_part(
-                assignment,
-                publisher=str(binding["publisher"]),
-                name=str(binding["skill_name"]),
-                version=str(binding["skill_version"]),
-                path="SKILL.md",
+            dependencies = binding.get("resolved_skills", ())
+            skill_refs = [
+                dependency
+                for dependency in dependencies
+                if isinstance(dependency, dict)
+            ]
+            skill_refs.append(
+                {
+                    "publisher": binding["publisher"],
+                    "skill_name": binding["skill_name"],
+                    "skill_version": binding["skill_version"],
+                    "package_digest": binding["package_digest"],
+                }
             )
-            text = next(
-                (
-                    str(part["text"])
-                    for part in parts
-                    if isinstance(part, dict) and isinstance(part.get("text"), str)
-                ),
-                "",
-            )
-            if text:
-                messages.append(
-                    {
-                        "role": "system",
-                        "content": (
-                            "Activated signed AuraClaw Skill "
-                            f"{binding['publisher']}/{binding['skill_name']}"
-                            f"@{binding['skill_version']} "
-                            f"(digest {binding['package_digest']}):\n{text}"
-                        ),
-                    }
+            for skill_ref in skill_refs:
+                identity = (
+                    str(skill_ref["publisher"]),
+                    str(skill_ref["skill_name"]),
+                    str(skill_ref["skill_version"]),
+                    str(skill_ref["package_digest"]),
                 )
+                if identity in emitted:
+                    continue
+                parts = await self._client.load_skill_part(
+                    assignment,
+                    publisher=identity[0],
+                    name=identity[1],
+                    version=identity[2],
+                    path="SKILL.md",
+                )
+                text = next(
+                    (
+                        str(part["text"])
+                        for part in parts
+                        if isinstance(part, dict)
+                        and isinstance(part.get("text"), str)
+                    ),
+                    "",
+                )
+                if text:
+                    messages.append(
+                        {
+                            "role": "system",
+                            "content": (
+                                "Activated signed AuraClaw Skill "
+                                f"{identity[0]}/{identity[1]}@{identity[2]} "
+                                f"(digest {identity[3]}):\n{text}"
+                            ),
+                        }
+                    )
+                    emitted.add(identity)
         return tuple(messages)
 
     async def execute(
@@ -377,29 +402,36 @@ class RuntimeCapabilityController:
         dependency_ids = [
             *(item.capability_id for item in binding.resolved_tools),
             *(item.capability_id for item in binding.resolved_resources),
+            *(item.capability_id for item in binding.resolved_skills),
         ]
         if dependency_ids:
-            dependency_invocation_id = (
-                f"dep_{_digest({'activation': call.tool_invocation_id})[:32]}"
-            )
-            dependency_result = await self._client.execute(
-                assignment,
-                ToolCall(
-                    tool_invocation_id=dependency_invocation_id,
-                    name=CAPABILITY_LOAD,
-                    version="1",
-                    arguments={"capability_ids": dependency_ids},
-                    expected_side_effect="read",
-                    idempotency_key=dependency_invocation_id,
-                ),
-            )
-            dependency_payload = _result_content(dependency_result)
-            hydrated = self._merge_loaded(
-                state,
-                dependency_payload.get("capabilities", ()),
-                allowed_ids=set(dependency_ids),
-            )
-            missing = sorted(set(dependency_ids).difference(hydrated))
+            missing: list[str] = []
+            for batch_index, start in enumerate(range(0, len(dependency_ids), 8)):
+                batch = dependency_ids[start : start + 8]
+                dependency_invocation_id = (
+                    "dep_"
+                    f"{_digest({'activation': call.tool_invocation_id})[:24]}"
+                    f"_{batch_index}"
+                )
+                dependency_result = await self._client.execute(
+                    assignment,
+                    ToolCall(
+                        tool_invocation_id=dependency_invocation_id,
+                        name=CAPABILITY_LOAD,
+                        version="1",
+                        arguments={"capability_ids": batch},
+                        expected_side_effect="read",
+                        idempotency_key=dependency_invocation_id,
+                    ),
+                )
+                dependency_payload = _result_content(dependency_result)
+                hydrated = self._merge_loaded(
+                    state,
+                    dependency_payload.get("capabilities", ()),
+                    allowed_ids=set(batch),
+                )
+                state["loaded"] = hydrated
+                missing.extend(sorted(set(batch).difference(hydrated)))
             if missing:
                 return CapabilityExecution(
                     result={
@@ -413,7 +445,6 @@ class RuntimeCapabilityController:
                     },
                     state=state,
                 )
-            state["loaded"] = hydrated
         activation_key = call.tool_invocation_id
         activation = SkillActivation(
             skill_activation_id=_activation_id(assignment, activation_key),

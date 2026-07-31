@@ -10,10 +10,12 @@ from typing import Any
 import pymysql  # type: ignore[import-untyped]
 
 from auraclaw.contracts.price_insight import (
+    PriceBenchmarkRecord,
     PriceCompareRecord,
     PriceEventRecord,
     PriceInsightDataset,
     PriceInsightFilter,
+    PriceInsightRuleRecord,
 )
 
 _EVENT_COLUMNS = (
@@ -73,6 +75,47 @@ _COMPARE_COLUMNS = (
     "rule_version",
     "data_quality_status",
 )
+_BENCHMARK_COLUMNS = (
+    "benchmark_id",
+    "benchmark_version",
+    "benchmark_period",
+    "category_code",
+    "material_code",
+    "material_name",
+    "spec_model",
+    "region_code",
+    "standard_uom_code",
+    "currency_code",
+    "tax_basis_code",
+    "industry_avg_unit_price",
+    "benchmark_statistic_type",
+    "industry_sample_count",
+    "confidence_level",
+    "data_quality_status",
+)
+_RULE_COLUMNS = (
+    "rule_version",
+    "rule_code",
+    "anchor_type",
+    "deviation_threshold_pct",
+    "min_benchmark_sample_count",
+    "min_material_match_score",
+    "enabled",
+)
+
+# This is the complete database boundary for the procurement price-insight
+# scenario. Keep it aligned with
+# docs/ddl/行业均价智能横向比对-DWD-MySQL-DDL.sql. Table names are never accepted
+# from Agent input; this allowlist also prevents future internal callers from
+# extending the source to unrelated schemas accidentally.
+PRICE_INSIGHT_DWD_TABLES = frozenset(
+    {
+        "dwd_pr_price_event_detail_di",
+        "dwd_pr_industry_price_benchmark_di",
+        "dwd_pr_price_compare_pair_di",
+        "dwd_pr_price_insight_rule_di",
+    }
+)
 
 
 class JsonPriceInsightSource:
@@ -107,11 +150,30 @@ class JsonPriceInsightSource:
             )
             and (filters.rule_version is None or row.rule_version == filters.rule_version)
         )
+        benchmarks = tuple(
+            row
+            for row in fixture.benchmarks
+            if filters.period_from <= row.benchmark_period <= filters.period_to
+            and _matches_set(row.category_code, filters.category_codes)
+            and _matches_set(row.material_code, filters.material_codes)
+            and (
+                filters.benchmark_version is None
+                or row.benchmark_version == filters.benchmark_version
+            )
+        )
+        rules = tuple(
+            row
+            for row in fixture.rules
+            if filters.rule_version is None
+            or row.rule_version == filters.rule_version
+        )
         return PriceInsightDataset(
             tenant_id=tenant_id,
             source_revision=fixture.source_revision,
             events=events,
             comparisons=comparisons,
+            benchmarks=benchmarks,
+            rules=rules,
         )
 
 
@@ -178,12 +240,38 @@ class MySqlPriceInsightSource:
                 comparisons = tuple(
                     PriceCompareRecord.model_validate(row) for row in cursor.fetchall()
                 )
-                revision = _source_revision(filters, events, comparisons)
+                benchmark_sql, benchmark_args = _select_benchmark_statement(
+                    tenant_id=tenant_id,
+                    filters=filters,
+                )
+                cursor.execute(benchmark_sql, benchmark_args)
+                benchmarks = tuple(
+                    PriceBenchmarkRecord.model_validate(row)
+                    for row in cursor.fetchall()
+                )
+                rule_sql, rule_args = _select_rule_statement(
+                    tenant_id=tenant_id,
+                    filters=filters,
+                )
+                cursor.execute(rule_sql, rule_args)
+                rules = tuple(
+                    PriceInsightRuleRecord.model_validate(row)
+                    for row in cursor.fetchall()
+                )
+                revision = _source_revision(
+                    filters,
+                    events,
+                    comparisons,
+                    benchmarks,
+                    rules,
+                )
                 return PriceInsightDataset(
                     tenant_id=tenant_id,
                     source_revision=revision,
                     events=events,
                     comparisons=comparisons,
+                    benchmarks=benchmarks,
+                    rules=rules,
                 )
         finally:
             connection.rollback()
@@ -215,6 +303,8 @@ def _select_statement(
     filters: PriceInsightFilter,
     include_benchmark: bool,
 ) -> tuple[str, tuple[Any, ...]]:
+    if table not in PRICE_INSIGHT_DWD_TABLES:
+        raise ValueError(f"table is outside the Price Insight DWD allowlist: {table}")
     clauses = [
         "tenant_id = %s",
         "transaction_period BETWEEN %s AND %s",
@@ -252,15 +342,84 @@ def _select_statement(
     )
 
 
+def _select_benchmark_statement(
+    *,
+    tenant_id: str,
+    filters: PriceInsightFilter,
+) -> tuple[str, tuple[Any, ...]]:
+    table = "dwd_pr_industry_price_benchmark_di"
+    if table not in PRICE_INSIGHT_DWD_TABLES:
+        raise ValueError(f"table is outside the Price Insight DWD allowlist: {table}")
+    clauses = [
+        "tenant_id = %s",
+        "benchmark_period BETWEEN %s AND %s",
+    ]
+    arguments: list[Any] = [tenant_id, filters.period_from, filters.period_to]
+    for column, values in (
+        ("category_code", filters.category_codes),
+        ("material_code", filters.material_codes),
+    ):
+        if values:
+            placeholders = ", ".join("%s" for _ in values)
+            clauses.append(f"{column} IN ({placeholders})")
+            arguments.extend(values)
+    if filters.benchmark_version:
+        clauses.append("benchmark_version = %s")
+        arguments.append(filters.benchmark_version)
+    columns = ", ".join(_BENCHMARK_COLUMNS)
+    where = " AND ".join(clauses)
+    return (
+        f"SELECT {columns} FROM ("
+        f"SELECT {columns}, "
+        "ROW_NUMBER() OVER (PARTITION BY tenant_id, benchmark_id "
+        "ORDER BY dt DESC, etl_load_time DESC) AS _latest_rank "
+        f"FROM `{table}` WHERE {where}"
+        ") AS latest WHERE _latest_rank = 1 "
+        "ORDER BY benchmark_period, benchmark_id",
+        tuple(arguments),
+    )
+
+
+def _select_rule_statement(
+    *,
+    tenant_id: str,
+    filters: PriceInsightFilter,
+) -> tuple[str, tuple[Any, ...]]:
+    table = "dwd_pr_price_insight_rule_di"
+    if table not in PRICE_INSIGHT_DWD_TABLES:
+        raise ValueError(f"table is outside the Price Insight DWD allowlist: {table}")
+    clauses = ["tenant_id = %s", "enabled = 1"]
+    arguments: list[Any] = [tenant_id]
+    if filters.rule_version:
+        clauses.append("rule_version = %s")
+        arguments.append(filters.rule_version)
+    columns = ", ".join(_RULE_COLUMNS)
+    where = " AND ".join(clauses)
+    return (
+        f"SELECT {columns} FROM ("
+        f"SELECT {columns}, "
+        "ROW_NUMBER() OVER (PARTITION BY tenant_id, rule_version, rule_code "
+        "ORDER BY dt DESC, etl_load_time DESC) AS _latest_rank "
+        f"FROM `{table}` WHERE {where}"
+        ") AS latest WHERE _latest_rank = 1 "
+        "ORDER BY rule_version, rule_code",
+        tuple(arguments),
+    )
+
+
 def _source_revision(
     filters: PriceInsightFilter,
     events: tuple[PriceEventRecord, ...],
     comparisons: tuple[PriceCompareRecord, ...],
+    benchmarks: tuple[PriceBenchmarkRecord, ...],
+    rules: tuple[PriceInsightRuleRecord, ...],
 ) -> str:
     payload = {
         "filter": filters.model_dump(mode="json"),
         "events": [row.model_dump(mode="json") for row in events],
         "comparisons": [row.model_dump(mode="json") for row in comparisons],
+        "benchmarks": [row.model_dump(mode="json") for row in benchmarks],
+        "rules": [row.model_dump(mode="json") for row in rules],
     }
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode()
     return f"mysql-price-insight:{hashlib.sha256(encoded).hexdigest()[:16]}"

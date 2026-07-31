@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from pathlib import Path
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -29,6 +30,13 @@ from auraclaw.infrastructure.artifacts.store import (
 )
 from auraclaw.internal.mcp import InProcessMcpTransport
 from auraclaw.runtime.mcp_client import HandsMcpClient
+
+PRICE_INSIGHT_MODEL_CONFIG = (
+    Path(__file__).parents[2]
+    / "config"
+    / "model-skills"
+    / "procurement-price-insight.json"
+)
 
 
 class _SnapshotSource:
@@ -101,6 +109,34 @@ def _snapshot() -> ModelSkillSnapshot:
         },
         source_revision="mysql:2:2:0123456789abcdef",
         source_digest=f"sha256:{'a' * 64}",
+    )
+
+
+def _price_insight_snapshot() -> ModelSkillSnapshot:
+    spec = json.loads(PRICE_INSIGHT_MODEL_CONFIG.read_text())
+    return ModelSkillSnapshot(
+        tenant_id="1",
+        model={
+            "id": 3,
+            **spec["model"],
+            "status": "ENABLED",
+        },
+        version={
+            "id": 4,
+            **spec["version"],
+            "status": "PUBLISHED",
+            "config_snapshot_json": spec,
+        },
+        sections={
+            "input_sources": spec["input_sources"],
+            "input_features": spec["input_features"],
+            "output_schemas": spec["output_schemas"],
+            "weights": spec["weights"],
+            "tags": spec["tags"],
+            "switches": [spec["switch"]],
+        },
+        source_revision="mysql:3:4:fedcba9876543210",
+        source_digest=f"sha256:{'b' * 64}",
     )
 
 
@@ -214,6 +250,95 @@ def test_model_config_flows_through_skill_mcp_to_runtime_client() -> None:
         assert parsed["source_digest"] == f"sha256:{'a' * 64}"
 
     asyncio.run(scenario())
+
+
+def test_published_model_config_compiles_executable_atomic_price_skill() -> None:
+    signer = HmacSkillSignatureVerifier(
+        {"ct-model": b"model-skill-test-signing-key"}
+    )
+    package = ModelSkillCompiler(signer).compile(_price_insight_snapshot())
+
+    assert package.manifest.name == "procurement.price-insight.generate"
+    assert package.manifest.version == "4.0.0"
+    assert package.manifest.required_tools == ()
+    assert [skill.name for skill in package.manifest.required_skills] == [
+        "procurement.price-data.validate",
+        "procurement.price-metrics.analyze",
+    ]
+    instructions = package.files["SKILL.md"].decode()
+    assert "由 `ct_model_*` 已发布配置生成" in instructions
+    assert "`history_dev_pct`" in instructions
+    assert "`dwd_pr_price_insight_rule_di`" in instructions
+    assert "模型参数权重仅控制解读和呈现优先级" in instructions
+    assert any(
+        "价格管理控制塔" in applies_when
+        for applies_when in package.manifest.applies_when
+    )
+
+
+def test_executable_model_config_rejects_table_scope_expansion() -> None:
+    snapshot = _price_insight_snapshot()
+    configured = dict(snapshot.version["config_snapshot_json"])
+    skill = dict(configured["auraclaw_skill"])
+    skill["data_tables"] = [*skill["data_tables"], "unrelated_business_table"]
+    configured["auraclaw_skill"] = skill
+    invalid = snapshot.model_copy(
+        update={
+            "version": {
+                **snapshot.version,
+                "config_snapshot_json": configured,
+            }
+        }
+    )
+    signer = HmacSkillSignatureVerifier(
+        {"ct-model": b"model-skill-test-signing-key"}
+    )
+    try:
+        ModelSkillCompiler(signer).compile(invalid)
+    except Exception as exc:
+        assert "invalid DWD table scope" in str(exc)
+    else:
+        raise AssertionError("out-of-scope DWD tables must be rejected")
+
+
+def test_executable_model_config_rejects_weight_semantic_changes() -> None:
+    snapshot = _price_insight_snapshot()
+    sections = {
+        name: [dict(row) for row in rows]
+        for name, rows in snapshot.sections.items()
+    }
+    sections["weights"][0]["weight_value"] = "0.200000"
+    invalid = snapshot.model_copy(update={"sections": sections})
+    signer = HmacSkillSignatureVerifier(
+        {"ct-model": b"model-skill-test-signing-key"}
+    )
+
+    try:
+        ModelSkillCompiler(signer).compile(invalid)
+    except Exception as exc:
+        assert "weight semantics are invalid" in str(exc)
+    else:
+        raise AssertionError("weight semantic changes must fail closed")
+
+
+def test_executable_model_config_rejects_unregistered_capability_tag() -> None:
+    snapshot = _price_insight_snapshot()
+    sections = {
+        name: [dict(row) for row in rows]
+        for name, rows in snapshot.sections.items()
+    }
+    sections["tags"][0]["tag_code"] = "free_form_prompt"
+    invalid = snapshot.model_copy(update={"sections": sections})
+    signer = HmacSkillSignatureVerifier(
+        {"ct-model": b"model-skill-test-signing-key"}
+    )
+
+    try:
+        ModelSkillCompiler(signer).compile(invalid)
+    except Exception as exc:
+        assert "discovery tags are incomplete" in str(exc)
+    else:
+        raise AssertionError("unregistered capability tags must fail closed")
 
 
 def test_model_skill_reconcile_is_idempotent() -> None:

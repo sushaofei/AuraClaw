@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
 
 from auraclaw.action.capability_catalog import (
@@ -21,7 +22,11 @@ from auraclaw.action.mcp import HandsMcpServer
 from auraclaw.action.mcp_primitives import McpResourceRegistry
 from auraclaw.action.policy import PolicyEngine
 from auraclaw.action.price_insight import (
-    PRICE_INSIGHT_SNAPSHOT_TOOL,
+    PRICE_DATASET_PROFILE_TOOL,
+    PRICE_DATASET_QUALITY_CHECK_TOOL,
+    PRICE_INSIGHT_METRIC_KEYS,
+    PRICE_METRIC_EVIDENCE_LIST_TOOL,
+    PRICE_METRIC_TOOLS,
     PriceInsightService,
     PriceInsightToolExecutor,
     price_insight_tool_descriptors,
@@ -38,6 +43,7 @@ from auraclaw.composition.business_skills import (
     PRICE_INSIGHT_SKILL_DIR,
     price_insight_resource_descriptors,
     price_insight_resources,
+    signed_price_insight_dependency_packages,
     signed_price_insight_package,
 )
 from auraclaw.contracts.capabilities import (
@@ -45,6 +51,7 @@ from auraclaw.contracts.capabilities import (
     CapabilityTrustLevel,
     McpServerDefinition,
 )
+from auraclaw.contracts.price_insight import PriceInsightFilter
 from auraclaw.contracts.skills import ResolvedSkillTool, SkillBinding
 from auraclaw.contracts.tools import ArtifactRef
 from auraclaw.control.ports import RuntimeAssignment, RuntimeBudget
@@ -52,7 +59,13 @@ from auraclaw.infrastructure.artifacts.store import (
     ArtifactStore,
     InMemoryObjectStorage,
 )
-from auraclaw.infrastructure.price_insight import JsonPriceInsightSource
+from auraclaw.infrastructure.price_insight import (
+    PRICE_INSIGHT_DWD_TABLES,
+    JsonPriceInsightSource,
+    _select_benchmark_statement,
+    _select_rule_statement,
+    _select_statement,
+)
 from auraclaw.internal.mcp import InProcessMcpTransport
 from auraclaw.runtime.capability_controller import RuntimeCapabilityController
 from auraclaw.runtime.mcp_client import HandsMcpClient
@@ -86,6 +99,162 @@ def _assignment() -> RuntimeAssignment:
         resource_profile={},
         budget=RuntimeBudget(),
     )
+
+
+def test_price_insight_sql_is_restricted_to_governed_dwd_tables() -> None:
+    assert PRICE_INSIGHT_DWD_TABLES == {
+        "dwd_pr_price_event_detail_di",
+        "dwd_pr_industry_price_benchmark_di",
+        "dwd_pr_price_compare_pair_di",
+        "dwd_pr_price_insight_rule_di",
+    }
+
+    try:
+        _select_statement(
+            table="unrelated_business_table",
+            columns=("id",),
+            tenant_id="development",
+            filters=PriceInsightFilter(
+                period_from="2026-01",
+                period_to="2026-01",
+            ),
+            include_benchmark=False,
+        )
+    except ValueError as exc:
+        assert "outside the Price Insight DWD allowlist" in str(exc)
+    else:
+        raise AssertionError("an unrelated table must not be queryable")
+
+
+def test_price_insight_data_interface_covers_benchmark_and_rule_tables() -> None:
+    filters = PriceInsightFilter(
+        period_from="2026-01",
+        period_to="2026-02",
+        benchmark_version="benchmark-v1",
+        rule_version="rule-v1",
+    )
+    benchmark_sql, benchmark_args = _select_benchmark_statement(
+        tenant_id="development",
+        filters=filters,
+    )
+    rule_sql, rule_args = _select_rule_statement(
+        tenant_id="development",
+        filters=filters,
+    )
+
+    assert "`dwd_pr_industry_price_benchmark_di`" in benchmark_sql
+    assert benchmark_args == (
+        "development",
+        "2026-01",
+        "2026-02",
+        "benchmark-v1",
+    )
+    assert "`dwd_pr_price_insight_rule_di`" in rule_sql
+    assert rule_args == ("development", "rule-v1")
+
+
+def test_dwd_rule_drives_default_threshold_and_request_can_override(tmp_path: Any) -> None:
+    async def scenario() -> None:
+        payload = json.loads(
+            (
+                PRICE_INSIGHT_SKILL_DIR / "tests" / "golden-data.json"
+            ).read_text()
+        )
+        payload["rules"] = [
+            {
+                "rule_version": "rule-v1",
+                "rule_code": "MARKET_DEFAULT",
+                "anchor_type": "MARKET",
+                "deviation_threshold_pct": "12",
+                "min_benchmark_sample_count": 30,
+                "min_material_match_score": "0.9",
+                "enabled": True,
+            }
+        ]
+        fixture = tmp_path / "price-rule.json"
+        fixture.write_text(json.dumps(payload))
+        service = PriceInsightService(JsonPriceInsightSource(fixture))
+
+        governed = await service.metric(
+            tenant_id="development",
+            filters=PriceInsightFilter(
+                period_from="2026-01",
+                period_to="2026-02",
+                anchor="market",
+            ),
+            metric_key="deviation_cnt",
+        )
+        assert governed["metric"]["value"] == 0
+        assert governed["context"]["threshold_pct"] == 12
+        assert (
+            governed["context"]["effective_rule"]["threshold_source"]
+            == "dwd_rule"
+        )
+
+        overridden = await service.metric(
+            tenant_id="development",
+            filters=PriceInsightFilter(
+                period_from="2026-01",
+                period_to="2026-02",
+                anchor="market",
+                deviation_threshold_pct=8,
+            ),
+            metric_key="deviation_cnt",
+        )
+        assert overridden["metric"]["value"] == 2
+        assert (
+            overridden["context"]["effective_rule"]["threshold_source"]
+            == "request"
+        )
+
+    asyncio.run(scenario())
+
+
+def test_dwd_rule_quality_minimums_exclude_weak_market_matches(
+    tmp_path: Any,
+) -> None:
+    async def scenario() -> None:
+        payload = json.loads(
+            (
+                PRICE_INSIGHT_SKILL_DIR / "tests" / "golden-data.json"
+            ).read_text()
+        )
+        payload["rules"] = [
+            {
+                "rule_version": "rule-v1",
+                "rule_code": "MARKET_STRICT",
+                "anchor_type": "MARKET",
+                "deviation_threshold_pct": "8",
+                "min_benchmark_sample_count": 50,
+                "min_material_match_score": "0.9",
+                "enabled": True,
+            }
+        ]
+        fixture = tmp_path / "price-strict-rule.json"
+        fixture.write_text(json.dumps(payload))
+        service = PriceInsightService(JsonPriceInsightSource(fixture))
+        filters = PriceInsightFilter(
+            period_from="2026-01",
+            period_to="2026-02",
+            anchor="market",
+        )
+
+        quality = await service.data_quality(
+            tenant_id="development",
+            filters=filters,
+        )
+        assert quality["status"] == "warning"
+        assert {
+            finding["code"] for finding in quality["findings"]
+        } >= {"BENCHMARK_SAMPLE_BELOW_RULE_MINIMUM"}
+        metric = await service.metric(
+            tenant_id="development",
+            filters=filters,
+            metric_key="market_dev_pct",
+        )
+        assert metric["context"]["matched_line_count"] == 0
+
+    asyncio.run(scenario())
 
 
 def test_price_insight_skill_runs_search_load_activate_and_tool_flow() -> None:
@@ -127,6 +296,8 @@ def test_price_insight_skill_runs_search_load_activate_and_tool_flow() -> None:
             signature_verifier=signer,
             resources=resources,
         )
+        for package in signed_price_insight_dependency_packages(signer):
+            await skills.publish(tenant_id, package)
         await skills.publish(tenant_id, signed_price_insight_package(signer))
         resolver = SkillResolver(skills, store)
         price_executor = PriceInsightToolExecutor(
@@ -185,7 +356,11 @@ def test_price_insight_skill_runs_search_load_activate_and_tool_flow() -> None:
             ),
             controller.empty_state(),
         )
-        skill_id = next(iter(searched.state["candidates"]))
+        skill_id = next(
+            capability_id
+            for capability_id, candidate in searched.state["candidates"].items()
+            if candidate["canonical_name"] == "procurement.price-insight.generate"
+        )
         loaded = await controller.execute(
             _assignment(),
             ToolCall(
@@ -206,18 +381,26 @@ def test_price_insight_skill_runs_search_load_activate_and_tool_flow() -> None:
         )
 
         assert activated.result["status"] == "activated"
-        assert len(activated.result["loaded_dependency_ids"]) == 6
-        assert len(activated.state["loaded"]) == 7
-        assert PRICE_INSIGHT_SNAPSHOT_TOOL in {
+        assert len(activated.result["loaded_dependency_ids"]) == 16
+        assert len(activated.state["loaded"]) == 17
+        assert PRICE_METRIC_TOOLS["history_dev_pct"] in {
             tool["function"]["name"]
             for tool in controller.model_tools(activated.state)
         }
+        trusted = await controller.trusted_messages(
+            _assignment(),
+            activated.state,
+        )
+        assert len(trusted) == 3
+        assert "procurement.price-data.validate" in trusted[0]["content"]
+        assert "procurement.price-metrics.analyze" in trusted[1]["content"]
+        assert "procurement.price-insight.generate" in trusted[2]["content"]
 
-        snapshot = await controller.execute(
+        profile = await controller.execute(
             _assignment(),
             ToolCall(
-                tool_invocation_id="price-snapshot",
-                name=PRICE_INSIGHT_SNAPSHOT_TOOL,
+                tool_invocation_id="price-scope-profile",
+                name=PRICE_DATASET_PROFILE_TOOL,
                 arguments={
                     "filter": {
                         "period_from": "2026-01",
@@ -228,16 +411,79 @@ def test_price_insight_skill_runs_search_load_activate_and_tool_flow() -> None:
             ),
             activated.state,
         )
-        assert snapshot.result["status"] == "success"
-        result = snapshot.result["content"]
-        assert len(result["kpis"]) == 8
-        assert result["data_quality"]["status"] == "pass"
-        assert result["analytics"]["price_impact"]["anchors"]["market"][
-            "total_pos_amount"
-        ] == 40000
-        assert result["analytics"]["price_impact"]["anchors"]["market"][
-            "total_neg_amount"
-        ] == 40000
+        assert profile.result["status"] == "success"
+        revision = profile.result["content"]["source_revision"]
+        assert profile.result["content"]["tables_read"] == [
+            "dwd_pr_price_event_detail_di",
+            "dwd_pr_industry_price_benchmark_di",
+            "dwd_pr_price_compare_pair_di",
+            "dwd_pr_price_insight_rule_di",
+        ]
+
+        quality = await controller.execute(
+            _assignment(),
+            ToolCall(
+                tool_invocation_id="price-quality-check",
+                name=PRICE_DATASET_QUALITY_CHECK_TOOL,
+                arguments={
+                    "filter": {
+                        "period_from": "2026-01",
+                        "period_to": "2026-02",
+                        "anchor": "market",
+                    }
+                },
+            ),
+            activated.state,
+        )
+        assert quality.result["content"]["status"] == "pass"
+        assert quality.result["content"]["source_revision"] == revision
+
+        metrics = {}
+        for metric_key in PRICE_INSIGHT_METRIC_KEYS:
+            computed = await controller.execute(
+                _assignment(),
+                ToolCall(
+                    tool_invocation_id=f"price-metric-{metric_key}",
+                    name=PRICE_METRIC_TOOLS[metric_key],
+                    arguments={
+                        "filter": {
+                            "period_from": "2026-01",
+                            "period_to": "2026-02",
+                            "anchor": "market",
+                        }
+                    },
+                ),
+                activated.state,
+            )
+            content = computed.result["content"]
+            assert content["source_revision"] == revision
+            assert content["metric"]["key"] == metric_key
+            metrics[metric_key] = content["metric"]["value"]
+
+        assert len(metrics) == 8
+        assert metrics["impact_amount"] == 40000
+        assert metrics["impact_neg_amount"] == 40000
+
+        evidence = await controller.execute(
+            _assignment(),
+            ToolCall(
+                tool_invocation_id="price-market-evidence",
+                name=PRICE_METRIC_EVIDENCE_LIST_TOOL,
+                arguments={
+                    "filter": {
+                        "period_from": "2026-01",
+                        "period_to": "2026-02",
+                        "anchor": "market",
+                    },
+                    "metric_key": "market_dev_pct",
+                    "limit": 2,
+                },
+            ),
+            activated.state,
+        )
+        assert evidence.result["content"]["metric_key"] == "market_dev_pct"
+        assert evidence.result["content"]["source_revision"] == revision
+        assert len(evidence.result["content"]["rows"]) <= 2
 
     asyncio.run(scenario())
 

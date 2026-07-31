@@ -5,11 +5,11 @@ import hashlib
 import hmac
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
-from typing import Protocol
+from typing import Protocol, TypeVar
 
 from auraclaw.action.mcp_primitives import McpResourceRegistry, RegisteredResource
 from auraclaw.action.ports import (
@@ -32,6 +32,7 @@ from auraclaw.contracts.errors import (
 from auraclaw.contracts.mcp import McpResourceContent, McpResourceDescriptor
 from auraclaw.contracts.skills import (
     PublishedSkill,
+    ResolvedSkillDependency,
     ResolvedSkillResource,
     ResolvedSkillTool,
     SkillBinding,
@@ -44,6 +45,9 @@ _VERSION_CLAUSE = re.compile(
     r"^(>=|<=|>|<|==|=)?(0|[1-9]\d*)"
     r"(?:\.(0|[1-9]\d*))?(?:\.(0|[1-9]\d*))?$"
 )
+
+
+_CapabilityDependency = TypeVar("_CapabilityDependency")
 
 
 @dataclass(frozen=True)
@@ -289,6 +293,7 @@ class SkillResolver:
         subject: str = "agent-runtime",
         correlation_id: str = "skill.resolve",
         active_skill_names: tuple[str, ...] = (),
+        _dependency_path: tuple[str, ...] = (),
     ) -> SkillBinding:
         publication = next(
             (
@@ -301,6 +306,9 @@ class SkillResolver:
         if publication is None:
             raise NotFoundError("No active Skill version satisfies the request")
         manifest = publication.manifest
+        if manifest.name in _dependency_path:
+            path = " -> ".join((*_dependency_path, manifest.name))
+            raise SchemaValidationError(f"Skill dependency cycle detected: {path}")
         if role not in manifest.allowed_roles:
             raise PolicyDeniedError("Runtime role is not allowed to activate Skill")
         capabilities = tuple(
@@ -308,13 +316,87 @@ class SkillResolver:
             for capability in await self._catalog.list_capabilities(tenant_id)
             if capability.status in {CapabilityStatus.ACTIVE, CapabilityStatus.DEGRADED}
         )
-        resolved_tools = tuple(
+        own_tools = tuple(
             _resolve_tool(requirement.name, requirement.version, capabilities)
             for requirement in manifest.required_tools
         )
-        resolved_resources = tuple(
+        own_resources = tuple(
             _resolve_resource(requirement.uri_template, capabilities)
             for requirement in manifest.required_resources
+        )
+        child_bindings = tuple(
+            [
+                await self.resolve(
+                    tenant_id=tenant_id,
+                    name=requirement.name,
+                    version=requirement.version,
+                    publisher=requirement.publisher,
+                    role=role,
+                    policy_version=policy_version,
+                    subject=subject,
+                    correlation_id=correlation_id,
+                    active_skill_names=tuple(
+                        dict.fromkeys(
+                            (
+                                *active_skill_names,
+                                *_dependency_path,
+                                manifest.name,
+                            )
+                        )
+                    ),
+                    _dependency_path=(*_dependency_path, manifest.name),
+                )
+                for requirement in manifest.required_skills
+            ]
+        )
+        resolved_tools = _unique_by_capability_id(
+            (
+                *own_tools,
+                *(
+                    tool
+                    for binding in child_bindings
+                    for tool in binding.resolved_tools
+                ),
+            ),
+            key=lambda item: item.capability_id,
+        )
+        resolved_resources = _unique_by_capability_id(
+            (
+                *own_resources,
+                *(
+                    resource
+                    for binding in child_bindings
+                    for resource in binding.resolved_resources
+                ),
+            ),
+            key=lambda item: item.capability_id,
+        )
+        direct_skills = tuple(
+            ResolvedSkillDependency(
+                capability_id=_skill_capability_id(
+                    tenant_id,
+                    binding.publisher,
+                    binding.skill_name,
+                    binding.skill_version,
+                ),
+                skill_name=binding.skill_name,
+                skill_version=binding.skill_version,
+                publisher=binding.publisher,
+                package_digest=binding.package_digest,
+                artifact_ref=binding.artifact_ref,
+            )
+            for binding in child_bindings
+        )
+        resolved_skills = _unique_by_capability_id(
+            (
+                *direct_skills,
+                *(
+                    child
+                    for binding in child_bindings
+                    for child in binding.resolved_skills
+                ),
+            ),
+            key=lambda item: item.capability_id,
         )
         policy_decision_id: str | None = None
         if self._policy is not None:
@@ -338,6 +420,14 @@ class SkillResolver:
                     "required_tools": [
                         item.name for item in manifest.required_tools
                     ],
+                    "required_skills": [
+                        {
+                            "name": item.name,
+                            "publisher": item.publisher,
+                            "version": item.version,
+                        }
+                        for item in manifest.required_skills
+                    ],
                     "risk_level": manifest.risk_level,
                     "role": role,
                 },
@@ -357,6 +447,7 @@ class SkillResolver:
             artifact_ref=publication.artifact_ref,
             resolved_tools=resolved_tools,
             resolved_resources=resolved_resources,
+            resolved_skills=resolved_skills,
             policy_version=policy_version,
             policy_decision_id=policy_decision_id,
             max_steps=manifest.max_steps,
@@ -481,12 +572,13 @@ def _package_key(tenant_id: str, manifest: SkillManifest) -> tuple[str, str, str
 
 def _skill_descriptor(publication: PublishedSkill) -> CapabilityDescriptor:
     manifest = publication.manifest
-    identity = (
-        f"{publication.tenant_id}:{manifest.publisher}:"
-        f"{manifest.name}:{manifest.version}"
-    )
     return CapabilityDescriptor(
-        capability_id=f"cap_{hashlib.sha256(identity.encode()).hexdigest()[:32]}",
+        capability_id=_skill_capability_id(
+            publication.tenant_id,
+            manifest.publisher,
+            manifest.name,
+            manifest.version,
+        ),
         kind=CapabilityKind.SKILL,
         server_id="auraclaw-skill-registry",
         canonical_name=manifest.name,
@@ -511,12 +603,38 @@ def _skill_descriptor(publication: PublishedSkill) -> CapabilityDescriptor:
                 "applies_when": list(manifest.applies_when),
                 "not_when": list(manifest.not_when),
                 "input_schema": manifest.input_schema,
+                "required_skills": [
+                    requirement.model_dump(mode="json")
+                    for requirement in manifest.required_skills
+                ],
                 "allowed_roles": list(manifest.allowed_roles),
                 "max_steps": manifest.max_steps,
                 "timeout_seconds": manifest.timeout_seconds,
             }
         },
     )
+
+
+def _skill_capability_id(
+    tenant_id: str,
+    publisher: str,
+    name: str,
+    version: str,
+) -> str:
+    identity = f"{tenant_id}:{publisher}:{name}:{version}"
+    return f"cap_{hashlib.sha256(identity.encode()).hexdigest()[:32]}"
+
+
+def _unique_by_capability_id(
+    items: tuple[_CapabilityDependency, ...],
+    *,
+    key: Callable[[_CapabilityDependency], str],
+) -> tuple[_CapabilityDependency, ...]:
+    unique: dict[str, _CapabilityDependency] = {}
+    for item in items:
+        capability_id = key(item)
+        unique.setdefault(capability_id, item)
+    return tuple(unique.values())
 
 
 def _package_resources(

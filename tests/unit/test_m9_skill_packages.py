@@ -34,6 +34,7 @@ from auraclaw.contracts.errors import (
 )
 from auraclaw.contracts.skills import (
     SkillManifest,
+    SkillRequirement,
     SkillResourceRequirement,
     SkillToolRequirement,
 )
@@ -144,6 +145,35 @@ def _descriptor(
         status=CapabilityStatus.ACTIVE,
         updated_at=datetime.now(UTC),
         metadata=metadata or {},
+    )
+
+
+def _dependency_package(
+    verifier: HmacSkillSignatureVerifier,
+    *,
+    name: str,
+    required_skills: tuple[SkillRequirement, ...] = (),
+    required_tools: tuple[SkillToolRequirement, ...] = (),
+) -> SkillPackage:
+    unsigned = SkillManifest(
+        name=name,
+        version="1.0.0",
+        description=f"Composable test Skill {name}",
+        required_skills=required_skills,
+        required_tools=required_tools,
+        publisher="platform",
+        signature=f"hmac-sha256:{'0' * 64}",
+    )
+    files = {"SKILL.md": f"# {name}".encode()}
+    manifest = unsigned.model_copy(
+        update={"signature": verifier.sign(unsigned, files)}
+    )
+    return SkillPackage(
+        manifest=manifest,
+        files={
+            "manifest.json": manifest.model_dump_json().encode(),
+            **files,
+        },
     )
 
 
@@ -365,6 +395,92 @@ def test_skill_resolver_pins_highest_compatible_dependencies() -> None:
                 version="2.0.0",
                 role="worker",
                 policy_version="policy-42",
+            )
+
+    asyncio.run(scenario())
+
+
+def test_skill_resolver_flattens_child_skills_and_rejects_cycles() -> None:
+    async def scenario() -> None:
+        verifier = HmacSkillSignatureVerifier({"platform": _PUBLISHER_KEY})
+        registry = SkillPackageRegistry(
+            artifacts=_artifacts(),
+            signature_verifier=verifier,
+        )
+        child = _dependency_package(
+            verifier,
+            name="data.validate",
+            required_tools=(
+                SkillToolRequirement(name="data.scope.profile", version="1.0.0"),
+            ),
+        )
+        parent = _dependency_package(
+            verifier,
+            name="scenario.analyze",
+            required_skills=(
+                SkillRequirement(
+                    name="data.validate",
+                    version="1.0.0",
+                    publisher="platform",
+                ),
+            ),
+        )
+        await registry.publish("tenant-a", child)
+        await registry.publish("tenant-a", parent)
+        store = InMemoryCapabilityCatalogStore()
+        catalog = CapabilityCatalog(store)
+        await catalog.register_server(
+            McpServerDefinition(
+                server_id="server-platform",
+                title="Platform capabilities",
+                endpoint="https://platform.example/mcp",
+                trust_level=CapabilityTrustLevel.PLATFORM,
+                status=CapabilityStatus.ACTIVE,
+                enabled=True,
+            )
+        )
+        await catalog.replace_server_capabilities(
+            "server-platform",
+            (
+                _descriptor(
+                    "cap-data-profile",
+                    CapabilityKind.TOOL,
+                    "data.scope.profile",
+                    "1.0.0",
+                ),
+            ),
+        )
+        binding = await SkillResolver(registry, store).resolve(
+            tenant_id="tenant-a",
+            name="scenario.analyze",
+            role="worker",
+            policy_version="policy-1",
+        )
+        assert [item.skill_name for item in binding.resolved_skills] == [
+            "data.validate"
+        ]
+        assert [item.canonical_name for item in binding.resolved_tools] == [
+            "data.scope.profile"
+        ]
+
+        cycle_a = _dependency_package(
+            verifier,
+            name="cycle.a",
+            required_skills=(SkillRequirement(name="cycle.b"),),
+        )
+        cycle_b = _dependency_package(
+            verifier,
+            name="cycle.b",
+            required_skills=(SkillRequirement(name="cycle.a"),),
+        )
+        await registry.publish("tenant-a", cycle_a)
+        await registry.publish("tenant-a", cycle_b)
+        with pytest.raises(SchemaValidationError, match="cycle detected"):
+            await SkillResolver(registry, store).resolve(
+                tenant_id="tenant-a",
+                name="cycle.a",
+                role="worker",
+                policy_version="policy-1",
             )
 
     asyncio.run(scenario())

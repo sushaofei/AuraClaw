@@ -1,0 +1,22 @@
+{
+  "name": "procurement.price-data.validate",
+  "version": "1.0.0",
+  "description": "验证采购价格数据范围、覆盖度、可比性和质量门禁，供多个采购价格场景复用。",
+  "applies_when": ["采购价格数据范围", "采购价格数据质量", "价格分析前置校验"],
+  "not_when": ["要求计算业务指标", "要求修改采购数据"],
+  "publisher": "platform",
+  "signature": "hmac-sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "input_schema": {"type": "object"},
+  "output_schema": {"type": "object"},
+  "required_tools": [
+    {"name": "procurement.price.dataset.profile", "version": "1.0.0"},
+    {"name": "procurement.price.dataset.quality.check", "version": "1.0.0"}
+  ],
+  "required_resources": [],
+  "required_skills": [],
+  "allowed_roles": ["root", "coordinator", "worker"],
+  "data_classification": "internal",
+  "risk_level": "low",
+  "max_steps": 6,
+  "timeout_seconds": 60
+}

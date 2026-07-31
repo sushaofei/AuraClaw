@@ -21,6 +21,12 @@ from auraclaw.contracts.skills import SkillManifest
 
 PRICE_INSIGHT_SERVER_ID = "auraclaw-price-insight"
 PRICE_INSIGHT_SKILL_DIR = Path(__file__).parents[1] / "skills" / "procurement-price-insight"
+PRICE_DATA_VALIDATION_SKILL_DIR = (
+    Path(__file__).parents[1] / "skills" / "procurement-price-data-validation"
+)
+PRICE_METRICS_SKILL_DIR = (
+    Path(__file__).parents[1] / "skills" / "procurement-price-metrics"
+)
 _RESOURCE_FILES = {
     "repo://business-skills/price-insight/metric-definitions/1.0.0": (
         "references/metric-definitions.md",
@@ -46,9 +52,25 @@ _RESOURCE_FILES = {
 def signed_price_insight_package(
     signer: HmacSkillSignatureVerifier,
 ) -> SkillPackage:
+    return _signed_skill_package(PRICE_INSIGHT_SKILL_DIR, signer)
+
+
+def signed_price_insight_dependency_packages(
+    signer: HmacSkillSignatureVerifier,
+) -> tuple[SkillPackage, ...]:
+    return (
+        _signed_skill_package(PRICE_DATA_VALIDATION_SKILL_DIR, signer),
+        _signed_skill_package(PRICE_METRICS_SKILL_DIR, signer),
+    )
+
+
+def _signed_skill_package(
+    skill_dir: Path,
+    signer: HmacSkillSignatureVerifier,
+) -> SkillPackage:
     files = {
-        path.relative_to(PRICE_INSIGHT_SKILL_DIR).as_posix(): path.read_bytes()
-        for path in PRICE_INSIGHT_SKILL_DIR.rglob("*")
+        path.relative_to(skill_dir).as_posix(): path.read_bytes()
+        for path in skill_dir.rglob("*")
         if path.is_file()
     }
     manifest = SkillManifest.model_validate_json(files["manifest.json"])

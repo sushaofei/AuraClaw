@@ -1,26 +1,34 @@
 {
   "name": "procurement.price-insight.generate",
-  "version": "1.0.0",
-  "description": "生成采购价格洞察，覆盖历史、区域、市场三维比价与价格影响分析。",
+  "version": "3.0.0",
+  "description": "组合数据校验与原子指标子 Skill，生成采购价格洞察。",
   "applies_when": ["采购价格", "行业均价", "历史价差", "区域价差", "价格影响"],
   "not_when": ["要求修改采购订单", "要求直接执行调价"],
   "publisher": "platform",
   "signature": "hmac-sha256:0000000000000000000000000000000000000000000000000000000000000000",
   "input_schema": {"type": "object"},
   "output_schema": {"type": "object"},
-  "required_tools": [
-    {"name": "procurement.price_insight.snapshot", "version": "1.0.0"},
-    {"name": "procurement.price_insight.drilldown", "version": "1.0.0"},
-    {"name": "procurement.price_insight.data_quality", "version": "1.0.0"}
-  ],
+  "required_tools": [],
   "required_resources": [
     {"uri_template": "repo://business-skills/price-insight/metric-definitions/1.0.0"},
     {"uri_template": "repo://business-skills/price-insight/comparability-rules/1.0.0"},
     {"uri_template": "repo://business-skills/price-insight/output-contract/1.0.0"}
   ],
+  "required_skills": [
+    {
+      "name": "procurement.price-data.validate",
+      "version": "1.0.0",
+      "publisher": "platform"
+    },
+    {
+      "name": "procurement.price-metrics.analyze",
+      "version": "1.0.0",
+      "publisher": "platform"
+    }
+  ],
   "allowed_roles": ["root", "coordinator", "worker"],
   "data_classification": "internal",
   "risk_level": "low",
-  "max_steps": 20,
+  "max_steps": 30,
   "timeout_seconds": 120
 }

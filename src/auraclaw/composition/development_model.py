@@ -7,8 +7,28 @@ from typing import Any
 from auraclaw.runtime.ports import ModelRequest, ModelResponse, ToolCall
 
 _SKILL_NAME = "procurement.price-insight.generate"
-_DATA_QUALITY_TOOL = "procurement.price_insight.data_quality"
-_SNAPSHOT_TOOL = "procurement.price_insight.snapshot"
+_SCOPE_PROFILE_TOOL = "procurement.price.dataset.profile"
+_QUALITY_CHECK_TOOL = "procurement.price.dataset.quality.check"
+_METRIC_KEYS = (
+    "history_dev_pct",
+    "region_gap_max",
+    "market_dev_pct",
+    "impact_amount",
+    "impact_neg_amount",
+    "impact_share_pct",
+    "impact_neg_share_pct",
+    "deviation_cnt",
+)
+_METRIC_TOOLS = {
+    "history_dev_pct": "procurement.price.metric.history-deviation.compute",
+    "region_gap_max": "procurement.price.metric.region-max-gap.compute",
+    "market_dev_pct": "procurement.price.metric.market-deviation.compute",
+    "impact_amount": "procurement.price.metric.positive-impact-amount.compute",
+    "impact_neg_amount": "procurement.price.metric.negative-impact-amount.compute",
+    "impact_share_pct": "procurement.price.metric.positive-impact-share.compute",
+    "impact_neg_share_pct": "procurement.price.metric.negative-impact-share.compute",
+    "deviation_cnt": "procurement.price.metric.market-deviation-count.compute",
+}
 
 
 class DevelopmentPriceInsightModel:
@@ -50,36 +70,65 @@ class DevelopmentPriceInsightModel:
                 "capability_id": skill_id,
                 "inputs": {},
             }
-        elif _DATA_QUALITY_TOOL in available and _DATA_QUALITY_TOOL not in called:
-            name = _DATA_QUALITY_TOOL
+        elif _SCOPE_PROFILE_TOOL in available and _SCOPE_PROFILE_TOOL not in called:
+            name = _SCOPE_PROFILE_TOOL
             arguments = {"filter": _filter_from_goal(request.messages)}
-        elif _SNAPSHOT_TOOL in available and _SNAPSHOT_TOOL not in called:
-            name = _SNAPSHOT_TOOL
+        elif _QUALITY_CHECK_TOOL in available and _QUALITY_CHECK_TOOL not in called:
+            name = _QUALITY_CHECK_TOOL
             arguments = {"filter": _filter_from_goal(request.messages)}
-        else:
-            snapshot = _latest_tool_content(request.messages, _SNAPSHOT_TOOL)
-            kpis = snapshot.get("kpis", [])
-            source_revision = snapshot.get("filter", {}).get(
-                "source_revision", "unknown"
-            )
+        elif (
+            _QUALITY_CHECK_TOOL in called
+            and _latest_tool_content(request.messages, _QUALITY_CHECK_TOOL).get("status")
+            == "blocked"
+        ):
+            quality = _latest_tool_content(request.messages, _QUALITY_CHECK_TOOL)
             output = (
-                f"价格洞察已完成：数据源 {source_revision}，"
-                f"数据质量 {snapshot.get('data_quality', {}).get('status', 'unknown')}，"
-                f"已生成 {len(kpis) if isinstance(kpis, list) else 0} 项关键指标。"
+                "价格洞察已被数据质量门禁阻断；请先修复："
+                f"{json.dumps(quality.get('findings', []), ensure_ascii=False)}"
             )
             return ModelResponse(
                 model_call_id=request.model_call_id,
                 provider="development-scripted",
-                model="price-insight-loop-v1",
+                model="price-insight-loop-v3",
                 completed_output=output,
                 deltas=(output,),
                 usage={"output_tokens": 32},
+            )
+        elif any(tool in available for tool in _METRIC_TOOLS.values()):
+            computed = _called_metric_keys(request.messages)
+            remaining = [key for key in _METRIC_KEYS if key not in computed]
+            if remaining:
+                name = _METRIC_TOOLS[remaining[0]]
+                arguments = {"filter": _filter_from_goal(request.messages)}
+            else:
+                profile = _latest_tool_content(request.messages, _SCOPE_PROFILE_TOOL)
+                source_revision = profile.get("source_revision", "unknown")
+                quality_status = _latest_tool_content(
+                    request.messages,
+                    _QUALITY_CHECK_TOOL,
+                ).get("status", "unknown")
+                output = (
+                    f"价格洞察原子 SOP 已完成：数据源 {source_revision}，"
+                    f"数据质量 {quality_status}，"
+                    f"已逐项生成 {len(computed)} 项关键指标。"
+                )
+                return ModelResponse(
+                    model_call_id=request.model_call_id,
+                    provider="development-scripted",
+                    model="price-insight-loop-v3",
+                    completed_output=output,
+                    deltas=(output,),
+                    usage={"output_tokens": 32},
+                )
+        else:
+            raise RuntimeError(
+                "Price Insight atomic tools are unavailable after Skill activation"
             )
 
         return ModelResponse(
             model_call_id=request.model_call_id,
             provider="development-scripted",
-            model="price-insight-loop-v1",
+            model="price-insight-loop-v2",
             completed_output="",
             tool_calls=(
                 ToolCall(
@@ -114,6 +163,27 @@ def _available_tools(tools: tuple[dict[str, Any], ...]) -> set[str]:
         if isinstance(function, dict) and function.get("name"):
             available.add(str(function["name"]))
     return available
+
+
+def _called_metric_keys(messages: tuple[dict[str, Any], ...]) -> set[str]:
+    keys: set[str] = set()
+    for message in messages:
+        if message.get("role") != "assistant":
+            continue
+        for item in message.get("tool_calls", ()):
+            if not isinstance(item, dict):
+                continue
+            function = item.get("function")
+            if not isinstance(function, dict):
+                continue
+            name = str(function.get("name", ""))
+            metric_key = next(
+                (key for key, tool in _METRIC_TOOLS.items() if tool == name),
+                None,
+            )
+            if metric_key is not None:
+                keys.add(metric_key)
+    return keys
 
 
 def _tool_payloads(messages: tuple[dict[str, Any], ...]) -> list[dict[str, Any]]:
