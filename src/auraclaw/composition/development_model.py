@@ -94,6 +94,23 @@ class DevelopmentPriceInsightModel:
                 deltas=(output,),
                 usage={"output_tokens": 32},
             )
+        elif (
+            _QUALITY_CHECK_TOOL in called
+            and len(_price_source_revisions(request.messages)) > 1
+        ):
+            revisions = sorted(_price_source_revisions(request.messages))
+            output = (
+                "价格洞察检测到数据版本漂移，已停止拼接跨版本指标："
+                f"{', '.join(revisions)}"
+            )
+            return ModelResponse(
+                model_call_id=request.model_call_id,
+                provider="development-scripted",
+                model="price-insight-loop-v3",
+                completed_output=output,
+                deltas=(output,),
+                usage={"output_tokens": 32},
+            )
         elif any(tool in available for tool in _METRIC_TOOLS.values()):
             computed = _called_metric_keys(request.messages)
             remaining = [key for key in _METRIC_KEYS if key not in computed]
@@ -184,6 +201,48 @@ def _called_metric_keys(messages: tuple[dict[str, Any], ...]) -> set[str]:
             if metric_key is not None:
                 keys.add(metric_key)
     return keys
+
+
+def _price_source_revisions(
+    messages: tuple[dict[str, Any], ...],
+) -> set[str]:
+    governed_tools = {
+        _SCOPE_PROFILE_TOOL,
+        _QUALITY_CHECK_TOOL,
+        *_METRIC_TOOLS.values(),
+    }
+    call_ids: set[str] = set()
+    for message in messages:
+        if message.get("role") != "assistant":
+            continue
+        for item in message.get("tool_calls", ()):
+            if not isinstance(item, dict):
+                continue
+            function = item.get("function")
+            if (
+                isinstance(function, dict)
+                and function.get("name") in governed_tools
+            ):
+                call_ids.add(str(item.get("id", "")))
+    revisions: set[str] = set()
+    for message in messages:
+        if (
+            message.get("role") != "tool"
+            or str(message.get("tool_call_id", "")) not in call_ids
+        ):
+            continue
+        try:
+            payload = json.loads(str(message.get("content", "{}")))
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        content = payload.get("content")
+        selected = content if isinstance(content, dict) else payload
+        revision = selected.get("source_revision")
+        if isinstance(revision, str) and revision:
+            revisions.add(revision)
+    return revisions
 
 
 def _tool_payloads(messages: tuple[dict[str, Any], ...]) -> list[dict[str, Any]]:
