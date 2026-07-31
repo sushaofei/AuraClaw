@@ -159,3 +159,59 @@ def test_development_model_drives_filter_aware_price_loop() -> None:
         }
 
     asyncio.run(scenario())
+
+
+def test_development_model_stops_on_price_source_revision_drift() -> None:
+    async def scenario() -> None:
+        model = DevelopmentPriceInsightModel()
+        messages: tuple[dict[str, object], ...] = (
+            {
+                "role": "user",
+                "content": "分析周期为 2026-03 至 2026-04，主要对标 行业均价。",
+            },
+            _assistant_call("search", "auraclaw.capabilities.search"),
+            _tool_result(
+                "search",
+                {
+                    "capabilities": [
+                        {
+                            "capability_id": "cap-price-skill",
+                            "kind": "skill",
+                            "canonical_name": (
+                                "procurement.price-insight.generate"
+                            ),
+                        }
+                    ]
+                },
+            ),
+            _assistant_call("load", "auraclaw.capabilities.load"),
+            _tool_result("load", {"capabilities": []}),
+            _assistant_call("activate", "auraclaw.skills.activate"),
+            _tool_result("activate", {"status": "activated"}),
+            _assistant_call("profile", "procurement.price.dataset.profile"),
+            _tool_result("profile", {"source_revision": "mysql-v1"}),
+            _assistant_call(
+                "quality",
+                "procurement.price.dataset.quality.check",
+            ),
+            _tool_result(
+                "quality",
+                {"status": "pass", "source_revision": "mysql-v2"},
+            ),
+        )
+        response = await model.generate(
+            ModelRequest(
+                model_call_id="model-revision-drift",
+                tenant_id="development",
+                run_id="run-local-debug",
+                messages=messages,
+                tools=(),
+            )
+        )
+
+        assert response.tool_calls == ()
+        assert "数据版本漂移" in response.completed_output
+        assert "mysql-v1" in response.completed_output
+        assert "mysql-v2" in response.completed_output
+
+    asyncio.run(scenario())

@@ -896,6 +896,79 @@ def _quality_findings(
             )
         )
         return tuple(findings)
+    event_quality_flags = _quality_flag_counts(
+        event.data_quality_status for event in dataset.events
+    )
+    comparison_quality_flags = _quality_flag_counts(
+        comparison.data_quality_status
+        for comparison in dataset.comparisons
+    )
+    benchmark_quality_flags = _quality_flag_counts(
+        benchmark.data_quality_status
+        for benchmark in dataset.benchmarks
+    )
+    unconfirmed_count = event_quality_flags.get(
+        "FINAL_TRANSACTION_STATUS_UNCONFIRMED",
+        0,
+    )
+    if unconfirmed_count:
+        findings.append(
+            PriceInsightQualityFinding(
+                code="FINAL_TRANSACTION_STATUS_UNCONFIRMED",
+                severity="high",
+                message=(
+                    "Upstream rows are not confirmed as final transactions; "
+                    "price conclusions require qualification."
+                ),
+                affected_count=unconfirmed_count,
+            )
+        )
+    unknown_tax_count = sum(
+        event.tax_basis_code == "UNKNOWN" for event in dataset.events
+    )
+    if unknown_tax_count:
+        findings.append(
+            PriceInsightQualityFinding(
+                code="TAX_BASIS_UNKNOWN",
+                severity="high",
+                message=(
+                    "Rows with an unknown tax basis cannot support an "
+                    "authoritative tax-consistent comparison."
+                ),
+                affected_count=unknown_tax_count,
+            )
+        )
+    simulated_benchmark_count = max(
+        comparison_quality_flags.get(
+            "INDUSTRY_BENCHMARK_SIMULATED",
+            0,
+        ),
+        benchmark_quality_flags.get("DEMO_ONLY", 0),
+        benchmark_quality_flags.get(
+            "DERIVED_FROM_INTERNAL_CURRENT_PRICE",
+            0,
+        ),
+    )
+    if (
+        filters.anchor == PriceInsightAnchor.MARKET
+        and simulated_benchmark_count
+    ):
+        findings.append(
+            PriceInsightQualityFinding(
+                code="SIMULATED_INDUSTRY_BENCHMARK",
+                severity="critical",
+                message=(
+                    "The selected market benchmark is simulated or derived "
+                    "from internal prices and cannot support an authoritative "
+                    "industry comparison."
+                ),
+                affected_count=simulated_benchmark_count,
+                evidence={
+                    "comparison_flags": comparison_quality_flags,
+                    "benchmark_flags": benchmark_quality_flags,
+                },
+            )
+        )
     identifiers = [event.price_line_id for event in dataset.events]
     duplicate_count = len(identifiers) - len(set(identifiers))
     if duplicate_count:
@@ -1056,6 +1129,16 @@ def _quality_findings(
                     )
                 )
     return tuple(findings)
+
+
+def _quality_flag_counts(values: Iterable[str]) -> dict[str, int]:
+    counts: dict[str, int] = defaultdict(int)
+    for value in values:
+        for flag in value.split(";"):
+            normalized = flag.strip().upper()
+            if normalized and normalized != "PASS":
+                counts[normalized] += 1
+    return dict(sorted(counts.items()))
 
 
 def _quality_status(

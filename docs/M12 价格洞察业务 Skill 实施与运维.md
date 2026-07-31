@@ -123,6 +123,33 @@ Schema，缺少当前 DDL 要求的 `tenant_id`、稳定行 ID、基准统计类
 阻塞。不得用 `CREATE TABLE IF NOT EXISTS`、删除重建或模拟结果掩盖该差异；需由数据侧按
 `docs/ddl/行业均价智能横向比对-DWD-MySQL-DDL.sql` 完成兼容迁移并保留现有数据后再验收。
 
+进一步的数据质量审计得到：
+
+- 成交 87 行、比对 87 行、行业基准 46 行；
+- 成交来源键完整且无重复，87 条比对与 benchmark 在物料、单位、币种、税价和期间上
+  100% 一致，可通过现有主键确定性回填稳定 ID；
+- 全部 benchmark 均为 `SIM_MEDIAN_V1 / SIMULATED_MEDIAN_CURRENT_PRICE`；
+- 数据明确标记 `DEMO_ONLY`、`DERIVED_FROM_INTERNAL_CURRENT_PRICE`、
+  `INDUSTRY_BENCHMARK_SIMULATED`、`FINAL_TRANSACTION_STATUS_UNCONFIRMED` 和
+  `TAX_BASIS_UNKNOWN`。
+
+因此 Schema 对齐不等于数据可用于权威洞察。数据质量 Tool 在市场锚点遇到模拟/内部派生
+benchmark 时必须返回 `blocked`；成交未确认和税价未知分别产生高严重度 finding。
+
+兼容迁移工具默认只读：
+
+```bash
+PYTHONPATH=src uv run python scripts/migrate_price_insight_dwd_schema.py --plan
+```
+
+`--apply` 必须显式提供 tenant、benchmark 统计类型、映射版本、阈值、最小样本量、最低
+匹配分及目标数据库确认。检测到演示 benchmark 时还必须显式传
+`--allow-demo-benchmark`；该参数只允许做 Schema 迁移，不会取消数据质量 blocked。
+
+迁移已在远端数据的本机临时克隆上演练：87/87/46 行完整保留，治理字段、唯一索引和规则表
+创建成功，真实 MySQL Source 能读出 1 条 DWD 规则；质量状态仍按预期为 `blocked`。临时库
+已在验证后删除，远端库未执行任何 DDL/DML。
+
 配置命令：
 
 ```bash

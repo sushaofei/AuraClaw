@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from auraclaw.action.capability_catalog import (
@@ -51,9 +52,17 @@ from auraclaw.contracts.capabilities import (
     CapabilityTrustLevel,
     McpServerDefinition,
 )
-from auraclaw.contracts.price_insight import PriceInsightFilter
+from auraclaw.contracts.price_insight import (
+    PriceInsightDataset,
+    PriceInsightFilter,
+)
 from auraclaw.contracts.skills import ResolvedSkillTool, SkillBinding
-from auraclaw.contracts.tools import ArtifactRef
+from auraclaw.contracts.tools import (
+    ArtifactRef,
+    PolicyDecision,
+    ToolInvocation,
+    ToolResultStatus,
+)
 from auraclaw.control.ports import RuntimeAssignment, RuntimeBudget
 from auraclaw.infrastructure.artifacts.store import (
     ArtifactStore,
@@ -84,6 +93,36 @@ class _NoApprovals:
         policy_version: str,
     ) -> None:
         del tenant_id, session_id, digest, policy_version
+
+
+class _CountingPriceSource:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def load_dataset(
+        self,
+        *,
+        tenant_id: str,
+        filters: PriceInsightFilter,
+    ) -> PriceInsightDataset:
+        del filters
+        self.calls += 1
+        return PriceInsightDataset(
+            tenant_id=tenant_id,
+            source_revision="replay-safe-v1",
+        )
+
+
+class _DenyPolicy:
+    version = "price-deny-v1"
+
+    def evaluate(
+        self,
+        capability: Any,
+        invocation: ToolInvocation | None = None,
+    ) -> PolicyDecision:
+        del capability, invocation
+        return PolicyDecision.DENY
 
 
 def _assignment() -> RuntimeAssignment:
@@ -253,6 +292,139 @@ def test_dwd_rule_quality_minimums_exclude_weak_market_matches(
             metric_key="market_dev_pct",
         )
         assert metric["context"]["matched_line_count"] == 0
+
+    asyncio.run(scenario())
+
+
+def test_simulated_market_benchmark_blocks_authoritative_insight(
+    tmp_path: Any,
+) -> None:
+    async def scenario() -> None:
+        payload = json.loads(
+            (
+                PRICE_INSIGHT_SKILL_DIR / "tests" / "golden-data.json"
+            ).read_text()
+        )
+        for event in payload["events"]:
+            event["tax_basis_code"] = "UNKNOWN"
+            event["data_quality_status"] = (
+                "FINAL_TRANSACTION_STATUS_UNCONFIRMED;TAX_BASIS_UNKNOWN"
+            )
+        for comparison in payload["comparisons"]:
+            comparison["tax_basis_code"] = "UNKNOWN"
+            comparison["data_quality_status"] = (
+                "FINAL_TRANSACTION_STATUS_UNCONFIRMED;"
+                "TAX_BASIS_UNKNOWN;"
+                "INDUSTRY_BENCHMARK_SIMULATED"
+            )
+        fixture = tmp_path / "simulated-market.json"
+        fixture.write_text(json.dumps(payload))
+        service = PriceInsightService(JsonPriceInsightSource(fixture))
+
+        quality = await service.data_quality(
+            tenant_id="development",
+            filters=PriceInsightFilter(
+                period_from="2026-01",
+                period_to="2026-02",
+                anchor="market",
+            ),
+        )
+
+        assert quality["status"] == "blocked"
+        assert {
+            finding["code"] for finding in quality["findings"]
+        } >= {
+            "FINAL_TRANSACTION_STATUS_UNCONFIRMED",
+            "TAX_BASIS_UNKNOWN",
+            "SIMULATED_INDUSTRY_BENCHMARK",
+        }
+
+    asyncio.run(scenario())
+
+
+def test_price_tool_replay_returns_cached_result_without_rereading_dwd() -> None:
+    async def scenario() -> None:
+        source = _CountingPriceSource()
+        gateway = ToolGateway(
+            registry=ToolRegistry(price_insight_tools()),
+            policy=PolicyEngine(),
+            approvals=_NoApprovals(),
+            hands=PriceInsightToolExecutor(PriceInsightService(source)),
+            artifacts=ArtifactStore(
+                InMemoryObjectStorage(),
+                signing_key=b"price-replay-artifact-key",
+            ),
+        )
+        invocation = ToolInvocation(
+            tool_invocation_id="price-profile-replay",
+            tenant_id="development",
+            root_session_id="root-price",
+            session_id="session-price",
+            run_id="run-price",
+            tool_name=PRICE_DATASET_PROFILE_TOOL,
+            tool_version="1.0.0",
+            arguments={
+                "filter": {
+                    "period_from": "2026-01",
+                    "period_to": "2026-02",
+                }
+            },
+            expected_side_effect="read",
+            idempotency_key="price-profile-replay-key",
+            deadline=datetime.now(UTC) + timedelta(minutes=1),
+            fencing_token=1,
+            actor_id="runtime-price",
+        )
+
+        first = await gateway.execute(invocation)
+        replay = await gateway.execute(invocation)
+
+        assert first.status is ToolResultStatus.SUCCESS
+        assert replay == first
+        assert source.calls == 1
+
+    asyncio.run(scenario())
+
+
+def test_price_tool_policy_deny_happens_before_dwd_read() -> None:
+    async def scenario() -> None:
+        source = _CountingPriceSource()
+        gateway = ToolGateway(
+            registry=ToolRegistry(price_insight_tools()),
+            policy=_DenyPolicy(),
+            approvals=_NoApprovals(),
+            hands=PriceInsightToolExecutor(PriceInsightService(source)),
+            artifacts=ArtifactStore(
+                InMemoryObjectStorage(),
+                signing_key=b"price-deny-artifact-key",
+            ),
+        )
+        denied = await gateway.execute(
+            ToolInvocation(
+                tool_invocation_id="price-profile-denied",
+                tenant_id="development",
+                root_session_id="root-price",
+                session_id="session-price",
+                run_id="run-price",
+                tool_name=PRICE_DATASET_PROFILE_TOOL,
+                tool_version="1.0.0",
+                arguments={
+                    "filter": {
+                        "period_from": "2026-01",
+                        "period_to": "2026-02",
+                    }
+                },
+                expected_side_effect="read",
+                idempotency_key="price-profile-denied-key",
+                deadline=datetime.now(UTC) + timedelta(minutes=1),
+                fencing_token=1,
+                actor_id="runtime-price",
+            )
+        )
+
+        assert denied.status is ToolResultStatus.DENIED
+        assert denied.error_code == "policy_denied"
+        assert source.calls == 0
 
     asyncio.run(scenario())
 
