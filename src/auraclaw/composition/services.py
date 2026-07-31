@@ -78,6 +78,7 @@ from auraclaw.composition.business_skills import (
     PRICE_INSIGHT_SKILL_DIR,
     price_insight_resource_descriptors,
     price_insight_resources,
+    signed_price_insight_dependency_packages,
     signed_price_insight_package,
 )
 from auraclaw.config import Settings, get_settings
@@ -1046,7 +1047,10 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
                     title="AuraClaw Procurement Price Insight",
                     endpoint="https://price-insight.internal/mcp",
                     trust_level=CapabilityTrustLevel.PLATFORM,
-                    allowed_tool_prefixes=("procurement.price_insight.",),
+                    allowed_tool_prefixes=(
+                        "procurement.price.",
+                        "procurement.price_insight.",
+                    ),
                     allowed_resource_schemes=("repo",),
                     status=CapabilityStatus.ACTIVE,
                     enabled=True,
@@ -1062,10 +1066,15 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
                     *price_insight_resource_descriptors(tenant_id),
                 ),
             )
-            await skill_registry.publish(
-                tenant_id,
-                signed_price_insight_package(model_skill_signer),
-            )
+            for package in signed_price_insight_dependency_packages(
+                model_skill_signer
+            ):
+                await skill_registry.publish(tenant_id, package)
+            if model_skill_publisher is None:
+                await skill_registry.publish(
+                    tenant_id,
+                    signed_price_insight_package(model_skill_signer),
+                )
         if model_skill_publisher is not None:
             await model_skill_publisher.reconcile()
 

@@ -17,8 +17,9 @@ const STEP_DEFINITIONS = [
   ["能力发现", "auraclaw.capabilities.search"],
   ["Skill 装载", "auraclaw.capabilities.load"],
   ["Skill 激活", "skill.activated"],
-  ["数据质量", "procurement.price_insight.data_quality"],
-  ["指标计算", "procurement.price_insight.snapshot"],
+  ["数据范围", "procurement.price.dataset.profile"],
+  ["质量门禁", "procurement.price.dataset.quality.check"],
+  ["原子指标", "procurement.price.metric."],
 ] as const;
 
 function asJson(value: unknown): Json {
@@ -50,23 +51,79 @@ function taskGoal(
   return [
     "请使用价格洞察智能体完成采购价格分析。",
     `分析周期为 ${periodFrom} 至 ${periodTo}，主要对标 ${anchorLabel}，偏离阈值为 ${threshold}%。`,
-    "必须先执行数据质量检查，再调用价格洞察 snapshot；输出八项关键指标、历史/区域/市场三维分析、正负价格影响金额、异常明细、source_revision 和证据。",
+    "必须按 Skill 3.0 SOP 先调用数据校验子 Skill，再通过八个独立指标 Tool 逐项生成关键指标；必要时调用证据 Tool。",
+    "所有原子结果必须使用相同 source_revision，并输出历史/区域/市场指标、正负价格影响及证据。",
     "不要自行拼接 SQL，不要把正负影响金额抵消。",
   ].join("");
 }
 
 function extractSnapshot(entries: Json[]): Json | null {
-  for (const entry of [...entries].reverse()) {
+  let profile: Json | null = null;
+  let quality: Json | null = null;
+  const metricResults = new Map<string, Json>();
+  const evidence: Json[] = [];
+  for (const entry of entries) {
     if (String(entry.type ?? "") !== "tool.call.completed") continue;
     const detail = asJson(entry.detail);
-    if (String(detail.name ?? "") !== "procurement.price_insight.snapshot") {
-      continue;
-    }
+    const name = String(detail.name ?? "");
     const result = asJson(detail.result);
     const content = asJson(result.content);
-    if (Array.isArray(content.kpis)) return content;
+    if (name === "procurement.price.dataset.profile") profile = content;
+    if (name === "procurement.price.dataset.quality.check") quality = content;
+    if (
+      name.startsWith("procurement.price.metric.") &&
+      name.endsWith(".compute")
+    ) {
+      const metric = asJson(content.metric);
+      const key = String(metric.key ?? "");
+      if (key) metricResults.set(key, content);
+    }
+    if (name === "procurement.price.metric.evidence.list") evidence.push(content);
   }
-  return null;
+  if (!profile && metricResults.size === 0) return null;
+
+  const kpis = [...metricResults.values()].map((item) => asJson(item.metric));
+  const impactByAnchor: Json = {};
+  for (const item of metricResults.values()) {
+    const metric = asJson(item.metric);
+    const context = asJson(item.context);
+    const metricKey = String(metric.key ?? "");
+    const targetAnchor = String(context.anchor ?? "");
+    if (!targetAnchor) continue;
+    const current = asJson(impactByAnchor[targetAnchor]);
+    if (metricKey === "impact_amount") current.total_pos_amount = metric.value;
+    if (metricKey === "impact_neg_amount") current.total_neg_amount = metric.value;
+    if (metricKey === "impact_share_pct") current.share_pct = metric.value;
+    if (metricKey === "impact_neg_share_pct") current.neg_share_pct = metric.value;
+    current.line_cnt = context.line_count;
+    impactByAnchor[targetAnchor] = current;
+  }
+  const marketMetric = asJson(metricResults.get("market_dev_pct")?.context);
+  const marketEvidence = evidence.find(
+    (item) => String(item.metric_key ?? "") === "market_dev_pct",
+  );
+  return {
+    filter: {
+      ...asJson(profile?.filter),
+      records: profile?.records,
+      comparisons: profile?.comparisons,
+      source_revision:
+        profile?.source_revision ??
+        metricResults.values().next().value?.source_revision,
+    },
+    kpis,
+    data_quality: quality ?? {},
+    analytics: {
+      price_compare_3d: {
+        market: {
+          hit_cnt: marketMetric.matched_line_count,
+          top_materials: asList(marketEvidence?.rows),
+        },
+      },
+      price_impact: { anchors: impactByAnchor },
+    },
+    evidence,
+  };
 }
 
 function metricValue(snapshot: Json | null): Kpi[] {
@@ -270,7 +327,7 @@ export function PriceInsightLab() {
                   : "NON-MYSQL"
                 : "WAITING"}
             </strong>
-            <code>{sourceRevision || "尚未执行 snapshot"}</code>
+            <code>{sourceRevision || "尚未执行范围画像"}</code>
           </div>
         </div>
       </section>
@@ -354,7 +411,7 @@ export function PriceInsightLab() {
             <p className={styles.eyebrow}>KEY METRICS</p>
             <h2>价格洞察关键指标</h2>
           </div>
-          <span>{kpis.length ? `${kpis.length} / 8 已生成` : "等待 Agent snapshot"}</span>
+          <span>{kpis.length ? `${kpis.length} / 8 已生成` : "等待原子指标计算"}</span>
         </div>
         <div className={styles.kpiGrid}>
           {(kpis.length ? kpis : Array.from({ length: 8 }, (_, index) => ({
@@ -439,8 +496,8 @@ export function PriceInsightLab() {
 
       <section className={styles.rawPanel}>
         <details open={Boolean(snapshot)}>
-          <summary>Snapshot 原始 JSON</summary>
-          <pre>{snapshot ? JSON.stringify(snapshot, null, 2) : "尚无 snapshot"}</pre>
+          <summary>原子分析聚合 JSON</summary>
+          <pre>{snapshot ? JSON.stringify(snapshot, null, 2) : "尚无原子结果"}</pre>
         </details>
         <details>
           <summary>Agent 最终结果</summary>

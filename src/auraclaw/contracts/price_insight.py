@@ -4,7 +4,7 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Any
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 
 from auraclaw.contracts.internal import ContractModel
 
@@ -99,11 +99,47 @@ class PriceCompareRecord(ContractModel):
     data_quality_status: str = "PASS"
 
 
+class PriceBenchmarkRecord(ContractModel):
+    benchmark_id: str
+    benchmark_version: str
+    benchmark_period: str
+    category_code: str | None = None
+    material_code: str | None = None
+    material_name: str
+    spec_model: str | None = None
+    region_code: str | None = None
+    standard_uom_code: str
+    currency_code: str
+    tax_basis_code: str
+    industry_avg_unit_price: Decimal = Field(gt=0)
+    benchmark_statistic_type: str
+    industry_sample_count: int | None = Field(default=None, ge=0)
+    confidence_level: str
+    data_quality_status: str = "PASS"
+
+
+class PriceInsightRuleRecord(ContractModel):
+    rule_version: str
+    rule_code: str
+    anchor_type: PriceInsightAnchor
+    deviation_threshold_pct: Decimal = Field(ge=0)
+    min_benchmark_sample_count: int | None = Field(default=None, ge=0)
+    min_material_match_score: Decimal | None = Field(default=None, ge=0, le=1)
+    enabled: bool = True
+
+    @field_validator("anchor_type", mode="before")
+    @classmethod
+    def normalize_anchor_type(cls, value: object) -> object:
+        return value.lower() if isinstance(value, str) else value
+
+
 class PriceInsightDataset(ContractModel):
     tenant_id: str
     source_revision: str
     events: tuple[PriceEventRecord, ...] = ()
     comparisons: tuple[PriceCompareRecord, ...] = ()
+    benchmarks: tuple[PriceBenchmarkRecord, ...] = ()
+    rules: tuple[PriceInsightRuleRecord, ...] = ()
 
 
 class PriceInsightQualityFinding(ContractModel):

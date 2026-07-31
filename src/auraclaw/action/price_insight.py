@@ -24,6 +24,7 @@ from auraclaw.contracts.price_insight import (
     PriceInsightFilter,
     PriceInsightQualityFinding,
     PriceInsightQualityStatus,
+    PriceInsightRuleRecord,
     PriceInsightSnapshot,
 )
 from auraclaw.contracts.tools import (
@@ -36,8 +37,38 @@ from auraclaw.contracts.tools import (
 PRICE_INSIGHT_SNAPSHOT_TOOL = "procurement.price_insight.snapshot"
 PRICE_INSIGHT_DRILLDOWN_TOOL = "procurement.price_insight.drilldown"
 PRICE_INSIGHT_DATA_QUALITY_TOOL = "procurement.price_insight.data_quality"
+PRICE_INSIGHT_SCOPE_PROFILE_TOOL = "procurement.price_insight.scope.profile"
+PRICE_INSIGHT_QUALITY_CHECK_TOOL = "procurement.price_insight.quality.check"
+PRICE_INSIGHT_METRIC_COMPUTE_TOOL = "procurement.price_insight.metric.compute"
+PRICE_INSIGHT_EVIDENCE_LIST_TOOL = "procurement.price_insight.evidence.list"
+PRICE_DATASET_PROFILE_TOOL = "procurement.price.dataset.profile"
+PRICE_DATASET_QUALITY_CHECK_TOOL = "procurement.price.dataset.quality.check"
+PRICE_METRIC_EVIDENCE_LIST_TOOL = "procurement.price.metric.evidence.list"
 PRICE_INSIGHT_TOOL_VERSION = "1.0.0"
 PRICE_INSIGHT_OWNER = "business-skill:price-insight"
+PRICE_INSIGHT_METRIC_KEYS = (
+    "history_dev_pct",
+    "region_gap_max",
+    "market_dev_pct",
+    "impact_amount",
+    "impact_neg_amount",
+    "impact_share_pct",
+    "impact_neg_share_pct",
+    "deviation_cnt",
+)
+PRICE_METRIC_TOOLS = {
+    "history_dev_pct": "procurement.price.metric.history-deviation.compute",
+    "region_gap_max": "procurement.price.metric.region-max-gap.compute",
+    "market_dev_pct": "procurement.price.metric.market-deviation.compute",
+    "impact_amount": "procurement.price.metric.positive-impact-amount.compute",
+    "impact_neg_amount": "procurement.price.metric.negative-impact-amount.compute",
+    "impact_share_pct": "procurement.price.metric.positive-impact-share.compute",
+    "impact_neg_share_pct": "procurement.price.metric.negative-impact-share.compute",
+    "deviation_cnt": "procurement.price.metric.market-deviation-count.compute",
+}
+_METRIC_KEY_BY_TOOL = {
+    tool_name: metric_key for metric_key, tool_name in PRICE_METRIC_TOOLS.items()
+}
 _HUNDRED = Decimal("100")
 _ZERO = Decimal("0")
 
@@ -74,12 +105,14 @@ class PriceInsightService:
             tenant_id=tenant_id,
             filters=filters,
         )
-        findings = _quality_findings(dataset)
+        findings = _quality_findings(dataset, filters)
         quality_status = _quality_status(findings)
         events = tuple(_eligible_events(dataset.events))
         history_items = _history_anchor_items(events)
         region_items = _region_anchor_items(events)
-        market_items = _market_anchor_items(dataset.comparisons)
+        market_comparisons = _governed_market_comparisons(dataset, filters)
+        market_items = _market_anchor_items(market_comparisons)
+        threshold = _effective_deviation_threshold(dataset, filters)
         anchors = {
             PriceInsightAnchor.HISTORY: history_items,
             PriceInsightAnchor.REGION: region_items,
@@ -89,9 +122,9 @@ class PriceInsightService:
         history = _history_analytics(events, history_items)
         region = _region_analytics(events, region_items)
         market = _market_analytics(
-            dataset.comparisons,
+            market_comparisons,
             market_items,
-            threshold=filters.deviation_threshold_pct,
+            threshold=threshold,
         )
         impact = {
             anchor.value: _impact_analytics(items, anchor) for anchor, items in anchors.items()
@@ -109,7 +142,7 @@ class PriceInsightService:
                 "kind": "metric-definition",
                 "version": "price-insight-metrics/1.0.0",
                 "anchor": filters.anchor.value,
-                "rule_version": filters.rule_version,
+                "rule": _rule_context(dataset, filters),
                 "benchmark_version": filters.benchmark_version,
             },
         )
@@ -189,13 +222,97 @@ class PriceInsightService:
             tenant_id=tenant_id,
             filters=filters,
         )
-        findings = _quality_findings(dataset)
+        findings = _quality_findings(dataset, filters)
         return {
             "status": _quality_status(findings).value,
             "source_revision": dataset.source_revision,
             "event_count": len(dataset.events),
             "comparison_count": len(dataset.comparisons),
+            "effective_rule": _rule_context(dataset, filters),
             "findings": [finding.model_dump(mode="json") for finding in findings],
+        }
+
+    async def scope_profile(
+        self,
+        *,
+        tenant_id: str,
+        filters: PriceInsightFilter,
+    ) -> dict[str, Any]:
+        dataset = await self._source.load_dataset(
+            tenant_id=tenant_id,
+            filters=filters,
+        )
+        eligible_events = tuple(_eligible_events(dataset.events))
+        return {
+            "operation": "scope.profile",
+            "filter": filters.model_dump(mode="json"),
+            "source_revision": dataset.source_revision,
+            "records": len(dataset.events),
+            "comparisons": len(dataset.comparisons),
+            "benchmarks": len(dataset.benchmarks),
+            "rules": len(dataset.rules),
+            "effective_rule": _rule_context(dataset, filters),
+            "eligible_records": len(eligible_events),
+            "periods": sorted({event.transaction_period for event in dataset.events}),
+            "tables_read": [
+                "dwd_pr_price_event_detail_di",
+                "dwd_pr_industry_price_benchmark_di",
+                "dwd_pr_price_compare_pair_di",
+                "dwd_pr_price_insight_rule_di",
+            ],
+        }
+
+    async def metric(
+        self,
+        *,
+        tenant_id: str,
+        filters: PriceInsightFilter,
+        metric_key: str,
+    ) -> dict[str, Any]:
+        if metric_key not in PRICE_INSIGHT_METRIC_KEYS:
+            raise ValueError(f"Unsupported price insight metric: {metric_key}")
+        dataset = await self._source.load_dataset(
+            tenant_id=tenant_id,
+            filters=filters,
+        )
+        events = tuple(_eligible_events(dataset.events))
+        metric, context = _compute_atomic_metric(
+            dataset,
+            events=events,
+            filters=filters,
+            metric_key=metric_key,
+        )
+        return {
+            "operation": "metric.compute",
+            "metric": metric,
+            "context": context,
+            "source_revision": dataset.source_revision,
+        }
+
+    async def evidence(
+        self,
+        *,
+        tenant_id: str,
+        filters: PriceInsightFilter,
+        metric_key: str,
+        offset: int,
+        limit: int,
+    ) -> dict[str, Any]:
+        if metric_key not in PRICE_INSIGHT_METRIC_KEYS:
+            raise ValueError(f"Unsupported price insight metric: {metric_key}")
+        dataset = await self._source.load_dataset(
+            tenant_id=tenant_id,
+            filters=filters,
+        )
+        rows = _metric_evidence_rows(dataset, filters, metric_key)
+        return {
+            "operation": "evidence.list",
+            "metric_key": metric_key,
+            "offset": offset,
+            "limit": limit,
+            "total": len(rows),
+            "rows": rows[offset : offset + limit],
+            "source_revision": dataset.source_revision,
         }
 
     async def drilldown(
@@ -207,17 +324,15 @@ class PriceInsightService:
         offset: int,
         limit: int,
     ) -> dict[str, Any]:
-        snapshot = await self.snapshot(tenant_id=tenant_id, filters=filters)
-        rows = _drilldown_rows(snapshot, metric_key)
-        return {
-            "metric_key": metric_key,
-            "offset": offset,
-            "limit": limit,
-            "total": len(rows),
-            "rows": rows[offset : offset + limit],
-            "source_revision": snapshot.filter["source_revision"],
-            "data_quality": snapshot.data_quality,
-        }
+        result = await self.evidence(
+            tenant_id=tenant_id,
+            filters=filters,
+            metric_key=metric_key,
+            offset=offset,
+            limit=limit,
+        )
+        quality = await self.data_quality(tenant_id=tenant_id, filters=filters)
+        return {**result, "data_quality": quality}
 
 
 @dataclass(frozen=True)
@@ -230,6 +345,55 @@ class PriceInsightToolExecutor:
         capability: ToolCapability,
     ) -> dict[str, Any]:
         filters = PriceInsightFilter.model_validate(invocation.arguments["filter"])
+        if capability.name == PRICE_DATASET_PROFILE_TOOL:
+            return await self.service.scope_profile(
+                tenant_id=invocation.tenant_id,
+                filters=filters,
+            )
+        if capability.name == PRICE_DATASET_QUALITY_CHECK_TOOL:
+            return await self.service.data_quality(
+                tenant_id=invocation.tenant_id,
+                filters=filters,
+            )
+        metric_key = _METRIC_KEY_BY_TOOL.get(capability.name)
+        if metric_key is not None:
+            return await self.service.metric(
+                tenant_id=invocation.tenant_id,
+                filters=filters,
+                metric_key=metric_key,
+            )
+        if capability.name == PRICE_METRIC_EVIDENCE_LIST_TOOL:
+            return await self.service.evidence(
+                tenant_id=invocation.tenant_id,
+                filters=filters,
+                metric_key=str(invocation.arguments["metric_key"]),
+                offset=int(invocation.arguments.get("offset", 0)),
+                limit=int(invocation.arguments.get("limit", 50)),
+            )
+        if capability.name == PRICE_INSIGHT_SCOPE_PROFILE_TOOL:
+            return await self.service.scope_profile(
+                tenant_id=invocation.tenant_id,
+                filters=filters,
+            )
+        if capability.name == PRICE_INSIGHT_QUALITY_CHECK_TOOL:
+            return await self.service.data_quality(
+                tenant_id=invocation.tenant_id,
+                filters=filters,
+            )
+        if capability.name == PRICE_INSIGHT_METRIC_COMPUTE_TOOL:
+            return await self.service.metric(
+                tenant_id=invocation.tenant_id,
+                filters=filters,
+                metric_key=str(invocation.arguments["metric_key"]),
+            )
+        if capability.name == PRICE_INSIGHT_EVIDENCE_LIST_TOOL:
+            return await self.service.evidence(
+                tenant_id=invocation.tenant_id,
+                filters=filters,
+                metric_key=str(invocation.arguments["metric_key"]),
+                offset=int(invocation.arguments.get("offset", 0)),
+                limit=int(invocation.arguments.get("limit", 50)),
+            )
         if capability.name == PRICE_INSIGHT_SNAPSHOT_TOOL:
             snapshot = await self.service.snapshot(
                 tenant_id=invocation.tenant_id,
@@ -260,7 +424,216 @@ def price_insight_tools() -> tuple[ToolCapability, ...]:
         "required": ["filter"],
         "additionalProperties": False,
     }
+    atomic_tools = [
+        ToolCapability(
+            name=PRICE_DATASET_PROFILE_TOOL,
+            version=PRICE_INSIGHT_TOOL_VERSION,
+            description=(
+                "Profile one governed procurement-price dataset scope and return "
+                "coverage plus its immutable source revision; compute no metric."
+            ),
+            input_schema=common,
+            output_schema={
+                "type": "object",
+                "required": [
+                    "operation",
+                    "source_revision",
+                    "records",
+                    "comparisons",
+                    "benchmarks",
+                    "rules",
+                    "eligible_records",
+                    "tables_read",
+                ],
+            },
+            permission=ToolPermission.READ_ONLY,
+            risk_level=RiskLevel.LOW,
+            owner=PRICE_INSIGHT_OWNER,
+        ),
+        ToolCapability(
+            name=PRICE_DATASET_QUALITY_CHECK_TOOL,
+            version=PRICE_INSIGHT_TOOL_VERSION,
+            description=(
+                "Evaluate deterministic quality gates for one governed "
+                "procurement-price dataset scope; compute no business metric."
+            ),
+            input_schema=common,
+            output_schema={
+                "type": "object",
+                "required": ["status", "source_revision", "findings"],
+            },
+            permission=ToolPermission.READ_ONLY,
+            risk_level=RiskLevel.LOW,
+            owner=PRICE_INSIGHT_OWNER,
+        ),
+    ]
+    for metric_key, tool_name in PRICE_METRIC_TOOLS.items():
+        atomic_tools.append(
+            ToolCapability(
+                name=tool_name,
+                version=PRICE_INSIGHT_TOOL_VERSION,
+                description=(
+                    f"Compute only the governed procurement-price metric "
+                    f"{metric_key}; accept no metric selector and return its "
+                    "source revision."
+                ),
+                input_schema=common,
+                output_schema={
+                    "type": "object",
+                    "required": [
+                        "operation",
+                        "metric",
+                        "context",
+                        "source_revision",
+                    ],
+                },
+                permission=ToolPermission.READ_ONLY,
+                risk_level=RiskLevel.LOW,
+                owner=PRICE_INSIGHT_OWNER,
+            )
+        )
+    atomic_tools.append(
+        ToolCapability(
+            name=PRICE_METRIC_EVIDENCE_LIST_TOOL,
+            version=PRICE_INSIGHT_TOOL_VERSION,
+            description=(
+                "List bounded evidence for one governed procurement-price metric; "
+                "compute no metric and perform no business write."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "filter": filter_schema,
+                    "metric_key": {
+                        "type": "string",
+                        "enum": list(PRICE_INSIGHT_METRIC_KEYS),
+                    },
+                    "offset": {"type": "integer", "minimum": 0},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 200},
+                },
+                "required": ["filter", "metric_key"],
+                "additionalProperties": False,
+            },
+            output_schema={
+                "type": "object",
+                "required": [
+                    "operation",
+                    "metric_key",
+                    "rows",
+                    "total",
+                    "source_revision",
+                ],
+            },
+            permission=ToolPermission.READ_ONLY,
+            risk_level=RiskLevel.LOW,
+            owner=PRICE_INSIGHT_OWNER,
+        )
+    )
     return (
+        *atomic_tools,
+        ToolCapability(
+            name=PRICE_INSIGHT_SCOPE_PROFILE_TOOL,
+            version=PRICE_INSIGHT_TOOL_VERSION,
+            description=(
+                "Profile one governed procurement-price data scope and return only "
+                "record coverage plus a source revision; no KPI is computed."
+            ),
+            input_schema=common,
+            output_schema={
+                "type": "object",
+                "required": [
+                    "operation",
+                    "source_revision",
+                    "records",
+                    "comparisons",
+                    "benchmarks",
+                    "rules",
+                    "eligible_records",
+                    "tables_read",
+                ],
+            },
+            permission=ToolPermission.READ_ONLY,
+            risk_level=RiskLevel.LOW,
+            owner=PRICE_INSIGHT_OWNER,
+        ),
+        ToolCapability(
+            name=PRICE_INSIGHT_QUALITY_CHECK_TOOL,
+            version=PRICE_INSIGHT_TOOL_VERSION,
+            description=(
+                "Run only deterministic quality gates for one governed "
+                "procurement-price data scope; no business KPI is computed."
+            ),
+            input_schema=common,
+            output_schema={
+                "type": "object",
+                "required": ["status", "source_revision", "findings"],
+            },
+            permission=ToolPermission.READ_ONLY,
+            risk_level=RiskLevel.LOW,
+            owner=PRICE_INSIGHT_OWNER,
+        ),
+        ToolCapability(
+            name=PRICE_INSIGHT_METRIC_COMPUTE_TOOL,
+            version=PRICE_INSIGHT_TOOL_VERSION,
+            description=(
+                "Compute exactly one governed procurement-price KPI selected by "
+                "metric_key and return its source revision."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "filter": filter_schema,
+                    "metric_key": {
+                        "type": "string",
+                        "enum": list(PRICE_INSIGHT_METRIC_KEYS),
+                    },
+                },
+                "required": ["filter", "metric_key"],
+                "additionalProperties": False,
+            },
+            output_schema={
+                "type": "object",
+                "required": ["operation", "metric", "context", "source_revision"],
+            },
+            permission=ToolPermission.READ_ONLY,
+            risk_level=RiskLevel.LOW,
+            owner=PRICE_INSIGHT_OWNER,
+        ),
+        ToolCapability(
+            name=PRICE_INSIGHT_EVIDENCE_LIST_TOOL,
+            version=PRICE_INSIGHT_TOOL_VERSION,
+            description=(
+                "List bounded row-level or grouped evidence for exactly one "
+                "previously computed procurement-price KPI."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "filter": filter_schema,
+                    "metric_key": {
+                        "type": "string",
+                        "enum": list(PRICE_INSIGHT_METRIC_KEYS),
+                    },
+                    "offset": {"type": "integer", "minimum": 0},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 200},
+                },
+                "required": ["filter", "metric_key"],
+                "additionalProperties": False,
+            },
+            output_schema={
+                "type": "object",
+                "required": [
+                    "operation",
+                    "metric_key",
+                    "rows",
+                    "total",
+                    "source_revision",
+                ],
+            },
+            permission=ToolPermission.READ_ONLY,
+            risk_level=RiskLevel.LOW,
+            owner=PRICE_INSIGHT_OWNER,
+        ),
         ToolCapability(
             name=PRICE_INSIGHT_SNAPSHOT_TOOL,
             version=PRICE_INSIGHT_TOOL_VERSION,
@@ -288,12 +661,7 @@ def price_insight_tools() -> tuple[ToolCapability, ...]:
                     "metric_key": {
                         "type": "string",
                         "enum": [
-                            "history_dev_pct",
-                            "region_gap_max",
-                            "market_dev_pct",
-                            "impact_amount",
-                            "impact_neg_amount",
-                            "deviation_cnt",
+                            *PRICE_INSIGHT_METRIC_KEYS,
                         ],
                     },
                     "offset": {"type": "integer", "minimum": 0},
@@ -396,8 +764,127 @@ def _filter_schema() -> dict[str, Any]:
     }
 
 
+def _matching_rules(
+    dataset: PriceInsightDataset,
+    filters: PriceInsightFilter,
+) -> tuple[PriceInsightRuleRecord, ...]:
+    return tuple(
+        sorted(
+            (
+                rule
+                for rule in dataset.rules
+                if rule.enabled
+                and rule.anchor_type == filters.anchor
+                and (
+                    filters.rule_version is None
+                    or rule.rule_version == filters.rule_version
+                )
+            ),
+            key=lambda rule: (rule.rule_version, rule.rule_code),
+        )
+    )
+
+
+def _effective_rule(
+    dataset: PriceInsightDataset,
+    filters: PriceInsightFilter,
+) -> PriceInsightRuleRecord | None:
+    matching = _matching_rules(dataset, filters)
+    return matching[0] if len(matching) == 1 else None
+
+
+def _effective_deviation_threshold(
+    dataset: PriceInsightDataset,
+    filters: PriceInsightFilter,
+) -> Decimal:
+    if "deviation_threshold_pct" in filters.model_fields_set:
+        return filters.deviation_threshold_pct
+    rule = _effective_rule(dataset, filters)
+    return (
+        rule.deviation_threshold_pct
+        if rule is not None
+        else filters.deviation_threshold_pct
+    )
+
+
+def _rule_context(
+    dataset: PriceInsightDataset,
+    filters: PriceInsightFilter,
+) -> dict[str, Any] | None:
+    rule = _effective_rule(dataset, filters)
+    if rule is None:
+        return None
+    return {
+        "rule_version": rule.rule_version,
+        "rule_code": rule.rule_code,
+        "anchor": rule.anchor_type.value,
+        "deviation_threshold_pct": _number(
+            _effective_deviation_threshold(dataset, filters)
+        ),
+        "threshold_source": (
+            "request"
+            if "deviation_threshold_pct" in filters.model_fields_set
+            else "dwd_rule"
+        ),
+        "min_benchmark_sample_count": rule.min_benchmark_sample_count,
+        "min_material_match_score": (
+            _number(rule.min_material_match_score)
+            if rule.min_material_match_score is not None
+            else None
+        ),
+    }
+
+
+def _selected_market_comparisons(
+    comparisons: Iterable[PriceCompareRecord],
+) -> Iterable[PriceCompareRecord]:
+    return (
+        comparison
+        for comparison in comparisons
+        if comparison.is_selected
+        and comparison.industry_avg_unit_price is not None
+        and comparison.benchmark_match_status
+        in {"MATCHED", "SELECTED", "COMPARABLE"}
+    )
+
+
+def _governed_market_comparisons(
+    dataset: PriceInsightDataset,
+    filters: PriceInsightFilter,
+) -> tuple[PriceCompareRecord, ...]:
+    rule = _effective_rule(dataset, filters)
+    if rule is None:
+        return dataset.comparisons
+    governed: list[PriceCompareRecord] = []
+    for comparison in dataset.comparisons:
+        if not comparison.is_selected:
+            governed.append(comparison)
+            continue
+        if (
+            rule.min_benchmark_sample_count is not None
+            and (
+                comparison.industry_sample_count is None
+                or comparison.industry_sample_count
+                < rule.min_benchmark_sample_count
+            )
+        ):
+            continue
+        if (
+            rule.min_material_match_score is not None
+            and (
+                comparison.material_match_score is None
+                or comparison.material_match_score
+                < rule.min_material_match_score
+            )
+        ):
+            continue
+        governed.append(comparison)
+    return tuple(governed)
+
+
 def _quality_findings(
     dataset: PriceInsightDataset,
+    filters: PriceInsightFilter,
 ) -> tuple[PriceInsightQualityFinding, ...]:
     findings: list[PriceInsightQualityFinding] = []
     if not dataset.events:
@@ -504,6 +991,70 @@ def _quality_findings(
                 ),
             )
         )
+    matching_rules = _matching_rules(dataset, filters)
+    if len(matching_rules) > 1:
+        findings.append(
+            PriceInsightQualityFinding(
+                code="AMBIGUOUS_PRICE_INSIGHT_RULE",
+                severity="critical",
+                message=(
+                    "More than one enabled DWD rule matched the requested anchor "
+                    "and rule version."
+                ),
+                affected_count=len(matching_rules),
+                evidence={
+                    "anchor": filters.anchor.value,
+                    "rule_codes": [rule.rule_code for rule in matching_rules],
+                },
+            )
+        )
+    rule = matching_rules[0] if len(matching_rules) == 1 else None
+    if rule is not None and filters.anchor == PriceInsightAnchor.MARKET:
+        comparable = tuple(_selected_market_comparisons(dataset.comparisons))
+        if rule.min_benchmark_sample_count is not None:
+            below_sample = sum(
+                row.industry_sample_count is None
+                or row.industry_sample_count < rule.min_benchmark_sample_count
+                for row in comparable
+            )
+            if below_sample:
+                findings.append(
+                    PriceInsightQualityFinding(
+                        code="BENCHMARK_SAMPLE_BELOW_RULE_MINIMUM",
+                        severity="high",
+                        message=(
+                            "Selected market benchmarks below the DWD rule's "
+                            "minimum sample count are excluded."
+                        ),
+                        affected_count=below_sample,
+                        evidence={
+                            "rule_code": rule.rule_code,
+                            "minimum": rule.min_benchmark_sample_count,
+                        },
+                    )
+                )
+        if rule.min_material_match_score is not None:
+            below_score = sum(
+                row.material_match_score is None
+                or row.material_match_score < rule.min_material_match_score
+                for row in comparable
+            )
+            if below_score:
+                findings.append(
+                    PriceInsightQualityFinding(
+                        code="MATERIAL_MATCH_BELOW_RULE_MINIMUM",
+                        severity="high",
+                        message=(
+                            "Selected market comparisons below the DWD rule's "
+                            "minimum material match score are excluded."
+                        ),
+                        affected_count=below_score,
+                        evidence={
+                            "rule_code": rule.rule_code,
+                            "minimum": str(rule.min_material_match_score),
+                        },
+                    )
+                )
     return tuple(findings)
 
 
@@ -721,13 +1272,7 @@ def _market_analytics(
     *,
     threshold: Decimal,
 ) -> dict[str, Any]:
-    selected = [
-        comparison
-        for comparison in comparisons
-        if comparison.is_selected
-        and comparison.industry_avg_unit_price is not None
-        and comparison.benchmark_match_status in {"MATCHED", "SELECTED", "COMPARABLE"}
-    ]
+    selected = list(_selected_market_comparisons(comparisons))
     return {
         "kpi_deviation_pct": _number(_weighted_deviation(items)),
         "hit_cnt": len(selected),
@@ -781,6 +1326,134 @@ def _impact_analytics(
         "by_amount_bucket": _impact_groups(rows, "bucket"),
         "items": rows,
     }
+
+
+def _compute_atomic_metric(
+    dataset: PriceInsightDataset,
+    *,
+    events: tuple[PriceEventRecord, ...],
+    filters: PriceInsightFilter,
+    metric_key: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    matching_rules = _matching_rules(dataset, filters)
+    if len(matching_rules) > 1:
+        raise ValueError(
+            "Multiple enabled DWD rules match the requested anchor and version"
+        )
+    governed_market = _governed_market_comparisons(dataset, filters)
+    rule_context = _rule_context(dataset, filters)
+    if metric_key == "history_dev_pct":
+        analysis = _history_analytics(events, _history_anchor_items(events))
+        return (
+            _kpi(metric_key, "历史维偏离", analysis["kpi_deviation_pct"], "%"),
+            {
+                "dimension": "history",
+                "matched_line_count": analysis["matched_line_count"],
+                "formula": analysis["formula"],
+                "effective_rule": rule_context,
+            },
+        )
+    if metric_key == "region_gap_max":
+        analysis = _region_analytics(events, _region_anchor_items(events))
+        return (
+            _kpi(metric_key, "区域维价差", analysis["kpi_gap_max_pct"], "%"),
+            {
+                "dimension": "region",
+                "matched_line_count": analysis["matched_line_count"],
+                "region_count": len(analysis["regions"]),
+                "formula": analysis["formula"],
+                "effective_rule": rule_context,
+            },
+        )
+    if metric_key in {"market_dev_pct", "deviation_cnt"}:
+        analysis = _market_analytics(
+            governed_market,
+            _market_anchor_items(governed_market),
+            threshold=_effective_deviation_threshold(dataset, filters),
+        )
+        metric = (
+            _kpi(metric_key, "市场维偏离", analysis["kpi_deviation_pct"], "%")
+            if metric_key == "market_dev_pct"
+            else _kpi(metric_key, "市场偏离行", analysis["deviation_cnt"], "行")
+        )
+        return (
+            metric,
+            {
+                "dimension": "market",
+                "matched_line_count": analysis["hit_cnt"],
+                "threshold_pct": analysis["threshold_pct"],
+                "formula": analysis["formula"],
+                "effective_rule": rule_context,
+            },
+        )
+
+    anchor_items = {
+        PriceInsightAnchor.HISTORY: _history_anchor_items(events),
+        PriceInsightAnchor.REGION: _region_anchor_items(events),
+        PriceInsightAnchor.MARKET: _market_anchor_items(governed_market),
+    }[filters.anchor]
+    analysis = _impact_analytics(anchor_items, filters.anchor)
+    metric_fields = {
+        "impact_amount": ("正偏移金额", analysis["total_pos_amount"], "元"),
+        "impact_neg_amount": ("负偏移金额", analysis["total_neg_amount"], "元"),
+        "impact_share_pct": ("正偏移占采购额", analysis["share_pct"], "%"),
+        "impact_neg_share_pct": (
+            "负偏移占采购额",
+            analysis["neg_share_pct"],
+            "%",
+        ),
+    }
+    label, value, suffix = metric_fields[metric_key]
+    return (
+        _kpi(metric_key, label, value, suffix),
+        {
+            "dimension": "impact",
+            "anchor": filters.anchor.value,
+            "total_po_amount": analysis["total_po_amount"],
+            "line_count": analysis["line_cnt"],
+            "positive_line_count": analysis["pos_line_cnt"],
+            "negative_line_count": analysis["neg_line_cnt"],
+            "effective_rule": rule_context,
+            "formula": (
+                "正偏移=max(0,成交价-对标价)×数量；"
+                "负偏移=max(0,对标价-成交价)×数量；两侧互不抵消。"
+            ),
+        },
+    )
+
+
+def _metric_evidence_rows(
+    dataset: PriceInsightDataset,
+    filters: PriceInsightFilter,
+    metric_key: str,
+) -> list[dict[str, Any]]:
+    events = tuple(_eligible_events(dataset.events))
+    governed_market = _governed_market_comparisons(dataset, filters)
+    if metric_key == "history_dev_pct":
+        return list(_history_analytics(events, _history_anchor_items(events))["top_materials"])
+    if metric_key == "region_gap_max":
+        return list(_region_analytics(events, _region_anchor_items(events))["regions"])
+    if metric_key in {"market_dev_pct", "deviation_cnt"}:
+        market_items = _market_anchor_items(governed_market)
+        return list(
+            _market_analytics(
+                governed_market,
+                market_items,
+                threshold=_effective_deviation_threshold(dataset, filters),
+            )["top_materials"]
+        )
+    anchor_items = {
+        PriceInsightAnchor.HISTORY: _history_anchor_items(events),
+        PriceInsightAnchor.REGION: _region_anchor_items(events),
+        PriceInsightAnchor.MARKET: _market_anchor_items(governed_market),
+    }[filters.anchor]
+    rows = list(_impact_analytics(anchor_items, filters.anchor)["items"])
+    side = (
+        "pos"
+        if metric_key in {"impact_amount", "impact_share_pct"}
+        else "neg"
+    )
+    return [row for row in rows if row["side"] == side]
 
 
 def _impact_row(item: _AnchorItem) -> dict[str, Any]:

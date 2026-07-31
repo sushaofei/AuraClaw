@@ -47,6 +47,9 @@ MySQL ct_model_* 固定只读 SELECT
 - Draft 版本映射成 `<semver>-draft.<version_id>`，可被 Agent 加载但明确标为预览；
 - `manifest.json`、`SKILL.md`、`references/config.json` 和模型摘要通过 MCP 暴露；
 - 生成的 Skill 不声明执行 Tool，并明确禁止权威计算、回写和自行补全规则；
+- 例外是通过代码注册并严格校验的 `config_snapshot_json.auraclaw_skill` 执行模板；首个模板
+  `procurement-price-insight-atomic-v1` 可绑定固定的只读原子 Tool，或在 v2 配置中依赖固定
+  的平台子 Skill。未注册模板仍禁止执行；
 - 开发环境可使用固定本地签名键，生产启用源读取时必须提供独立签名键；
 - MySQL 到 AuraClaw tenant 通过显式配置映射，默认仅服务 development 演示。
 
@@ -58,6 +61,20 @@ MySQL ct_model_* 固定只读 SELECT
 - 权重、阈值和自然语言量化规则如何升级为确定性 DSL；
 - 输入数据应通过受管接口、Resource 还是专用 read-only Tool 获取；
 - 模型计算、结果查询和回写 Tool 的幂等、审批及 Fencing 契约。
+
+### 1.2 Tool 与 Skill 的复用层级
+
+```text
+受治理数据接口
+  -> 原子 Tool（一个固定动作或一个固定指标）
+  -> 领域子 Skill（短 SOP + 可复用 Tool 集）
+  -> 场景 Skill（业务意图、分支、输出组织）
+```
+
+`SkillManifest.required_skills` 声明签名子 Skill 的名称、版本约束和 publisher。Resolver
+递归解析依赖、检测循环、对每层执行角色与策略校验，并把 Tool、Resource 去重后固定到根
+Binding。Runtime 分批加载依赖，并按“子 Skill 在前、场景 Skill 在后”的顺序注入签名指令。
+子 Skill 不能授予父 Skill 未经 Policy 允许的能力。
 
 ## 2. 当前数据理解
 
@@ -311,6 +328,10 @@ Tool 输入不能接受 SQL、公式、任意 source/sink 或版本漂移。每�
 在公式 DSL 尚未结构化前，`ct.model.evaluate` 必须拒绝执行；不得用 Python `eval`、SQL 片段或 LLM
 解释自然语言公式。后续 DSL 应采用有界 AST 和允许列表操作符，并提供静态类型、除零、范围、精度和
 复杂度校验。
+
+价格洞察不执行自然语言公式，也不使用通用 `ct.model.evaluate`。它绑定经过代码审查的确定性
+领域 Tool：范围画像、质量门禁、单指标计算和有界证据查询。编译器同时校验四张 DWD
+`input_source`、十个治理输出、场景开关、八项指标顺序和 Tool 版本，任何漂移均 fail closed。
 
 ## 7. 校验与发布状态机
 

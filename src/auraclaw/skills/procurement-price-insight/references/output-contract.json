@@ -1,15 +1,41 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "ProcurementPriceInsightSnapshot",
+  "title": "ProcurementPriceInsightAtomicResult",
   "type": "object",
-  "required": ["filter", "kpis", "analytics", "data_quality", "evidence"],
+  "required": ["filter", "source_revision", "data_quality", "metrics", "evidence"],
   "properties": {
     "filter": {"type": "object"},
-    "kpis": {"type": "array", "minItems": 8},
-    "analytics": {"type": "object", "required": ["price_compare_3d", "price_impact"]},
+    "source_revision": {"type": "string"},
     "data_quality": {"type": "object", "required": ["status", "findings"]},
-    "evidence": {"type": "array", "minItems": 2},
-    "recommendations": {"type": "array"}
+    "metrics": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "required": ["key", "label", "value", "suffix"],
+        "properties": {
+          "key": {
+            "enum": [
+              "history_dev_pct",
+              "region_gap_max",
+              "market_dev_pct",
+              "impact_amount",
+              "impact_neg_amount",
+              "impact_share_pct",
+              "impact_neg_share_pct",
+              "deviation_cnt"
+            ]
+          },
+          "label": {"type": "string"},
+          "value": {"type": "number"},
+          "suffix": {"type": "string"}
+        },
+        "additionalProperties": false
+      }
+    },
+    "evidence": {"type": "array"},
+    "limitations": {"type": "array", "items": {"type": "string"}}
   },
   "additionalProperties": false
 }

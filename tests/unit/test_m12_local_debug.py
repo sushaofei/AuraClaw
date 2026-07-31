@@ -107,11 +107,19 @@ def test_development_model_drives_filter_aware_price_loop() -> None:
             _tool_result("load", {"capabilities": []}),
             _assistant_call("activate", "auraclaw.skills.activate"),
             _tool_result("activate", {"status": "activated"}),
-            _assistant_call(
-                "quality",
-                "procurement.price_insight.data_quality",
+                _assistant_call(
+                    "profile",
+                    "procurement.price.dataset.profile",
             ),
-            _tool_result("quality", {"status": "pass"}),
+            _tool_result("profile", {"source_revision": "fixture-v1"}),
+                _assistant_call(
+                    "quality",
+                    "procurement.price.dataset.quality.check",
+            ),
+            _tool_result(
+                "quality",
+                {"status": "pass", "source_revision": "fixture-v1"},
+            ),
         )
         request = ModelRequest(
             model_call_id="model-local-debug",
@@ -122,14 +130,17 @@ def test_development_model_drives_filter_aware_price_loop() -> None:
                 {
                     "type": "function",
                     "function": {
-                        "name": "procurement.price_insight.snapshot",
+                        "name": (
+                            "procurement.price.metric."
+                            "history-deviation.compute"
+                        ),
                         "parameters": {"type": "object"},
                     },
                 },
                 {
                     "type": "function",
                     "function": {
-                        "name": "procurement.price_insight.data_quality",
+                        "name": "procurement.price.dataset.quality.check",
                         "parameters": {"type": "object"},
                     },
                 },
@@ -137,7 +148,9 @@ def test_development_model_drives_filter_aware_price_loop() -> None:
         )
         response = await model.generate(request)
 
-        assert response.tool_calls[0].name == "procurement.price_insight.snapshot"
+        assert response.tool_calls[0].name == (
+            "procurement.price.metric.history-deviation.compute"
+        )
         assert response.tool_calls[0].arguments["filter"] == {
             "period_from": "2026-03",
             "period_to": "2026-04",

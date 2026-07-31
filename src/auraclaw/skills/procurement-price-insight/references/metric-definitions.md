@@ -14,3 +14,12 @@
 | `deviation_cnt` | 市场偏离行 | 市场偏离绝对值达到筛选阈值的成交价格行数 |
 
 三类锚点独立计算影响金额：`history`、`region`、`market`。正负影响分别汇总，不做净额抵消。
+
+## 原子计算契约
+
+每个指标由 `procurement.price.metric.<固定指标>.compute` 独立 Tool 计算。Tool 不接受
+`metric_key` 选择器，只返回自身对应的一个 `metric`。全量页面由 Agent 按上表顺序调用八个
+Tool 并组装，不允许从一个复合快照拆值或由模型自行计算。
+
+每次结果都包含 `source_revision`。同一答案中的所有指标必须来自同一修订版本；影响金额和
+影响占比还必须使用相同 `anchor`。

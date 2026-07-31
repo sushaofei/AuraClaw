@@ -28,6 +28,17 @@ class SkillResourceRequirement(ContractModel):
     uri_template: str = Field(min_length=1, max_length=2048)
 
 
+class SkillRequirement(ContractModel):
+    name: str = Field(min_length=1, max_length=256, pattern=_SKILL_NAME)
+    version: str = Field(default="*", min_length=1, max_length=128)
+    publisher: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=128,
+        pattern=_SKILL_NAME,
+    )
+
+
 class SkillManifest(ContractModel):
     name: str = Field(min_length=1, max_length=256, pattern=_SKILL_NAME)
     version: str = Field(pattern=_SEMVER)
@@ -38,6 +49,7 @@ class SkillManifest(ContractModel):
     output_schema: dict[str, Any] = Field(default_factory=lambda: {"type": "object"})
     required_tools: tuple[SkillToolRequirement, ...] = ()
     required_resources: tuple[SkillResourceRequirement, ...] = ()
+    required_skills: tuple[SkillRequirement, ...] = ()
     allowed_roles: tuple[str, ...] = ("coordinator", "worker")
     data_classification: str = "internal"
     risk_level: str = "medium"
@@ -66,14 +78,41 @@ class SkillManifest(ContractModel):
                 )
         return requirements
 
+    @field_validator("required_skills")
+    @classmethod
+    def validate_skill_version_ranges(
+        cls,
+        requirements: tuple[SkillRequirement, ...],
+    ) -> tuple[SkillRequirement, ...]:
+        clause = re.compile(
+            r"^(>=|<=|>|<|==|=)?(0|[1-9]\d*)"
+            r"(?:\.(0|[1-9]\d*))?(?:\.(0|[1-9]\d*))?$"
+        )
+        for requirement in requirements:
+            if requirement.version != "*" and any(
+                clause.fullmatch(item.strip()) is None
+                for item in requirement.version.split(",")
+            ):
+                raise ValueError(
+                    f"Unsupported Skill version constraint: {requirement.version}"
+                )
+        return requirements
+
     @model_validator(mode="after")
     def validate_dependencies(self) -> SkillManifest:
         tool_names = [item.name for item in self.required_tools]
         resource_uris = [item.uri_template for item in self.required_resources]
+        skill_names = [
+            (item.publisher, item.name) for item in self.required_skills
+        ]
         if len(tool_names) != len(set(tool_names)):
             raise ValueError("Skill Tool dependencies must be unique")
         if len(resource_uris) != len(set(resource_uris)):
             raise ValueError("Skill Resource dependencies must be unique")
+        if len(skill_names) != len(set(skill_names)):
+            raise ValueError("Skill dependencies must be unique")
+        if any(item.name == self.name for item in self.required_skills):
+            raise ValueError("Skill cannot depend directly on itself")
         if not self.allowed_roles or any(not role for role in self.allowed_roles):
             raise ValueError("Skill must allow at least one non-empty role")
         for schema in (self.input_schema, self.output_schema):
@@ -104,6 +143,15 @@ class ResolvedSkillResource(ContractModel):
     content_digest: str
 
 
+class ResolvedSkillDependency(ContractModel):
+    capability_id: str
+    skill_name: str
+    skill_version: str
+    publisher: str
+    package_digest: str = Field(pattern=_DIGEST)
+    artifact_ref: ArtifactRef
+
+
 class SkillBinding(ContractModel):
     skill_name: str
     skill_version: str
@@ -112,6 +160,7 @@ class SkillBinding(ContractModel):
     artifact_ref: ArtifactRef
     resolved_tools: tuple[ResolvedSkillTool, ...] = ()
     resolved_resources: tuple[ResolvedSkillResource, ...] = ()
+    resolved_skills: tuple[ResolvedSkillDependency, ...] = ()
     policy_version: str
     policy_decision_id: str | None = None
     max_steps: int = Field(ge=1, le=1000)

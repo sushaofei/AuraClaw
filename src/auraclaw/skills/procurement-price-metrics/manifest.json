@@ -1,0 +1,29 @@
+{
+  "name": "procurement.price-metrics.analyze",
+  "version": "1.0.0",
+  "description": "用独立原子 Tool 计算采购价格历史、区域、市场和价格影响指标，并按需获取证据。",
+  "applies_when": ["采购价格指标", "价格偏离", "价格影响", "行业价格对标"],
+  "not_when": ["数据质量未通过", "要求修改采购数据"],
+  "publisher": "platform",
+  "signature": "hmac-sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "input_schema": {"type": "object"},
+  "output_schema": {"type": "object"},
+  "required_tools": [
+    {"name": "procurement.price.metric.history-deviation.compute", "version": "1.0.0"},
+    {"name": "procurement.price.metric.region-max-gap.compute", "version": "1.0.0"},
+    {"name": "procurement.price.metric.market-deviation.compute", "version": "1.0.0"},
+    {"name": "procurement.price.metric.positive-impact-amount.compute", "version": "1.0.0"},
+    {"name": "procurement.price.metric.negative-impact-amount.compute", "version": "1.0.0"},
+    {"name": "procurement.price.metric.positive-impact-share.compute", "version": "1.0.0"},
+    {"name": "procurement.price.metric.negative-impact-share.compute", "version": "1.0.0"},
+    {"name": "procurement.price.metric.market-deviation-count.compute", "version": "1.0.0"},
+    {"name": "procurement.price.metric.evidence.list", "version": "1.0.0"}
+  ],
+  "required_resources": [],
+  "required_skills": [],
+  "allowed_roles": ["root", "coordinator", "worker"],
+  "data_classification": "internal",
+  "risk_level": "low",
+  "max_steps": 20,
+  "timeout_seconds": 90
+}
