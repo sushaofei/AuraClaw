@@ -107,13 +107,15 @@ class PostgresDeliveryJobStore(_LazyPool):
         pool = await self.pool()
         async with pool.acquire() as connection, connection.transaction():
             rows = await connection.fetch(
-                """SELECT * FROM delivery.delivery_job
+                """SELECT * FROM delivery.delivery_job AS delivery_job
                 WHERE (
-                    (status IN ('pending','retry_wait') AND next_attempt_at <= now())
-                    OR (status='attempting' AND claim_expires_at <= now())
+                    (delivery_job.status IN ('pending','retry_wait')
+                     AND delivery_job.next_attempt_at <= now())
+                    OR (delivery_job.status='attempting'
+                        AND delivery_job.claim_expires_at <= now())
                 )
                 AND NOT EXISTS (
-                    SELECT 1 FROM delivery.delivery_job earlier
+                    SELECT 1 FROM delivery.delivery_job AS earlier
                     WHERE earlier.tenant_id=delivery_job.tenant_id
                       AND earlier.session_id=delivery_job.session_id
                       AND earlier.sink_id=delivery_job.sink_id
@@ -121,7 +123,7 @@ class PostgresDeliveryJobStore(_LazyPool):
                       AND (earlier.created_at,earlier.delivery_id)
                         < (delivery_job.created_at,delivery_job.delivery_id)
                 )
-                ORDER BY created_at, delivery_id
+                ORDER BY delivery_job.created_at, delivery_job.delivery_id
                 FOR UPDATE SKIP LOCKED LIMIT $1""",
                 limit,
             )
