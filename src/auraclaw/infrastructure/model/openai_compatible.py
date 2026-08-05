@@ -5,6 +5,7 @@ import logging
 import time
 from collections.abc import AsyncIterator
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -45,6 +46,46 @@ class OpenAICompatibleProvider:
             await self._client.aclose()
             self._client = None
 
+    async def prewarm(self, *, credential: str | None = None) -> None:
+        """Warm DNS/TCP/TLS (and optionally a 1-token completion) before first user call."""
+        client = self._ensure_client()
+        origin = self._provider_origin()
+        try:
+            await client.get(origin, timeout=5.0)
+        except httpx.HTTPError:
+            # Origin may 404; the connection pool is still warmed.
+            pass
+        if not credential:
+            return
+        probe = ModelRequest(
+            model_call_id="mdl_prewarm",
+            tenant_id="system",
+            run_id="prewarm",
+            messages=({"role": "user", "content": "ping"},),
+            max_output_tokens=1,
+        )
+        try:
+            async for _chunk in self.generate_stream(probe, credential=credential):
+                pass
+        except Exception as exc:
+            logger.warning(
+                "model provider probe prewarm failed provider=%s error=%s",
+                self.name,
+                type(exc).__name__,
+            )
+
+    def _ensure_client(self) -> httpx.AsyncClient:
+        if self._client is None:
+            self._client = httpx.AsyncClient(timeout=self._timeout)
+            self._owns_client = True
+        return self._client
+
+    def _provider_origin(self) -> str:
+        parsed = urlparse(self._endpoint)
+        if not parsed.scheme or not parsed.netloc:
+            return self._endpoint
+        return f"{parsed.scheme}://{parsed.netloc}"
+
     async def generate(self, request: ModelRequest, *, credential: str) -> ModelResponse:
         response: ModelResponse | None = None
         async for chunk in self.generate_stream(request, credential=credential):
@@ -73,14 +114,12 @@ class OpenAICompatibleProvider:
             }
 
         started = time.perf_counter()
+        first_delta_logged = False
         deltas: list[str] = []
         usage: dict[str, int | float] = {}
         finish_reason = "stop"
         tool_fragments: dict[int, dict[str, str]] = {}
-        if self._client is None:
-            self._client = httpx.AsyncClient(timeout=self._timeout)
-            self._owns_client = True
-        client = self._client
+        client = self._ensure_client()
         try:
             async with client.stream(
                 "POST",
@@ -114,6 +153,16 @@ class OpenAICompatibleProvider:
                         if content is not None:
                             text = str(content)
                             deltas.append(text)
+                            if not first_delta_logged:
+                                first_delta_logged = True
+                                logger.info(
+                                    "provider_ttft_ms=%.2f provider=%s model=%s "
+                                    "model_call=%s",
+                                    (time.perf_counter() - started) * 1_000,
+                                    self.name,
+                                    model,
+                                    request.model_call_id,
+                                )
                             yield ModelStreamChunk(kind="delta", delta=text)
                         self._merge_tool_calls(tool_fragments, delta.get("tool_calls"))
         except httpx.TimeoutException as exc:

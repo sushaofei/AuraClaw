@@ -4,6 +4,7 @@ import asyncio
 import logging
 import secrets
 import socket
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
@@ -227,6 +228,13 @@ def _worker_idle_interval(settings: Settings, configured: float) -> float:
     return configured
 
 
+def _worker_post_tick_wait(settings: Settings, configured: float) -> float:
+    """Idle sleep after a tick that already long-polled the Session outbox."""
+    if settings.worker_wake_enabled:
+        return 0.05
+    return configured
+
+
 SERVICE_BY_COMMAND = {
     "api": "task-api",
     "session": "session",
@@ -311,13 +319,17 @@ class RemoteRuntimeWorker:
         # Must stay below recover_expired's stale-heartbeat window (30s), or a
         # healthy long model call can be mistaken for a dead runtime.
         self._heartbeat_interval = heartbeat_interval or timedelta(seconds=10)
+        self._last_heartbeat_at = 0.0
 
     async def tick(self) -> int:
+        now = time.monotonic()
         if not self._registered:
             await self._control.register()
             self._registered = True
-        else:
+            self._last_heartbeat_at = now
+        elif now - self._last_heartbeat_at >= self._heartbeat_interval.total_seconds():
             await self._control.heartbeat()
+            self._last_heartbeat_at = time.monotonic()
         assignments = await self._control.claim(limit=1)
         for assignment in assignments:
             task_id = (
@@ -361,6 +373,7 @@ class RemoteRuntimeWorker:
                 except TimeoutError:
                     try:
                         await self._control.heartbeat()
+                        self._last_heartbeat_at = time.monotonic()
                     except Exception:
                         # Transient control-plane blips must not stop keep-alive;
                         # exiting here leaves last_heartbeat_at stale and
@@ -664,6 +677,12 @@ async def _service_lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.worker_iterations = 0
     stop = asyncio.Event()
     worker_task: asyncio.Task[None] | None = None
+    log_level = str(getattr(app.state, "log_level", "INFO") or "INFO").upper()
+    logging.basicConfig(
+        level=getattr(logging, log_level, logging.INFO),
+        format="%(levelname)s:%(name)s:%(message)s",
+        force=True,
+    )
     if getattr(app.state, "worker_wake", None) is None and bool(app.state.worker):
         app.state.worker_wake = WorkerWakeGate()
     initialize = getattr(app.state, "initialize", None)
@@ -743,6 +762,7 @@ def _base_service_app(
     app.state.closeables = closeables
     app.state.worker_error = None
     app.state.worker_wake = WorkerWakeGate() if spec.worker else None
+    app.state.log_level = settings.log_level
     ready, dependencies = _readiness(spec.name, settings)
     app.state.config_ready = ready
     app.state.dependencies = dependencies
@@ -874,13 +894,22 @@ def _orchestrator_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
             settings.session_base_url,
             service_identity=ServiceIdentity.ORCHESTRATOR,
             bearer_token=bearer_token,
+            timeout=max(10.0, settings.worker_idle_interval + 5.0),
         )
         lifecycle_session = RemoteOrchestratorSessionClient(
             settings.session_base_url,
             bearer_token=bearer_token,
         )
         worker_id = f"orchestrator-{secrets.token_hex(8)}"
-        feed = RunnableFeedConsumer(feed_session, store, worker_id=worker_id)
+        claim_wait = (
+            settings.worker_idle_interval if settings.worker_wake_enabled else 0.0
+        )
+        feed = RunnableFeedConsumer(
+            feed_session,
+            store,
+            worker_id=worker_id,
+            wait_seconds=claim_wait,
+        )
         orchestrator = ManagedOrchestrator(
             orchestrator_id=worker_id,
             control_store=store,
@@ -901,7 +930,7 @@ def _orchestrator_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         spec,
         settings,
         tick=tick,
-        worker_interval=_worker_idle_interval(
+        worker_interval=_worker_post_tick_wait(
             settings, settings.orchestrator_worker_interval
         ),
         closeables=closeables,
@@ -1524,12 +1553,20 @@ def _artifact_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
 def _delivery_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
     token = settings.workload_token_value(ServiceIdentity.DELIVERY_WORKER.value)
     bearer_token = token or secrets.token_urlsafe(32)
+    claim_wait = (
+        settings.worker_idle_interval if settings.worker_wake_enabled else 0.0
+    )
     session = RemoteSessionEventStore(
         settings.session_base_url,
         service_identity=ServiceIdentity.DELIVERY_WORKER,
         bearer_token=bearer_token,
+        timeout=max(10.0, settings.worker_idle_interval + 5.0),
     )
-    outbox = RemoteSessionDeliveryOutboxSource(session, worker_id="delivery-worker")
+    outbox = RemoteSessionDeliveryOutboxSource(
+        session,
+        worker_id="delivery-worker",
+        wait_seconds=claim_wait,
+    )
     store = (
         PostgresDeliveryJobStore(settings.resolved_database_url)
         if settings.sql_storage_enabled
@@ -1567,7 +1604,7 @@ def _delivery_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         spec,
         settings,
         tick=worker.run_once,
-        worker_interval=_worker_idle_interval(settings, 1.0),
+        worker_interval=_worker_post_tick_wait(settings, 1.0),
         closeables=closeables,
     )
     app.state.session_access = "http"
@@ -1626,9 +1663,15 @@ def _projection_app(
             settings.session_base_url,
             service_identity=ServiceIdentity.PROJECTION_WORKER,
             bearer_token=token or secrets.token_urlsafe(32),
+            timeout=max(10.0, settings.worker_idle_interval + 5.0),
+        )
+        claim_wait = (
+            settings.worker_idle_interval if settings.worker_wake_enabled else 0.0
         )
         source = RemoteSessionOutboxSource(
-            remote_session, worker_id="projection-worker"
+            remote_session,
+            worker_id="projection-worker",
+            wait_seconds=claim_wait,
         )
         relay = OutboxRelay(source, projector)
         closeables = (remote_session, projector, admin_store)
@@ -1639,7 +1682,7 @@ def _projection_app(
         spec,
         settings,
         tick=relay.relay_once,
-        worker_interval=worker_interval,
+        worker_interval=_worker_post_tick_wait(settings, worker_interval),
         closeables=closeables,
     )
 
@@ -1722,6 +1765,9 @@ def _model_gateway_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
             model,
         ),
     )
+    prewarm = getattr(model, "prewarm", None)
+    if callable(prewarm):
+        app.state.initialize = prewarm
     contract_app = create_contract_app(
         "model-gateway",
         model_routes(model_service),
@@ -1782,6 +1828,14 @@ def _runtime_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         closeables=(control, session, model, hands_http),
     )
     app.state.data_access = "remote-only"
+
+    async def prewarm_runtime_links() -> None:
+        with suppress(Exception):
+            await hands_http.get("/health/live")
+        with suppress(Exception):
+            await model.prewarm()
+
+    app.state.initialize = prewarm_runtime_links
     return app
 
 

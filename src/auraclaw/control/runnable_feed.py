@@ -21,6 +21,7 @@ class ControlFeedSource(Protocol):
         *,
         limit: int,
         claim_ttl: timedelta,
+        wait_seconds: float = 0,
     ) -> list[ClaimedOutboxRecord]: ...
 
     async def disposition_outbox(
@@ -43,10 +44,12 @@ class RunnableFeedConsumer:
         store: ControlStateStore,
         *,
         worker_id: str,
+        wait_seconds: float = 0,
     ) -> None:
         self._source = source
         self._store = store
         self._worker_id = worker_id
+        self._wait_seconds = max(0.0, wait_seconds)
 
     async def run_once(self, *, limit: int = 100) -> int:
         records = await self._source.claim_outbox(
@@ -54,6 +57,7 @@ class RunnableFeedConsumer:
             self._worker_id,
             limit=limit,
             claim_ttl=timedelta(seconds=30),
+            wait_seconds=self._wait_seconds,
         )
         enqueued = 0
         for record in records:

@@ -127,6 +127,7 @@ class OutboxClaimRequest(ContractModel):
     worker_id: str
     limit: int = Field(default=100, ge=1, le=1000)
     claim_ttl_seconds: int = Field(default=30, ge=1, le=3600)
+    wait_seconds: float = Field(default=0, ge=0, le=30)
 
 
 class OutboxRecord(ContractModel):

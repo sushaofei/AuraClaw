@@ -70,6 +70,7 @@ class EventStore(Protocol):
         *,
         limit: int,
         claim_ttl: timedelta,
+        wait_seconds: float = 0,
     ) -> list[ClaimedOutboxRecord]: ...
 
     async def disposition_outbox(

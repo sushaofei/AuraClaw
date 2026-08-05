@@ -26,6 +26,17 @@ class ModelGateway:
         self._credentials = credentials
         self._default_provider = default_provider
 
+    async def prewarm(self) -> None:
+        for provider, adapter in self._adapters.items():
+            warm = getattr(adapter, "prewarm", None)
+            if not callable(warm):
+                continue
+            try:
+                credential = await self._credentials.resolve(provider, "system")
+            except Exception:
+                credential = None
+            await warm(credential=credential)
+
     async def generate(self, request: ModelRequest) -> ModelResponse:
         response: ModelResponse | None = None
         async for chunk in self.generate_stream(request):

@@ -182,3 +182,76 @@ async def test_trusted_messages_loads_skills_in_parallel() -> None:
     assert client.calls == 2
     assert client.max_inflight == 2
     assert elapsed < 0.05
+
+
+@pytest.mark.asyncio
+async def test_claim_outbox_waits_for_arrival() -> None:
+    from datetime import timedelta
+
+    from auraclaw.contracts.commands import CommandContext
+    from auraclaw.contracts.events import Actor, NewEvent
+    from auraclaw.infrastructure.persistence.memory_event_store import InMemoryEventStore
+
+    store = InMemoryEventStore()
+
+    async def publish_soon() -> None:
+        await asyncio.sleep(0.08)
+        await store.append(
+            root_session_id="s1",
+            session_id="s1",
+            run_id="run_1",
+            context=CommandContext(
+                command_id="cmd_1",
+                tenant_id="t1",
+                actor=Actor(type="user", id="u1"),
+                correlation_id="run_1",
+                expected_version=0,
+                operation="create",
+            ),
+            events=(
+                NewEvent(type="session.created", payload={"goal": "hi"}),
+                NewEvent(type="run.requested", payload={"run_id": "run_1"}),
+            ),
+            command_result={},
+        )
+
+    publisher = asyncio.create_task(publish_soon())
+    started = asyncio.get_running_loop().time()
+    claimed = await store.claim_outbox(
+        "control",
+        "worker-1",
+        limit=10,
+        claim_ttl=timedelta(seconds=30),
+        wait_seconds=0.5,
+    )
+    elapsed = asyncio.get_running_loop().time() - started
+    await publisher
+    assert claimed
+    assert elapsed >= 0.05
+    assert elapsed < 0.35
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_prewarm_creates_client() -> None:
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    import httpx
+
+    from auraclaw.infrastructure.model.openai_compatible import OpenAICompatibleProvider
+
+    provider = OpenAICompatibleProvider(
+        base_url="http://provider.example/v1",
+        model="test-model",
+        name="test",
+    )
+    mock_response = MagicMock()
+    mock_response.is_error = False
+    mock_client = AsyncMock()
+    mock_client.get = AsyncMock(return_value=mock_response)
+    mock_client.aclose = AsyncMock()
+
+    with patch.object(httpx, "AsyncClient", return_value=mock_client):
+        await provider.prewarm()
+    mock_client.get.assert_awaited()
+    assert provider._client is mock_client
+    await provider.aclose()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from contextlib import suppress
 
 import httpx
 
@@ -35,6 +36,11 @@ class RemoteModelClient:
 
     async def aclose(self) -> None:
         await self._client.aclose()
+
+    async def prewarm(self) -> None:
+        """Warm the Runtime → Model Gateway HTTP connection."""
+        with suppress(Exception):
+            await self._client.get("/health/live")
 
     async def generate(self, request: ModelRequest) -> ModelResponse:
         response: ModelResponse | None = None

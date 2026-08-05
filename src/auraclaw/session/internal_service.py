@@ -196,6 +196,7 @@ class SessionInternalService:
             request.worker_id,
             limit=request.limit,
             claim_ttl=timedelta(seconds=request.claim_ttl_seconds),
+            wait_seconds=request.wait_seconds,
         )
         return OutboxClaimResponse(
             records=tuple(

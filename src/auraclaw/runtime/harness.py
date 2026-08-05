@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import inspect
 import json
 import logging
 import time
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
@@ -118,15 +120,20 @@ class AgentHarness:
         )
         model_call_id = f"mdl_{assignment.run_id}_step_1"
         if checkpoint is None or checkpoint.phase == "model_pending":
-            await self._save_checkpoint(
-                assignment,
-                "model_pending",
-                {"model_call_id": model_call_id, "sequence": 0},
+            checkpoint_ready = asyncio.create_task(
+                self._save_checkpoint(
+                    assignment,
+                    "model_pending",
+                    {"model_call_id": model_call_id, "sequence": 0},
+                )
             )
             await self._inject(InjectionPoint.BEFORE_MODEL)
             await self._guard(assignment)
             messages = self._build_messages(events)
             if not messages:
+                checkpoint_ready.cancel()
+                with suppress(asyncio.CancelledError):
+                    await checkpoint_ready
                 raise ModelProviderError(
                     "model request has no user/assistant messages "
                     f"(session={assignment.session_id} run={assignment.run_id})"
@@ -143,6 +150,7 @@ class AgentHarness:
                 ),
                 sequence=0,
                 execute_started=execute_started,
+                prep=checkpoint_ready,
             )
             await self._validate_usage(assignment, response)
             await self._save_checkpoint(
@@ -287,14 +295,16 @@ class AgentHarness:
                     raise BudgetExceededError(
                         "Runtime cumulative output token budget was exhausted"
                     )
-                await self._save_checkpoint(
-                    assignment,
-                    "capability.model_pending",
-                    {
-                        **state,
-                        "model_call_id": model_call_id,
-                        "call_index": 0,
-                    },
+                checkpoint_ready = asyncio.create_task(
+                    self._save_checkpoint(
+                        assignment,
+                        "capability.model_pending",
+                        {
+                            **state,
+                            "model_call_id": model_call_id,
+                            "call_index": 0,
+                        },
+                    )
                 )
                 await self._inject(InjectionPoint.BEFORE_MODEL)
                 await self._guard(assignment)
@@ -317,6 +327,7 @@ class AgentHarness:
                     sequence=int(state.get("sequence", 0)),
                     publish_deltas=True,
                     execute_started=execute_started,
+                    prep=checkpoint_ready,
                 )
                 turn_events = None
                 usage = self._accumulate_usage(
@@ -953,13 +964,39 @@ class AgentHarness:
         sequence: int,
         publish_deltas: bool = True,
         execute_started: float | None = None,
+        prep: Awaitable[None] | None = None,
     ) -> tuple[ModelResponse, int]:
         response: ModelResponse | None = None
         stream_started = time.perf_counter()
         first_delta_logged = False
         if execute_started is None:
             execute_started = stream_started
-        async for chunk in iter_model_stream(self._model, request):
+
+        async def _next_chunk(iterator: Any) -> Any | None:
+            try:
+                return await anext(iterator)
+            except StopAsyncIteration:
+                return None
+
+        stream = iter_model_stream(self._model, request)
+        iterator = stream.__aiter__()
+        first_chunk_task = asyncio.create_task(_next_chunk(iterator))
+        try:
+            if prep is not None:
+                await prep
+            chunk = await first_chunk_task
+        except BaseException:
+            if not first_chunk_task.done():
+                first_chunk_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await first_chunk_task
+            aclose = getattr(stream, "aclose", None)
+            if aclose is not None:
+                await aclose()
+            raise
+        if chunk is None:
+            raise ModelProviderError("model stream ended without a completed response")
+        while True:
             if chunk.kind == "delta":
                 if publish_deltas and chunk.delta:
                     sequence += 1
@@ -978,6 +1015,9 @@ class AgentHarness:
                         )
             elif chunk.kind == "completed":
                 response = chunk.response
+            chunk = await _next_chunk(iterator)
+            if chunk is None:
+                break
         if response is None:
             raise ModelProviderError("model stream ended without a completed response")
         return response, sequence
