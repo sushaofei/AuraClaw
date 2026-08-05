@@ -197,6 +197,29 @@ class InMemoryEventStore:
         *,
         limit: int,
         claim_ttl: timedelta,
+        wait_seconds: float = 0,
+    ) -> list[ClaimedOutboxRecord]:
+        import time
+
+        deadline = time.monotonic() + max(0.0, wait_seconds)
+        while True:
+            claimed = await self._claim_outbox_once(
+                destination, worker_id, limit=limit, claim_ttl=claim_ttl
+            )
+            if claimed or wait_seconds <= 0:
+                return claimed
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return []
+            await asyncio.sleep(min(0.05, remaining))
+
+    async def _claim_outbox_once(
+        self,
+        destination: str,
+        worker_id: str,
+        *,
+        limit: int,
+        claim_ttl: timedelta,
     ) -> list[ClaimedOutboxRecord]:
         now = datetime.now(UTC)
         claimed: list[ClaimedOutboxRecord] = []

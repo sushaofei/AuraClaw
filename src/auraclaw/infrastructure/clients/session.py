@@ -189,6 +189,7 @@ class RemoteSessionEventStore:
         *,
         limit: int,
         claim_ttl: timedelta,
+        wait_seconds: float = 0,
     ) -> list[ClaimedOutboxRecord]:
         context = InternalRequestContext(
             tenant_id="system",
@@ -201,10 +202,11 @@ class RemoteSessionEventStore:
             "/internal/v1/session/outbox/claim",
             OutboxClaimRequest(
                 context=context,
-                destination=destination,
+                destination=destination,  # type: ignore[arg-type]
                 worker_id=worker_id,
                 limit=limit,
                 claim_ttl_seconds=max(1, int(claim_ttl.total_seconds())),
+                wait_seconds=wait_seconds,
             ),
             OutboxClaimResponse,
         )
@@ -260,9 +262,16 @@ class RemoteOutboxItem:
 class RemoteSessionOutboxSource:
     """Projection relay source backed only by Session claim/disposition APIs."""
 
-    def __init__(self, session: RemoteSessionEventStore, *, worker_id: str) -> None:
+    def __init__(
+        self,
+        session: RemoteSessionEventStore,
+        *,
+        worker_id: str,
+        wait_seconds: float = 0,
+    ) -> None:
         self._session = session
         self._worker_id = worker_id
+        self._wait_seconds = max(0.0, wait_seconds)
         self._claims: dict[int, str] = {}
 
     async def pending_outbox(self) -> Sequence[OutboxItem]:
@@ -271,6 +280,7 @@ class RemoteSessionOutboxSource:
             self._worker_id,
             limit=100,
             claim_ttl=timedelta(seconds=30),
+            wait_seconds=self._wait_seconds,
         )
         items: list[OutboxItem] = []
         for record in records:
@@ -299,9 +309,16 @@ class RemoteSessionOutboxSource:
 class RemoteSessionDeliveryOutboxSource:
     """Delivery source backed by claim tokens owned by Session."""
 
-    def __init__(self, session: RemoteSessionEventStore, *, worker_id: str) -> None:
+    def __init__(
+        self,
+        session: RemoteSessionEventStore,
+        *,
+        worker_id: str,
+        wait_seconds: float = 0,
+    ) -> None:
         self._session = session
         self._worker_id = worker_id
+        self._wait_seconds = max(0.0, wait_seconds)
         self._claims: dict[int, str] = {}
 
     async def pending_delivery_outbox(self) -> Sequence[RemoteOutboxItem]:
@@ -310,6 +327,7 @@ class RemoteSessionDeliveryOutboxSource:
             self._worker_id,
             limit=100,
             claim_ttl=timedelta(seconds=30),
+            wait_seconds=self._wait_seconds,
         )
         items: list[RemoteOutboxItem] = []
         for record in records:
