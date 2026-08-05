@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import time
 from typing import Any
 from uuid import uuid4
 
@@ -16,6 +18,8 @@ from auraclaw.session.ports import (
     OutboxRelayPort,
     SessionSnapshot,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class TaskService:
@@ -37,6 +41,7 @@ class TaskService:
         self._approval_notifier = approval_notifier
 
     async def create_task(self, *, goal: str, context: CommandContext) -> dict[str, Any]:
+        started = time.perf_counter()
         await self._admission.admit(goal=goal, context=context)
         session_id = f"ses_{uuid4().hex}"
         run_id = f"run_{uuid4().hex}"
@@ -59,6 +64,12 @@ class TaskService:
             command_result=response,
         )
         await self._after_append(session, result)
+        logger.info(
+            "ttft.create_task session=%s run=%s duration_ms=%.2f",
+            session_id,
+            run_id,
+            (time.perf_counter() - started) * 1_000,
+        )
         return result.command_result
 
     async def append_message(

@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import logging
+import time
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -32,6 +34,8 @@ from auraclaw.runtime.ports import (
     ToolCall,
     ToolClient,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _error_payload(error: BaseException) -> str:
@@ -79,6 +83,7 @@ class AgentHarness:
         self._failure_injector = failure_injector
 
     async def execute(self, assignment: RuntimeAssignment) -> None:
+        execute_started = time.perf_counter()
         await self._guard(assignment)
         if assignment.budget.max_steps < 1:
             raise BudgetExceededError("Runtime step budget is exhausted")
@@ -90,6 +95,12 @@ class AgentHarness:
             {"run_id": assignment.run_id, "runtime_id": assignment.runtime_id},
             identity=assignment.run_id,
         )
+        logger.info(
+            "ttft.run_started session=%s run=%s since_execute_ms=%.2f",
+            assignment.session_id,
+            assignment.run_id,
+            (time.perf_counter() - execute_started) * 1_000,
+        )
         if any(
             event.type == "run.completed" and event.run_id == assignment.run_id
             for event in events
@@ -97,7 +108,9 @@ class AgentHarness:
             await self._control.finish_assignment(self._task_id(assignment), "completed")
             return
         if self._capability_controller is not None:
-            await self._execute_capability_loop(assignment, events=events)
+            await self._execute_capability_loop(
+                assignment, events=events, execute_started=execute_started
+            )
             return
 
         checkpoint = await self._control.load_checkpoint(
@@ -129,6 +142,7 @@ class AgentHarness:
                     max_output_tokens=assignment.budget.max_output_tokens,
                 ),
                 sequence=0,
+                execute_started=execute_started,
             )
             await self._validate_usage(assignment, response)
             await self._save_checkpoint(
@@ -215,8 +229,11 @@ class AgentHarness:
         assignment: RuntimeAssignment,
         *,
         events: list[Any] | None = None,
+        execute_started: float | None = None,
     ) -> None:
         assert self._capability_controller is not None
+        if execute_started is None:
+            execute_started = time.perf_counter()
         checkpoint = await self._control.load_checkpoint(
             assignment.tenant_id,
             assignment.session_id,
@@ -299,6 +316,7 @@ class AgentHarness:
                     ),
                     sequence=int(state.get("sequence", 0)),
                     publish_deltas=True,
+                    execute_started=execute_started,
                 )
                 turn_events = None
                 usage = self._accumulate_usage(
@@ -934,13 +952,30 @@ class AgentHarness:
         *,
         sequence: int,
         publish_deltas: bool = True,
+        execute_started: float | None = None,
     ) -> tuple[ModelResponse, int]:
         response: ModelResponse | None = None
+        stream_started = time.perf_counter()
+        first_delta_logged = False
+        if execute_started is None:
+            execute_started = stream_started
         async for chunk in iter_model_stream(self._model, request):
             if chunk.kind == "delta":
                 if publish_deltas and chunk.delta:
                     sequence += 1
                     await self._publish_delta(assignment, sequence, chunk.delta)
+                    if not first_delta_logged:
+                        first_delta_logged = True
+                        now = time.perf_counter()
+                        logger.info(
+                            "ttft.first_delta session=%s run=%s model_call=%s "
+                            "execute_ms=%.2f stream_ms=%.2f",
+                            assignment.session_id,
+                            assignment.run_id,
+                            request.model_call_id,
+                            (now - execute_started) * 1_000,
+                            (now - stream_started) * 1_000,
+                        )
             elif chunk.kind == "completed":
                 response = chunk.response
         if response is None:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -14,6 +16,8 @@ from auraclaw.control.ports import (
     RuntimeProvisioner,
 )
 from auraclaw.runtime.ports import SessionClient
+
+logger = logging.getLogger(__name__)
 
 
 class ManagedOrchestrator:
@@ -76,6 +80,7 @@ class ManagedOrchestrator:
         return enqueued
 
     async def schedule_once(self) -> RuntimeAssignment | None:
+        started = time.perf_counter()
         claimed = await self._control.claim(self._id, limit=1)
         if not claimed:
             return None
@@ -161,6 +166,13 @@ class ManagedOrchestrator:
                 lifecycle_events,
                 command_id=f"orchestrator:schedule:{item.run_id}:{lease.fencing_token}",
                 operation="orchestrator.schedule",
+            )
+            logger.info(
+                "ttft.run_scheduled session=%s run=%s runtime=%s schedule_ms=%.2f",
+                item.session_id,
+                item.run_id,
+                runtime.runtime_id,
+                (time.perf_counter() - started) * 1_000,
             )
             return assignment
         except Exception:
