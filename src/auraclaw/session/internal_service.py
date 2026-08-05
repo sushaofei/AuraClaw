@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, Sequence
 from datetime import timedelta
 
 from auraclaw.contracts.commands import CommandContext
@@ -19,6 +19,10 @@ from auraclaw.contracts.internal import (
     SessionFeedResponse,
 )
 from auraclaw.contracts.state import Visibility
+from auraclaw.infrastructure.persistence.memory_event_store import (
+    CONTROL_TRIGGER_EVENTS,
+    DELIVERY_TRIGGER_EVENTS,
+)
 from auraclaw.internal.security import LeaseAssertionVerifier
 from auraclaw.session.ports import EventStore
 
@@ -54,12 +58,24 @@ DEFAULT_ACTOR_ALLOWLIST: Mapping[ServiceIdentity, tuple[str, ...]] = {
     ServiceIdentity.POLICY: ("policy", "service"),
 }
 
+OutboxWakeHook = Callable[[Sequence[str]], None]
+
 
 def _allowed(value: str, patterns: tuple[str, ...]) -> bool:
     return any(
         value == pattern or (pattern.endswith(".") and value.startswith(pattern))
         for pattern in patterns
     )
+
+
+def outbox_wake_destinations(event_types: Sequence[str]) -> frozenset[str]:
+    destinations: set[str] = {"projection"}
+    for event_type in event_types:
+        if event_type in CONTROL_TRIGGER_EVENTS:
+            destinations.add("control")
+        if event_type in DELIVERY_TRIGGER_EVENTS:
+            destinations.add("delivery")
+    return frozenset(destinations)
 
 
 class SessionInternalService:
@@ -70,11 +86,13 @@ class SessionInternalService:
         lease_verifier: LeaseAssertionVerifier,
         event_allowlist: Mapping[ServiceIdentity, tuple[str, ...]] = DEFAULT_EVENT_ALLOWLIST,
         actor_allowlist: Mapping[ServiceIdentity, tuple[str, ...]] = DEFAULT_ACTOR_ALLOWLIST,
+        outbox_wake: OutboxWakeHook | None = None,
     ) -> None:
         self._event_store = event_store
         self._lease_verifier = lease_verifier
         self._event_allowlist = event_allowlist
         self._actor_allowlist = actor_allowlist
+        self._outbox_wake = outbox_wake
 
     async def append(self, request: SessionAppendRequest) -> SessionAppendResponse:
         identity = request.context.service_identity
@@ -124,6 +142,10 @@ class SessionInternalService:
             events=events,
             command_result=dict(request.command_result),
         )
+        if not result.deduplicated and self._outbox_wake is not None and events:
+            self._outbox_wake(
+                tuple(outbox_wake_destinations(tuple(event.type for event in events)))
+            )
         return SessionAppendResponse(
             events=tuple(event.as_dict() for event in result.events),
             command_result=result.command_result,

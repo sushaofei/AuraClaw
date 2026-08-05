@@ -13,7 +13,7 @@ from typing import Any
 
 import httpx
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from auraclaw import __version__
 from auraclaw.action.capability_catalog import (
@@ -81,6 +81,7 @@ from auraclaw.composition.business_skills import (
     signed_price_insight_dependency_packages,
     signed_price_insight_package,
 )
+from auraclaw.composition.worker_wake import WorkerWakeGate
 from auraclaw.config import Settings, get_settings
 from auraclaw.contracts.capabilities import (
     CapabilityStatus,
@@ -122,6 +123,10 @@ from auraclaw.infrastructure.clients.session import (
     RemoteSessionDeliveryOutboxSource,
     RemoteSessionEventStore,
     RemoteSessionOutboxSource,
+)
+from auraclaw.infrastructure.clients.worker_wake import (
+    HttpWorkerWakeClient,
+    OutboxWakeNotifier,
 )
 from auraclaw.infrastructure.credentials.mcp_egress import ManagedMcpEgressAdapter
 from auraclaw.infrastructure.credentials.proxy import CredentialProxy, InMemoryVault
@@ -214,6 +219,13 @@ from auraclaw.session.internal_service import SessionInternalService
 from auraclaw.session.task_service import TaskService
 
 logger = logging.getLogger(__name__)
+
+
+def _worker_idle_interval(settings: Settings, configured: float) -> float:
+    if settings.worker_wake_enabled:
+        return settings.worker_idle_interval
+    return configured
+
 
 SERVICE_BY_COMMAND = {
     "api": "task-api",
@@ -652,24 +664,41 @@ async def _service_lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.worker_iterations = 0
     stop = asyncio.Event()
     worker_task: asyncio.Task[None] | None = None
+    if getattr(app.state, "worker_wake", None) is None and bool(app.state.worker):
+        app.state.worker_wake = WorkerWakeGate()
     initialize = getattr(app.state, "initialize", None)
     if initialize is not None:
         await initialize()
 
     async def worker_loop() -> None:
         while not stop.is_set():
+            processed = 0
             tick = getattr(app.state, "tick", None)
             if tick is not None:
                 try:
-                    await tick()
+                    result = await tick()
+                    processed = int(result or 0)
                     app.state.worker_error = None
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
                     app.state.worker_error = type(exc).__name__
             app.state.worker_iterations += 1
-            with suppress(TimeoutError):
-                await asyncio.wait_for(stop.wait(), timeout=app.state.worker_interval)
+            if stop.is_set():
+                break
+            if processed > 0:
+                # Drain remaining work immediately after a productive tick.
+                continue
+            wake = getattr(app.state, "worker_wake", None)
+            if isinstance(wake, WorkerWakeGate):
+                woke = await wake.wait(app.state.worker_interval)
+                if stop.is_set():
+                    break
+                if woke:
+                    continue
+            else:
+                with suppress(TimeoutError):
+                    await asyncio.wait_for(stop.wait(), timeout=app.state.worker_interval)
 
     if bool(app.state.worker):
         worker_task = asyncio.create_task(
@@ -680,6 +709,9 @@ async def _service_lifespan(app: FastAPI) -> AsyncIterator[None]:
     finally:
         app.state.stopping = True
         stop.set()
+        wake = getattr(app.state, "worker_wake", None)
+        if isinstance(wake, WorkerWakeGate):
+            wake.signal()
         if worker_task is not None:
             with suppress(asyncio.CancelledError):
                 await worker_task
@@ -710,6 +742,7 @@ def _base_service_app(
     app.state.worker_interval = worker_interval
     app.state.closeables = closeables
     app.state.worker_error = None
+    app.state.worker_wake = WorkerWakeGate() if spec.worker else None
     ready, dependencies = _readiness(spec.name, settings)
     app.state.config_ready = ready
     app.state.dependencies = dependencies
@@ -758,6 +791,15 @@ def _base_service_app(
             "deployment_profile": settings.deployment_profile,
         }
 
+    if spec.worker:
+
+        @app.post("/internal/v1/worker/wake")
+        async def wake_worker(request: Request) -> Response:
+            wake = getattr(request.app.state, "worker_wake", None)
+            if isinstance(wake, WorkerWakeGate):
+                wake.signal()
+            return Response(status_code=204)
+
     return app
 
 
@@ -772,7 +814,18 @@ def _development_lease_key(settings: Settings) -> bytes:
 
 
 def _session_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
-    app = _base_service_app(spec, settings)
+    wake: OutboxWakeNotifier | None = None
+    closeables: tuple[Any, ...] = ()
+    if settings.worker_wake_enabled and settings.deployment_profile == "production":
+        wake = OutboxWakeNotifier(
+            {
+                "projection": HttpWorkerWakeClient(settings.projection_base_url),
+                "control": HttpWorkerWakeClient(settings.control_base_url),
+                "delivery": HttpWorkerWakeClient(settings.delivery_base_url),
+            }
+        )
+        closeables = (wake,)
+    app = _base_service_app(spec, settings, closeables=closeables)
     key = _development_lease_key(settings)
     verifier = LeaseAssertionVerifier(
         {"development": key},
@@ -780,7 +833,9 @@ def _session_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         audience=("session", "runtime"),
     )
     service = SessionInternalService(
-        providers.get_event_store(), lease_verifier=verifier
+        providers.get_event_store(),
+        lease_verifier=verifier,
+        outbox_wake=None if wake is None else wake.schedule,
     )
     identities = _configured_identities(
         settings,
@@ -845,7 +900,9 @@ def _orchestrator_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         spec,
         settings,
         tick=tick,
-        worker_interval=settings.orchestrator_worker_interval,
+        worker_interval=_worker_idle_interval(
+            settings, settings.orchestrator_worker_interval
+        ),
         closeables=closeables,
     )
     service = ControlInternalService(
@@ -1509,6 +1566,7 @@ def _delivery_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         spec,
         settings,
         tick=worker.run_once,
+        worker_interval=_worker_idle_interval(settings, 1.0),
         closeables=closeables,
     )
     app.state.session_access = "http"

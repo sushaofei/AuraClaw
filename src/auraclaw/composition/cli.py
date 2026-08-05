@@ -213,7 +213,11 @@ def main(
             interval = (
                 args.interval
                 if args.interval is not None
-                else settings.projection_worker_interval
+                else (
+                    settings.worker_idle_interval
+                    if settings.worker_wake_enabled
+                    else settings.projection_worker_interval
+                )
             )
             uvicorn_runner(
                 create_service_app(
@@ -228,7 +232,11 @@ def main(
         interval = (
             args.interval
             if args.interval is not None
-            else settings.projection_worker_interval
+            else (
+                settings.worker_idle_interval
+                if settings.worker_wake_enabled
+                else settings.projection_worker_interval
+            )
         )
         asyncio.run(
             _run_projection_command(
