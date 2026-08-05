@@ -94,7 +94,7 @@ DEV_SERVICE 与生产共用 12 服务拓扑。缩短「创建任务 → 首 Toke
 | 变量 | 默认 | 作用 |
 |------|------|------|
 | `AURACLAW_WORKER_WAKE_ENABLED` | `true` | Session append 后 HTTP 唤醒 projection/orchestrator/delivery |
-| `AURACLAW_WORKER_IDLE_INTERVAL` | `2.0` | 有 wake 时的空闲 fallback 轮询 |
+| `AURACLAW_WORKER_IDLE_INTERVAL` | `0.25` | 有 wake 时的空闲 fallback 轮询（多副本兜底） |
 | `AURACLAW_PROJECTION_WORKER_INTERVAL` | `0.1` | wake 关闭时的 Projection 轮询 |
 | `AURACLAW_ORCHESTRATOR_WORKER_INTERVAL` | `0.1` | wake 关闭时的 Orchestrator 轮询 |
 | `AURACLAW_RUNTIME_POLL_INTERVAL` | `0.05` | agent-runtime claim 轮询 |

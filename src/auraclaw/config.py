@@ -89,6 +89,7 @@ class Settings(BaseSettings):
     session_base_url: str = "http://127.0.0.1:8001"
     projection_base_url: str = "http://127.0.0.1:8002"
     control_base_url: str = "http://127.0.0.1:8003"
+    runtime_base_url: str = "http://127.0.0.1:8004"
     model_gateway_base_url: str = "http://127.0.0.1:8005"
     hands_mcp_url: str = "http://127.0.0.1:8006/mcp"
     policy_base_url: str = "http://127.0.0.1:8007"
@@ -192,7 +193,7 @@ class Settings(BaseSettings):
     # With worker_wake_enabled, idle uses worker_idle_interval; busy ticks drain
     # immediately after Session outbox HTTP wake.
     worker_wake_enabled: bool = True
-    worker_idle_interval: float = Field(default=2.0, ge=0.05, le=60.0)
+    worker_idle_interval: float = Field(default=0.25, ge=0.05, le=60.0)
     projection_worker_interval: float = Field(default=0.1, ge=0.01, le=30.0)
     orchestrator_worker_interval: float = Field(default=0.1, ge=0.01, le=30.0)
     orchestrator_lease_ttl_seconds: int = Field(default=300, ge=30, le=3600)

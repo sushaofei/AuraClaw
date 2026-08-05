@@ -822,6 +822,7 @@ def _session_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
                 "projection": HttpWorkerWakeClient(settings.projection_base_url),
                 "control": HttpWorkerWakeClient(settings.control_base_url),
                 "delivery": HttpWorkerWakeClient(settings.delivery_base_url),
+                "runtime": HttpWorkerWakeClient(settings.runtime_base_url),
             }
         )
         closeables = (wake,)
