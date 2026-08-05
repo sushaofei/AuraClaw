@@ -23,6 +23,10 @@ def test_outbox_wake_destinations_for_create_task() -> None:
     }
 
 
+def test_outbox_wake_destinations_for_scheduled_run() -> None:
+    assert outbox_wake_destinations(("run.scheduled",)) == {"projection", "runtime"}
+
+
 def test_outbox_wake_destinations_for_completion() -> None:
     assert outbox_wake_destinations(("run.completed",)) == {"projection", "delivery"}
 
@@ -68,6 +72,7 @@ async def test_outbox_wake_notifier_posts_destinations(
     await notifier.aclose()
     assert any("/internal/v1/worker/wake" in url and "projection" in url for url in calls)
     assert any("/internal/v1/worker/wake" in url and "orchestrator" in url for url in calls)
+    assert sum(1 for url in calls if "orchestrator" in url) >= 3
 
 
 def test_orchestrator_wake_endpoint_signals_gate() -> None:

@@ -17,6 +17,7 @@ class HttpWorkerWakeClient:
         base_url: str,
         *,
         timeout: float = 0.5,
+        fanout: int = 3,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self._client = httpx.AsyncClient(
@@ -24,11 +25,17 @@ class HttpWorkerWakeClient:
             timeout=timeout,
             transport=transport,
         )
+        self._fanout = max(1, fanout)
 
     async def aclose(self) -> None:
         await self._client.aclose()
 
     async def wake(self) -> None:
+        # Compose/Swarm VIP round-robin: multiple POSTs raise the odds of
+        # interrupting every idle replica without changing service discovery.
+        await asyncio.gather(*(self._wake_once() for _ in range(self._fanout)))
+
+    async def _wake_once(self) -> None:
         try:
             response = await self._client.post("/internal/v1/worker/wake")
             response.raise_for_status()

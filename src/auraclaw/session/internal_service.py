@@ -75,6 +75,8 @@ def outbox_wake_destinations(event_types: Sequence[str]) -> frozenset[str]:
             destinations.add("control")
         if event_type in DELIVERY_TRIGGER_EVENTS:
             destinations.add("delivery")
+        if event_type == "run.scheduled":
+            destinations.add("runtime")
     return frozenset(destinations)
 
 
