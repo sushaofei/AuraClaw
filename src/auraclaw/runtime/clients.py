@@ -5,6 +5,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from auraclaw.contracts.commands import CommandContext
+from auraclaw.contracts.errors import VersionConflictError
 from auraclaw.contracts.events import Actor, CanonicalEvent, NewEvent
 from auraclaw.control.ports import ControlStateStore, RuntimeAssignment
 from auraclaw.runtime.ports import RuntimeEvent, ToolCall
@@ -46,6 +47,37 @@ class FencedSessionClient:
                 assignment.tenant_id, assignment.session_id
             )
             version = len(current)
+        try:
+            return await self._append_at(
+                assignment,
+                events,
+                command_id=command_id,
+                operation=operation,
+                expected_version=version,
+            )
+        except VersionConflictError:
+            if expected_version is None:
+                raise
+            current = await self._event_store.load(
+                assignment.tenant_id, assignment.session_id
+            )
+            return await self._append_at(
+                assignment,
+                events,
+                command_id=command_id,
+                operation=operation,
+                expected_version=len(current),
+            )
+
+    async def _append_at(
+        self,
+        assignment: RuntimeAssignment,
+        events: Sequence[NewEvent],
+        *,
+        command_id: str,
+        operation: str,
+        expected_version: int,
+    ) -> list[CanonicalEvent]:
         result = await self._event_store.append(
             root_session_id=assignment.root_session_id,
             session_id=assignment.session_id,
@@ -55,7 +87,7 @@ class FencedSessionClient:
                 tenant_id=assignment.tenant_id,
                 actor=Actor(type="runtime", id=assignment.runtime_id),
                 correlation_id=assignment.run_id,
-                expected_version=version,
+                expected_version=expected_version,
                 operation=operation,
             ),
             events=events,

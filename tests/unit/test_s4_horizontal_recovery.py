@@ -31,8 +31,9 @@ class _RecordingOrchestratorSession:
         *,
         command_id: str,
         operation: str,
+        expected_version: int | None = None,
     ) -> list[CanonicalEvent]:
-        del command_id, operation
+        del command_id, operation, expected_version
         self.appended.append((assignment, events))
         return []
 

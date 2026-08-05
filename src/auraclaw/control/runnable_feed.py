@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import logging
 from collections.abc import Sequence
 from datetime import timedelta
 from typing import Protocol
@@ -7,6 +9,8 @@ from typing import Protocol
 from auraclaw.contracts.events import CanonicalEvent
 from auraclaw.control.ports import ControlStateStore, RunnableItem, RuntimeBudget
 from auraclaw.session.ports import ClaimedOutboxRecord
+
+logger = logging.getLogger(__name__)
 
 
 class ControlFeedSource(Protocol):
@@ -50,6 +54,7 @@ class RunnableFeedConsumer:
         self._store = store
         self._worker_id = worker_id
         self._wait_seconds = max(0.0, wait_seconds)
+        self._ack_tasks: set[asyncio.Task[None]] = set()
 
     async def run_once(self, *, limit: int = 100) -> int:
         records = await self._source.claim_outbox(
@@ -68,15 +73,9 @@ class RunnableFeedConsumer:
                 item = self._derive(events, record.event.aggregate_version)
                 if item is not None:
                     enqueued += int(await self._store.enqueue(item))
-                accepted = await self._source.disposition_outbox(
-                    "control",
-                    self._worker_id,
-                    record.outbox_id,
-                    record.claim_token,
-                    "ack",
-                )
-                if not accepted:
-                    raise RuntimeError("Session rejected control outbox acknowledgement")
+                # Ack off the schedule critical path; enqueue is idempotent so
+                # a redelivered outbox row after crash is safe.
+                self._schedule_ack(record)
             except Exception as exc:
                 await self._source.disposition_outbox(
                     "control",
@@ -87,6 +86,30 @@ class RunnableFeedConsumer:
                     str(exc),
                 )
         return enqueued
+
+    def _schedule_ack(self, record: ClaimedOutboxRecord) -> None:
+        async def _ack() -> None:
+            try:
+                accepted = await self._source.disposition_outbox(
+                    "control",
+                    self._worker_id,
+                    record.outbox_id,
+                    record.claim_token,
+                    "ack",
+                )
+                if not accepted:
+                    logger.warning(
+                        "Session rejected control outbox acknowledgement outbox_id=%s",
+                        record.outbox_id,
+                    )
+            except Exception:
+                logger.exception(
+                    "failed to ack control outbox outbox_id=%s", record.outbox_id
+                )
+
+        task = asyncio.create_task(_ack(), name=f"control-outbox-ack-{record.outbox_id}")
+        self._ack_tasks.add(task)
+        task.add_done_callback(self._ack_tasks.discard)
 
     @staticmethod
     def _derive(

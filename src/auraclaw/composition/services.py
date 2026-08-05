@@ -900,6 +900,11 @@ def _orchestrator_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
             settings.session_base_url,
             bearer_token=bearer_token,
         )
+        runtime_wake_client = (
+            HttpWorkerWakeClient(settings.runtime_base_url)
+            if settings.worker_wake_enabled
+            else None
+        )
         worker_id = f"orchestrator-{secrets.token_hex(8)}"
         claim_wait = (
             settings.worker_idle_interval if settings.worker_wake_enabled else 0.0
@@ -916,16 +921,29 @@ def _orchestrator_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
             session=lifecycle_session,
             provisioner=RegisteredRuntimeProvisioner(store),
             lease_ttl=timedelta(seconds=settings.orchestrator_lease_ttl_seconds),
+            runtime_wake=(
+                (lambda: runtime_wake_client.wake())
+                if runtime_wake_client is not None
+                else None
+            ),
+            register_selected_runtime=False,
         )
 
         async def production_tick() -> int:
             ingested = await feed.run_once()
-            recovered = await orchestrator.recover()
             scheduled = await orchestrator.schedule_once()
+            recovered = 0
+            # Keep recover off the create→schedule hot path; run it when idle.
+            if ingested == 0 and scheduled is None:
+                recovered = await orchestrator.recover()
+                if recovered:
+                    scheduled = await orchestrator.schedule_once()
             return ingested + recovered + int(scheduled is not None)
 
         tick = production_tick
         closeables += (feed_session, lifecycle_session)
+        if runtime_wake_client is not None:
+            closeables += (runtime_wake_client,)
     app = _base_service_app(
         spec,
         settings,
