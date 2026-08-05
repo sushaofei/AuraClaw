@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+
 import httpx
 
 from auraclaw.contracts.internal import (
     InternalRequestContext,
     ModelGenerateRequest,
     ModelGenerateResponse,
+    ModelStreamEvent,
     ServiceIdentity,
 )
 from auraclaw.internal.http import HttpContractClient
-from auraclaw.runtime.ports import ModelRequest, ModelResponse, ToolCall
+from auraclaw.runtime.ports import ModelRequest, ModelResponse, ModelStreamChunk, ToolCall
 
 
 class RemoteModelClient:
@@ -34,28 +37,56 @@ class RemoteModelClient:
         await self._client.aclose()
 
     async def generate(self, request: ModelRequest) -> ModelResponse:
-        response = await self._contract.call(
-            "/internal/v1/model/generate",
-            ModelGenerateRequest(
-                context=InternalRequestContext(
-                    tenant_id=request.tenant_id,
-                    service_identity=ServiceIdentity.AGENT_RUNTIME,
-                    request_id=request.model_call_id,
-                    correlation_id=request.run_id,
-                    causation_id=request.model_call_id,
-                ),
-                model_call_id=request.model_call_id,
-                run_id=request.run_id,
-                messages=request.messages,
-                tools=request.tools,
-                capability=request.policy.capability,
-                preferred_model=request.policy.preferred_model,
-                allowed_providers=request.policy.allowed_providers,
-                data_classification=request.policy.data_classification,
-                max_output_tokens=request.max_output_tokens,
+        response: ModelResponse | None = None
+        async for chunk in self.generate_stream(request):
+            if chunk.kind == "completed":
+                response = chunk.response
+        if response is None:
+            raise RuntimeError("model stream ended without a completed response")
+        return response
+
+    async def generate_stream(
+        self, request: ModelRequest
+    ) -> AsyncIterator[ModelStreamChunk]:
+        payload = ModelGenerateRequest(
+            context=InternalRequestContext(
+                tenant_id=request.tenant_id,
+                service_identity=ServiceIdentity.AGENT_RUNTIME,
+                request_id=request.model_call_id,
+                correlation_id=request.run_id,
+                causation_id=request.model_call_id,
             ),
-            ModelGenerateResponse,
+            model_call_id=request.model_call_id,
+            run_id=request.run_id,
+            messages=request.messages,
+            tools=request.tools,
+            capability=request.policy.capability,
+            preferred_model=request.policy.preferred_model,
+            allowed_providers=request.policy.allowed_providers,
+            data_classification=request.policy.data_classification,
+            max_output_tokens=request.max_output_tokens,
         )
+        async for event in self._contract.stream(
+            "/internal/v1/model/stream",
+            payload,
+            ModelStreamEvent,
+        ):
+            if event.type == "delta":
+                delta = event.payload.get("delta")
+                if isinstance(delta, str) and delta:
+                    yield ModelStreamChunk(kind="delta", delta=delta)
+            elif event.type == "completed":
+                response = ModelGenerateResponse.model_validate(event.payload)
+                yield ModelStreamChunk(
+                    kind="completed",
+                    response=self._to_model_response(response),
+                )
+            elif event.type == "error":
+                message = event.payload.get("message") or "model stream reported an error"
+                raise RuntimeError(str(message))
+
+    @staticmethod
+    def _to_model_response(response: ModelGenerateResponse) -> ModelResponse:
         return ModelResponse(
             model_call_id=response.model_call_id,
             provider=response.provider,

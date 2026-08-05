@@ -29,6 +29,7 @@ from auraclaw.contracts.internal import (
     ModelCancelResponse,
     ModelGenerateRequest,
     ModelGenerateResponse,
+    ModelStreamEvent,
     OutboxClaimRequest,
     OutboxClaimResponse,
     OutboxDispositionRequest,
@@ -50,7 +51,12 @@ from auraclaw.contracts.internal import (
 )
 from auraclaw.control.internal_service import ControlInternalService
 from auraclaw.credential_proxy.internal_service import CredentialProxyInternalService
-from auraclaw.internal.http import ContractRoute, contract_route
+from auraclaw.internal.http import (
+    ContractRoute,
+    StreamContractRoute,
+    contract_route,
+    stream_contract_route,
+)
 from auraclaw.model_gateway.internal_service import ModelGatewayInternalService
 from auraclaw.policy.internal_service import PolicyInternalService
 from auraclaw.session.internal_service import SessionInternalService
@@ -122,6 +128,16 @@ def model_routes(service: ModelGatewayInternalService) -> dict[str, ContractRout
         ),
         "/internal/v1/model/cancel": contract_route(
             ModelCancelRequest, ModelCancelResponse, service.cancel
+        ),
+    }
+
+
+def model_stream_routes(
+    service: ModelGatewayInternalService,
+) -> dict[str, StreamContractRoute]:
+    return {
+        "/internal/v1/model/stream": stream_contract_route(
+            ModelGenerateRequest, ModelStreamEvent, service.generate_stream
         ),
     }
 

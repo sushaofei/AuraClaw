@@ -186,6 +186,7 @@ from auraclaw.internal.routes import (
     control_routes,
     credential_routes,
     model_routes,
+    model_stream_routes,
     policy_routes,
     session_routes,
 )
@@ -1651,16 +1652,16 @@ def _model_gateway_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         if settings.model_gateway_configured
         else UnavailableModelClient()
     )
+    model_service = ModelGatewayInternalService(
+        model,
+        policy=policy,
+        state=state,
+        tenant_token_limit=settings.model_tenant_token_limit_per_hour,
+    )
     contract_app = create_contract_app(
         "model-gateway",
-        model_routes(
-            ModelGatewayInternalService(
-                model,
-                policy=policy,
-                state=state,
-                tenant_token_limit=settings.model_tenant_token_limit_per_hour,
-            )
-        ),
+        model_routes(model_service),
+        stream_routes=model_stream_routes(model_service),
         workload_identities=_configured_identities(
             settings, (ServiceIdentity.AGENT_RUNTIME,)
         ),
