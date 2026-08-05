@@ -14,7 +14,7 @@ from auraclaw.contracts.errors import (
     ModelRateLimitError,
     ModelTimeoutError,
 )
-from auraclaw.runtime.ports import ModelRequest, ModelResponse, ToolCall
+from auraclaw.runtime.ports import ModelRequest, ModelResponse, ModelStreamChunk, ToolCall
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +40,17 @@ class OpenAICompatibleProvider:
         self._client = client
 
     async def generate(self, request: ModelRequest, *, credential: str) -> ModelResponse:
+        response: ModelResponse | None = None
+        async for chunk in self.generate_stream(request, credential=credential):
+            if chunk.kind == "completed":
+                response = chunk.response
+        if response is None:
+            raise ModelProviderError("model provider stream ended without a completed response")
+        return response
+
+    async def generate_stream(
+        self, request: ModelRequest, *, credential: str
+    ) -> AsyncIterator[ModelStreamChunk]:
         model = request.policy.preferred_model or self._model
         payload: dict[str, Any] = {
             "model": model,
@@ -93,7 +104,9 @@ class OpenAICompatibleProvider:
                             continue
                         content = delta.get("content")
                         if content is not None:
-                            deltas.append(str(content))
+                            text = str(content)
+                            deltas.append(text)
+                            yield ModelStreamChunk(kind="delta", delta=text)
                         self._merge_tool_calls(tool_fragments, delta.get("tool_calls"))
         except httpx.TimeoutException as exc:
             raise ModelTimeoutError("model provider request timed out") from exc
@@ -113,15 +126,18 @@ class OpenAICompatibleProvider:
             duration_ms,
             usage,
         )
-        return ModelResponse(
-            model_call_id=request.model_call_id,
-            provider=self.name,
-            model=model,
-            completed_output="".join(deltas),
-            deltas=tuple(deltas),
-            tool_calls=self._tool_calls(request, tool_fragments),
-            finish_reason=finish_reason,
-            usage=usage,
+        yield ModelStreamChunk(
+            kind="completed",
+            response=ModelResponse(
+                model_call_id=request.model_call_id,
+                provider=self.name,
+                model=model,
+                completed_output="".join(deltas),
+                deltas=tuple(deltas),
+                tool_calls=self._tool_calls(request, tool_fragments),
+                finish_reason=finish_reason,
+                usage=usage,
+            ),
         )
 
     @staticmethod

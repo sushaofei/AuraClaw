@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from auraclaw.contracts.events import CanonicalEvent, NewEvent
 from auraclaw.contracts.skills import SkillBinding
@@ -51,6 +51,15 @@ class ModelResponse:
     tool_calls: tuple[ToolCall, ...] = ()
     finish_reason: str = "stop"
     usage: dict[str, int | float] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ModelStreamChunk:
+    """Incremental model output consumed by Runtime before the final response."""
+
+    kind: Literal["delta", "completed"]
+    delta: str = ""
+    response: ModelResponse | None = None
 
 
 @dataclass(frozen=True)

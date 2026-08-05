@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import AsyncIterator
 from typing import Protocol
 
 from auraclaw.action.ports import PolicyEvaluation
@@ -9,6 +10,7 @@ from auraclaw.contracts.errors import (
     AuthorizationError,
     BudgetExceededError,
     LeaseConflictError,
+    ModelProviderError,
     PolicyDeniedError,
     VersionConflictError,
 )
@@ -17,11 +19,13 @@ from auraclaw.contracts.internal import (
     ModelCancelResponse,
     ModelGenerateRequest,
     ModelGenerateResponse,
+    ModelStreamEvent,
     ServiceIdentity,
 )
 from auraclaw.contracts.tools import PolicyDecision
 from auraclaw.model_gateway.ports import ModelStateStore
-from auraclaw.runtime.ports import ModelClient, ModelPolicy, ModelRequest
+from auraclaw.runtime.model_stream import iter_model_stream
+from auraclaw.runtime.ports import ModelClient, ModelPolicy, ModelRequest, ModelResponse
 
 
 class ModelPolicyEnforcer(Protocol):
@@ -58,28 +62,130 @@ class ModelGatewayInternalService:
             raise AuthorizationError("model calls are restricted to agent-runtime")
 
     async def generate(self, request: ModelGenerateRequest) -> ModelGenerateResponse:
+        result: ModelGenerateResponse | None = None
+        async for event in self.generate_stream(request):
+            if event.type == "completed":
+                result = ModelGenerateResponse.model_validate(event.payload)
+        if result is None:
+            raise ModelProviderError("model stream ended without a completed response")
+        return result
+
+    async def generate_stream(
+        self, request: ModelGenerateRequest
+    ) -> AsyncIterator[ModelStreamEvent]:
         self._require_runtime(request.context.service_identity)
-        if self._policy is not None:
-            encoded = json.dumps(request.messages, sort_keys=True, default=str).encode()
-            evaluation = await self._policy.evaluate_action(
+        await self._enforce_policy(request)
+        request_digest = self._request_digest(request)
+        if self._state is not None:
+            reservation = await self._state.reserve(
                 tenant_id=request.context.tenant_id,
-                subject=request.context.service_identity.value,
-                action="model.generate",
-                resource=request.capability,
-                input_digest=hashlib.sha256(encoded).hexdigest(),
-                correlation_id=request.run_id,
-                attributes={
-                    "permission": "read-only",
-                    "risk_level": "medium",
-                    "data_classification": request.data_classification,
-                },
+                model_call_id=request.model_call_id,
+                run_id=request.run_id,
+                request_digest=request_digest,
+                reserved_tokens=request.max_output_tokens,
+                token_limit=self._tenant_token_limit,
             )
-            if evaluation.decision not in {
-                PolicyDecision.ALLOW,
-                PolicyDecision.ALLOW_WITH_CONSTRAINTS,
-            }:
-                raise PolicyDeniedError("Model policy denied generation")
-        request_digest = hashlib.sha256(
+            if reservation.status == "completed":
+                assert reservation.cached_response is not None
+                async for event in self._cached_stream(reservation.cached_response):
+                    yield event
+                return
+            if reservation.status == "conflict":
+                raise VersionConflictError("model_call_id was reused with another request")
+            if reservation.status == "in_progress":
+                raise LeaseConflictError("model call is already in progress")
+            if reservation.status == "quota_exceeded":
+                raise BudgetExceededError("tenant model token quota is exhausted")
+        sequence = 0
+        response: ModelResponse | None = None
+        try:
+            async for chunk in iter_model_stream(
+                self._model,
+                ModelRequest(
+                    model_call_id=request.model_call_id,
+                    tenant_id=request.context.tenant_id,
+                    run_id=request.run_id,
+                    messages=request.messages,
+                    tools=request.tools,
+                    policy=ModelPolicy(
+                        capability=request.capability,
+                        preferred_model=request.preferred_model,
+                        allowed_providers=request.allowed_providers,
+                        data_classification=request.data_classification,
+                    ),
+                    max_output_tokens=request.max_output_tokens,
+                ),
+            ):
+                if chunk.kind == "delta":
+                    if not chunk.delta:
+                        continue
+                    sequence += 1
+                    yield ModelStreamEvent(
+                        model_call_id=request.model_call_id,
+                        sequence=sequence,
+                        type="delta",
+                        payload={"delta": chunk.delta},
+                    )
+                elif chunk.kind == "completed":
+                    response = chunk.response
+        except Exception as exc:
+            if self._state is not None:
+                await self._state.fail(
+                    tenant_id=request.context.tenant_id,
+                    model_call_id=request.model_call_id,
+                    error_code=type(exc).__name__,
+                )
+            raise
+        if response is None:
+            raise ModelProviderError("model stream ended without a completed response")
+        result = self._to_generate_response(response)
+        if self._state is not None:
+            await self._state.complete(
+                tenant_id=request.context.tenant_id,
+                model_call_id=request.model_call_id,
+                response=result,
+            )
+        sequence += 1
+        yield ModelStreamEvent(
+            model_call_id=request.model_call_id,
+            sequence=sequence,
+            type="completed",
+            payload=result.model_dump(mode="json"),
+        )
+
+    async def cancel(self, request: ModelCancelRequest) -> ModelCancelResponse:
+        self._require_runtime(request.context.service_identity)
+        return ModelCancelResponse(
+            model_call_id=request.model_call_id,
+            cancelled=False,
+        )
+
+    async def _enforce_policy(self, request: ModelGenerateRequest) -> None:
+        if self._policy is None:
+            return
+        encoded = json.dumps(request.messages, sort_keys=True, default=str).encode()
+        evaluation = await self._policy.evaluate_action(
+            tenant_id=request.context.tenant_id,
+            subject=request.context.service_identity.value,
+            action="model.generate",
+            resource=request.capability,
+            input_digest=hashlib.sha256(encoded).hexdigest(),
+            correlation_id=request.run_id,
+            attributes={
+                "permission": "read-only",
+                "risk_level": "medium",
+                "data_classification": request.data_classification,
+            },
+        )
+        if evaluation.decision not in {
+            PolicyDecision.ALLOW,
+            PolicyDecision.ALLOW_WITH_CONSTRAINTS,
+        }:
+            raise PolicyDeniedError("Model policy denied generation")
+
+    @staticmethod
+    def _request_digest(request: ModelGenerateRequest) -> str:
+        return hashlib.sha256(
             json.dumps(
                 {
                     "run_id": request.run_id,
@@ -95,50 +201,32 @@ class ModelGatewayInternalService:
                 default=str,
             ).encode()
         ).hexdigest()
-        if self._state is not None:
-            reservation = await self._state.reserve(
-                tenant_id=request.context.tenant_id,
-                model_call_id=request.model_call_id,
-                run_id=request.run_id,
-                request_digest=request_digest,
-                reserved_tokens=request.max_output_tokens,
-                token_limit=self._tenant_token_limit,
+
+    async def _cached_stream(
+        self, cached: ModelGenerateResponse
+    ) -> AsyncIterator[ModelStreamEvent]:
+        sequence = 0
+        for delta in cached.deltas:
+            if not delta:
+                continue
+            sequence += 1
+            yield ModelStreamEvent(
+                model_call_id=cached.model_call_id,
+                sequence=sequence,
+                type="delta",
+                payload={"delta": delta},
             )
-            if reservation.status == "completed":
-                assert reservation.cached_response is not None
-                return reservation.cached_response
-            if reservation.status == "conflict":
-                raise VersionConflictError("model_call_id was reused with another request")
-            if reservation.status == "in_progress":
-                raise LeaseConflictError("model call is already in progress")
-            if reservation.status == "quota_exceeded":
-                raise BudgetExceededError("tenant model token quota is exhausted")
-        try:
-            response = await self._model.generate(
-                ModelRequest(
-                    model_call_id=request.model_call_id,
-                    tenant_id=request.context.tenant_id,
-                    run_id=request.run_id,
-                    messages=request.messages,
-                    tools=request.tools,
-                    policy=ModelPolicy(
-                        capability=request.capability,
-                        preferred_model=request.preferred_model,
-                        allowed_providers=request.allowed_providers,
-                        data_classification=request.data_classification,
-                    ),
-                    max_output_tokens=request.max_output_tokens,
-                )
-            )
-        except Exception as exc:
-            if self._state is not None:
-                await self._state.fail(
-                    tenant_id=request.context.tenant_id,
-                    model_call_id=request.model_call_id,
-                    error_code=type(exc).__name__,
-                )
-            raise
-        result = ModelGenerateResponse(
+        sequence += 1
+        yield ModelStreamEvent(
+            model_call_id=cached.model_call_id,
+            sequence=sequence,
+            type="completed",
+            payload=cached.model_dump(mode="json"),
+        )
+
+    @staticmethod
+    def _to_generate_response(response: ModelResponse) -> ModelGenerateResponse:
+        return ModelGenerateResponse(
             model_call_id=response.model_call_id,
             provider=response.provider,
             model=response.model,
@@ -159,18 +247,4 @@ class ModelGatewayInternalService:
             ),
             finish_reason=response.finish_reason,
             usage=response.usage,
-        )
-        if self._state is not None:
-            await self._state.complete(
-                tenant_id=request.context.tenant_id,
-                model_call_id=request.model_call_id,
-                response=result,
-            )
-        return result
-
-    async def cancel(self, request: ModelCancelRequest) -> ModelCancelResponse:
-        self._require_runtime(request.context.service_identity)
-        return ModelCancelResponse(
-            model_call_id=request.model_call_id,
-            cancelled=False,
         )

@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, NoReturn, TypeVar
 
 import httpx
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import ValidationError
 from starlette.responses import Response
 
@@ -34,6 +34,7 @@ from auraclaw.contracts.internal import (
 RequestModel = TypeVar("RequestModel", bound=ContractModel)
 ResponseModel = TypeVar("ResponseModel", bound=ContractModel)
 ContractHandler = Callable[[ContractModel], Awaitable[ContractModel]]
+StreamContractHandler = Callable[[ContractModel], AsyncIterator[ContractModel]]
 
 
 @dataclass(frozen=True)
@@ -41,6 +42,13 @@ class ContractRoute:
     request_model: type[ContractModel]
     response_model: type[ContractModel]
     handler: ContractHandler
+
+
+@dataclass(frozen=True)
+class StreamContractRoute:
+    request_model: type[ContractModel]
+    event_model: type[ContractModel]
+    handler: StreamContractHandler
 
 
 def contract_route(
@@ -55,6 +63,23 @@ def contract_route(
     return ContractRoute(
         request_model=request_model,
         response_model=response_model,
+        handler=invoke,
+    )
+
+
+def stream_contract_route(
+    request_model: type[RequestModel],
+    event_model: type[ResponseModel],
+    handler: Callable[[RequestModel], AsyncIterator[ResponseModel]],
+) -> StreamContractRoute:
+    async def invoke(request: ContractModel) -> AsyncIterator[ContractModel]:
+        parsed = request_model.model_validate(request)
+        async for event in handler(parsed):
+            yield event_model.model_validate(event)
+
+    return StreamContractRoute(
+        request_model=request_model,
+        event_model=event_model,
         handler=invoke,
     )
 
@@ -103,6 +128,7 @@ def create_contract_app(
     service_name: str,
     routes: Mapping[str, ContractRoute],
     *,
+    stream_routes: Mapping[str, StreamContractRoute] | None = None,
     workload_identities: Mapping[str, ServiceIdentity] | None = None,
 ) -> FastAPI:
     app = FastAPI(title=f"AuraClaw {service_name} Internal API", version=INTERNAL_API_VERSION)
@@ -132,6 +158,21 @@ def create_contract_app(
         )
         return JSONResponse(status_code=exc.status_code, content=error.model_dump(mode="json"))
 
+    def _authenticate(request_model: ContractModel, raw_request: Request) -> None:
+        if workload_identities is None:
+            return
+        authorization = raw_request.headers.get("Authorization", "")
+        token = authorization.removeprefix("Bearer ")
+        authenticated = workload_identities.get(token)
+        context = getattr(request_model, "context", None)
+        supplied = getattr(context, "service_identity", None)
+        if authenticated is None or supplied != authenticated:
+            error = InternalError(
+                code=InternalErrorCode.UNAUTHORIZED,
+                message="workload identity does not match request context",
+            )
+            raise InternalAuthenticationError(error)
+
     def make_endpoint(
         route: ContractRoute,
     ) -> Callable[[dict[str, Any], Request], Awaitable[dict[str, Any]]]:
@@ -140,21 +181,36 @@ def create_contract_app(
                 request_model = route.request_model.model_validate(payload)
             except ValidationError as exc:
                 raise ContractValidationError(str(exc)) from exc
-            if workload_identities is not None:
-                authorization = raw_request.headers.get("Authorization", "")
-                token = authorization.removeprefix("Bearer ")
-                authenticated = workload_identities.get(token)
-                context = getattr(request_model, "context", None)
-                supplied = getattr(context, "service_identity", None)
-                if authenticated is None or supplied != authenticated:
-                    error = InternalError(
-                        code=InternalErrorCode.UNAUTHORIZED,
-                        message="workload identity does not match request context",
-                    )
-                    raise InternalAuthenticationError(error)
+            _authenticate(request_model, raw_request)
             response = await route.handler(request_model)
             validated = route.response_model.model_validate(response)
             return validated.model_dump(mode="json")
+
+        return endpoint
+
+    def make_stream_endpoint(
+        route: StreamContractRoute,
+    ) -> Callable[[dict[str, Any], Request], Awaitable[StreamingResponse]]:
+        async def endpoint(
+            payload: dict[str, Any], raw_request: Request
+        ) -> StreamingResponse:
+            try:
+                request_model = route.request_model.model_validate(payload)
+            except ValidationError as exc:
+                raise ContractValidationError(str(exc)) from exc
+            _authenticate(request_model, raw_request)
+
+            async def event_stream() -> AsyncIterator[str]:
+                async for event in route.handler(request_model):
+                    validated = route.event_model.model_validate(event)
+                    yield f"data: {validated.model_dump_json()}\n\n"
+                yield "data: [DONE]\n\n"
+
+            return StreamingResponse(
+                event_stream(),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            )
 
         return endpoint
 
@@ -164,6 +220,12 @@ def create_contract_app(
             make_endpoint(route),
             methods=["POST"],
             response_model=route.response_model,
+        )
+    for path, stream_route in (stream_routes or {}).items():
+        app.add_api_route(
+            path,
+            make_stream_endpoint(stream_route),
+            methods=["POST"],
         )
     return app
 
@@ -202,20 +264,46 @@ class HttpContractClient:
         self._client = client
         self._bearer_token = bearer_token
 
+    def _headers(self) -> dict[str, str]:
+        headers = {"X-AuraClaw-Contract-Version": INTERNAL_API_VERSION}
+        if self._bearer_token is not None:
+            headers["Authorization"] = f"Bearer {self._bearer_token}"
+        return headers
+
     async def call(
         self,
         path: str,
         request: RequestModel,
         response_model: type[ResponseModel],
     ) -> ResponseModel:
-        headers = {"X-AuraClaw-Contract-Version": INTERNAL_API_VERSION}
-        if self._bearer_token is not None:
-            headers["Authorization"] = f"Bearer {self._bearer_token}"
         response = await self._client.post(
             path,
             json=request.model_dump(mode="json"),
-            headers=headers,
+            headers=self._headers(),
         )
         if response.is_error:
             _raise_contract_error(response)
         return response_model.model_validate(response.json())
+
+    async def stream(
+        self,
+        path: str,
+        request: RequestModel,
+        event_model: type[ResponseModel],
+    ) -> AsyncIterator[ResponseModel]:
+        async with self._client.stream(
+            "POST",
+            path,
+            json=request.model_dump(mode="json"),
+            headers=self._headers(),
+        ) as response:
+            if response.is_error:
+                await response.aread()
+                _raise_contract_error(response)
+            async for line in response.aiter_lines():
+                if not line.startswith("data:"):
+                    continue
+                value = line[5:].strip()
+                if not value or value == "[DONE]":
+                    continue
+                yield event_model.model_validate_json(value)

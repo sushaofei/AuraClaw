@@ -1,10 +1,13 @@
 from __future__ import annotations
 
-from auraclaw.contracts.errors import AuthorizationError, BudgetExceededError
+from collections.abc import AsyncIterator
+
+from auraclaw.contracts.errors import AuthorizationError, BudgetExceededError, ModelProviderError
 from auraclaw.runtime.ports import (
     CredentialResolver,
     ModelRequest,
     ModelResponse,
+    ModelStreamChunk,
     ProviderAdapter,
 )
 
@@ -24,6 +27,17 @@ class ModelGateway:
         self._default_provider = default_provider
 
     async def generate(self, request: ModelRequest) -> ModelResponse:
+        response: ModelResponse | None = None
+        async for chunk in self.generate_stream(request):
+            if chunk.kind == "completed":
+                response = chunk.response
+        if response is None:
+            raise ModelProviderError("model provider stream ended without a completed response")
+        return response
+
+    async def generate_stream(
+        self, request: ModelRequest
+    ) -> AsyncIterator[ModelStreamChunk]:
         if request.max_output_tokens <= 0:
             raise BudgetExceededError("model output token budget is exhausted")
         allowed = request.policy.allowed_providers
@@ -34,7 +48,15 @@ class ModelGateway:
         if adapter is None:
             raise AuthorizationError(f"model provider is not configured: {provider}")
         credential = await self._credentials.resolve(provider, request.tenant_id)
-        return await adapter.generate(request, credential=credential)
+        stream = getattr(adapter, "generate_stream", None)
+        if callable(stream):
+            async for chunk in stream(request, credential=credential):
+                yield chunk
+            return
+        response = await adapter.generate(request, credential=credential)
+        for delta in response.deltas:
+            yield ModelStreamChunk(kind="delta", delta=str(delta))
+        yield ModelStreamChunk(kind="completed", response=response)
 
 
 class StaticCredentialResolver:

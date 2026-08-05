@@ -19,6 +19,7 @@ from auraclaw.contracts.state import Visibility
 from auraclaw.control.ports import RuntimeAssignment, RuntimeCheckpoint
 from auraclaw.runtime.capability_controller import RuntimeCapabilityController
 from auraclaw.runtime.clients import assignment_resource_id
+from auraclaw.runtime.model_stream import iter_model_stream
 from auraclaw.runtime.ports import (
     ModelClient,
     ModelPolicy,
@@ -118,7 +119,8 @@ class AgentHarness:
                     "model request has no user/assistant messages "
                     f"(session={assignment.session_id} run={assignment.run_id})"
                 )
-            response = await self._model.generate(
+            response, sequence = await self._generate_with_live_deltas(
+                assignment,
                 ModelRequest(
                     model_call_id=model_call_id,
                     tenant_id=assignment.tenant_id,
@@ -126,27 +128,37 @@ class AgentHarness:
                     messages=messages,
                     policy=self._policy,
                     max_output_tokens=assignment.budget.max_output_tokens,
-                )
+                ),
+                sequence=0,
             )
             await self._validate_usage(assignment, response)
             await self._save_checkpoint(
                 assignment,
                 "model_completed",
-                {"response": self._response_to_dict(response), "sequence": 0},
+                {
+                    "response": self._response_to_dict(response),
+                    "sequence": sequence,
+                    "deltas_published": True,
+                },
             )
             await self._inject(InjectionPoint.AFTER_MODEL)
         elif checkpoint.phase == "model_completed":
             response = self._response_from_dict(dict(checkpoint.state["response"]))
+            sequence = int(checkpoint.state.get("sequence", 0))
+            if not checkpoint.state.get("deltas_published"):
+                for delta in response.deltas:
+                    sequence += 1
+                    await self._publish_delta(assignment, sequence, delta)
         else:
             response_data = checkpoint.state.get("response")
             if not isinstance(response_data, dict):
                 raise RuntimeError(f"invalid Runtime checkpoint phase: {checkpoint.phase}")
             response = self._response_from_dict(response_data)
-
-        sequence = int((checkpoint.state if checkpoint else {}).get("sequence", 0))
-        for delta in response.deltas:
-            sequence += 1
-            await self._publish_delta(assignment, sequence, delta)
+            sequence = int(checkpoint.state.get("sequence", 0))
+            if not checkpoint.state.get("deltas_published"):
+                for delta in response.deltas:
+                    sequence += 1
+                    await self._publish_delta(assignment, sequence, delta)
 
         events = await self._session.load(assignment)
         await self._append_once(
@@ -265,7 +277,8 @@ class AgentHarness:
                 )
                 await self._inject(InjectionPoint.BEFORE_MODEL)
                 await self._guard(assignment)
-                response = await self._model.generate(
+                response, sequence = await self._generate_with_live_deltas(
+                    assignment,
                     ModelRequest(
                         model_call_id=model_call_id,
                         tenant_id=assignment.tenant_id,
@@ -279,7 +292,9 @@ class AgentHarness:
                         ),
                         policy=self._policy,
                         max_output_tokens=remaining_output_tokens,
-                    )
+                    ),
+                    sequence=int(state.get("sequence", 0)),
+                    publish_deltas=True,
                 )
                 usage = self._accumulate_usage(
                     dict(state.get("usage", {})), response.usage
@@ -291,6 +306,8 @@ class AgentHarness:
                     "usage": usage,
                     "steps_used": int(state.get("steps_used", 0)) + 1,
                     "call_index": 0,
+                    "sequence": sequence,
+                    "deltas_published": True,
                 }
                 await self._save_checkpoint(
                     assignment, "capability.model_completed", state
@@ -303,7 +320,10 @@ class AgentHarness:
                 await self._inject(InjectionPoint.AFTER_MODEL)
 
             sequence = int(state.get("sequence", 0))
-            if not response.tool_calls:
+            if (
+                not response.tool_calls
+                and not state.get("deltas_published")
+            ):
                 for delta in response.deltas:
                     sequence += 1
                     await self._publish_delta(assignment, sequence, delta)
@@ -893,6 +913,26 @@ class AgentHarness:
         except Exception:
             # The ephemeral stream is deliberately not a result-delivery guarantee.
             return
+
+    async def _generate_with_live_deltas(
+        self,
+        assignment: RuntimeAssignment,
+        request: ModelRequest,
+        *,
+        sequence: int,
+        publish_deltas: bool = True,
+    ) -> tuple[ModelResponse, int]:
+        response: ModelResponse | None = None
+        async for chunk in iter_model_stream(self._model, request):
+            if chunk.kind == "delta":
+                if publish_deltas and chunk.delta:
+                    sequence += 1
+                    await self._publish_delta(assignment, sequence, chunk.delta)
+            elif chunk.kind == "completed":
+                response = chunk.response
+        if response is None:
+            raise ModelProviderError("model stream ended without a completed response")
+        return response, sequence
 
     @staticmethod
     def _build_messages(events: list[Any]) -> tuple[dict[str, Any], ...]:
