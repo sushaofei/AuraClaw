@@ -109,8 +109,9 @@ class _Session:
         *,
         command_id: str,
         operation: str,
+        expected_version: int | None = None,
     ) -> list[Any]:
-        del command_id, operation
+        del command_id, operation, expected_version
         appended = [
             SimpleNamespace(
                 type=event.type,

@@ -187,6 +187,11 @@ class Settings(BaseSettings):
     cors_allow_origins: str = ""
     runtime_enabled: bool = True
     runtime_poll_interval: float = 0.05
+    # Shared production-topology worker ticks (Outbox → Feed / Projection).
+    # Keep identical semantics across compose.services and compose.production;
+    # only tune the interval. Defaults favor TTFT over idle DB chatter.
+    projection_worker_interval: float = Field(default=0.1, ge=0.01, le=30.0)
+    orchestrator_worker_interval: float = Field(default=0.1, ge=0.01, le=30.0)
     orchestrator_lease_ttl_seconds: int = Field(default=300, ge=30, le=3600)
     runtime_id: str = "runtime-local-1"
     runtime_role: str = "root"

@@ -281,6 +281,9 @@ class UnavailableModelClient:
         del request
         raise RuntimeError("model provider is not configured")
 
+    async def aclose(self) -> None:
+        return None
+
 
 class RemoteRuntimeWorker:
     def __init__(
@@ -842,6 +845,7 @@ def _orchestrator_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         spec,
         settings,
         tick=tick,
+        worker_interval=settings.orchestrator_worker_interval,
         closeables=closeables,
     )
     service = ControlInternalService(
@@ -1639,14 +1643,6 @@ def _model_gateway_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
             bearer_token=token or secrets.token_urlsafe(32),
             service_identity=ServiceIdentity.MODEL_GATEWAY,
         )
-    app = _base_service_app(
-        spec,
-        settings,
-        closeables=(
-            *((policy,) if policy is not None else ()),
-            *((state,) if state is not None else ()),
-        ),
-    )
     model = (
         providers.get_model_gateway()
         if settings.model_gateway_configured
@@ -1657,6 +1653,15 @@ def _model_gateway_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         policy=policy,
         state=state,
         tenant_token_limit=settings.model_tenant_token_limit_per_hour,
+    )
+    app = _base_service_app(
+        spec,
+        settings,
+        closeables=(
+            *((policy,) if policy is not None else ()),
+            *((state,) if state is not None else ()),
+            model,
+        ),
     )
     contract_app = create_contract_app(
         "model-gateway",

@@ -73,8 +73,9 @@ class _Session:
         *,
         command_id: str,
         operation: str,
+        expected_version: int | None = None,
     ) -> list[Any]:
-        del operation
+        del operation, expected_version
         if command_id in self.commands:
             return []
         self.commands.add(command_id)

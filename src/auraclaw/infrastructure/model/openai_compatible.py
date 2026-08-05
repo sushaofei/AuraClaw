@@ -38,6 +38,12 @@ class OpenAICompatibleProvider:
         self._timeout = timeout_seconds
         self._thinking_enabled = thinking_enabled
         self._client = client
+        self._owns_client = client is None
+
+    async def aclose(self) -> None:
+        if self._client is not None and self._owns_client:
+            await self._client.aclose()
+            self._client = None
 
     async def generate(self, request: ModelRequest, *, credential: str) -> ModelResponse:
         response: ModelResponse | None = None
@@ -71,8 +77,10 @@ class OpenAICompatibleProvider:
         usage: dict[str, int | float] = {}
         finish_reason = "stop"
         tool_fragments: dict[int, dict[str, str]] = {}
-        client = self._client or httpx.AsyncClient(timeout=self._timeout)
-        owns_client = self._client is None
+        if self._client is None:
+            self._client = httpx.AsyncClient(timeout=self._timeout)
+            self._owns_client = True
+        client = self._client
         try:
             async with client.stream(
                 "POST",
@@ -112,9 +120,6 @@ class OpenAICompatibleProvider:
             raise ModelTimeoutError("model provider request timed out") from exc
         except httpx.HTTPError as exc:
             raise ModelProviderError("model provider request failed") from exc
-        finally:
-            if owns_client:
-                await client.aclose()
 
         duration_ms = (time.perf_counter() - started) * 1_000
         logger.info(
