@@ -67,10 +67,12 @@ class RunnableFeedConsumer:
         enqueued = 0
         for record in records:
             try:
-                events = await self._source.load(
-                    record.event.tenant_id, record.event.session_id
-                )
-                item = self._derive(events, record.event.aggregate_version)
+                item = self._derive_from_record(record)
+                if item is None:
+                    events = await self._source.load(
+                        record.event.tenant_id, record.event.session_id
+                    )
+                    item = self._derive(events, record.event.aggregate_version)
                 if item is not None:
                     enqueued += int(await self._store.enqueue(item))
                 # Ack off the schedule critical path; enqueue is idempotent so
@@ -110,6 +112,40 @@ class RunnableFeedConsumer:
         task = asyncio.create_task(_ack(), name=f"control-outbox-ack-{record.outbox_id}")
         self._ack_tasks.add(task)
         task.add_done_callback(self._ack_tasks.discard)
+
+    @staticmethod
+    def _derive_from_record(record: ClaimedOutboxRecord) -> RunnableItem | None:
+        """Hot path for first-run scheduling without a full Session feed reload."""
+        event = record.event
+        if event.type != "run.requested":
+            return None
+        run_id = event.payload.get("run_id")
+        if run_id is None:
+            return None
+        role = str(event.payload.get("role", "root"))
+        configured = event.payload.get("budget")
+        budget = RuntimeBudget()
+        if isinstance(configured, dict):
+            budget = RuntimeBudget(
+                max_steps=int(configured.get("max_steps", 16)),
+                max_output_tokens=int(configured.get("max_output_tokens", 8192)),
+                max_cost=(
+                    float(configured["max_cost"])
+                    if configured.get("max_cost") is not None
+                    else None
+                ),
+            )
+        return RunnableItem(
+            task_id=f"{event.tenant_id}:{event.session_id}:{run_id}",
+            tenant_id=event.tenant_id,
+            root_session_id=event.root_session_id,
+            session_id=event.session_id,
+            run_id=str(run_id),
+            source_version=event.aggregate_version,
+            queue_partition=event.tenant_id,
+            role=role,
+            budget=budget,
+        )
 
     @staticmethod
     def _derive(
