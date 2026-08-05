@@ -2,11 +2,11 @@
 """Measure create-task → first SSE model.output.delta on a live AuraClaw stack.
 
 Intended for production-isomorphic topologies (compose.services / DEV_SERVICE),
-not `auraclaw serve`.
+not `auraclaw serve`. Uses only the Python standard library.
 
 Example:
   python scripts/measure_create_to_first_delta.py \\
-    --base-url http://10.244.16.131:8080 \\
+    --base-url http://127.0.0.1:8080 \\
     --goal '用一句话介绍你自己'
 """
 
@@ -17,9 +17,25 @@ import json
 import sys
 import time
 import uuid
+import urllib.error
+import urllib.request
 from typing import Any
 
-import httpx
+
+def _request(
+    method: str,
+    url: str,
+    *,
+    headers: dict[str, str],
+    body: bytes | None = None,
+    timeout: float,
+) -> tuple[int, bytes]:
+    req = urllib.request.Request(url, data=body, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            return int(response.status), response.read()
+    except urllib.error.HTTPError as exc:
+        return int(exc.code), exc.read()
 
 
 def _parse_sse_block(block: str) -> tuple[str | None, dict[str, Any] | None]:
@@ -52,69 +68,105 @@ def measure(
         "X-Tenant-ID": tenant_id,
         "X-Actor-ID": actor_id,
         "Content-Type": "application/json",
+        "Accept": "text/event-stream",
     }
     started = time.perf_counter()
     create_ms: float | None = None
-    authorize_ms: float | None = None
+    visible_ms: float | None = None
     first_delta_ms: float | None = None
     session_id = ""
     run_id = ""
 
-    with httpx.Client(timeout=timeout) as client:
-        create = client.post(
-            f"{base}/v1/tasks",
-            headers={
-                **headers,
-                "Idempotency-Key": f"ttft-{uuid.uuid4().hex}",
-            },
-            json={"goal": goal},
-        )
-        create.raise_for_status()
-        create_ms = (time.perf_counter() - started) * 1_000
-        body = create.json()
-        session_id = str(body["session_id"])
-        run_id = str(body["run_id"])
+    status, payload = _request(
+        "POST",
+        f"{base}/v1/tasks",
+        headers={
+            **headers,
+            "Idempotency-Key": f"ttft-{uuid.uuid4().hex}",
+        },
+        body=json.dumps({"goal": goal}).encode(),
+        timeout=timeout,
+    )
+    if status >= 400:
+        print(f"create failed status={status} body={payload!r}", file=sys.stderr)
+        return 1
+    create_ms = (time.perf_counter() - started) * 1_000
+    body = json.loads(payload.decode())
+    session_id = str(body["session_id"])
+    run_id = str(body["run_id"])
 
-        # Projection may lag slightly; retry authorize/open until ready.
-        stream_url = f"{base}/v1/streams/{session_id}"
-        deadline = time.perf_counter() + timeout
-        while time.perf_counter() < deadline:
-            with client.stream("GET", stream_url, headers=headers) as response:
-                if response.status_code == 404:
-                    time.sleep(0.05)
-                    continue
-                response.raise_for_status()
-                authorize_ms = (time.perf_counter() - started) * 1_000
-                buffer = ""
-                for chunk in response.iter_text():
-                    buffer += chunk
-                    while "\n\n" in buffer:
-                        block, buffer = buffer.split("\n\n", 1)
-                        event_type, data = _parse_sse_block(block)
-                        if event_type == "model.output.delta" or (
-                            isinstance(data, dict)
-                            and data.get("type") == "model.output.delta"
-                        ):
-                            first_delta_ms = (time.perf_counter() - started) * 1_000
-                            print(
-                                json.dumps(
-                                    {
-                                        "session_id": session_id,
-                                        "run_id": run_id,
-                                        "create_ms": round(create_ms, 2),
-                                        "stream_open_ms": round(authorize_ms, 2),
-                                        "first_delta_ms": round(first_delta_ms, 2),
-                                        "goal": goal,
-                                    },
-                                    ensure_ascii=False,
-                                )
+    deadline = time.perf_counter() + timeout
+    while time.perf_counter() < deadline:
+        code, _ = _request(
+            "GET",
+            f"{base}/v1/tasks/{session_id}",
+            headers={"X-Tenant-ID": tenant_id, "X-Actor-ID": actor_id},
+            timeout=min(5.0, timeout),
+        )
+        if code == 200:
+            visible_ms = (time.perf_counter() - started) * 1_000
+            break
+        time.sleep(0.02)
+
+    stream_req = urllib.request.Request(
+        f"{base}/v1/streams/{session_id}",
+        headers={
+            "X-Tenant-ID": tenant_id,
+            "X-Actor-ID": actor_id,
+            "Accept": "text/event-stream",
+        },
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(stream_req, timeout=timeout) as response:
+            buffer = ""
+            while time.perf_counter() < deadline:
+                chunk = response.read(256)
+                if not chunk:
+                    break
+                buffer += chunk.decode("utf-8", errors="replace")
+                while "\n\n" in buffer:
+                    block, buffer = buffer.split("\n\n", 1)
+                    event_type, data = _parse_sse_block(block)
+                    if event_type == "model.output.delta" or (
+                        isinstance(data, dict)
+                        and data.get("type") == "model.output.delta"
+                    ):
+                        first_delta_ms = (time.perf_counter() - started) * 1_000
+                        print(
+                            json.dumps(
+                                {
+                                    "session_id": session_id,
+                                    "run_id": run_id,
+                                    "create_ms": round(create_ms, 2),
+                                    "task_visible_ms": None
+                                    if visible_ms is None
+                                    else round(visible_ms, 2),
+                                    "first_delta_ms": round(first_delta_ms, 2),
+                                    "goal": goal,
+                                },
+                                ensure_ascii=False,
                             )
-                            return 0
-                    if time.perf_counter() >= deadline:
-                        break
-            if first_delta_ms is not None:
-                break
-            time.sleep(0.05)
+                        )
+                        return 0
+    except Exception as exc:  # noqa: BLE001 - probe reports failure payload
+        print(
+            json.dumps(
+                {
+                    "session_id": session_id,
+                    "run_id": run_id,
+                    "create_ms": None if create_ms is None else round(create_ms, 2),
+                    "task_visible_ms": None
+                    if visible_ms is None
+                    else round(visible_ms, 2),
+                    "first_delta_ms": None,
+                    "error": str(exc),
+                },
+                ensure_ascii=False,
+            ),
+            file=sys.stderr,
+        )
+        return 1
 
     print(
         json.dumps(
@@ -122,9 +174,7 @@ def measure(
                 "session_id": session_id,
                 "run_id": run_id,
                 "create_ms": None if create_ms is None else round(create_ms, 2),
-                "stream_open_ms": None
-                if authorize_ms is None
-                else round(authorize_ms, 2),
+                "task_visible_ms": None if visible_ms is None else round(visible_ms, 2),
                 "first_delta_ms": None,
                 "error": "timeout_waiting_for_first_delta",
             },
