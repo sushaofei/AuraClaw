@@ -213,3 +213,135 @@ def test_outbox_nack_backoff_caps_exponent_before_power() -> None:
 
     asyncio.run(exercise("mysql"))
     asyncio.run(exercise("postgres"))
+
+
+_NEXT_SEQUENCE_SQL = """
+INSERT INTO streaming.session_sequence
+       (tenant_id, session_id, last_sequence)
+   VALUES ($1, $2, 1)
+   ON CONFLICT (tenant_id, session_id) DO UPDATE SET
+       last_sequence = streaming.session_sequence.last_sequence + 1,
+       updated_at = now()
+   RETURNING last_sequence
+""".strip()
+
+
+def test_insert_returning_followup_for_session_sequence() -> None:
+    from auraclaw.infrastructure.persistence.mysql_pool import _insert_returning_followup
+
+    followup = _insert_returning_followup(_NEXT_SEQUENCE_SQL, ("local", "ses_1"))
+    assert followup is not None
+    select_sql, select_args = followup
+    assert select_sql == (
+        "SELECT last_sequence FROM streaming.session_sequence "
+        "WHERE tenant_id=$1 AND session_id=$2"
+    )
+    assert select_args == ("local", "ses_1")
+
+
+def test_insert_returning_followup_for_conflict_do_nothing() -> None:
+    from auraclaw.infrastructure.persistence.mysql_pool import _insert_returning_followup
+
+    sql = (
+        "INSERT INTO projection.processed_event (projector_id, event_id) "
+        "VALUES ('task', $1) ON CONFLICT DO NOTHING RETURNING event_id"
+    )
+    followup = _insert_returning_followup(sql, ("evt_1",))
+    assert followup is not None
+    select_sql, select_args = followup
+    assert "projector_id='task'" in select_sql
+    assert "event_id=$1" in select_sql
+    assert select_args == ("evt_1",)
+
+
+def test_mysql_fetchval_insert_returning_reads_real_sequence() -> None:
+    """Regression for #40: INSERT RETURNING must not hardcode '1'."""
+    import asyncio
+
+    from auraclaw.infrastructure.persistence.mysql_pool import MysqlConnection
+
+    class _FakeCursor:
+        def __init__(self, owner: _FakeRaw) -> None:
+            self._owner = owner
+            self.rowcount = 0
+            self._rows: list[dict[str, object]] = []
+
+        async def execute(self, sql: str, params: tuple[object, ...] = ()) -> None:
+            self._owner.statements.append((sql, params))
+            normalized = " ".join(sql.upper().split())
+            if normalized.startswith("INSERT"):
+                self._owner.sequence += 1
+                self.rowcount = 1 if self._owner.sequence == 1 else 2
+                self._rows = []
+                return
+            if "SELECT LAST_SEQUENCE FROM" in normalized:
+                self.rowcount = 1
+                self._rows = [{"last_sequence": self._owner.sequence}]
+                return
+            raise AssertionError(f"unexpected SQL: {sql}")
+
+        async def fetchall(self) -> list[dict[str, object]]:
+            return list(self._rows)
+
+        async def __aenter__(self) -> _FakeCursor:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+    class _FakeRaw:
+        def __init__(self) -> None:
+            self.sequence = 0
+            self.statements: list[tuple[str, tuple[object, ...]]] = []
+
+        def cursor(self, *_args: object, **_kwargs: object) -> _FakeCursor:
+            return _FakeCursor(self)
+
+    async def exercise() -> None:
+        raw = _FakeRaw()
+        connection = MysqlConnection(raw)  # type: ignore[arg-type]
+        values = [
+            await connection.fetchval(_NEXT_SEQUENCE_SQL, "local", "ses_seq")
+            for _ in range(3)
+        ]
+        assert values == [1, 2, 3]
+        assert raw.sequence == 3
+        assert any("SELECT" in sql.upper() for sql, _ in raw.statements)
+
+    asyncio.run(exercise())
+
+
+def test_mysql_fetchval_insert_returning_do_nothing_miss_returns_none() -> None:
+    import asyncio
+
+    from auraclaw.infrastructure.persistence.mysql_pool import MysqlConnection
+
+    class _FakeCursor:
+        rowcount = 0
+
+        async def execute(self, sql: str, params: tuple[object, ...] = ()) -> None:
+            del sql, params
+            self.rowcount = 0
+
+        async def fetchall(self) -> list[dict[str, object]]:
+            return []
+
+        async def __aenter__(self) -> _FakeCursor:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+    class _FakeRaw:
+        def cursor(self, *_args: object, **_kwargs: object) -> _FakeCursor:
+            return _FakeCursor()
+
+    async def exercise() -> None:
+        connection = MysqlConnection(_FakeRaw())  # type: ignore[arg-type]
+        sql = (
+            "INSERT INTO projection.processed_event (projector_id, event_id) "
+            "VALUES ('task', $1) ON CONFLICT DO NOTHING RETURNING event_id"
+        )
+        assert await connection.fetchval(sql, "evt_dup") is None
+
+    asyncio.run(exercise())

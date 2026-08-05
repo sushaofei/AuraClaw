@@ -40,12 +40,127 @@ _DELETE_RETURNING = re.compile(
     r"^\s*DELETE\s+FROM\s+(\S+)(?:\s+AS\s+(\w+))?\s+WHERE\s+(.+?)\s+RETURNING\s+(.+?)\s*$",
     re.IGNORECASE | re.DOTALL,
 )
+_INSERT_RETURNING_HEAD = re.compile(
+    r"^\s*INSERT\s+INTO\s+(\S+)\s*"
+    r"\(([^)]+)\)\s*"
+    r"VALUES\s*\(",
+    re.IGNORECASE | re.DOTALL,
+)
+_INSERT_RETURNING_TAIL = re.compile(
+    r"^\s*(?:ON\s+CONFLICT\s*(?:\(([^)]*)\))?\s*DO\s+(?:UPDATE\s+SET\s+.+?|NOTHING)\s*)?"
+    r"RETURNING\s+(.+?)\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
 _CONCAT_FOUR = re.compile(
     r"\('([^']*)'\s*\|\|\s*([a-zA-Z_][\w.]*)\s*\|\|\s*'([^']*)'\s*\|\|\s*([a-zA-Z_][\w.]*)\)"
 )
 _CONCAT_TWO = re.compile(r"'([^']*)'\s*\|\|\s*([a-zA-Z_][\w.]*)")
 _JSON_TEXT = re.compile(r"(\w+(?:\.\w+)?)\s*->>\s*'([^']+)'")
 _JSON_PATH = re.compile(r"(\w+(?:\.\w+)?)\s*->\s*'([^']+)'")
+
+
+def _split_sql_csv(expr: str) -> list[str]:
+    """Split a comma-separated SQL list, ignoring commas inside parentheses."""
+    parts: list[str] = []
+    depth = 0
+    start = 0
+    for index, char in enumerate(expr):
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        elif char == "," and depth == 0:
+            parts.append(expr[start:index].strip())
+            start = index + 1
+    parts.append(expr[start:].strip())
+    return [part for part in parts if part]
+
+
+def _placeholder_index(expr: str) -> int | None:
+    match = re.fullmatch(r"\$(\d+)(?:::[a-zA-Z0-9_\[\]]+)?", expr.strip())
+    if match is None:
+        return None
+    return int(match.group(1))
+
+
+def _split_values_list(sql: str, start: int) -> tuple[str, int] | None:
+    """Return (values_csv, index_after_closing_paren) for VALUES ( ... )."""
+    depth = 1
+    index = start
+    while index < len(sql):
+        char = sql[index]
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return sql[start:index], index + 1
+        index += 1
+    return None
+
+
+def _insert_returning_followup(
+    query: str, args: Sequence[Any]
+) -> tuple[str, tuple[Any, ...]] | None:
+    """Build SELECT that reads INSERT ... RETURNING columns after a MySQL upsert.
+
+    MySQL has no RETURNING; callers execute the INSERT first, then this SELECT.
+    """
+    stripped = query.strip()
+    head = _INSERT_RETURNING_HEAD.match(stripped)
+    if head is None:
+        return None
+    values_span = _split_values_list(stripped, head.end())
+    if values_span is None:
+        return None
+    values_csv, after_values = values_span
+    tail = _INSERT_RETURNING_TAIL.match(stripped[after_values:])
+    if tail is None:
+        return None
+    table = head.group(1)
+    columns = _split_sql_csv(head.group(2))
+    value_exprs = _split_sql_csv(values_csv)
+    if len(columns) != len(value_exprs):
+        return None
+    conflict_raw = tail.group(1)
+    returning = tail.group(2).strip()
+    if conflict_raw is not None and conflict_raw.strip():
+        key_columns = _split_sql_csv(conflict_raw)
+    else:
+        key_columns = list(columns)
+    column_to_expr = {
+        column.split(".")[-1].strip().strip("`"): expr
+        for column, expr in zip(columns, value_exprs, strict=True)
+    }
+    where_parts: list[str] = []
+    select_args: list[Any] = []
+    for key in key_columns:
+        bare = key.split(".")[-1].strip().strip("`")
+        expr = column_to_expr.get(bare)
+        if expr is None:
+            return None
+        placeholder = _placeholder_index(expr)
+        if placeholder is None:
+            where_parts.append(f"{bare}={expr}")
+            continue
+        if placeholder < 1 or placeholder > len(args):
+            return None
+        select_args.append(args[placeholder - 1])
+        where_parts.append(f"{bare}=${len(select_args)}")
+    if not where_parts:
+        return None
+    if returning == "*" or returning.endswith(".*"):
+        select_list = "*"
+    elif "." in returning:
+        select_list = ", ".join(
+            part.strip().split(".")[-1] for part in _split_sql_csv(returning)
+        )
+    else:
+        select_list = returning
+    select_sql = f"SELECT {select_list} FROM {table} WHERE {' AND '.join(where_parts)}"
+    return select_sql, tuple(select_args)
+
+
 # Column names that are MySQL reserved words (must be backtick-quoted).
 # Applied after schema.table → `schema_table` rewrite so table names like
 # `model_gateway_usage_budget` are not mangled.
@@ -252,6 +367,18 @@ class MysqlConnection:
     async def fetch(self, query: str, *args: Any) -> list[MysqlRecord]:
         stripped = query.strip()
         upper = stripped.upper()
+        if "RETURNING" in upper and upper.startswith("INSERT"):
+            followup = _insert_returning_followup(query, args)
+            result = await self.execute(query, *args)
+            count = int(str(result).rsplit(" ", 1)[-1])
+            if count == 0:
+                return []
+            if followup is None:
+                raise RuntimeError(
+                    "MySQL adapter could not emulate INSERT ... RETURNING"
+                )
+            select_sql, select_args = followup
+            return await self.fetch(select_sql, *select_args)
         if "RETURNING" in upper and upper.startswith("UPDATE"):
             matched = _UPDATE_RETURNING.match(stripped)
             if matched is not None:
@@ -298,12 +425,10 @@ class MysqlConnection:
 
     async def fetchval(self, query: str, *args: Any) -> Any:
         upper = query.lstrip().upper()
-        if "RETURNING" in query.upper() and upper.startswith("INSERT"):
-            result = await self.execute(query, *args)
-            count = int(str(result).rsplit(" ", 1)[-1])
-            return "1" if count > 0 else None
         if "RETURNING" in query.upper() and (
-            upper.startswith("UPDATE") or upper.startswith("DELETE")
+            upper.startswith("INSERT")
+            or upper.startswith("UPDATE")
+            or upper.startswith("DELETE")
         ):
             row = await self.fetchrow(query, *args)
             if row is None:
