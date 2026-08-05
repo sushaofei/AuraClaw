@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -31,12 +33,16 @@ class ManagedOrchestrator:
         session: SessionClient,
         provisioner: RuntimeProvisioner,
         lease_ttl: timedelta = timedelta(seconds=30),
+        runtime_wake: Callable[[], Any] | None = None,
+        register_selected_runtime: bool = True,
     ) -> None:
         self._id = orchestrator_id
         self._control = control_store
         self._session = session
         self._provisioner = provisioner
         self._lease_ttl = lease_ttl
+        self._runtime_wake = runtime_wake
+        self._register_selected_runtime = register_selected_runtime
 
     @property
     def lease_ttl(self) -> timedelta:
@@ -86,9 +92,11 @@ class ManagedOrchestrator:
             return None
         claim = claimed[0]
         item = claim.item
-        previous = await self._control.get_assignment(item.task_id)
         resource_id = f"session:{item.tenant_id}:{item.session_id}"
-        lease = await self._control.acquire_lease(resource_id, self._id, ttl=self._lease_ttl)
+        previous, lease = await asyncio.gather(
+            self._control.get_assignment(item.task_id),
+            self._control.acquire_lease(resource_id, self._id, ttl=self._lease_ttl),
+        )
         if lease is None:
             await self._control.reschedule(
                 item.task_id,
@@ -98,7 +106,8 @@ class ManagedOrchestrator:
             return None
         try:
             runtime = await self._provisioner.provision(item, lease)
-            await self._control.register_runtime(runtime)
+            if self._register_selected_runtime:
+                await self._control.register_runtime(runtime)
             assignment = RuntimeAssignment(
                 tenant_id=item.tenant_id,
                 root_session_id=item.root_session_id,
@@ -123,6 +132,13 @@ class ManagedOrchestrator:
                     claim_token=claim.claim_token,
                 )
                 return None
+            # Wake Runtime as soon as Control owns the assignment so claim can
+            # overlap Session run.scheduled append. Session wake remains fallback.
+            if self._runtime_wake is not None:
+                maybe = self._runtime_wake()
+                if asyncio.iscoroutine(maybe):
+                    task = asyncio.create_task(maybe, name="orchestrator-runtime-wake")
+                    task.add_done_callback(lambda _: None)
             lifecycle_events = (
                 [
                     NewEvent(
@@ -166,6 +182,7 @@ class ManagedOrchestrator:
                 lifecycle_events,
                 command_id=f"orchestrator:schedule:{item.run_id}:{lease.fencing_token}",
                 operation="orchestrator.schedule",
+                expected_version=item.source_version,
             )
             logger.info(
                 "ttft.run_scheduled session=%s run=%s runtime=%s schedule_ms=%.2f",

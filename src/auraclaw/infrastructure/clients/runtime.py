@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 
 import httpx
 
+from auraclaw.contracts.errors import VersionConflictError
 from auraclaw.contracts.events import CanonicalEvent, NewEvent
 from auraclaw.contracts.internal import (
     AssignmentClaimRequest,
@@ -93,6 +94,34 @@ class RemoteRuntimeSessionClient:
         if version is None:
             current = await self.load(assignment)
             version = len(current)
+        try:
+            return await self._append_at(
+                assignment,
+                events,
+                command_id=command_id,
+                operation=operation,
+                expected_version=version,
+            )
+        except VersionConflictError:
+            current = await self.load(assignment)
+            return await self._append_at(
+                assignment,
+                events,
+                command_id=command_id,
+                operation=operation,
+                expected_version=len(current),
+            )
+
+    async def _append_at(
+        self,
+        assignment: RuntimeAssignment,
+        events: Sequence[NewEvent],
+        *,
+        command_id: str,
+        operation: str,
+        expected_version: int,
+    ) -> list[CanonicalEvent]:
+        assert assignment.lease_assertion is not None
         response = await self._contract.call(
             "/internal/v1/session/append",
             SessionAppendRequest(
@@ -103,7 +132,7 @@ class RemoteRuntimeSessionClient:
                 session_id=assignment.session_id,
                 run_id=assignment.run_id,
                 command_id=command_id,
-                expected_version=version,
+                expected_version=expected_version,
                 operation=operation,
                 actor_type="runtime",
                 actor_id=assignment.runtime_id,
@@ -178,8 +207,41 @@ class RemoteOrchestratorSessionClient:
         *,
         command_id: str,
         operation: str,
+        expected_version: int | None = None,
     ) -> list[CanonicalEvent]:
-        current = await self.load(assignment)
+        version = expected_version
+        if version is None:
+            current = await self.load(assignment)
+            version = len(current)
+        try:
+            return await self._append_at(
+                assignment,
+                events,
+                command_id=command_id,
+                operation=operation,
+                expected_version=version,
+            )
+        except VersionConflictError:
+            if expected_version is None:
+                raise
+            current = await self.load(assignment)
+            return await self._append_at(
+                assignment,
+                events,
+                command_id=command_id,
+                operation=operation,
+                expected_version=len(current),
+            )
+
+    async def _append_at(
+        self,
+        assignment: RuntimeAssignment,
+        events: Sequence[NewEvent],
+        *,
+        command_id: str,
+        operation: str,
+        expected_version: int,
+    ) -> list[CanonicalEvent]:
         response = await self._contract.call(
             "/internal/v1/session/append",
             SessionAppendRequest(
@@ -190,7 +252,7 @@ class RemoteOrchestratorSessionClient:
                 session_id=assignment.session_id,
                 run_id=assignment.run_id,
                 command_id=command_id,
-                expected_version=len(current),
+                expected_version=expected_version,
                 operation=operation,
                 actor_type="orchestrator",
                 actor_id="orchestrator",
