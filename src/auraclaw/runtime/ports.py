@@ -87,6 +87,7 @@ class SessionClient(Protocol):
         *,
         command_id: str,
         operation: str,
+        expected_version: int | None = None,
     ) -> list[CanonicalEvent]: ...
 
 

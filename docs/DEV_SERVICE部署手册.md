@@ -86,3 +86,15 @@ ssh jcroot@10.244.16.131 'rm -rf /home/jcroot/workspace/AuraClaw/Users'
 ## 一句话
 
 改完代码后执行 `./scripts/dev_service_deploy.sh` 即可。
+
+## TTFT / 调度间隔（与生产同构）
+
+DEV_SERVICE 与生产共用 12 服务拓扑。缩短「创建任务 → 首 Token」时，只调配置，不改调度语义：
+
+| 变量 | 默认 | 作用 |
+|------|------|------|
+| `AURACLAW_PROJECTION_WORKER_INTERVAL` | `0.1` | Projection Outbox 轮询 |
+| `AURACLAW_ORCHESTRATOR_WORKER_INTERVAL` | `0.1` | RunnableFeed + schedule 轮询 |
+| `AURACLAW_RUNTIME_POLL_INTERVAL` | `0.05` | agent-runtime claim 轮询 |
+
+性能结论请在多服务拓扑（本机 `compose.services.yml` 或 DEV_SERVICE）验证，不要以 `auraclaw serve` 合一体为依据。详见 #42。

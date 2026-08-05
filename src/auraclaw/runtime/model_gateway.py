@@ -58,6 +58,12 @@ class ModelGateway:
             yield ModelStreamChunk(kind="delta", delta=str(delta))
         yield ModelStreamChunk(kind="completed", response=response)
 
+    async def aclose(self) -> None:
+        for adapter in self._adapters.values():
+            close = getattr(adapter, "aclose", None)
+            if close is not None:
+                await close()
+
 
 class StaticCredentialResolver:
     """Gateway-owned test/development resolver; credentials are never exposed to Runtime."""

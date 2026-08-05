@@ -90,7 +90,6 @@ class AgentHarness:
             {"run_id": assignment.run_id, "runtime_id": assignment.runtime_id},
             identity=assignment.run_id,
         )
-        events = await self._session.load(assignment)
         if any(
             event.type == "run.completed" and event.run_id == assignment.run_id
             for event in events
@@ -98,7 +97,7 @@ class AgentHarness:
             await self._control.finish_assignment(self._task_id(assignment), "completed")
             return
         if self._capability_controller is not None:
-            await self._execute_capability_loop(assignment)
+            await self._execute_capability_loop(assignment, events=events)
             return
 
         checkpoint = await self._control.load_checkpoint(
@@ -212,7 +211,10 @@ class AgentHarness:
         await self._control.finish_assignment(self._task_id(assignment), "completed")
 
     async def _execute_capability_loop(
-        self, assignment: RuntimeAssignment
+        self,
+        assignment: RuntimeAssignment,
+        *,
+        events: list[Any] | None = None,
     ) -> None:
         assert self._capability_controller is not None
         checkpoint = await self._control.load_checkpoint(
@@ -234,6 +236,7 @@ class AgentHarness:
                 "call_signatures": {},
             }
         )
+        turn_events = events
         while int(state.get("steps_used", 0)) < assignment.budget.max_steps:
             await self._guard(assignment)
             turn_index = int(state.get("turn_index", 0))
@@ -251,7 +254,8 @@ class AgentHarness:
             ):
                 response = self._response_from_dict(dict(state["response"]))
             else:
-                events = await self._session.load(assignment)
+                if turn_events is None:
+                    turn_events = await self._session.load(assignment)
                 capability_state = dict(state.get("capability_state", {}))
                 trusted = await self._capability_controller.trusted_messages(
                     assignment, capability_state
@@ -285,7 +289,7 @@ class AgentHarness:
                         run_id=assignment.run_id,
                         messages=(
                             *trusted,
-                            *self._build_capability_messages(events),
+                            *self._build_capability_messages(turn_events),
                         ),
                         tools=self._capability_controller.model_tools(
                             capability_state
@@ -296,6 +300,7 @@ class AgentHarness:
                     sequence=int(state.get("sequence", 0)),
                     publish_deltas=True,
                 )
+                turn_events = None
                 usage = self._accumulate_usage(
                     dict(state.get("usage", {})), response.usage
                 )
@@ -852,12 +857,20 @@ class AgentHarness:
         ):
             return
         await self._guard(assignment)
-        await self._session.append(
+        appended = await self._session.append(
             assignment,
             [NewEvent(type=event_type, payload=payload, visibility=visibility)],
             command_id=f"runtime:{event_type}:{identity}",
             operation=f"runtime.{event_type}",
+            expected_version=len(existing),
         )
+        if appended:
+            existing.extend(appended)
+        else:
+            # Store-level command dedup: local version may already be ahead.
+            refreshed = await self._session.load(assignment)
+            existing.clear()
+            existing.extend(refreshed)
 
     async def _guard(self, assignment: RuntimeAssignment) -> None:
         await self._control.assert_fencing(

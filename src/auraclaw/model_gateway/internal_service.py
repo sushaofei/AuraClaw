@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from collections.abc import AsyncIterator
@@ -23,7 +24,7 @@ from auraclaw.contracts.internal import (
     ServiceIdentity,
 )
 from auraclaw.contracts.tools import PolicyDecision
-from auraclaw.model_gateway.ports import ModelStateStore
+from auraclaw.model_gateway.ports import ModelCallReservation, ModelStateStore
 from auraclaw.runtime.model_stream import iter_model_stream
 from auraclaw.runtime.ports import ModelClient, ModelPolicy, ModelRequest, ModelResponse
 
@@ -74,17 +75,9 @@ class ModelGatewayInternalService:
         self, request: ModelGenerateRequest
     ) -> AsyncIterator[ModelStreamEvent]:
         self._require_runtime(request.context.service_identity)
-        await self._enforce_policy(request)
         request_digest = self._request_digest(request)
-        if self._state is not None:
-            reservation = await self._state.reserve(
-                tenant_id=request.context.tenant_id,
-                model_call_id=request.model_call_id,
-                run_id=request.run_id,
-                request_digest=request_digest,
-                reserved_tokens=request.max_output_tokens,
-                token_limit=self._tenant_token_limit,
-            )
+        reservation = await self._prepare_stream(request, request_digest)
+        if reservation is not None:
             if reservation.status == "completed":
                 assert reservation.cached_response is not None
                 async for event in self._cached_stream(reservation.cached_response):
@@ -159,6 +152,48 @@ class ModelGatewayInternalService:
             model_call_id=request.model_call_id,
             cancelled=False,
         )
+
+    async def _prepare_stream(
+        self, request: ModelGenerateRequest, request_digest: str
+    ) -> ModelCallReservation | None:
+        """Run policy and quota reservation concurrently when both are configured."""
+
+        async def _no_reservation() -> None:
+            return None
+
+        policy_result, reservation = await asyncio.gather(
+            self._enforce_policy(request),
+            (
+                self._state.reserve(
+                    tenant_id=request.context.tenant_id,
+                    model_call_id=request.model_call_id,
+                    run_id=request.run_id,
+                    request_digest=request_digest,
+                    reserved_tokens=request.max_output_tokens,
+                    token_limit=self._tenant_token_limit,
+                )
+                if self._state is not None
+                else _no_reservation()
+            ),
+            return_exceptions=True,
+        )
+        if isinstance(reservation, BaseException):
+            if isinstance(policy_result, BaseException):
+                raise policy_result
+            raise reservation
+        if isinstance(policy_result, BaseException):
+            if (
+                self._state is not None
+                and isinstance(reservation, ModelCallReservation)
+                and reservation.status == "reserved"
+            ):
+                await self._state.fail(
+                    tenant_id=request.context.tenant_id,
+                    model_call_id=request.model_call_id,
+                    error_code=type(policy_result).__name__,
+                )
+            raise policy_result
+        return reservation if isinstance(reservation, ModelCallReservation) else None
 
     async def _enforce_policy(self, request: ModelGenerateRequest) -> None:
         if self._policy is None:

@@ -35,11 +35,17 @@ class FencedSessionClient:
         *,
         command_id: str,
         operation: str,
+        expected_version: int | None = None,
     ) -> list[CanonicalEvent]:
         await self._control_store.assert_fencing(
             assignment_resource_id(assignment), assignment.fencing_token
         )
-        current = await self._event_store.load(assignment.tenant_id, assignment.session_id)
+        version = expected_version
+        if version is None:
+            current = await self._event_store.load(
+                assignment.tenant_id, assignment.session_id
+            )
+            version = len(current)
         result = await self._event_store.append(
             root_session_id=assignment.root_session_id,
             session_id=assignment.session_id,
@@ -49,7 +55,7 @@ class FencedSessionClient:
                 tenant_id=assignment.tenant_id,
                 actor=Actor(type="runtime", id=assignment.runtime_id),
                 correlation_id=assignment.run_id,
-                expected_version=len(current),
+                expected_version=version,
                 operation=operation,
             ),
             events=events,

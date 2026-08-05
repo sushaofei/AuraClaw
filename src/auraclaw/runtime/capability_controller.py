@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import copy
 import hashlib
 import json
@@ -154,6 +155,7 @@ class RuntimeCapabilityController:
     ) -> tuple[dict[str, Any], ...]:
         messages: list[dict[str, Any]] = []
         emitted: set[tuple[str, str, str, str]] = set()
+        pending: list[tuple[str, str, str, str]] = []
         for item in state.get("active_skills", ()):
             if not isinstance(item, dict):
                 continue
@@ -183,34 +185,45 @@ class RuntimeCapabilityController:
                 )
                 if identity in emitted:
                     continue
-                parts = await self._client.load_skill_part(
+                emitted.add(identity)
+                pending.append(identity)
+
+        if not pending:
+            return tuple(messages)
+
+        loaded = await asyncio.gather(
+            *(
+                self._client.load_skill_part(
                     assignment,
                     publisher=identity[0],
                     name=identity[1],
                     version=identity[2],
                     path="SKILL.md",
                 )
-                text = next(
-                    (
-                        str(part["text"])
-                        for part in parts
-                        if isinstance(part, dict)
-                        and isinstance(part.get("text"), str)
-                    ),
-                    "",
+                for identity in pending
+            )
+        )
+        for identity, parts in zip(pending, loaded, strict=True):
+            text = next(
+                (
+                    str(part["text"])
+                    for part in parts
+                    if isinstance(part, dict)
+                    and isinstance(part.get("text"), str)
+                ),
+                "",
+            )
+            if text:
+                messages.append(
+                    {
+                        "role": "system",
+                        "content": (
+                            "Activated signed AuraClaw Skill "
+                            f"{identity[0]}/{identity[1]}@{identity[2]} "
+                            f"(digest {identity[3]}):\n{text}"
+                        ),
+                    }
                 )
-                if text:
-                    messages.append(
-                        {
-                            "role": "system",
-                            "content": (
-                                "Activated signed AuraClaw Skill "
-                                f"{identity[0]}/{identity[1]}@{identity[2]} "
-                                f"(digest {identity[3]}):\n{text}"
-                            ),
-                        }
-                    )
-                    emitted.add(identity)
         return tuple(messages)
 
     async def execute(

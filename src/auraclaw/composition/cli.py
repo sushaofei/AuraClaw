@@ -172,7 +172,7 @@ def build_parser() -> argparse.ArgumentParser:
     projection.add_argument("action", choices=("relay", "rebuild"))
     projection.add_argument("--tenant")
     projection.add_argument("--watch", action="store_true")
-    projection.add_argument("--interval", type=float, default=1.0)
+    projection.add_argument("--interval", type=float, default=None)
     projection.add_argument("--host")
     projection.add_argument("--port", type=int)
     operations = subcommands.add_parser("operations")
@@ -210,18 +210,29 @@ def main(
         if args.action == "relay" and args.watch:
             settings = get_settings()
             spec = service_spec("projection", settings)
+            interval = (
+                args.interval
+                if args.interval is not None
+                else settings.projection_worker_interval
+            )
             uvicorn_runner(
                 create_service_app(
-                    "projection", settings, worker_interval=args.interval
+                    "projection", settings, worker_interval=interval
                 ),
                 host=args.host or settings.host,
                 port=args.port or spec.port,
                 log_level=settings.log_level.lower(),
             )
             return
+        settings = get_settings()
+        interval = (
+            args.interval
+            if args.interval is not None
+            else settings.projection_worker_interval
+        )
         asyncio.run(
             _run_projection_command(
-                args.action, args.tenant, watch=args.watch, interval=args.interval
+                args.action, args.tenant, watch=args.watch, interval=interval
             )
         )
         return
