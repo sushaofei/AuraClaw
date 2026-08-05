@@ -26,8 +26,9 @@ class _SessionRecorder:
         *,
         command_id: str,
         operation: str,
+        expected_version: int | None = None,
     ) -> list[CanonicalEvent]:
-        del events, command_id, operation
+        del events, command_id, operation, expected_version
         self.assignments.append(assignment)
         return []
 
