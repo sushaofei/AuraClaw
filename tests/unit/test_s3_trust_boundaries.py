@@ -57,6 +57,7 @@ from auraclaw.internal.routes import (
     control_routes,
     credential_routes,
     model_routes,
+    model_stream_routes,
     policy_routes,
     session_routes,
 )
@@ -218,9 +219,11 @@ def test_production_task_api_uses_remote_session_and_fails_closed() -> None:
 
 @pytest.mark.asyncio
 async def test_runtime_model_client_has_only_http_contract_and_workload_identity() -> None:
+    service = ModelGatewayInternalService(_DeterministicModel())
     app = create_contract_app(
         "model-gateway",
-        model_routes(ModelGatewayInternalService(_DeterministicModel())),
+        model_routes(service),
+        stream_routes=model_stream_routes(service),
         workload_identities={"runtime-token": ServiceIdentity.AGENT_RUNTIME},
     )
     remote = RemoteModelClient(

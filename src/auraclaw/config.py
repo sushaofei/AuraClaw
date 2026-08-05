@@ -188,8 +188,11 @@ class Settings(BaseSettings):
     runtime_enabled: bool = True
     runtime_poll_interval: float = 0.05
     # Shared production-topology worker ticks (Outbox → Feed / Projection).
-    # Keep identical semantics across compose.services and compose.production;
-    # only tune the interval. Defaults favor TTFT over idle DB chatter.
+    # Keep identical semantics across compose.services and compose.production.
+    # With worker_wake_enabled, idle uses worker_idle_interval; busy ticks drain
+    # immediately after Session outbox HTTP wake.
+    worker_wake_enabled: bool = True
+    worker_idle_interval: float = Field(default=2.0, ge=0.05, le=60.0)
     projection_worker_interval: float = Field(default=0.1, ge=0.01, le=30.0)
     orchestrator_worker_interval: float = Field(default=0.1, ge=0.01, le=30.0)
     orchestrator_lease_ttl_seconds: int = Field(default=300, ge=30, le=3600)
