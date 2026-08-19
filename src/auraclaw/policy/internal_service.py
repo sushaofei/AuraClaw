@@ -63,7 +63,7 @@ class PolicyInternalService:
             description="remote policy input",
             input_schema={},
             output_schema={},
-            permission=ToolPermission(str(attributes["permission"])),
+            permission=ToolPermission(str(attributes.get("permission", "read-only"))),
             risk_level=RiskLevel(str(attributes.get("risk_level", "low"))),
             runtime_location=str(attributes.get("runtime_location", "hands")),
         )

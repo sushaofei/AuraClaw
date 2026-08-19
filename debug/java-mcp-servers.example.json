@@ -1,0 +1,25 @@
+[
+  {
+    "server_id": "java-mcp",
+    "tenant_id": "development",
+    "title": "Java MCP Server",
+    "endpoint": "https://java-mcp.example.com/mcp",
+    "protocol_revision": "2026-07-28",
+    "credential_ref": "vault/java-mcp#client_secret",
+    "oauth": {
+      "protected_resource_metadata_url": "https://java-mcp.example.com/.well-known/oauth-protected-resource",
+      "authorization_server_metadata_url": "https://auth.example.com/.well-known/oauth-authorization-server",
+      "issuer": "https://auth.example.com",
+      "token_endpoint": "https://auth.example.com/oauth/token",
+      "client_id": "auraclaw-hands",
+      "resource": "https://java-mcp.example.com/mcp",
+      "scopes": ["tools.read"]
+    },
+    "trust_level": "tenant_verified",
+    "allowed_tool_prefixes": ["order."],
+    "allowed_resource_schemes": ["order"],
+    "allowed_prompt_prefixes": ["order."],
+    "status": "active",
+    "enabled": true
+  }
+]

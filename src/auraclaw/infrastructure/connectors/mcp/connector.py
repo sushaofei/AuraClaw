@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+from uuid import uuid4
 
 from auraclaw.action.ports import CredentialInvoker, ResourcePolicyEvaluator
 from auraclaw.contracts.capabilities import McpServerDefinition
@@ -18,6 +19,7 @@ from auraclaw.contracts.hands import (
 )
 from auraclaw.infrastructure.connectors.mcp.transport import ManagedRemoteMcpTransport
 from auraclaw.infrastructure.connectors.mcp.wire import (
+    MCP_AURACLAW_INVOCATION_ID_META_KEY,
     MCP_CLIENT_CAPABILITIES_META_KEY,
     MCP_CLIENT_INFO_META_KEY,
     MCP_LEGACY_PROTOCOL_VERSION,
@@ -40,6 +42,8 @@ class ManagedMcpConnector:
         max_pages: int = 100,
         max_items: int = 10_000,
     ) -> None:
+        if max_pages < 1 or max_items < 1:
+            raise ValueError("MCP pagination limits must be positive")
         self._server = server
         self._transport = ManagedRemoteMcpTransport(
             server, credentials=credentials, policy=policy
@@ -59,9 +63,17 @@ class ManagedMcpConnector:
         extra: dict[str, Any] = {}
         if self._server.protocol_revision == MCP_PROTOCOL_VERSION:
             discovery = await self._send(mcp_trusted, "server/discover", {})
-            if MCP_PROTOCOL_VERSION not in discovery.get("supportedVersions", []):
+            supported_versions = discovery.get("supportedVersions", [])
+            if not isinstance(supported_versions, list) or (
+                MCP_PROTOCOL_VERSION not in supported_versions
+            ):
                 raise ValueError("remote MCP protocol version is incompatible")
-            extra["capabilities"] = discovery.get("capabilities", {})
+            capabilities = discovery.get("capabilities", {})
+            if not isinstance(capabilities, dict):
+                raise ValueError("remote MCP capabilities are invalid")
+            extra["capabilities"] = capabilities
+            if isinstance(discovery.get("serverInfo"), dict):
+                extra["server_info"] = dict(discovery["serverInfo"])
         elif self._server.protocol_revision == MCP_LEGACY_PROTOCOL_VERSION:
             discovery = await self._send(
                 mcp_trusted,
@@ -77,26 +89,53 @@ class ManagedMcpConnector:
             )
             if discovery.get("protocolVersion") != MCP_LEGACY_PROTOCOL_VERSION:
                 raise ValueError("remote MCP protocol version is incompatible")
-            extra["capabilities"] = discovery.get("capabilities", {})
+            capabilities = discovery.get("capabilities", {})
+            if not isinstance(capabilities, dict):
+                raise ValueError("remote MCP capabilities are invalid")
+            extra["capabilities"] = capabilities
+            if isinstance(discovery.get("serverInfo"), dict):
+                extra["server_info"] = dict(discovery["serverInfo"])
         else:
             raise ValueError("remote MCP protocol version is not supported")
-        tools = tuple(
-            _tool_descriptor(item)
-            for item in await self._list_all(mcp_trusted, "tools/list", "tools")
+        capabilities = extra["capabilities"]
+        standard_capability_gating = (
+            self._server.protocol_revision == MCP_LEGACY_PROTOCOL_VERSION
         )
-        resources = tuple(
-            _resource_descriptor(item)
-            for item in await self._list_all(mcp_trusted, "resources/list", "resources")
-        )
-        templates = tuple(
-            _template_descriptor(item)
-            for item in await self._list_all(
-                mcp_trusted, "resources/templates/list", "resourceTemplates"
+        tools = (
+            tuple(
+                _tool_descriptor(item)
+                for item in await self._list_all(mcp_trusted, "tools/list", "tools")
             )
+            if not standard_capability_gating or "tools" in capabilities
+            else ()
         )
-        prompts = tuple(
-            _prompt_descriptor(item)
-            for item in await self._list_all(mcp_trusted, "prompts/list", "prompts")
+        resources = (
+            tuple(
+                _resource_descriptor(item)
+                for item in await self._list_all(
+                    mcp_trusted, "resources/list", "resources"
+                )
+            )
+            if not standard_capability_gating or "resources" in capabilities
+            else ()
+        )
+        templates = (
+            tuple(
+                _template_descriptor(item)
+                for item in await self._list_all(
+                    mcp_trusted, "resources/templates/list", "resourceTemplates"
+                )
+            )
+            if not standard_capability_gating or "resources" in capabilities
+            else ()
+        )
+        prompts = (
+            tuple(
+                _prompt_descriptor(item)
+                for item in await self._list_all(mcp_trusted, "prompts/list", "prompts")
+            )
+            if not standard_capability_gating or "prompts" in capabilities
+            else ()
         )
         extra["listed_resource_uris"] = [item.uri for item in resources if item.uri]
         if (
@@ -179,9 +218,16 @@ class ManagedMcpConnector:
         arguments: dict[str, Any],
         invocation_id: str,
     ) -> HandsToolResult:
-        params: dict[str, Any] = {"name": name, "arguments": arguments}
+        request_meta: dict[str, Any] = {
+            MCP_AURACLAW_INVOCATION_ID_META_KEY: invocation_id,
+        }
         if self._server.protocol_revision == MCP_PROTOCOL_VERSION:
-            params["_meta"] = _modern_meta()
+            request_meta.update(_modern_meta())
+        params: dict[str, Any] = {
+            "name": name,
+            "arguments": arguments,
+            "_meta": request_meta,
+        }
         response = await self._transport.send(
             McpJsonRpcRequest(id=invocation_id, method="tools/call", params=params),
             trusted_context=_mcp_trusted(trusted),
@@ -195,7 +241,12 @@ class ManagedMcpConnector:
             )
         result = dict(response.result or {})
         if result.get("isError") is True:
-            raise RuntimeError("remote MCP Tool returned an execution error")
+            return HandsToolResult(
+                status="error",
+                summary=_tool_error_summary(result),
+                error_code="mcp_tool_error",
+                side_effect_status="unknown",
+            )
         structured = result.get("structuredContent")
         if isinstance(structured, dict):
             if "status" in structured:
@@ -259,11 +310,17 @@ class ManagedMcpConnector:
         if self._server.protocol_revision == MCP_PROTOCOL_VERSION:
             request_params["_meta"] = _modern_meta()
         response = await self._transport.send(
-            McpJsonRpcRequest(id=f"mcp:{method}", method=method, params=request_params),
+            McpJsonRpcRequest(
+                id=f"mcp:{method}:{uuid4().hex}",
+                method=method,
+                params=request_params,
+            ),
             trusted_context=trusted,
         )
         if response.error is not None:
-            raise ValueError(f"remote MCP error {response.error.code}")
+            raise ValueError(
+                f"remote MCP error {response.error.code}: {response.error.message}"
+            )
         return dict(response.result or {})
 
 
@@ -276,6 +333,13 @@ def _modern_meta() -> dict[str, Any]:
         },
         MCP_CLIENT_CAPABILITIES_META_KEY: {},
     }
+
+
+def _tool_error_summary(result: dict[str, Any]) -> str:
+    for item in result.get("content", ()):
+        if isinstance(item, dict) and item.get("type") == "text" and item.get("text"):
+            return str(item["text"])[:1_000]
+    return "remote MCP Tool returned an execution error"
 
 
 def _mcp_trusted(trusted: HandsTrustedContext) -> McpTrustedContext:

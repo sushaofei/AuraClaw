@@ -21,20 +21,26 @@ from auraclaw.contracts.capabilities import (
     McpServerDefinition,
 )
 from auraclaw.contracts.errors import PolicyDeniedError
+from auraclaw.contracts.hands import HandsTrustedContext
 from auraclaw.contracts.tools import (
     PolicyDecision,
     ToolCapability,
     ToolInvocation,
 )
 from auraclaw.infrastructure.connectors.mcp.connector import ManagedMcpConnector
+from auraclaw.infrastructure.connectors.mcp.wire import (
+    MCP_AURACLAW_INVOCATION_ID_META_KEY,
+    MCP_LEGACY_PROTOCOL_VERSION,
+)
 
 
-def _server() -> McpServerDefinition:
+def _server(*, protocol_revision: str = "2026-07-28") -> McpServerDefinition:
     return McpServerDefinition(
         server_id="github-mcp",
         tenant_id="tenant-a",
         title="GitHub MCP",
         endpoint="https://mcp.example/v1/mcp",
+        protocol_revision=protocol_revision,
         credential_ref="vault/github-mcp#client_secret",
         oauth=McpOAuthConfiguration(
             protected_resource_metadata_url=(
@@ -72,6 +78,7 @@ class _RemoteCredentials:
         self.calls: list[dict[str, object]] = []
         self.failed = False
         self.tool_version = "2.1.0"
+        self.tool_error = False
 
     async def invoke(self, **arguments: object) -> dict[str, object]:
         self.calls.append(arguments)
@@ -80,6 +87,16 @@ class _RemoteCredentials:
         request = arguments["request"]
         assert isinstance(request, dict)
         method = request["method"]
+        if method == "initialize":
+            return {
+                "jsonrpc": "2.0",
+                "id": request["id"],
+                "result": {
+                    "protocolVersion": MCP_LEGACY_PROTOCOL_VERSION,
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "test-mcp", "version": "1.0.0"},
+                },
+            }
         if method == "server/discover":
             return {
                 "jsonrpc": "2.0",
@@ -87,6 +104,7 @@ class _RemoteCredentials:
                 "result": {
                     "supportedVersions": ["2026-07-28"],
                     "capabilities": {"resources": {"subscribe": True}},
+                    "serverInfo": {"name": "test-mcp", "version": "1.0.0"},
                 },
             }
         if method == "tools/list":
@@ -145,6 +163,15 @@ class _RemoteCredentials:
         if method == "resources/subscribe":
             return self._result(request, "subscribed", True)
         if method == "tools/call":
+            if self.tool_error:
+                return {
+                    "jsonrpc": "2.0",
+                    "id": request["id"],
+                    "result": {
+                        "content": [{"type": "text", "text": "business rejected"}],
+                        "isError": True,
+                    },
+                }
             return {
                 "jsonrpc": "2.0",
                 "id": request["id"],
@@ -173,6 +200,18 @@ class _RemoteCredentials:
 class _UnexpectedHands:
     async def execute(self, invocation: object, capability: object) -> object:
         raise AssertionError(f"unexpected local Tool: {invocation}, {capability}")
+
+
+def _hands_trusted() -> HandsTrustedContext:
+    return HandsTrustedContext(
+        tenant_id="tenant-a",
+        root_session_id="session-root",
+        session_id="session-child",
+        run_id="run-1",
+        runtime_id="runtime-1",
+        lease_id="lease-1",
+        fencing_token=1,
+    )
 
 
 class _Cache:
@@ -234,6 +273,11 @@ def test_catalog_reconciliation_filters_routes_invalidates_and_recovers() -> Non
         result = await reconciler.reconcile_server(server)
         assert result.status == CapabilityStatus.ACTIVE
         assert result.capability_count == 4
+        snapshot = await connector.snapshot(_hands_trusted())
+        assert snapshot.extra["server_info"] == {
+            "name": "test-mcp",
+            "version": "1.0.0",
+        }
         discovered = await catalog.search(tenant_id="tenant-a")
         assert {item.kind for item in discovered} == {
             CapabilityKind.TOOL,
@@ -249,6 +293,24 @@ def test_catalog_reconciliation_filters_routes_invalidates_and_recovers() -> Non
             _invocation(capability),
             capability,
         ) == {"number": 21, "state": "open"}
+        credentials.tool_error = True
+        failed = await connector.call_tool(
+            _hands_trusted(),
+            name="github.issue.get",
+            arguments={"number": 21},
+            invocation_id="tool-error",
+        )
+        assert failed.status == "error"
+        assert failed.summary == "business rejected"
+        tool_error_request = next(
+            call["request"]
+            for call in reversed(credentials.calls)
+            if call["request"]["method"] == "tools/call"  # type: ignore[index]
+        )
+        assert tool_error_request["params"]["_meta"][  # type: ignore[index]
+            MCP_AURACLAW_INVOCATION_ID_META_KEY
+        ] == "tool-error"
+        credentials.tool_error = False
         assert not any(
             call["request"]["method"] == "resources/subscribe"  # type: ignore[index]
             for call in credentials.calls
@@ -290,5 +352,42 @@ def test_catalog_reconciliation_filters_routes_invalidates_and_recovers() -> Non
         recovered = await reconciler.reconcile_server(current)
         assert recovered.status == CapabilityStatus.ACTIVE
         assert tools.get("github.issue.get", "2.2.0")
+
+    asyncio.run(scenario())
+
+
+def test_legacy_connector_uses_initialize_and_preserves_invocation_id() -> None:
+    async def scenario() -> None:
+        server = _server(protocol_revision=MCP_LEGACY_PROTOCOL_VERSION)
+        credentials = _RemoteCredentials()
+        connector = ManagedMcpConnector(
+            server,
+            credentials=credentials,
+            policy=_AllowPolicy(),
+        )
+
+        snapshot = await connector.snapshot(_hands_trusted())
+        assert snapshot.extra["server_info"]["name"] == "test-mcp"
+        assert len(snapshot.tools) == 2
+        assert snapshot.resources == ()
+        assert snapshot.resource_templates == ()
+        assert snapshot.prompts == ()
+        assert [
+            call["request"]["method"]  # type: ignore[index]
+            for call in credentials.calls
+        ] == ["initialize", "tools/list"]
+        result = await connector.call_tool(
+            _hands_trusted(),
+            name="github.issue.get",
+            arguments={"number": 21},
+            invocation_id="legacy-invocation-1",
+        )
+
+        assert result.status == "success"
+        assert credentials.calls[0]["request"]["method"] == "initialize"  # type: ignore[index]
+        call_request = credentials.calls[-1]["request"]
+        assert call_request["params"]["_meta"] == {  # type: ignore[index]
+            MCP_AURACLAW_INVOCATION_ID_META_KEY: "legacy-invocation-1"
+        }
 
     asyncio.run(scenario())

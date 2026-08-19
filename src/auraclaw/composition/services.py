@@ -90,6 +90,7 @@ from auraclaw.contracts.capabilities import (
 )
 from auraclaw.contracts.hands import HandsTrustedContext
 from auraclaw.contracts.internal import ServiceIdentity
+from auraclaw.contracts.tools import CredentialReference
 from auraclaw.control.internal_service import ControlInternalService
 from auraclaw.control.orchestrator import (
     ManagedOrchestrator,
@@ -427,6 +428,53 @@ def _configured_identities(
         if token:
             configured[token] = identity
     return configured
+
+
+def _service_bearer_token(settings: Settings, identity: ServiceIdentity) -> str:
+    if settings.deployment_profile == "development":
+        return f"development-{identity.value}"
+    return settings.workload_token_value(identity.value) or secrets.token_urlsafe(32)
+
+
+def _uses_remote_capability_plane(settings: Settings) -> bool:
+    return (
+        settings.deployment_profile == "production"
+        or bool(settings.mcp_egress_servers)
+        or bool(settings.java_api_servers)
+    )
+
+
+def _seed_managed_connector_credentials(
+    proxy: CredentialProxy,
+    settings: Settings,
+) -> None:
+    expires_at = datetime.now(UTC) + timedelta(days=365)
+    for mcp_server in settings.mcp_egress_servers:
+        if mcp_server.credential_ref is None or mcp_server.oauth is None:
+            continue
+        proxy.register_reference(
+            mcp_server.tenant_id or "platform",
+            CredentialReference(
+                credential_ref=mcp_server.credential_ref,
+                provider=mcp_server.server_id,
+                account_scope=mcp_server.oauth.resource,
+                allowed_operations=("mcp.invoke",),
+                expires_at=expires_at,
+            ),
+        )
+    for java_server in settings.java_api_servers:
+        if java_server.credential_ref is None:
+            continue
+        proxy.register_reference(
+            java_server.tenant_id or "platform",
+            CredentialReference(
+                credential_ref=java_server.credential_ref,
+                provider=java_server.server_id,
+                account_scope=java_server.base_url,
+                allowed_operations=("http.invoke",),
+                expires_at=expires_at,
+            ),
+        )
 
 
 def _task_api_app(settings: Settings) -> FastAPI:
@@ -990,16 +1038,22 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
     capability_catalog_store: (
         InMemoryCapabilityCatalogStore | PostgresCapabilityCatalogStore
     ) = InMemoryCapabilityCatalogStore()
-    if settings.deployment_profile == "production":
-        hands_token = settings.workload_token_value(
-            ServiceIdentity.ACTION_HANDS.value
-        ) or secrets.token_urlsafe(32)
+    remote_clients: list[Any] = []
+    if _uses_remote_capability_plane(settings):
+        hands_token = _service_bearer_token(settings, ServiceIdentity.ACTION_HANDS)
         policy = RemotePolicyClient(settings.policy_base_url, bearer_token=hands_token)
         credential_proxy = RemoteCredentialProxy(
             settings.credential_proxy_base_url, bearer_token=hands_token
         )
+        remote_clients.extend((policy, credential_proxy))
+    else:
+        policy = PolicyEngine(version="s3-v1")
+    if settings.deployment_profile == "production":
         artifacts = RemoteArtifactWriter(
-            settings.artifact_base_url, bearer_token=hands_token
+            settings.artifact_base_url,
+            bearer_token=_service_bearer_token(
+                settings, ServiceIdentity.ACTION_HANDS
+            ),
         )
         if settings.sql_storage_enabled:
             invocation_store = PostgresInvocationStore(settings.resolved_database_url)
@@ -1010,8 +1064,7 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
                 settings.resolved_database_url
             )
         closeables = (
-            policy,
-            credential_proxy,
+            *remote_clients,
             artifacts,
             *((invocation_store,) if invocation_store is not None else ()),
             *((tool_registry_store,) if tool_registry_store is not None else ()),
@@ -1022,10 +1075,10 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
             ),
         )
     else:
-        policy = PolicyEngine(version="s3-v1")
         artifacts = ArtifactStore(
             InMemoryObjectStorage(), signing_key=b"auraclaw-s3-artifact-key"
         )
+        closeables = tuple(remote_clients)
     app = _base_service_app(
         spec,
         settings,
@@ -1430,7 +1483,7 @@ def _credential_proxy_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
             mount=settings.credential_vault_mount,
         )
     else:
-        vault = InMemoryVault({})
+        vault = InMemoryVault(settings.debug_vault_secrets)
     policy: RemotePolicyClient | None = None
     if settings.deployment_profile == "production":
         token = settings.workload_token_value(ServiceIdentity.CREDENTIAL_PROXY.value)
@@ -1462,8 +1515,10 @@ def _credential_proxy_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
             vault.readiness if isinstance(vault, HashiCorpVault) else None
         ),
     )
+    proxy = CredentialProxy(vault, registry=registry)
+    _seed_managed_connector_credentials(proxy, settings)
     service = CredentialProxyInternalService(
-        CredentialProxy(vault, registry=registry),
+        proxy,
         adapters={
             "webhook": ManagedWebhookCredentialAdapter(
                 allowed_hosts=settings.allowed_credential_egress_hosts

@@ -27,10 +27,14 @@ logs/
 # Editors and operating system
 .DS_Store
 .idea/
-.vscode/
+.vscode/*
+!.vscode/launch.json
+!.vscode/tasks.json
 .history/
 
 # Secrets
 .env
 .env.*
 !.env.example
+!.env.hands-debug.example
+debug/java-mcp-servers.json
