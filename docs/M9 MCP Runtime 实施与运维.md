@@ -11,7 +11,8 @@ Issue #43 之后 Runtime 只持有 Hands URL 和 workload identity，不接受�
 - `contracts/hands.py`：Runtime↔Hands 的协议无关 DTO 与内部 HTTP 路径。
 - `infrastructure/connectors/mcp/wire.py`：下游 MCP 2026-07-28 JSON-RPC；保留
   2025-11-25 legacy profile 供滚动升级。
-- `contracts/capabilities.py`：受管 Server、OAuth/OIDC 和统一 Capability 描述符。
+- `contracts/capabilities.py`：受管 Server、可选 OAuth/OIDC 或 workload trusted-context
+  认证策略，以及统一 Capability 描述符。
 - `contracts/skills.py`：Skill Manifest、发布状态、固定依赖和激活绑定。
 - `action`：Capability Catalog、Resource Gateway、Skill Package/Resolver 和周期对账。
 - `runtime`：单一 Hands Client、渐进式 Skill 加载和可恢复 Skill Runner。
@@ -53,9 +54,29 @@ Canonical Session Event；目录、缓存、通知和步骤进度都可丢弃并
 ]
 ```
 
-对应 Credential Reference 的 provider 必须等于 `server_id`，account scope 必须等于 OAuth
-`resource`，allowed operations 必须包含 `mcp.invoke`。Secret 只由 Vault 和 Credential Proxy
-解析。Hands 只传 credential ref、JSON-RPC 摘要和 Policy decision id。
+OAuth `client_credentials` 是**可选 Connector 策略**，不是 AuraClaw 用户身份系统。
+第三方 MCP 可继续使用 OAuth；chaintower MCP 应使用 `auth_strategy: "workload_trusted_context"`，
+由 Hands 从 `HandsTrustedContext` 构造受控 Header/`_meta`，MCP Server 做最终业务鉴权。
+见 [ADR-003](./ADR-003%20用户身份归属与可信上下文.md)。
+
+```json
+{
+  "server_id": "chaintower-mcp",
+  "title": "chaintower MCP",
+  "endpoint": "https://mcp.chaintower.example/mcp",
+  "credential_ref": "vault/chaintower-mcp#workload",
+  "auth_strategy": "workload_trusted_context",
+  "trust_level": "tenant_verified",
+  "allowed_tool_prefixes": ["order."],
+  "status": "active",
+  "enabled": true
+}
+```
+
+对应 Credential Reference 的 provider 必须等于 `server_id`。OAuth 路径的 account scope 必须等于
+OAuth `resource`；workload trusted-context 路径的 account scope 等于 MCP endpoint origin。
+allowed operations 必须包含 `mcp.invoke`。Secret 只由 Vault 和 Credential Proxy
+解析。Hands 只传 credential ref、受信身份、JSON-RPC 摘要和 Policy decision id。
 
 `AURACLAW_MCP_RECONCILE_INTERVAL_SECONDS` 控制周期全量对账，默认 60 秒，最小 5 秒。
 
@@ -67,9 +88,9 @@ Canonical Session Event；目录、缓存、通知和步骤进度都可丢弃并
 Server Registry / tenant
  -> Policy
  -> Credential provider + account scope
- -> OAuth protected-resource metadata
- -> authorization-server metadata
- -> client_credentials + Resource Indicator
+ -> 认证策略：
+    - oauth_client_credentials：OAuth metadata + client_credentials + Resource Indicator
+    - workload_trusted_context：AuraClaw/Hands workload Bearer + 受控 tenant/user Header
  -> DNS 全量公网地址校验
  -> 固定已校验 IP + 原 Host/SNI
  -> 禁止重定向

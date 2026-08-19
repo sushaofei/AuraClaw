@@ -33,8 +33,9 @@ docker network inspect auraclaw-platform >/dev/null 2>&1 ||
 ```
 
 最低必填配置包括不可变 `AURACLAW_IMAGE`、11 个角色 DSN、migration admin DSN、工作负载
-令牌、lease key、模型凭据、Vault 配置及 SeaweedFS 配置。Agent Runtime 没有数据库、模型、
-Vault 或 SeaweedFS Secret；只有对应 owner service 获得这些凭据。
+令牌、lease key、chaintower workload token、Agent Context 验签密钥、模型凭据、Vault 配置
+及 SeaweedFS 配置。Agent Runtime 没有数据库、模型、Vault 或 SeaweedFS Secret；chaintower
+身份密钥只挂到 Task API。只有对应 owner service 获得这些凭据。
 
 ## 3. 预检与迁移
 
@@ -62,7 +63,7 @@ docker compose --env-file .env.production \
 只能在旧版本实例归零且兼容窗口结束后，以后续显式迁移执行。
 
 Secret 生成目录必须与 `.env.production` 的 `AURACLAW_SECRET_DIR` 一致；目录权限为 `0700`，
-27 个文件权限为 `0600`，文件内容不会输出。既有数据库如果已由旧流程完整执行到目标版本、但
+29 个文件权限为 `0600`，文件内容不会输出。既有数据库如果已由旧流程完整执行到目标版本、但
 尚无 migration ledger，先确认 `status` 全部显示 pending，再且仅再执行一次：
 
 ```bash
@@ -161,6 +162,8 @@ multipart finalize/gc 是否排空；Hands 本地 workspace 是每个容器的�
 | Kafka/Streaming | broker 断连、消费者暂停 | 生产端背压；SSE 可 replay；Canonical Result 不依赖 SSE |
 | Delivery | kill claim owner、sink 5xx | claim expiry 后重试；超限进入 DLQ；redrive 可审计 |
 | PostgreSQL | 短暂断连 | readiness 失败、停止接流；恢复后 outbox/claim 继续 |
+| Task API 身份 | 错误 kid、过期 Assertion、clock skew、缺 workload | 写与敏感读 401 fail closed；不信任裸 `X-Tenant-ID` |
+| Assertion 验签密钥 | 清空/轮换 N-1 过早删除 | 写命令失败关闭；回滚不得重新开放公网裸 Header |
 
 示例（选择一个副本，不要一次停止整个 owner service）：
 
@@ -177,5 +180,6 @@ actor、command id、correlation/causation 和审批依据。
 ## 8. 停止条件
 
 出现以下任一情况立即停止发布或扩缩容：迁移 checksum drift、N/N-1 契约不兼容、readiness
-持续失败、Policy/Credential fail-open、跨角色数据库写入成功、Canonical Result 丢失、
+持续失败、Policy/Credential fail-open、生产身份 fail-open 或重新开放裸 tenant/user Header、
+跨角色数据库写入成功、Canonical Result 丢失、
 Delivery 重复副作用、SeaweedFS 对象与 metadata 无法收敛，或 Secret 出现在日志/config。

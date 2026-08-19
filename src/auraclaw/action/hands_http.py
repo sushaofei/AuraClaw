@@ -119,6 +119,7 @@ class SignedLeaseHandsAuthenticator:
             fencing_token=assertion.fencing_token,
             deadline=assertion.expires_at,
             lease_assertion=assertion,
+            user_id=assertion.user_id,
         )
 
 

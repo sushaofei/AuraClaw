@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from auraclaw.action.ports import CredentialInvoker, ResourcePolicyEvaluator
-from auraclaw.contracts.capabilities import CapabilityStatus, McpServerDefinition
+from auraclaw.contracts.capabilities import CapabilityStatus, McpAuthStrategy, McpServerDefinition
 from auraclaw.contracts.errors import PolicyDeniedError
 from auraclaw.contracts.tools import PolicyDecision
 from auraclaw.infrastructure.connectors.mcp.wire import (
@@ -31,7 +31,11 @@ class ManagedRemoteMcpTransport:
             or server.status
             not in {CapabilityStatus.ACTIVE, CapabilityStatus.DEGRADED}
             or server.credential_ref is None
-            or server.oauth is None
+        ):
+            raise ValueError("remote MCP server is not callable")
+        if (
+            server.resolved_auth_strategy is McpAuthStrategy.OAUTH_CLIENT_CREDENTIALS
+            and server.oauth is None
         ):
             raise ValueError("remote MCP server is not callable")
         self._server = server
@@ -63,7 +67,35 @@ class ManagedRemoteMcpTransport:
             and self._server.tenant_id != trusted_context.tenant_id
         ):
             raise PolicyDeniedError("remote MCP server is outside tenant scope")
+        arguments = request.params.get("arguments")
+        if isinstance(arguments, dict):
+            declared_tenant = arguments.get("tenant_id")
+            declared_user = arguments.get("user_id")
+            if (
+                declared_tenant is not None
+                and str(declared_tenant) != trusted_context.tenant_id
+            ):
+                raise PolicyDeniedError("tool argument tenant_id is not an authorization source")
+            if (
+                declared_user is not None
+                and trusted_context.user_id is not None
+                and str(declared_user) != trusted_context.user_id
+            ):
+                raise PolicyDeniedError("tool argument user_id is not an authorization source")
         request_payload = request.model_dump(mode="json")
+        identity = {
+            "tenant_id": trusted_context.tenant_id,
+            "user_id": trusted_context.user_id,
+            "session_id": trusted_context.session_id,
+            "run_id": trusted_context.run_id,
+        }
+        if (
+            self._server.resolved_auth_strategy
+            is McpAuthStrategy.WORKLOAD_TRUSTED_CONTEXT
+            and not identity["user_id"]
+            and request.method in {"tools/call", "resources/read", "prompts/get"}
+        ):
+            raise PolicyDeniedError("chaintower MCP call is missing trusted user context")
         input_digest = hashlib.sha256(
             json.dumps(
                 request_payload,
@@ -98,6 +130,7 @@ class ManagedRemoteMcpTransport:
             request={
                 **request_payload,
                 "server_id": self._server.server_id,
+                "_auraclaw_identity": identity,
             },
             policy_decision_id=evaluation.decision_id,
         )

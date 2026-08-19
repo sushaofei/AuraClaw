@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -50,6 +51,8 @@ REQUIRED = (
     "SEAWEEDFS_HOST",
     "SEAWEEDFS_ACCESS_KEY",
     "SEAWEEDFS_SECRET_KEY",
+    "AURACLAW_CHAINTOWER_WORKLOAD_TOKEN",
+    "AURACLAW_AGENT_CONTEXT_SIGNING_KEYS_JSON",
 )
 
 
@@ -105,6 +108,25 @@ def main() -> int:
     lease_key = values["AURACLAW_LEASE_SIGNING_KEY"]
     if lease_key and len(lease_key) < 32:
         failures.append("AURACLAW_LEASE_SIGNING_KEY must contain at least 32 characters")
+    chaintower_token = values["AURACLAW_CHAINTOWER_WORKLOAD_TOKEN"]
+    if chaintower_token and len(chaintower_token) < 32:
+        failures.append("AURACLAW_CHAINTOWER_WORKLOAD_TOKEN must contain at least 32 characters")
+    if chaintower_token and chaintower_token in token_values:
+        failures.append(
+            "AURACLAW_CHAINTOWER_WORKLOAD_TOKEN must differ from internal service tokens"
+        )
+    signing_keys = values["AURACLAW_AGENT_CONTEXT_SIGNING_KEYS_JSON"]
+    if signing_keys:
+        try:
+            payload = json.loads(signing_keys)
+        except json.JSONDecodeError:
+            payload = None
+        if not isinstance(payload, dict) or not payload:
+            failures.append(
+                "AURACLAW_AGENT_CONTEXT_SIGNING_KEYS_JSON must be a JSON object of kid to HMAC key"
+            )
+        elif any(len(str(value).encode()) < 32 for value in payload.values()):
+            failures.append("agent context signing keys must contain at least 32 bytes")
 
     completed = subprocess.run(
         [

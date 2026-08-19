@@ -197,8 +197,9 @@ Java MCP Server 必须同时满足：
    profile，也可使用 `2025-11-25 initialize`。
 2. 使用绝对 HTTPS Endpoint。
 3. DNS 的全部解析结果都是公网地址；当前 Egress 明确拒绝私网、loopback 和 link-local 地址。
-4. 使用 OAuth `client_credentials`。
-5. 提供 OAuth Protected Resource Metadata 和 Authorization Server Metadata。
+4. 认证使用受管 Connector 策略：第三方 MCP 可用 OAuth `client_credentials`；chaintower MCP
+   使用 AuraClaw/Hands workload + per-request trusted tenant/user 上下文，由 Java 服务做最终业务鉴权。
+5. 若使用 OAuth，提供 Protected Resource Metadata 和 Authorization Server Metadata。
 6. Tool、Resource Scheme、Prompt 名称命中 AuraClaw allowlist。
 7. 最好使用无状态的 2025 兼容模式；当前 Egress 没有保存和回传 `Mcp-Session-Id`。
 

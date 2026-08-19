@@ -35,6 +35,7 @@ class HandsTrustedContext(ContractModel):
     fencing_token: int = Field(ge=1)
     deadline: datetime | None = None
     lease_assertion: LeaseAssertion | None = None
+    user_id: str | None = None
 
 
 class HandsError(ContractModel):

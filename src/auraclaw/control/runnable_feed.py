@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Sequence
+from dataclasses import replace
 from datetime import timedelta
 from typing import Protocol
 
@@ -73,6 +74,15 @@ class RunnableFeedConsumer:
                         record.event.tenant_id, record.event.session_id
                     )
                     item = self._derive(events, record.event.aggregate_version)
+                if (
+                    item is not None
+                    and item.user_id is None
+                    and item.root_session_id != item.session_id
+                ):
+                    root_events = await self._source.load(
+                        item.tenant_id, item.root_session_id
+                    )
+                    item = replace(item, user_id=self._owner_user_id(root_events))
                 if item is not None:
                     enqueued += int(await self._store.enqueue(item))
                 # Ack off the schedule critical path; enqueue is idempotent so
@@ -119,6 +129,10 @@ class RunnableFeedConsumer:
         event = record.event
         if event.type != "run.requested":
             return None
+        # Only a user-originated root request carries a stable identity on the hot
+        # path. Coordinator/runtime requests fall back to canonical feed recovery.
+        if event.actor.type != "user":
+            return None
         run_id = event.payload.get("run_id")
         if run_id is None:
             return None
@@ -145,6 +159,7 @@ class RunnableFeedConsumer:
             queue_partition=event.tenant_id,
             role=role,
             budget=budget,
+            user_id=event.actor.id,
         )
 
     @staticmethod
@@ -158,6 +173,7 @@ class RunnableFeedConsumer:
         run_id: str | None = None
         budget = RuntimeBudget()
         terminal_runs: set[str] = set()
+        owner_user_id = RunnableFeedConsumer._owner_user_id(events)
         for event in events:
             if event.type in {"session.created", "child.created"}:
                 role = str(event.payload.get("role", role))
@@ -193,4 +209,13 @@ class RunnableFeedConsumer:
             queue_partition=latest.tenant_id,
             role=role,
             budget=budget,
+            user_id=owner_user_id,
         )
+
+    @staticmethod
+    def _owner_user_id(events: Sequence[CanonicalEvent]) -> str | None:
+        """Resolve the stable task owner from the canonical creation fact."""
+        for event in events:
+            if event.type == "session.created" and event.actor.type == "user":
+                return event.actor.id
+        return None

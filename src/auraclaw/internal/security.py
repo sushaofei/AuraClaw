@@ -16,19 +16,22 @@ def _canonical_claims(assertion: LeaseAssertion) -> bytes:
     expires_at = assertion.expires_at
     if expires_at.tzinfo is None:
         expires_at = expires_at.replace(tzinfo=UTC)
+    payload = {
+        "audience": assertion.audience,
+        "expires_at": expires_at.astimezone(UTC).isoformat(),
+        "fencing_token": assertion.fencing_token,
+        "key_id": assertion.key_id,
+        "lease_id": assertion.lease_id,
+        "run_id": assertion.run_id,
+        "root_session_id": assertion.root_session_id,
+        "runtime_id": assertion.runtime_id,
+        "session_id": assertion.session_id,
+        "tenant_id": assertion.tenant_id,
+    }
+    if assertion.user_id is not None:
+        payload["user_id"] = assertion.user_id
     return json.dumps(
-        {
-            "audience": assertion.audience,
-            "expires_at": expires_at.astimezone(UTC).isoformat(),
-            "fencing_token": assertion.fencing_token,
-            "key_id": assertion.key_id,
-            "lease_id": assertion.lease_id,
-            "run_id": assertion.run_id,
-            "root_session_id": assertion.root_session_id,
-            "runtime_id": assertion.runtime_id,
-            "session_id": assertion.session_id,
-            "tenant_id": assertion.tenant_id,
-        },
+        payload,
         sort_keys=True,
         separators=(",", ":"),
     ).encode()

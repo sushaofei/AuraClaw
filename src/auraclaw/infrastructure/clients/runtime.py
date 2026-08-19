@@ -360,6 +360,7 @@ class RemoteRuntimeControlClient:
                 ),
                 lease_expires_at=record.lease_assertion.expires_at,
                 lease_assertion=record.lease_assertion,
+                user_id=record.lease_assertion.user_id,
             )
             self._assignments[
                 (assignment.tenant_id, assignment.session_id, assignment.run_id)

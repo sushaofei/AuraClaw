@@ -29,6 +29,7 @@ class RuntimeAssignment:
     budget: RuntimeBudget = field(default_factory=RuntimeBudget)
     lease_expires_at: datetime | None = None
     lease_assertion: LeaseAssertion | None = None
+    user_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -51,6 +52,7 @@ class RunnableItem:
     required_capability: dict[str, Any] = field(default_factory=dict)
     deadline: datetime | None = None
     budget: RuntimeBudget = field(default_factory=RuntimeBudget)
+    user_id: str | None = None
 
 
 @dataclass(frozen=True)

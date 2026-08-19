@@ -35,6 +35,8 @@ SECRET_VARIABLES = {
     "vault_token": "AURACLAW_CREDENTIAL_VAULT_TOKEN",
     "seaweedfs_access_key": "SEAWEEDFS_ACCESS_KEY",
     "seaweedfs_secret_key": "SEAWEEDFS_SECRET_KEY",
+    "chaintower_workload_token": "AURACLAW_CHAINTOWER_WORKLOAD_TOKEN",
+    "agent_context_signing_keys_json": "AURACLAW_AGENT_CONTEXT_SIGNING_KEYS_JSON",
 }
 
 

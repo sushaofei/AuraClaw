@@ -33,6 +33,7 @@ class InProcessHandsClient:
             fencing_token=assignment.fencing_token,
             deadline=assignment.deadline,
             lease_assertion=assignment.lease_assertion,
+            user_id=assignment.user_id,
         )
 
     async def list_tools(

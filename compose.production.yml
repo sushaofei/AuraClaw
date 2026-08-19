@@ -100,7 +100,17 @@ services:
       AURACLAW_HEALTH_PORT: "8000"
       AURACLAW_DATABASE_URL_FILE: /run/secrets/task_query_database_url
       AURACLAW_TASK_API_WORKLOAD_TOKEN_FILE: /run/secrets/task_api_workload_token
-    secrets: [task_query_database_url, task_api_workload_token]
+      AURACLAW_CHAINTOWER_WORKLOAD_TOKEN_FILE: /run/secrets/chaintower_workload_token
+      AURACLAW_AGENT_CONTEXT_SIGNING_KEYS_JSON_FILE: /run/secrets/agent_context_signing_keys_json
+      AURACLAW_AGENT_CONTEXT_ISSUER: ${AURACLAW_AGENT_CONTEXT_ISSUER:-chaintower}
+      AURACLAW_AGENT_CONTEXT_AUDIENCE: ${AURACLAW_AGENT_CONTEXT_AUDIENCE:-auraclaw-task-api}
+    secrets:
+      [
+        task_query_database_url,
+        task_api_workload_token,
+        chaintower_workload_token,
+        agent_context_signing_keys_json,
+      ]
     command: ["api", "run", "--host", "0.0.0.0", "--port", "8000"]
     expose: ["8000"]
     healthcheck: *healthcheck
@@ -555,3 +565,5 @@ secrets:
   vault_token: {file: "${AURACLAW_SECRET_DIR:-.runtime/compose-secrets}/vault_token"}
   seaweedfs_access_key: {file: "${AURACLAW_SECRET_DIR:-.runtime/compose-secrets}/seaweedfs_access_key"}
   seaweedfs_secret_key: {file: "${AURACLAW_SECRET_DIR:-.runtime/compose-secrets}/seaweedfs_secret_key"}
+  chaintower_workload_token: {file: "${AURACLAW_SECRET_DIR:-.runtime/compose-secrets}/chaintower_workload_token"}
+  agent_context_signing_keys_json: {file: "${AURACLAW_SECRET_DIR:-.runtime/compose-secrets}/agent_context_signing_keys_json"}

@@ -20,6 +20,8 @@ from auraclaw.contracts.hands import (
 from auraclaw.infrastructure.connectors.mcp.transport import ManagedRemoteMcpTransport
 from auraclaw.infrastructure.connectors.mcp.wire import (
     MCP_AURACLAW_INVOCATION_ID_META_KEY,
+    MCP_AURACLAW_TENANT_ID_META_KEY,
+    MCP_AURACLAW_USER_ID_META_KEY,
     MCP_CLIENT_CAPABILITIES_META_KEY,
     MCP_CLIENT_INFO_META_KEY,
     MCP_LEGACY_PROTOCOL_VERSION,
@@ -220,7 +222,10 @@ class ManagedMcpConnector:
     ) -> HandsToolResult:
         request_meta: dict[str, Any] = {
             MCP_AURACLAW_INVOCATION_ID_META_KEY: invocation_id,
+            MCP_AURACLAW_TENANT_ID_META_KEY: trusted.tenant_id,
         }
+        if trusted.user_id:
+            request_meta[MCP_AURACLAW_USER_ID_META_KEY] = trusted.user_id
         if self._server.protocol_revision == MCP_PROTOCOL_VERSION:
             request_meta.update(_modern_meta())
         params: dict[str, Any] = {
@@ -353,6 +358,7 @@ def _mcp_trusted(trusted: HandsTrustedContext) -> McpTrustedContext:
         fencing_token=trusted.fencing_token,
         deadline=trusted.deadline,
         lease_assertion=trusted.lease_assertion,
+        user_id=trusted.user_id,
     )
 
 

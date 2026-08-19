@@ -25,6 +25,8 @@ _SECRET_FILE_VARIABLES = {
     "AURACLAW_ARTIFACT_SERVICE_WORKLOAD_TOKEN",
     "AURACLAW_POLICY_WORKLOAD_TOKEN",
     "AURACLAW_DELIVERY_WORKLOAD_TOKEN",
+    "AURACLAW_CHAINTOWER_WORKLOAD_TOKEN",
+    "AURACLAW_AGENT_CONTEXT_SIGNING_KEYS_JSON",
     "AURACLAW_LEASE_SIGNING_KEY",
     "AURACLAW_MODEL_API_KEY",
     "AURACLAW_MODEL_SKILL_SIGNING_KEY",
@@ -76,6 +78,14 @@ class Settings(BaseSettings):
     streaming_port: int = 8010
     delivery_port: int = 8011
     lease_signing_key: SecretStr | None = None
+    allow_insecure_identity_headers: bool | None = None
+    chaintower_workload_token: SecretStr | None = None
+    agent_context_issuer: str = "chaintower"
+    agent_context_audience: str = "auraclaw-task-api"
+    agent_context_signing_keys_json: str = "{}"
+    agent_context_max_ttl_seconds: int = Field(default=300, ge=30, le=600)
+    agent_context_clock_skew_seconds: int = Field(default=30, ge=0, le=120)
+    agent_context_required_scope: str = "agent.task.invoke"
     task_api_workload_token: SecretStr | None = None
     orchestrator_workload_token: SecretStr | None = None
     projection_workload_token: SecretStr | None = None
@@ -213,6 +223,15 @@ class Settings(BaseSettings):
     model_tenant_token_limit_per_hour: int = Field(default=1_000_000, ge=1)
     # None omits the field; True/False maps to OpenAI-compatible thinking.type enabled/disabled.
     model_thinking_enabled: bool | None = None
+
+    @model_validator(mode="after")
+    def validate_identity_settings(self) -> Settings:
+        if (
+            self.deployment_profile == "production"
+            and self.allow_insecure_identity_headers is True
+        ):
+            raise ValueError("insecure identity headers cannot be enabled in production")
+        return self
 
     @model_validator(mode="after")
     def validate_artifact_backend(self) -> Settings:
@@ -418,6 +437,41 @@ class Settings(BaseSettings):
             and self.price_insight_mysql_password is not None
             and self.price_insight_mysql_password.get_secret_value()
             and self.price_insight_mysql_database
+        )
+
+    @property
+    def insecure_identity_headers_enabled(self) -> bool:
+        if self.deployment_profile == "production":
+            return False
+        if self.allow_insecure_identity_headers is False:
+            return False
+        if self.allow_insecure_identity_headers is True:
+            return True
+        return self.deployment_profile == "development"
+
+    @property
+    def agent_context_signing_keys(self) -> dict[str, bytes]:
+        try:
+            payload = json.loads(self.agent_context_signing_keys_json or "{}")
+        except json.JSONDecodeError as exc:
+            raise ValueError("agent context signing keys must be a JSON object") from exc
+        if not isinstance(payload, dict):
+            raise ValueError("agent context signing keys must be a JSON object")
+        keys: dict[str, bytes] = {}
+        for key_id, value in payload.items():
+            encoded = str(value).encode()
+            if len(encoded) < 32:
+                raise ValueError("agent context signing key must contain at least 32 bytes")
+            keys[str(key_id)] = encoded
+        return keys
+
+    @property
+    def signed_identity_configured(self) -> bool:
+        token = self.chaintower_workload_token
+        return bool(
+            token is not None
+            and token.get_secret_value()
+            and self.agent_context_signing_keys
         )
 
     def workload_token_value(self, service_name: str) -> str | None:

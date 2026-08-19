@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from typing import Any
 
 _SENSITIVE_KEY = re.compile(
-    r"(^|_)(authorization|cookie|credential|password|secret|token|api_key|private_key)($|_)",
+    r"(^|_)(authorization|cookie|credential|password|secret|token|api_key|private_key|assertion|agent_context)($|_)",
     re.IGNORECASE,
 )
 _BEARER = re.compile(r"(?i)bearer\s+[a-z0-9._~+/=-]+")

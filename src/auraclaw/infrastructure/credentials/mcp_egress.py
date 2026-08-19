@@ -11,7 +11,7 @@ from urllib.parse import urlencode, urlsplit, urlunsplit
 
 import httpx
 
-from auraclaw.contracts.capabilities import McpServerDefinition
+from auraclaw.contracts.capabilities import McpAuthStrategy, McpServerDefinition
 from auraclaw.contracts.errors import CredentialAccessError
 from auraclaw.infrastructure.connectors.mcp.wire import (
     MCP_CLIENT_CAPABILITIES_META_KEY,
@@ -157,16 +157,19 @@ class ManagedMcpEgressAdapter:
     ) -> None:
         if not server.enabled:
             raise ValueError("MCP egress server must be enabled")
-        if server.oauth is None or server.credential_ref is None:
-            raise ValueError("MCP egress server requires managed OAuth configuration")
+        if server.credential_ref is None:
+            raise ValueError("MCP egress server requires a credential_ref")
         _validate_https_url(server.endpoint)
-        _validate_https_url(server.oauth.protected_resource_metadata_url)
-        _validate_https_url(server.oauth.authorization_server_metadata_url)
-        _validate_https_url(server.oauth.issuer)
-        _validate_https_url(server.oauth.token_endpoint)
-        _validate_https_url(server.oauth.resource)
-        if _origin(server.endpoint) != _origin(server.oauth.resource):
-            raise ValueError("OAuth Resource Indicator must match MCP server origin")
+        if server.resolved_auth_strategy is McpAuthStrategy.OAUTH_CLIENT_CREDENTIALS:
+            if server.oauth is None:
+                raise ValueError("MCP egress server requires managed OAuth configuration")
+            _validate_https_url(server.oauth.protected_resource_metadata_url)
+            _validate_https_url(server.oauth.authorization_server_metadata_url)
+            _validate_https_url(server.oauth.issuer)
+            _validate_https_url(server.oauth.token_endpoint)
+            _validate_https_url(server.oauth.resource)
+            if _origin(server.endpoint) != _origin(server.oauth.resource):
+                raise ValueError("OAuth Resource Indicator must match MCP server origin")
         self._server = server
         self._resolver = resolver or SystemMcpDnsResolver()
         self._sender = sender or HttpxPinnedMcpSender()
@@ -182,22 +185,36 @@ class ManagedMcpEgressAdapter:
     @property
     def credential_scope(self) -> str:
         oauth = self._server.oauth
-        assert oauth is not None
-        return oauth.resource
+        if oauth is not None:
+            return oauth.resource
+        return _origin(self._server.endpoint)
 
     async def __call__(
         self,
         request: dict[str, Any],
         client_secret: str,
     ) -> dict[str, Any]:
-        if set(request).difference({"id", "jsonrpc", "method", "params", "server_id"}):
+        payload = dict(request)
+        if payload.keys() - {
+            "id",
+            "jsonrpc",
+            "method",
+            "params",
+            "server_id",
+            "_auraclaw_identity",
+        }:
             raise CredentialAccessError("MCP egress request contains unsupported fields")
-        if _contains_forbidden_key(request):
+        identity = payload.pop("_auraclaw_identity", None)
+        if identity is not None and not isinstance(identity, dict):
+            raise CredentialAccessError("MCP trusted identity is invalid")
+        if _contains_forbidden_key(payload) or (
+            isinstance(identity, dict) and _contains_forbidden_key(identity)
+        ):
             raise CredentialAccessError("MCP egress request may not carry credentials or targets")
-        if request.get("server_id") != self._server.server_id:
+        if payload.get("server_id") != self._server.server_id:
             raise CredentialAccessError("MCP egress server binding does not match")
-        method = str(request.get("method", ""))
-        params = request.get("params", {})
+        method = str(payload.get("method", ""))
+        params = payload.get("params", {})
         if method not in _METHODS or not isinstance(params, dict):
             raise CredentialAccessError("MCP method is not allowlisted")
         if self._server.protocol_revision == MCP_PROTOCOL_VERSION:
@@ -214,10 +231,37 @@ class ManagedMcpEgressAdapter:
                 )
         self._authorize_method(method, params)
         token = await self._access_token(client_secret)
-        payload = json.dumps(
+        headers = {
+            "Accept": "application/json, text/event-stream",
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "MCP-Protocol-Version": self._server.protocol_revision,
+            "Mcp-Method": method,
+            **(
+                {"Mcp-Name": name}
+                if (name := _request_target_name(method, params)) is not None
+                else {}
+            ),
+            "Origin": _origin(self._server.endpoint),
+        }
+        if (
+            self._server.resolved_auth_strategy
+            is McpAuthStrategy.WORKLOAD_TRUSTED_CONTEXT
+            and isinstance(identity, dict)
+        ):
+            tenant_id = identity.get("tenant_id")
+            user_id = identity.get("user_id")
+            session_id = identity.get("session_id")
+            if tenant_id:
+                headers["X-CT-Tenant-ID"] = str(tenant_id)
+            if user_id:
+                headers["X-CT-User-ID"] = str(user_id)
+            if session_id:
+                headers["X-CT-Session-ID"] = str(session_id)
+        jsonrpc_body = json.dumps(
             {
                 "jsonrpc": "2.0",
-                "id": request.get("id"),
+                "id": payload.get("id"),
                 "method": method,
                 "params": params,
             },
@@ -226,20 +270,8 @@ class ManagedMcpEgressAdapter:
         response = await self._send_pinned(
             "POST",
             self._server.endpoint,
-            headers={
-                "Accept": "application/json, text/event-stream",
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json",
-                "MCP-Protocol-Version": self._server.protocol_revision,
-                "Mcp-Method": method,
-                **(
-                    {"Mcp-Name": name}
-                    if (name := _request_target_name(method, params)) is not None
-                    else {}
-                ),
-                "Origin": _origin(self._server.endpoint),
-            },
-            content=payload,
+            headers=headers,
+            content=jsonrpc_body,
         )
         result = _decode_mcp_response(response, self._max_response_bytes)
         return dict(_redact_exact(result, token))
@@ -250,6 +282,13 @@ class ManagedMcpEgressAdapter:
             await close()
 
     async def _access_token(self, client_secret: str) -> str:
+        if (
+            self._server.resolved_auth_strategy
+            is McpAuthStrategy.WORKLOAD_TRUSTED_CONTEXT
+        ):
+            if not client_secret:
+                raise CredentialAccessError("MCP workload credential is unavailable")
+            return client_secret
         await self._discover_oauth()
         now = datetime.now(UTC)
         if self._token is not None and self._token.expires_at > now:

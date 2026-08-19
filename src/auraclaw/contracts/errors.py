@@ -25,6 +25,11 @@ class InvalidTransitionError(AuraClawError):
     status_code = 409
 
 
+class UnauthenticatedError(AuraClawError):
+    code = "unauthenticated"
+    status_code = 401
+
+
 class AuthorizationError(AuraClawError):
     code = "authorization_denied"
     status_code = 403
