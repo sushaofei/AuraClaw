@@ -8,7 +8,8 @@ Gateway。Runtime 只持有内部 MCP 地址和 workload identity，不接受远
 
 实现分为以下边界：
 
-- `contracts/mcp.py`：MCP 2025-11-25 JSON-RPC、Resource、Prompt 和可信上下文 DTO。
+- `contracts/mcp.py`：MCP 2026-07-28 JSON-RPC、Resource、Prompt 和可信上下文 DTO；保留
+  2025-11-25 legacy profile 供滚动升级。
 - `contracts/capabilities.py`：受管 Server、OAuth/OIDC 和统一 Capability 描述符。
 - `contracts/skills.py`：Skill Manifest、发布状态、固定依赖和激活绑定。
 - `action`：Capability Catalog、Resource Gateway、Skill Package/Resolver、远端 Transport 和周期对账。
@@ -30,7 +31,7 @@ Canonical Session Event；目录、缓存、通知和步骤进度都可丢弃并
     "tenant_id": "tenant-a",
     "title": "GitHub MCP",
     "endpoint": "https://mcp.example/v1/mcp",
-    "protocol_revision": "2025-11-25",
+    "protocol_revision": "2026-07-28",
     "credential_ref": "vault/github-mcp#client_secret",
     "oauth": {
       "protected_resource_metadata_url": "https://mcp.example/.well-known/oauth-protected-resource",
@@ -79,12 +80,13 @@ Server Registry / tenant
 Runtime 不能覆盖 endpoint、Header、Authorization 或 Token。远端 Tool 一律先按
 `write-with-approval/high` 注册；服务端 annotations 不提升权限。
 
-对账只有在 initialize 和全部分页 list 成功后才发布快照。同名同版本内容漂移会失败，不会覆盖
+2026-07-28 Server 只有在 `server/discover` 和全部分页 list 成功后才发布快照；显式登记为
+2025-11-25 的 legacy Server 仍走 `initialize`。同名同版本内容漂移会失败，不会覆盖
 旧摘要。新快照只改变发现集合，已固定 Skill 仍可使用旧 Tool 版本；Server 连续三次同步失败后
 进入 `quarantined`，届时旧路由也被撤销。`list_changed` 只加速对账，
 `notifications/resources/updated` 只失效 Resource cache；通知丢失由周期对账修复。
 
-实验性 MCP Tasks 未启用，也不在 initialize 中协商。Hands Invocation Store、Runtime
+MCP Tasks Extension 未启用，也不在逐请求 client capabilities 中声明。Hands Invocation Store、Runtime
 Checkpoint 和 Session 状态机仍是长调用恢复边界。
 
 ## 4. Skill 生命周期
@@ -103,6 +105,7 @@ M9 新增：
 
 - `0015_m9_capability_catalog.sql`：受管 Server 和 Capability Catalog。
 - `0016_m9_skill_projection.sql`：Task Projection 的 `skill_activations`。
+- `0018_mcp_protocol_revision.sql`：新注册远端 Server 的数据库默认 revision 升为 `2026-07-28`。
 
 发布顺序是先执行 expand migration，再滚动 Credential Proxy、Action Hands、Runtime 和
 Projection。回滚应用时先停用远端 Server 配置，再回滚服务；只有确认没有旧版本读取

@@ -494,8 +494,13 @@ def test_production_hands_requires_signed_runtime_lease_capability() -> None:
     request = {
         "jsonrpc": "2.0",
         "id": 1,
-        "method": "initialize",
-        "params": {"protocolVersion": MCP_PROTOCOL_VERSION},
+        "method": "server/discover",
+        "params": {
+            "_meta": {
+                "io.modelcontextprotocol/protocolVersion": MCP_PROTOCOL_VERSION,
+                "io.modelcontextprotocol/clientCapabilities": {},
+            }
+        },
     }
     capability = LeaseAssertionSigner(key_id="development", signing_key=key).sign(
         LeaseAssertion(
@@ -524,11 +529,13 @@ def test_production_hands_requires_signed_runtime_lease_capability() -> None:
             json=request,
             headers={
                 "Authorization": "Bearer runtime-token",
+                "MCP-Protocol-Version": MCP_PROTOCOL_VERSION,
+                "Mcp-Method": "server/discover",
                 "X-AuraClaw-Lease-Assertion": capability.model_dump_json(),
             },
         )
         assert accepted.status_code == 200
-        assert accepted.json()["result"]["protocolVersion"] == MCP_PROTOCOL_VERSION
+        assert MCP_PROTOCOL_VERSION in accepted.json()["result"]["supportedVersions"]
 
 
 @pytest.mark.asyncio

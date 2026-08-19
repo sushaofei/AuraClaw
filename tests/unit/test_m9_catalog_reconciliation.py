@@ -80,12 +80,12 @@ class _RemoteCredentials:
         request = arguments["request"]
         assert isinstance(request, dict)
         method = request["method"]
-        if method == "initialize":
+        if method == "server/discover":
             return {
                 "jsonrpc": "2.0",
                 "id": request["id"],
                 "result": {
-                    "protocolVersion": "2025-11-25",
+                    "supportedVersions": ["2026-07-28"],
                     "capabilities": {"resources": {"subscribe": True}},
                 },
             }
@@ -249,7 +249,7 @@ def test_catalog_reconciliation_filters_routes_invalidates_and_recovers() -> Non
             _invocation(capability),
             capability,
         ) == {"number": 21, "state": "open"}
-        assert any(
+        assert not any(
             call["request"]["method"] == "resources/subscribe"  # type: ignore[index]
             for call in credentials.calls
         )

@@ -18,6 +18,9 @@ from auraclaw.contracts.capabilities import (
 )
 from auraclaw.contracts.errors import CredentialAccessError, PolicyDeniedError
 from auraclaw.contracts.mcp import (
+    MCP_CLIENT_CAPABILITIES_META_KEY,
+    MCP_PROTOCOL_VERSION,
+    MCP_PROTOCOL_VERSION_META_KEY,
     McpJsonRpcRequest,
     McpTrustedContext,
 )
@@ -139,7 +142,14 @@ def _request() -> dict[str, object]:
         "jsonrpc": "2.0",
         "id": 1,
         "method": "tools/call",
-        "params": {"name": "github.issue.get", "arguments": {"number": 21}},
+        "params": {
+            "name": "github.issue.get",
+            "arguments": {"number": 21},
+            "_meta": {
+                MCP_PROTOCOL_VERSION_META_KEY: MCP_PROTOCOL_VERSION,
+                MCP_CLIENT_CAPABILITIES_META_KEY: {},
+            },
+        },
     }
 
 
@@ -236,6 +246,11 @@ def test_mcp_egress_uses_resource_indicator_pins_dns_and_hides_tokens() -> None:
         assert token_body["resource"] == ["https://mcp.example/v1/mcp"]
         assert token_body["client_secret"] == ["oauth-client-secret"]
         assert sender.calls[3]["url"] == "https://mcp.example/v1/mcp"
+        request_headers = sender.calls[3]["headers"]
+        assert isinstance(request_headers, dict)
+        assert request_headers["MCP-Protocol-Version"] == MCP_PROTOCOL_VERSION
+        assert request_headers["Mcp-Method"] == "tools/call"
+        assert request_headers["Mcp-Name"] == "github.issue.get"
         assert resolver.calls == [
             ("mcp.example", 443),
             ("auth.example", 443),

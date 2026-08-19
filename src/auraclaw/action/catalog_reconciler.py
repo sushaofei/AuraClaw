@@ -25,7 +25,11 @@ from auraclaw.contracts.capabilities import (
     McpServerDefinition,
 )
 from auraclaw.contracts.mcp import (
+    MCP_CLIENT_CAPABILITIES_META_KEY,
+    MCP_CLIENT_INFO_META_KEY,
+    MCP_LEGACY_PROTOCOL_VERSION,
     MCP_PROTOCOL_VERSION,
+    MCP_PROTOCOL_VERSION_META_KEY,
     McpJsonRpcRequest,
     McpTransport,
     McpTrustedContext,
@@ -107,28 +111,45 @@ class McpCatalogReconciler:
             )
         trusted = _reconcile_context(server)
         try:
-            initialized = await _send(
-                transport,
-                trusted,
-                "initialize",
-                {
-                    "protocolVersion": MCP_PROTOCOL_VERSION,
-                    "capabilities": {
-                        "roots": {"listChanged": False},
-                        "sampling": {},
+            if server.protocol_revision == MCP_PROTOCOL_VERSION:
+                discovery = await _send(
+                    transport,
+                    trusted,
+                    "server/discover",
+                    {},
+                    protocol_version=server.protocol_revision,
+                )
+                if MCP_PROTOCOL_VERSION not in discovery.get("supportedVersions", []):
+                    raise ValueError("remote MCP protocol version is incompatible")
+            elif server.protocol_revision == MCP_LEGACY_PROTOCOL_VERSION:
+                discovery = await _send(
+                    transport,
+                    trusted,
+                    "initialize",
+                    {
+                        "protocolVersion": MCP_LEGACY_PROTOCOL_VERSION,
+                        "capabilities": {},
+                        "clientInfo": {
+                            "name": "auraclaw-capability-reconciler",
+                            "version": "1",
+                        },
                     },
-                    "clientInfo": {
-                        "name": "auraclaw-capability-reconciler",
-                        "version": "1",
-                    },
-                },
-            )
-            if initialized.get("protocolVersion") != MCP_PROTOCOL_VERSION:
-                raise ValueError("remote MCP protocol version is incompatible")
+                    protocol_version=server.protocol_revision,
+                )
+                if discovery.get("protocolVersion") != MCP_LEGACY_PROTOCOL_VERSION:
+                    raise ValueError("remote MCP protocol version is incompatible")
+            else:
+                raise ValueError("remote MCP protocol version is not supported")
             snapshot: list[CapabilityDescriptor] = []
             listed_resources: list[str] = []
             for method, key in _LIST_METHODS:
-                items = await self._list_all(transport, trusted, method, key)
+                items = await self._list_all(
+                    transport,
+                    trusted,
+                    method,
+                    key,
+                    protocol_version=server.protocol_revision,
+                )
                 if key == "resources":
                     listed_resources = [
                         str(item.get("uri", "")) for item in items
@@ -175,10 +196,13 @@ class McpCatalogReconciler:
             await self._catalog.register_server(active)
             self._failures.pop(server.server_id, None)
             self._dirty.discard(server.server_id)
-            resources_capability = initialized.get("capabilities", {}).get(
+            resources_capability = discovery.get("capabilities", {}).get(
                 "resources", {}
             )
-            if resources_capability.get("subscribe") is True:
+            if (
+                server.protocol_revision == MCP_LEGACY_PROTOCOL_VERSION
+                and resources_capability.get("subscribe") is True
+            ):
                 for uri in listed_resources[:100]:
                     try:
                         await _send(
@@ -186,6 +210,7 @@ class McpCatalogReconciler:
                             trusted,
                             "resources/subscribe",
                             {"uri": uri},
+                            protocol_version=server.protocol_revision,
                         )
                     except Exception:
                         break
@@ -272,6 +297,8 @@ class McpCatalogReconciler:
         trusted: McpTrustedContext,
         method: str,
         key: str,
+        *,
+        protocol_version: str,
     ) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
         cursor: str | None = None
@@ -282,6 +309,7 @@ class McpCatalogReconciler:
                 trusted,
                 method,
                 {"cursor": cursor} if cursor is not None else {},
+                protocol_version=protocol_version,
             )
             raw_items = result.get(key, [])
             if not isinstance(raw_items, list) or any(
@@ -336,9 +364,23 @@ async def _send(
     trusted: McpTrustedContext,
     method: str,
     params: dict[str, Any],
+    *,
+    protocol_version: str,
 ) -> dict[str, Any]:
+    request_params = dict(params)
+    if protocol_version == MCP_PROTOCOL_VERSION:
+        request_params["_meta"] = {
+            MCP_PROTOCOL_VERSION_META_KEY: MCP_PROTOCOL_VERSION,
+            MCP_CLIENT_INFO_META_KEY: {
+                "name": "auraclaw-capability-reconciler",
+                "version": "1",
+            },
+            MCP_CLIENT_CAPABILITIES_META_KEY: {},
+        }
     response = await transport.send(
-        McpJsonRpcRequest(id=f"reconcile:{method}", method=method, params=params),
+        McpJsonRpcRequest(
+            id=f"reconcile:{method}", method=method, params=request_params
+        ),
         trusted_context=trusted,
     )
     if response.error is not None:

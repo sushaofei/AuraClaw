@@ -9,6 +9,10 @@ from auraclaw.action.ports import CredentialInvoker, ResourcePolicyEvaluator
 from auraclaw.contracts.capabilities import CapabilityStatus, McpServerDefinition
 from auraclaw.contracts.errors import PolicyDeniedError
 from auraclaw.contracts.mcp import (
+    MCP_CLIENT_CAPABILITIES_META_KEY,
+    MCP_CLIENT_INFO_META_KEY,
+    MCP_PROTOCOL_VERSION,
+    MCP_PROTOCOL_VERSION_META_KEY,
     McpJsonRpcRequest,
     McpJsonRpcResponse,
     McpTrustedContext,
@@ -138,14 +142,24 @@ class RemoteMcpToolExecutor:
         capability: ToolCapability,
     ) -> dict[str, object]:
         del capability
+        params: dict[str, Any] = {
+            "name": invocation.tool_name,
+            "arguments": invocation.arguments,
+        }
+        if self._server.protocol_revision == MCP_PROTOCOL_VERSION:
+            params["_meta"] = {
+                MCP_PROTOCOL_VERSION_META_KEY: MCP_PROTOCOL_VERSION,
+                MCP_CLIENT_INFO_META_KEY: {
+                    "name": "auraclaw-action-hands",
+                    "version": "1",
+                },
+                MCP_CLIENT_CAPABILITIES_META_KEY: {},
+            }
         response = await self._transport.send(
             McpJsonRpcRequest(
                 id=invocation.tool_invocation_id,
                 method="tools/call",
-                params={
-                    "name": invocation.tool_name,
-                    "arguments": invocation.arguments,
-                },
+                params=params,
             ),
             trusted_context=McpTrustedContext(
                 tenant_id=invocation.tenant_id,

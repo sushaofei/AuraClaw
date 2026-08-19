@@ -13,6 +13,11 @@ import httpx
 
 from auraclaw.contracts.capabilities import McpServerDefinition
 from auraclaw.contracts.errors import CredentialAccessError
+from auraclaw.contracts.mcp import (
+    MCP_CLIENT_CAPABILITIES_META_KEY,
+    MCP_PROTOCOL_VERSION,
+    MCP_PROTOCOL_VERSION_META_KEY,
+)
 
 _FORBIDDEN_REQUEST_KEYS = {
     "access_token",
@@ -28,6 +33,7 @@ _FORBIDDEN_REQUEST_KEYS = {
     "token",
 }
 _METHODS = {
+    "server/discover",
     "initialize",
     "notifications/initialized",
     "ping",
@@ -194,6 +200,18 @@ class ManagedMcpEgressAdapter:
         params = request.get("params", {})
         if method not in _METHODS or not isinstance(params, dict):
             raise CredentialAccessError("MCP method is not allowlisted")
+        if self._server.protocol_revision == MCP_PROTOCOL_VERSION:
+            raw_meta = params.get("_meta")
+            meta = raw_meta if isinstance(raw_meta, dict) else {}
+            if (
+                meta.get(MCP_PROTOCOL_VERSION_META_KEY) != MCP_PROTOCOL_VERSION
+                or not isinstance(
+                    meta.get(MCP_CLIENT_CAPABILITIES_META_KEY), dict
+                )
+            ):
+                raise CredentialAccessError(
+                    "modern MCP request metadata is missing or invalid"
+                )
         self._authorize_method(method, params)
         token = await self._access_token(client_secret)
         payload = json.dumps(
@@ -213,6 +231,12 @@ class ManagedMcpEgressAdapter:
                 "Authorization": f"Bearer {token}",
                 "Content-Type": "application/json",
                 "MCP-Protocol-Version": self._server.protocol_revision,
+                "Mcp-Method": method,
+                **(
+                    {"Mcp-Name": name}
+                    if (name := _request_target_name(method, params)) is not None
+                    else {}
+                ),
                 "Origin": _origin(self._server.endpoint),
             },
             content=payload,
@@ -491,6 +515,16 @@ def _contains_forbidden_key(value: Any) -> bool:
 
 def _prefix_allowed(value: str, prefixes: tuple[str, ...]) -> bool:
     return bool(value) and any(value.startswith(prefix) for prefix in prefixes)
+
+
+def _request_target_name(method: str, params: dict[str, Any]) -> str | None:
+    key = {
+        "tools/call": "name",
+        "prompts/get": "name",
+        "resources/read": "uri",
+    }.get(method)
+    value = params.get(key) if key is not None else None
+    return str(value) if value is not None else None
 
 
 def _origin(value: str) -> str:

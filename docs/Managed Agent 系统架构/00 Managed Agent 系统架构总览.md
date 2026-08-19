@@ -130,7 +130,7 @@ service identity、数据库角色、健康检查和最小 Secret 文件挂载�
 - Session Event Log 只有 `session` 的数据库角色可写；其他服务通过版本化 Session Internal API 追加。
 - Projection、Control、Hands Invocation、Policy、Credential Audit、Artifact Metadata、Delivery 各有唯一写入者。
 - Task Query 由 `task-api` 使用 `task_query_ro` 只读 Projection；Orchestrator 只消费 Runnable Outbox/Feed。
-- Runtime 到 Hands 使用 MCP 2025-11-25 Streamable HTTP；MCP 不替代 Invocation Store、Lease 或 Canonical Event。
+- Runtime 到 Hands 默认使用 MCP 2026-07-28 无状态 Streamable HTTP；MCP 不替代 Invocation Store、Lease 或 Canonical Event。
 - Runtime 只连接内部 MCP Capability Gateway；外部数据、工具和技能经受管 Catalog、Policy、
   Credential Proxy 与 Artifact 边界接入，不能由 Runtime 直连第三方 MCP Server。
 - Artifact Service 使用 PostgreSQL 保存业务元数据、SeaweedFS S3 保存对象；生产不依赖本地共享目录。
