@@ -3,39 +3,38 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
-from auraclaw.contracts.mcp import (
-    McpPromptDescriptor,
-    McpPromptResult,
-    McpResourceContent,
-    McpResourceDescriptor,
-    McpResourceTemplateDescriptor,
-    McpTrustedContext,
+from auraclaw.contracts.hands import (
+    HandsPromptDescriptor,
+    HandsPromptResult,
+    HandsResourceContent,
+    HandsResourceDescriptor,
+    HandsTrustedContext,
 )
 
-PromptRenderer = Callable[[dict[str, str], McpTrustedContext], McpPromptResult]
+PromptRenderer = Callable[[dict[str, str], HandsTrustedContext], HandsPromptResult]
 
 
 @dataclass(frozen=True)
 class RegisteredResource:
-    descriptor: McpResourceDescriptor
-    contents: tuple[McpResourceContent, ...]
+    descriptor: HandsResourceDescriptor
+    contents: tuple[HandsResourceContent, ...]
     tenant_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
 class RegisteredResourceTemplate:
-    descriptor: McpResourceTemplateDescriptor
+    descriptor: HandsResourceDescriptor
     tenant_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
 class RegisteredPrompt:
-    descriptor: McpPromptDescriptor
+    descriptor: HandsPromptDescriptor
     renderer: PromptRenderer
     tenant_ids: tuple[str, ...] = ()
 
 
-class McpResourceRegistry:
+class HandsResourceRegistry:
     def __init__(
         self,
         resources: Sequence[RegisteredResource] = (),
@@ -50,6 +49,8 @@ class McpResourceRegistry:
 
     def register_resource(self, resource: RegisteredResource) -> None:
         uri = resource.descriptor.uri
+        if uri is None:
+            raise ValueError("Resource descriptor must define a uri")
         if uri in self._resources:
             raise ValueError(f"Resource already registered: {uri}")
         if any(content.uri != uri for content in resource.contents):
@@ -61,32 +62,33 @@ class McpResourceRegistry:
 
     def register_template(self, template: RegisteredResourceTemplate) -> None:
         uri_template = template.descriptor.uri_template
+        if uri_template is None:
+            raise ValueError("Resource template descriptor must define uri_template")
         if uri_template in self._templates:
             raise ValueError(f"Resource template already registered: {uri_template}")
         self._templates[uri_template] = template
 
-    def discover_resources(self, tenant_id: str) -> list[McpResourceDescriptor]:
+    def discover_resources(self, tenant_id: str) -> list[HandsResourceDescriptor]:
         return [
             resource.descriptor
             for resource in sorted(
-                self._resources.values(), key=lambda item: item.descriptor.uri
+                self._resources.values(),
+                key=lambda item: item.descriptor.uri or item.descriptor.name,
             )
             if _visible_to(resource.tenant_ids, tenant_id)
         ]
 
-    def discover_templates(
-        self, tenant_id: str
-    ) -> list[McpResourceTemplateDescriptor]:
+    def discover_templates(self, tenant_id: str) -> list[HandsResourceDescriptor]:
         return [
             template.descriptor
             for template in sorted(
                 self._templates.values(),
-                key=lambda item: item.descriptor.uri_template,
+                key=lambda item: item.descriptor.uri_template or item.descriptor.name,
             )
             if _visible_to(template.tenant_ids, tenant_id)
         ]
 
-    def read(self, tenant_id: str, uri: str) -> tuple[McpResourceContent, ...]:
+    def read(self, tenant_id: str, uri: str) -> tuple[HandsResourceContent, ...]:
         return self.get_resource(tenant_id, uri).contents
 
     def get_resource(self, tenant_id: str, uri: str) -> RegisteredResource:
@@ -96,7 +98,7 @@ class McpResourceRegistry:
         return resource
 
 
-class McpPromptRegistry:
+class HandsPromptRegistry:
     def __init__(self, prompts: Sequence[RegisteredPrompt] = ()) -> None:
         self._prompts: dict[str, RegisteredPrompt] = {}
         for prompt in prompts:
@@ -108,7 +110,7 @@ class McpPromptRegistry:
             raise ValueError(f"Prompt already registered: {name}")
         self._prompts[name] = prompt
 
-    def discover(self, tenant_id: str) -> list[McpPromptDescriptor]:
+    def discover(self, tenant_id: str) -> list[HandsPromptDescriptor]:
         return [
             prompt.descriptor
             for prompt in sorted(
@@ -122,8 +124,8 @@ class McpPromptRegistry:
         tenant_id: str,
         name: str,
         arguments: dict[str, str],
-        trusted_context: McpTrustedContext,
-    ) -> McpPromptResult:
+        trusted_context: HandsTrustedContext,
+    ) -> HandsPromptResult:
         prompt = self._prompts.get(name)
         if prompt is None or not _visible_to(prompt.tenant_ids, tenant_id):
             raise KeyError(f"Prompt not found: {name}")
@@ -132,9 +134,9 @@ class McpPromptRegistry:
         if unknown:
             raise ValueError(f"Prompt has unknown arguments: {unknown}")
         missing = sorted(
-            name
-            for name, argument in declared.items()
-            if argument.required and name not in arguments
+            argument_name
+            for argument_name, argument in declared.items()
+            if argument.required and argument_name not in arguments
         )
         if missing:
             raise ValueError(f"Prompt is missing required arguments: {missing}")
@@ -143,3 +145,8 @@ class McpPromptRegistry:
 
 def _visible_to(tenant_ids: tuple[str, ...], tenant_id: str) -> bool:
     return not tenant_ids or tenant_id in tenant_ids
+
+
+# Compatibility aliases while callers migrate off MCP-named registries.
+McpResourceRegistry = HandsResourceRegistry
+McpPromptRegistry = HandsPromptRegistry

@@ -17,8 +17,8 @@ from auraclaw.action.capability_catalog import (
     capability_search_tool,
     skill_resolve_tool,
 )
-from auraclaw.action.mcp import HandsMcpServer
-from auraclaw.action.mcp_primitives import McpResourceRegistry
+from auraclaw.action.hands import HandsGateway
+from auraclaw.action.mcp_primitives import HandsResourceRegistry
 from auraclaw.action.policy import PolicyEngine
 from auraclaw.action.ports import PriceInsightSource
 from auraclaw.action.price_insight import (
@@ -46,11 +46,17 @@ from auraclaw.contracts.capabilities import (
     CapabilityTrustLevel,
     McpServerDefinition,
 )
-from auraclaw.contracts.mcp import (
-    McpJsonRpcRequest,
-    McpJsonRpcResponse,
-    McpTrustedContext,
+from auraclaw.contracts.hands import (
+    HandsPage,
+    HandsPromptDescriptor,
+    HandsPromptResult,
+    HandsResourceContent,
+    HandsResourceDescriptor,
+    HandsToolCall,
+    HandsToolDescriptor,
+    HandsToolResult,
 )
+from auraclaw.control.ports import RuntimeAssignment
 from auraclaw.infrastructure.artifacts.store import (
     ArtifactStore,
     InMemoryObjectStorage,
@@ -59,7 +65,9 @@ from auraclaw.infrastructure.price_insight import (
     JsonPriceInsightSource,
     MySqlPriceInsightSource,
 )
-from auraclaw.runtime.mcp_client import HandsMcpClient
+from auraclaw.internal.hands import InProcessHandsClient
+from auraclaw.runtime.hands_adapter import HandsRuntimeAdapter
+from auraclaw.runtime.ports import CapabilityClient
 
 
 class _EmptyApprovalReader:
@@ -76,36 +84,101 @@ class _EmptyApprovalReader:
         del tenant_id, session_id, digest, policy_version
 
 
-class _InitializedInProcessTransport:
-    """Lazily publishes development capabilities before the first MCP request."""
+class _InitializedInProcessHandsClient:
+    """Lazily publishes development capabilities before the first Hands request."""
 
     def __init__(
         self,
-        server: HandsMcpServer,
+        client: InProcessHandsClient,
         initialize: Callable[[], Awaitable[None]],
     ) -> None:
-        self._server = server
+        self._client = client
         self._initialize = initialize
         self._initialized = False
         self._lock = asyncio.Lock()
 
-    async def send(
+    async def _ensure(self) -> None:
+        if self._initialized:
+            return
+        async with self._lock:
+            if not self._initialized:
+                await self._initialize()
+                self._initialized = True
+
+    async def list_tools(
         self,
-        request: McpJsonRpcRequest,
+        assignment: RuntimeAssignment,
         *,
-        trusted_context: McpTrustedContext,
-    ) -> McpJsonRpcResponse:
-        if not self._initialized:
-            async with self._lock:
-                if not self._initialized:
-                    await self._initialize()
-                    self._initialized = True
-        return await self._server.handle(request, trusted_context=trusted_context)
+        cursor: str | None = None,
+    ) -> HandsPage[HandsToolDescriptor]:
+        await self._ensure()
+        return await self._client.list_tools(assignment, cursor=cursor)
+
+    async def list_resources(
+        self,
+        assignment: RuntimeAssignment,
+        *,
+        cursor: str | None = None,
+    ) -> HandsPage[HandsResourceDescriptor]:
+        await self._ensure()
+        return await self._client.list_resources(assignment, cursor=cursor)
+
+    async def list_resource_templates(
+        self,
+        assignment: RuntimeAssignment,
+        *,
+        cursor: str | None = None,
+    ) -> HandsPage[HandsResourceDescriptor]:
+        await self._ensure()
+        return await self._client.list_resource_templates(assignment, cursor=cursor)
+
+    async def read_resource(
+        self,
+        assignment: RuntimeAssignment,
+        uri: str,
+    ) -> tuple[HandsResourceContent, ...]:
+        await self._ensure()
+        return await self._client.read_resource(assignment, uri)
+
+    async def list_prompts(
+        self,
+        assignment: RuntimeAssignment,
+        *,
+        cursor: str | None = None,
+    ) -> HandsPage[HandsPromptDescriptor]:
+        await self._ensure()
+        return await self._client.list_prompts(assignment, cursor=cursor)
+
+    async def get_prompt(
+        self,
+        assignment: RuntimeAssignment,
+        name: str,
+        *,
+        arguments: dict[str, str] | None = None,
+    ) -> HandsPromptResult:
+        await self._ensure()
+        return await self._client.get_prompt(assignment, name, arguments=arguments)
+
+    async def call_tool(
+        self,
+        assignment: RuntimeAssignment,
+        call: HandsToolCall,
+    ) -> HandsToolResult:
+        await self._ensure()
+        return await self._client.call_tool(assignment, call)
+
+    async def cancel_invocation(
+        self,
+        assignment: RuntimeAssignment,
+        tool_invocation_id: str,
+    ) -> bool:
+        await self._ensure()
+        return await self._client.cancel_invocation(assignment, tool_invocation_id)
 
 
 def build_development_capability_client(
     settings: Settings,
-) -> HandsMcpClient | None:
+) -> CapabilityClient | None:
     """Build the governed in-process capability plane for the combined dev server."""
     source_kind = settings.resolved_price_insight_source
     if source_kind == "disabled":
@@ -138,7 +211,7 @@ def build_development_capability_client(
     tenant_id = settings.price_insight_target_tenant_id
     catalog_store = InMemoryCapabilityCatalogStore()
     catalog = CapabilityCatalog(catalog_store)
-    resources = McpResourceRegistry(price_insight_resources(tenant_id))
+    resources = HandsResourceRegistry(price_insight_resources(tenant_id))
     artifacts = ArtifactStore(
         InMemoryObjectStorage(),
         signing_key=b"auraclaw-development-price-insight-artifact-key",
@@ -210,9 +283,7 @@ def build_development_capability_client(
         )
         await skills.publish(tenant_id, signed_price_insight_package(signer))
 
-    server = HandsMcpServer(
-        registry=registry,
-        gateway=gateway,
-        resources=resources,
+    hands = HandsGateway(registry=registry, gateway=gateway, resources=resources)
+    return HandsRuntimeAdapter(
+        _InitializedInProcessHandsClient(InProcessHandsClient(hands), initialize)
     )
-    return HandsMcpClient(_InitializedInProcessTransport(server, initialize))

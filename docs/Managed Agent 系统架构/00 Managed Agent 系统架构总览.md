@@ -113,7 +113,7 @@ monorepo 和应用镜像，但必须使用不同 service identity、配置、数
 4. orchestrator          Runnable / Lease / Assignment / Provision / Reconcile
 5. agent-runtime         Coordinator / Worker / Reviewer Runtime Pool
 6. model-gateway         Provider Secret / Model Call / Quota / Usage
-7. action-hands          MCP Gateway + Hands/Sandbox + Invocation Store
+7. action-hands          Hands Gateway + Connector 路由 + Invocation Store
 8. policy                Policy / Approval / Budget / Data Egress
 9. credential-proxy      Vault/KMS Proxy / Sign / Refresh / Credential Audit
 10. artifact-service     Artifact Metadata/ACL/Version -> SeaweedFS S3
@@ -130,8 +130,8 @@ service identity、数据库角色、健康检查和最小 Secret 文件挂载�
 - Session Event Log 只有 `session` 的数据库角色可写；其他服务通过版本化 Session Internal API 追加。
 - Projection、Control、Hands Invocation、Policy、Credential Audit、Artifact Metadata、Delivery 各有唯一写入者。
 - Task Query 由 `task-api` 使用 `task_query_ro` 只读 Projection；Orchestrator 只消费 Runnable Outbox/Feed。
-- Runtime 到 Hands 默认使用 MCP 2026-07-28 无状态 Streamable HTTP；MCP 不替代 Invocation Store、Lease 或 Canonical Event。
-- Runtime 只连接内部 MCP Capability Gateway；外部数据、工具和技能经受管 Catalog、Policy、
+- Runtime 到 Hands 使用协议无关内部 HTTP/JSON；MCP 与 Java API 只作为 Hands 下游 Connector。
+- Runtime 只连接内部 Hands Gateway；外部数据、工具和技能经受管 Catalog、Policy、
   Credential Proxy 与 Artifact 边界接入，不能由 Runtime 直连第三方 MCP Server。
 - Artifact Service 使用 PostgreSQL 保存业务元数据、SeaweedFS S3 保存对象；生产不依赖本地共享目录。
 - Policy 对高风险、凭证和外发动作 fail closed；Credential Proxy 不提供返回明文 Secret 的接口。

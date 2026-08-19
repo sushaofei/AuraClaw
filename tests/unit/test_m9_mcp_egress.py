@@ -8,7 +8,6 @@ from urllib.parse import parse_qs
 import pytest
 
 from auraclaw.action.ports import PolicyEvaluation
-from auraclaw.action.remote_mcp import ManagedRemoteMcpTransport
 from auraclaw.config import Settings
 from auraclaw.contracts.capabilities import (
     CapabilityStatus,
@@ -17,14 +16,15 @@ from auraclaw.contracts.capabilities import (
     McpServerDefinition,
 )
 from auraclaw.contracts.errors import CredentialAccessError, PolicyDeniedError
-from auraclaw.contracts.mcp import (
+from auraclaw.contracts.tools import CredentialReference, PolicyDecision
+from auraclaw.infrastructure.connectors.mcp.transport import ManagedRemoteMcpTransport
+from auraclaw.infrastructure.connectors.mcp.wire import (
     MCP_CLIENT_CAPABILITIES_META_KEY,
     MCP_PROTOCOL_VERSION,
     MCP_PROTOCOL_VERSION_META_KEY,
     McpJsonRpcRequest,
     McpTrustedContext,
 )
-from auraclaw.contracts.tools import CredentialReference, PolicyDecision
 from auraclaw.infrastructure.credentials.mcp_egress import (
     ManagedMcpEgressAdapter,
     McpEgressResponse,

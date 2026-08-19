@@ -19,7 +19,7 @@ from auraclaw.action.capability_catalog import (
     capability_search_tool,
     skill_resolve_tool,
 )
-from auraclaw.action.mcp import HandsMcpServer
+from auraclaw.action.hands import HandsGateway
 from auraclaw.action.mcp_primitives import McpResourceRegistry
 from auraclaw.action.policy import PolicyEngine
 from auraclaw.action.price_insight import (
@@ -75,9 +75,9 @@ from auraclaw.infrastructure.price_insight import (
     _select_rule_statement,
     _select_statement,
 )
-from auraclaw.internal.mcp import InProcessMcpTransport
+from auraclaw.internal.hands import InProcessHandsClient
 from auraclaw.runtime.capability_controller import RuntimeCapabilityController
-from auraclaw.runtime.mcp_client import HandsMcpClient
+from auraclaw.runtime.hands_adapter import HandsRuntimeAdapter
 from auraclaw.runtime.ports import ToolCall
 
 
@@ -509,9 +509,9 @@ def test_price_insight_skill_runs_search_load_activate_and_tool_flow() -> None:
             artifacts=artifacts,
         )
         controller = RuntimeCapabilityController(
-            HandsMcpClient(
-                InProcessMcpTransport(
-                    HandsMcpServer(
+            HandsRuntimeAdapter(
+                InProcessHandsClient(
+                    HandsGateway(
                         registry=tool_registry,
                         gateway=gateway,
                         resources=resources,

@@ -1,0 +1,367 @@
+from __future__ import annotations
+
+from typing import Any
+
+from auraclaw.action.ports import CredentialInvoker, ResourcePolicyEvaluator
+from auraclaw.contracts.capabilities import McpServerDefinition
+from auraclaw.contracts.hands import (
+    CapabilitySnapshot,
+    HandsPromptArgument,
+    HandsPromptDescriptor,
+    HandsPromptMessage,
+    HandsPromptResult,
+    HandsResourceContent,
+    HandsResourceDescriptor,
+    HandsToolDescriptor,
+    HandsToolResult,
+    HandsTrustedContext,
+)
+from auraclaw.infrastructure.connectors.mcp.transport import ManagedRemoteMcpTransport
+from auraclaw.infrastructure.connectors.mcp.wire import (
+    MCP_CLIENT_CAPABILITIES_META_KEY,
+    MCP_CLIENT_INFO_META_KEY,
+    MCP_LEGACY_PROTOCOL_VERSION,
+    MCP_PROTOCOL_VERSION,
+    MCP_PROTOCOL_VERSION_META_KEY,
+    McpJsonRpcRequest,
+    McpTrustedContext,
+)
+
+
+class ManagedMcpConnector:
+    """Downstream MCP connector. Maps MCP wire types to Hands DTOs."""
+
+    def __init__(
+        self,
+        server: McpServerDefinition,
+        *,
+        credentials: CredentialInvoker,
+        policy: ResourcePolicyEvaluator,
+        max_pages: int = 100,
+        max_items: int = 10_000,
+    ) -> None:
+        self._server = server
+        self._transport = ManagedRemoteMcpTransport(
+            server, credentials=credentials, policy=policy
+        )
+        self._max_pages = max_pages
+        self._max_items = max_items
+
+    @property
+    def connector_id(self) -> str:
+        return f"mcp:{self._server.server_id}"
+
+    def set_notification_handler(self, handler: Any) -> None:
+        self._transport.set_notification_handler(handler)
+
+    async def snapshot(self, trusted: HandsTrustedContext) -> CapabilitySnapshot:
+        mcp_trusted = _mcp_trusted(trusted)
+        extra: dict[str, Any] = {}
+        if self._server.protocol_revision == MCP_PROTOCOL_VERSION:
+            discovery = await self._send(mcp_trusted, "server/discover", {})
+            if MCP_PROTOCOL_VERSION not in discovery.get("supportedVersions", []):
+                raise ValueError("remote MCP protocol version is incompatible")
+            extra["capabilities"] = discovery.get("capabilities", {})
+        elif self._server.protocol_revision == MCP_LEGACY_PROTOCOL_VERSION:
+            discovery = await self._send(
+                mcp_trusted,
+                "initialize",
+                {
+                    "protocolVersion": MCP_LEGACY_PROTOCOL_VERSION,
+                    "capabilities": {},
+                    "clientInfo": {
+                        "name": "auraclaw-capability-reconciler",
+                        "version": "1",
+                    },
+                },
+            )
+            if discovery.get("protocolVersion") != MCP_LEGACY_PROTOCOL_VERSION:
+                raise ValueError("remote MCP protocol version is incompatible")
+            extra["capabilities"] = discovery.get("capabilities", {})
+        else:
+            raise ValueError("remote MCP protocol version is not supported")
+        tools = tuple(
+            _tool_descriptor(item)
+            for item in await self._list_all(mcp_trusted, "tools/list", "tools")
+        )
+        resources = tuple(
+            _resource_descriptor(item)
+            for item in await self._list_all(mcp_trusted, "resources/list", "resources")
+        )
+        templates = tuple(
+            _template_descriptor(item)
+            for item in await self._list_all(
+                mcp_trusted, "resources/templates/list", "resourceTemplates"
+            )
+        )
+        prompts = tuple(
+            _prompt_descriptor(item)
+            for item in await self._list_all(mcp_trusted, "prompts/list", "prompts")
+        )
+        extra["listed_resource_uris"] = [item.uri for item in resources if item.uri]
+        if (
+            self._server.protocol_revision == MCP_LEGACY_PROTOCOL_VERSION
+            and extra.get("capabilities", {}).get("resources", {}).get("subscribe")
+            is True
+        ):
+            for uri in extra["listed_resource_uris"][:100]:
+                try:
+                    await self._send(mcp_trusted, "resources/subscribe", {"uri": uri})
+                except Exception:
+                    break
+        return CapabilitySnapshot(
+            connector_id=self.connector_id,
+            tools=tools,
+            resources=resources,
+            resource_templates=templates,
+            prompts=prompts,
+            extra=extra,
+        )
+
+    async def read_resource(
+        self,
+        trusted: HandsTrustedContext,
+        uri: str,
+    ) -> tuple[HandsResourceContent, ...]:
+        result = await self._send(_mcp_trusted(trusted), "resources/read", {"uri": uri})
+        contents = []
+        for item in result.get("contents", []):
+            if not isinstance(item, dict):
+                continue
+            text = item.get("text")
+            blob = item.get("blob")
+            if (text is None) == (blob is None):
+                continue
+            contents.append(
+                HandsResourceContent(
+                    uri=str(item.get("uri", uri)),
+                    mime_type=(
+                        str(item["mimeType"]) if item.get("mimeType") is not None else None
+                    ),
+                    text=None if text is None else str(text),
+                    blob=None if blob is None else str(blob),
+                )
+            )
+        return tuple(contents)
+
+    async def get_prompt(
+        self,
+        trusted: HandsTrustedContext,
+        name: str,
+        *,
+        arguments: dict[str, str] | None = None,
+    ) -> HandsPromptResult:
+        result = await self._send(
+            _mcp_trusted(trusted),
+            "prompts/get",
+            {"name": name, "arguments": dict(arguments or {})},
+        )
+        messages = []
+        for item in result.get("messages", ()):
+            if isinstance(item, dict) and item.get("role") in {"user", "assistant"}:
+                messages.append(
+                    HandsPromptMessage(
+                        role=item["role"],
+                        content=dict(item.get("content") or {}),
+                    )
+                )
+        description = result.get("description")
+        return HandsPromptResult(
+            description=None if description is None else str(description),
+            messages=tuple(messages),
+        )
+
+    async def call_tool(
+        self,
+        trusted: HandsTrustedContext,
+        *,
+        name: str,
+        arguments: dict[str, Any],
+        invocation_id: str,
+    ) -> HandsToolResult:
+        params: dict[str, Any] = {"name": name, "arguments": arguments}
+        if self._server.protocol_revision == MCP_PROTOCOL_VERSION:
+            params["_meta"] = _modern_meta()
+        response = await self._transport.send(
+            McpJsonRpcRequest(id=invocation_id, method="tools/call", params=params),
+            trusted_context=_mcp_trusted(trusted),
+        )
+        if response.error is not None:
+            return HandsToolResult(
+                status="error",
+                summary=response.error.message,
+                error_code=str(response.error.code),
+                side_effect_status="unknown",
+            )
+        result = dict(response.result or {})
+        if result.get("isError") is True:
+            raise RuntimeError("remote MCP Tool returned an execution error")
+        structured = result.get("structuredContent")
+        if isinstance(structured, dict):
+            if "status" in structured:
+                return HandsToolResult(
+                    status=str(structured.get("status", "success")),
+                    content=structured.get("content")
+                    if isinstance(structured.get("content"), (str, dict))
+                    or structured.get("content") is None
+                    else dict(structured),
+                    summary=str(structured.get("summary", "")),
+                    metadata=dict(structured.get("metadata") or {}),
+                    error_code=(
+                        None
+                        if structured.get("error_code") is None
+                        else str(structured.get("error_code"))
+                    ),
+                    side_effect_status=str(
+                        structured.get("side_effect_status", "not_started")
+                    ),
+                )
+            return HandsToolResult(status="success", content=structured, summary="")
+        return HandsToolResult(status="success", content=result, summary="")
+
+    async def aclose(self) -> None:
+        return None
+
+    async def _list_all(
+        self,
+        trusted: McpTrustedContext,
+        method: str,
+        key: str,
+    ) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        cursor: str | None = None
+        seen: set[str] = set()
+        for _ in range(self._max_pages):
+            params: dict[str, Any] = {} if cursor is None else {"cursor": cursor}
+            result = await self._send(trusted, method, params)
+            page = result.get(key, [])
+            if not isinstance(page, list):
+                raise ValueError(f"remote MCP {key} list is invalid")
+            items.extend(item for item in page if isinstance(item, dict))
+            if len(items) > self._max_items:
+                raise ValueError(f"remote MCP {key} list exceeds limit")
+            raw_cursor = result.get("nextCursor")
+            if raw_cursor is None:
+                return items
+            cursor = str(raw_cursor)
+            if not cursor or cursor in seen:
+                raise ValueError("remote MCP pagination cursor did not advance")
+            seen.add(cursor)
+        raise ValueError("remote MCP pagination exceeded page limit")
+
+    async def _send(
+        self,
+        trusted: McpTrustedContext,
+        method: str,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        request_params = dict(params)
+        if self._server.protocol_revision == MCP_PROTOCOL_VERSION:
+            request_params["_meta"] = _modern_meta()
+        response = await self._transport.send(
+            McpJsonRpcRequest(id=f"mcp:{method}", method=method, params=request_params),
+            trusted_context=trusted,
+        )
+        if response.error is not None:
+            raise ValueError(f"remote MCP error {response.error.code}")
+        return dict(response.result or {})
+
+
+def _modern_meta() -> dict[str, Any]:
+    return {
+        MCP_PROTOCOL_VERSION_META_KEY: MCP_PROTOCOL_VERSION,
+        MCP_CLIENT_INFO_META_KEY: {
+            "name": "auraclaw-action-hands",
+            "version": "1",
+        },
+        MCP_CLIENT_CAPABILITIES_META_KEY: {},
+    }
+
+
+def _mcp_trusted(trusted: HandsTrustedContext) -> McpTrustedContext:
+    return McpTrustedContext(
+        tenant_id=trusted.tenant_id,
+        root_session_id=trusted.root_session_id,
+        session_id=trusted.session_id,
+        run_id=trusted.run_id,
+        runtime_id=trusted.runtime_id,
+        lease_id=trusted.lease_id,
+        fencing_token=trusted.fencing_token,
+        deadline=trusted.deadline,
+        lease_assertion=trusted.lease_assertion,
+    )
+
+
+def _tool_descriptor(item: dict[str, Any]) -> HandsToolDescriptor:
+    meta = item.get("_meta", {})
+    auraclaw = meta.get("auraclaw", {}) if isinstance(meta, dict) else {}
+    version = "1"
+    if isinstance(auraclaw, dict) and auraclaw.get("version"):
+        version = str(auraclaw["version"])
+    annotations = item.get("annotations", {})
+    read_only = False
+    destructive = False
+    if isinstance(annotations, dict):
+        read_only = bool(annotations.get("readOnlyHint", False))
+        destructive = bool(annotations.get("destructiveHint", False))
+    input_schema = item.get("inputSchema", {"type": "object"})
+    output_schema = item.get("outputSchema", {"type": "object"})
+    return HandsToolDescriptor(
+        name=str(item.get("name", "")),
+        version=version,
+        description=str(item.get("description", "")),
+        input_schema=dict(input_schema) if isinstance(input_schema, dict) else {},
+        output_schema=dict(output_schema) if isinstance(output_schema, dict) else {},
+        read_only=read_only,
+        destructive=destructive,
+        risk_level=(
+            str(auraclaw["riskLevel"])
+            if isinstance(auraclaw, dict) and auraclaw.get("riskLevel")
+            else None
+        ),
+    )
+
+
+def _resource_descriptor(item: dict[str, Any]) -> HandsResourceDescriptor:
+    return HandsResourceDescriptor(
+        name=str(item.get("name", "resource")),
+        uri=str(item.get("uri", "")),
+        title=None if item.get("title") is None else str(item["title"]),
+        description=None if item.get("description") is None else str(item["description"]),
+        mime_type=None if item.get("mimeType") is None else str(item["mimeType"]),
+        size=item.get("size") if isinstance(item.get("size"), int) else None,
+    )
+
+
+def _template_descriptor(item: dict[str, Any]) -> HandsResourceDescriptor:
+    return HandsResourceDescriptor(
+        name=str(item.get("name", "resource")),
+        uri_template=str(item.get("uriTemplate", "")),
+        title=None if item.get("title") is None else str(item["title"]),
+        description=None if item.get("description") is None else str(item["description"]),
+        mime_type=None if item.get("mimeType") is None else str(item["mimeType"]),
+    )
+
+
+def _prompt_descriptor(item: dict[str, Any]) -> HandsPromptDescriptor:
+    arguments = []
+    for argument in item.get("arguments", ()):
+        if isinstance(argument, dict) and argument.get("name"):
+            arguments.append(
+                HandsPromptArgument(
+                    name=str(argument["name"]),
+                    title=None if argument.get("title") is None else str(argument["title"]),
+                    description=(
+                        None
+                        if argument.get("description") is None
+                        else str(argument["description"])
+                    ),
+                    required=bool(argument.get("required", False)),
+                )
+            )
+    return HandsPromptDescriptor(
+        name=str(item.get("name", "")),
+        title=None if item.get("title") is None else str(item["title"]),
+        description=None if item.get("description") is None else str(item["description"]),
+        arguments=tuple(arguments),
+    )

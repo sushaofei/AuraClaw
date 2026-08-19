@@ -7,7 +7,7 @@ from auraclaw.runtime.ports import ToolCall
 
 
 class GatewayToolClient:
-    """Development in-process adapter; production Runtime uses HandsMcpClient."""
+    """Development in-process adapter; production Runtime uses HttpHandsClient."""
 
     def __init__(self, gateway: ToolGateway) -> None:
         self._gateway = gateway

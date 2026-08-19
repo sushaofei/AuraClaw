@@ -29,7 +29,7 @@ from auraclaw.contracts.errors import (
     SchemaValidationError,
     VersionConflictError,
 )
-from auraclaw.contracts.mcp import McpResourceContent, McpResourceDescriptor
+from auraclaw.contracts.hands import HandsResourceContent, HandsResourceDescriptor
 from auraclaw.contracts.skills import (
     PublishedSkill,
     ResolvedSkillDependency,
@@ -185,7 +185,9 @@ class SkillPackageRegistry:
                 package,
                 publication.package_digest,
             ):
-                self._resources.unregister_resource(resource.descriptor.uri)
+                uri = resource.descriptor.uri
+                if uri is not None:
+                    self._resources.unregister_resource(uri)
         return revoked
 
     def candidates(
@@ -648,7 +650,7 @@ def _package_resources(
     aliases = {"manifest.json": "manifest"}
     return tuple(
         RegisteredResource(
-            descriptor=McpResourceDescriptor(
+            descriptor=HandsResourceDescriptor(
                 uri=f"{prefix}/{aliases.get(path, path)}",
                 name=path,
                 mime_type=(
@@ -659,16 +661,12 @@ def _package_resources(
                     else "application/octet-stream"
                 ),
                 size=len(content),
-                meta={
-                    "auraclaw": {
-                        "classification": package.manifest.data_classification,
-                        "packageDigest": package_digest,
-                        "sourceRevision": package.manifest.version,
-                    }
-                },
+                classification=package.manifest.data_classification,
+                content_digest=f"sha256:{package_digest}",
+                source_revision=package.manifest.version,
             ),
             contents=(
-                McpResourceContent(
+                HandsResourceContent(
                     uri=f"{prefix}/{aliases.get(path, path)}",
                     mime_type=(
                         "application/json"
@@ -677,6 +675,8 @@ def _package_resources(
                         if path.endswith(".md")
                         else "application/octet-stream"
                     ),
+                    classification=package.manifest.data_classification,
+                    source_revision=package.manifest.version,
                     **(
                         {"text": content.decode()}
                         if path.endswith(".json") or path.endswith(".md")

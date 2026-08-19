@@ -12,7 +12,7 @@ from auraclaw.action.capability_catalog import (
     RoutedHandsExecutor,
     capability_search_tool,
 )
-from auraclaw.action.mcp import HandsMcpServer
+from auraclaw.action.hands import HandsGateway
 from auraclaw.action.policy import PolicyEngine
 from auraclaw.action.tool_gateway import ToolGateway, ToolRegistry
 from auraclaw.contracts.capabilities import (
@@ -24,8 +24,8 @@ from auraclaw.contracts.capabilities import (
 )
 from auraclaw.control.ports import RuntimeAssignment
 from auraclaw.infrastructure.artifacts.store import ArtifactStore, InMemoryObjectStorage
-from auraclaw.internal.mcp import InProcessMcpTransport
-from auraclaw.runtime.mcp_client import HandsMcpClient
+from auraclaw.internal.hands import InProcessHandsClient
+from auraclaw.runtime.hands_adapter import HandsRuntimeAdapter
 from auraclaw.runtime.ports import ToolCall
 
 
@@ -209,9 +209,9 @@ def test_capability_search_runs_through_tool_policy_and_trusted_tenant() -> None
                 signing_key=b"m9-capability-artifact-key-0001",
             ),
         )
-        client = HandsMcpClient(
-            InProcessMcpTransport(
-                HandsMcpServer(registry=registry, gateway=gateway)
+        client = HandsRuntimeAdapter(
+            InProcessHandsClient(
+                HandsGateway(registry=registry, gateway=gateway)
             )
         )
         assignment = _assignment()

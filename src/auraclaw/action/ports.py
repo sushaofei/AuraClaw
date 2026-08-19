@@ -6,7 +6,13 @@ from datetime import datetime
 from typing import Any, Protocol
 
 from auraclaw.contracts.capabilities import CapabilityDescriptor, McpServerDefinition
-from auraclaw.contracts.mcp import McpResourceContent, McpTrustedContext
+from auraclaw.contracts.hands import (
+    CapabilitySnapshot,
+    HandsPromptResult,
+    HandsResourceContent,
+    HandsToolResult,
+    HandsTrustedContext,
+)
 from auraclaw.contracts.model_skills import ModelSkillSnapshot
 from auraclaw.contracts.price_insight import PriceInsightDataset, PriceInsightFilter
 from auraclaw.contracts.tools import (
@@ -136,12 +142,48 @@ class CapabilityCatalogStore(Protocol):
     ) -> CapabilityDescriptor | None: ...
 
 
-class McpResourceReader(Protocol):
+class ResourceReader(Protocol):
     async def read(
         self,
-        trusted_context: McpTrustedContext,
+        trusted_context: HandsTrustedContext,
         uri: str,
-    ) -> tuple[McpResourceContent, ...]: ...
+    ) -> tuple[HandsResourceContent, ...]: ...
+
+
+McpResourceReader = ResourceReader
+
+
+class CapabilityConnector(Protocol):
+    connector_id: str
+
+    async def snapshot(
+        self, trusted: HandsTrustedContext
+    ) -> CapabilitySnapshot: ...
+
+    async def read_resource(
+        self,
+        trusted: HandsTrustedContext,
+        uri: str,
+    ) -> tuple[HandsResourceContent, ...]: ...
+
+    async def get_prompt(
+        self,
+        trusted: HandsTrustedContext,
+        name: str,
+        *,
+        arguments: dict[str, str] | None = None,
+    ) -> HandsPromptResult: ...
+
+    async def call_tool(
+        self,
+        trusted: HandsTrustedContext,
+        *,
+        name: str,
+        arguments: dict[str, Any],
+        invocation_id: str,
+    ) -> HandsToolResult: ...
+
+    async def aclose(self) -> None: ...
 
 
 class ResourcePolicyEvaluator(Protocol):

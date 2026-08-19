@@ -13,7 +13,7 @@ from auraclaw.composition.services import (
     service_spec,
 )
 from auraclaw.config import Settings
-from auraclaw.contracts.mcp import MCP_PROTOCOL_VERSION
+from auraclaw.contracts.hands import HANDS_TOOLS_LIST
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -117,36 +117,21 @@ def test_production_readiness_fails_when_hard_dependencies_are_missing() -> None
             assert "api_key" not in serialized.lower()
 
 
-def test_hands_exposes_authenticated_mcp_discovery() -> None:
+def test_hands_exposes_authenticated_internal_contract() -> None:
     app = create_service_app(
         "hands",
         _settings(storage_backend="memory", artifact_backend="local"),
     )
-    request = {
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "server/discover",
-        "params": {
-            "_meta": {
-                "io.modelcontextprotocol/protocolVersion": MCP_PROTOCOL_VERSION,
-                "io.modelcontextprotocol/clientCapabilities": {},
-            }
-        },
-    }
     with TestClient(app) as client:
-        denied = client.post("/mcp", json=request)
+        denied = client.post(HANDS_TOOLS_LIST, json={})
         assert denied.status_code == 401
-        initialized = client.post(
-            "/mcp",
-            json=request,
-            headers={
-                "Authorization": "Bearer development-runtime-token",
-                "MCP-Protocol-Version": MCP_PROTOCOL_VERSION,
-                "Mcp-Method": "server/discover",
-            },
+        listed = client.post(
+            HANDS_TOOLS_LIST,
+            json={},
+            headers={"Authorization": "Bearer development-runtime-token"},
         )
-        assert initialized.status_code == 200
-        assert MCP_PROTOCOL_VERSION in initialized.json()["result"]["supportedVersions"]
+        assert listed.status_code == 200
+        assert "items" in listed.json()
 
 
 def test_compose_uses_one_image_twelve_commands_and_ingress_split() -> None:

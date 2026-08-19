@@ -10,9 +10,8 @@ from auraclaw.action.capability_catalog import (
     InMemoryCapabilityCatalogStore,
     RoutedHandsExecutor,
 )
-from auraclaw.action.catalog_reconciler import McpCatalogReconciler
+from auraclaw.action.catalog_reconciler import CapabilityCatalogReconciler
 from auraclaw.action.ports import PolicyEvaluation
-from auraclaw.action.remote_mcp import ManagedRemoteMcpTransport
 from auraclaw.action.tool_gateway import ToolRegistry
 from auraclaw.contracts.capabilities import (
     CapabilityKind,
@@ -27,6 +26,7 @@ from auraclaw.contracts.tools import (
     ToolCapability,
     ToolInvocation,
 )
+from auraclaw.infrastructure.connectors.mcp.connector import ManagedMcpConnector
 
 
 def _server() -> McpServerDefinition:
@@ -214,7 +214,7 @@ def test_catalog_reconciliation_filters_routes_invalidates_and_recovers() -> Non
         server = _server()
         await catalog.register_server(server)
         credentials = _RemoteCredentials()
-        transport = ManagedRemoteMcpTransport(
+        connector = ManagedMcpConnector(
             server,
             credentials=credentials,
             policy=_AllowPolicy(),
@@ -222,10 +222,10 @@ def test_catalog_reconciliation_filters_routes_invalidates_and_recovers() -> Non
         tools = ToolRegistry()
         router = RoutedHandsExecutor(_UnexpectedHands(), {})
         cache = _Cache()
-        reconciler = McpCatalogReconciler(
+        reconciler = CapabilityCatalogReconciler(
             catalog=catalog,
             store=store,
-            transports={server.server_id: transport},
+            connectors={server.server_id: connector},
             resource_cache=cache,
             tool_registry=tools,
             hands_router=router,

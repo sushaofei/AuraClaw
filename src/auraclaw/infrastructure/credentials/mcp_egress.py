@@ -13,7 +13,7 @@ import httpx
 
 from auraclaw.contracts.capabilities import McpServerDefinition
 from auraclaw.contracts.errors import CredentialAccessError
-from auraclaw.contracts.mcp import (
+from auraclaw.infrastructure.connectors.mcp.wire import (
     MCP_CLIENT_CAPABILITIES_META_KEY,
     MCP_PROTOCOL_VERSION,
     MCP_PROTOCOL_VERSION_META_KEY,

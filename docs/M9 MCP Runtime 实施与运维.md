@@ -2,18 +2,19 @@
 
 ## 1. 交付范围
 
-M9 把 Agent Runtime 的数据、工具、Prompt 和 Skill 接入统一到内部 Action Hands MCP
-Gateway。Runtime 只持有内部 MCP 地址和 workload identity，不接受远端 URL、stdio command
-或 Secret。
+M9 把 Agent Runtime 的数据、工具、Prompt 和 Skill 接入统一到内部 Action Hands Gateway。
+Issue #43 之后 Runtime 只持有 Hands URL 和 workload identity，不接受远端 URL、stdio command
+或 Secret；MCP wire 只存在于下游 Connector。
 
 实现分为以下边界：
 
-- `contracts/mcp.py`：MCP 2026-07-28 JSON-RPC、Resource、Prompt 和可信上下文 DTO；保留
+- `contracts/hands.py`：Runtime↔Hands 的协议无关 DTO 与内部 HTTP 路径。
+- `infrastructure/connectors/mcp/wire.py`：下游 MCP 2026-07-28 JSON-RPC；保留
   2025-11-25 legacy profile 供滚动升级。
 - `contracts/capabilities.py`：受管 Server、OAuth/OIDC 和统一 Capability 描述符。
 - `contracts/skills.py`：Skill Manifest、发布状态、固定依赖和激活绑定。
-- `action`：Capability Catalog、Resource Gateway、Skill Package/Resolver、远端 Transport 和周期对账。
-- `runtime`：单一 MCP Client、渐进式 Skill 加载和可恢复 Skill Runner。
+- `action`：Capability Catalog、Resource Gateway、Skill Package/Resolver 和周期对账。
+- `runtime`：单一 Hands Client、渐进式 Skill 加载和可恢复 Skill Runner。
 - `infrastructure/credentials`：Credential Proxy 内的 OAuth/OIDC MCP Egress Connector。
 
 MCP 不成为新的业务事实源。Skill 激活与终态、重要 Resource 采用和 Tool 结果仍写入

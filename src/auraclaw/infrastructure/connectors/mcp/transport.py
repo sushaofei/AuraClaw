@@ -8,16 +8,12 @@ from typing import Any
 from auraclaw.action.ports import CredentialInvoker, ResourcePolicyEvaluator
 from auraclaw.contracts.capabilities import CapabilityStatus, McpServerDefinition
 from auraclaw.contracts.errors import PolicyDeniedError
-from auraclaw.contracts.mcp import (
-    MCP_CLIENT_CAPABILITIES_META_KEY,
-    MCP_CLIENT_INFO_META_KEY,
-    MCP_PROTOCOL_VERSION,
-    MCP_PROTOCOL_VERSION_META_KEY,
+from auraclaw.contracts.tools import PolicyDecision
+from auraclaw.infrastructure.connectors.mcp.wire import (
     McpJsonRpcRequest,
     McpJsonRpcResponse,
     McpTrustedContext,
 )
-from auraclaw.contracts.tools import PolicyDecision, ToolCapability, ToolInvocation
 
 
 class ManagedRemoteMcpTransport:
@@ -124,64 +120,3 @@ class ManagedRemoteMcpTransport:
                         dict(params),
                     )
         return McpJsonRpcResponse.model_validate(response)
-
-
-class RemoteMcpToolExecutor:
-    def __init__(
-        self,
-        server: McpServerDefinition,
-        transport: ManagedRemoteMcpTransport,
-    ) -> None:
-        self._server = server
-        self._transport = transport
-        self.route_owner = f"mcp:{server.server_id}:tools"
-
-    async def execute(
-        self,
-        invocation: ToolInvocation,
-        capability: ToolCapability,
-    ) -> dict[str, object]:
-        del capability
-        params: dict[str, Any] = {
-            "name": invocation.tool_name,
-            "arguments": invocation.arguments,
-        }
-        if self._server.protocol_revision == MCP_PROTOCOL_VERSION:
-            params["_meta"] = {
-                MCP_PROTOCOL_VERSION_META_KEY: MCP_PROTOCOL_VERSION,
-                MCP_CLIENT_INFO_META_KEY: {
-                    "name": "auraclaw-action-hands",
-                    "version": "1",
-                },
-                MCP_CLIENT_CAPABILITIES_META_KEY: {},
-            }
-        response = await self._transport.send(
-            McpJsonRpcRequest(
-                id=invocation.tool_invocation_id,
-                method="tools/call",
-                params=params,
-            ),
-            trusted_context=McpTrustedContext(
-                tenant_id=invocation.tenant_id,
-                root_session_id=invocation.root_session_id,
-                session_id=invocation.session_id,
-                run_id=invocation.run_id,
-                runtime_id=invocation.actor_id,
-                lease_id=f"tool:{invocation.tool_invocation_id}",
-                fencing_token=invocation.fencing_token,
-                deadline=invocation.deadline,
-            ),
-        )
-        if response.error is not None:
-            return {
-                "isError": True,
-                "error": {
-                    "code": response.error.code,
-                    "message": response.error.message,
-                },
-            }
-        result = dict(response.result or {})
-        if result.get("isError") is True:
-            raise RuntimeError("remote MCP Tool returned an execution error")
-        structured = result.get("structuredContent")
-        return dict(structured) if isinstance(structured, dict) else result

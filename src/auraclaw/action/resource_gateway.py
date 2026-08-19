@@ -8,14 +8,13 @@ import json
 import re
 import time
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import Protocol
 from urllib.parse import urlsplit
 
-from auraclaw.action.mcp_primitives import McpResourceRegistry
+from auraclaw.action.mcp_primitives import HandsResourceRegistry
 from auraclaw.action.ports import ArtifactWriter, ResourcePolicyEvaluator
 from auraclaw.contracts.errors import PolicyDeniedError, SchemaValidationError
-from auraclaw.contracts.mcp import McpResourceContent, McpTrustedContext
+from auraclaw.contracts.hands import HandsResourceContent, HandsTrustedContext
 from auraclaw.contracts.tools import PolicyDecision
 
 _SECRET_PATTERN = re.compile(
@@ -52,13 +51,13 @@ class DefaultResourceContentScanner:
 @dataclass(frozen=True)
 class _CacheEntry:
     expires_at: float
-    contents: tuple[McpResourceContent, ...]
+    contents: tuple[HandsResourceContent, ...]
 
 
 class ManagedResourceGateway:
     def __init__(
         self,
-        registry: McpResourceRegistry,
+        registry: HandsResourceRegistry,
         *,
         artifacts: ArtifactWriter,
         policy: ResourcePolicyEvaluator | None = None,
@@ -95,9 +94,9 @@ class ManagedResourceGateway:
 
     async def read(
         self,
-        trusted_context: McpTrustedContext,
+        trusted_context: HandsTrustedContext,
         uri: str,
-    ) -> tuple[McpResourceContent, ...]:
+    ) -> tuple[HandsResourceContent, ...]:
         parsed = urlsplit(uri)
         if not parsed.scheme or parsed.scheme not in self._allowed_schemes:
             raise PolicyDeniedError("Resource URI scheme is not allowed")
@@ -118,21 +117,15 @@ class ManagedResourceGateway:
             cached = self._cache.get(cache_key)
             if cached is not None and cached.expires_at > time.monotonic():
                 return tuple(_with_cache_hit(content, True) for content in cached.contents)
-            classification = str(
-                _auraclaw_meta(resource.descriptor.meta).get(
-                    "classification", "internal"
-                )
-            )
-            source_revision = _auraclaw_meta(resource.descriptor.meta).get(
-                "sourceRevision"
-            )
+            classification = resource.descriptor.classification or "internal"
+            source_revision = resource.descriptor.source_revision
             policy_decision_id = await self._authorize(
                 trusted_context,
                 uri,
                 classification=classification,
                 media_type=resource.descriptor.mime_type,
             )
-            normalized: tuple[McpResourceContent, ...] = tuple(
+            normalized: tuple[HandsResourceContent, ...] = tuple(
                 [
                     await self._normalize(
                         trusted_context,
@@ -164,7 +157,7 @@ class ManagedResourceGateway:
 
     async def _authorize(
         self,
-        trusted: McpTrustedContext,
+        trusted: HandsTrustedContext,
         uri: str,
         *,
         classification: str,
@@ -194,13 +187,13 @@ class ManagedResourceGateway:
 
     async def _normalize(
         self,
-        trusted: McpTrustedContext,
-        content: McpResourceContent,
+        trusted: HandsTrustedContext,
+        content: HandsResourceContent,
         *,
         classification: str,
         source_revision: object,
         policy_decision_id: str | None,
-    ) -> McpResourceContent:
+    ) -> HandsResourceContent:
         media_type = content.mime_type or "application/octet-stream"
         if not _media_type_allowed(media_type, self._allowed_media_types):
             raise PolicyDeniedError("Resource media type is not allowed")
@@ -209,29 +202,29 @@ class ManagedResourceGateway:
             raise PolicyDeniedError("Resource exceeds the maximum allowed size")
         findings = self._scanner.scan(payload, media_type=media_type)
         digest = f"sha256:{hashlib.sha256(payload).hexdigest()}"
-        metadata = _merge_metadata(
-            content.meta,
-            {
-                "contentDigest": digest,
-                "sourceRevision": source_revision,
-                "classification": classification,
-                "retrievedAt": datetime.now(UTC).isoformat(),
-                "securityFindings": list(findings),
-                "policyDecisionId": policy_decision_id,
-                "cacheHit": False,
-            },
-        )
+        revision = None if source_revision is None else str(source_revision)
         if len(payload) <= self._max_inline_bytes:
-            return content.model_copy(update={"mime_type": media_type, "meta": metadata})
+            return content.model_copy(
+                update={
+                    "mime_type": media_type,
+                    "content_digest": digest,
+                    "source_revision": revision,
+                    "classification": classification,
+                    "policy_decision_id": policy_decision_id,
+                    "security_findings": tuple(findings),
+                    "cache_hit": False,
+                    "inline": True,
+                }
+            )
         artifact = await self._artifacts.put(
             tenant_id=trusted.tenant_id,
             root_session_id=trusted.root_session_id,
             session_id=trusted.session_id,
             content=payload,
-            artifact_type="mcp-resource",
+            artifact_type="hands-resource",
             media_type=media_type,
             name=_resource_name(content.uri),
-            producer="mcp-resource-gateway",
+            producer="hands-resource-gateway",
             classification=classification,
             acl=(trusted.runtime_id,),
         )
@@ -239,20 +232,22 @@ class ManagedResourceGateway:
             {"artifact_ref": artifact.as_dict()},
             separators=(",", ":"),
         )
-        metadata = _merge_metadata(
-            metadata,
-            {"artifactRef": artifact.as_dict(), "inline": False},
-        )
-        return McpResourceContent(
+        return HandsResourceContent(
             uri=content.uri,
             mime_type="application/vnd.auraclaw.artifact-ref+json",
             text=artifact_payload,
-            annotations=content.annotations,
-            meta=metadata,
+            artifact_ref=artifact,
+            content_digest=digest,
+            source_revision=revision,
+            classification=classification,
+            policy_decision_id=policy_decision_id,
+            security_findings=tuple(findings),
+            cache_hit=False,
+            inline=False,
         )
 
 
-def _content_bytes(content: McpResourceContent) -> bytes:
+def _content_bytes(content: HandsResourceContent) -> bytes:
     if content.text is not None:
         return content.text.encode()
     assert content.blob is not None
@@ -276,26 +271,8 @@ def _resource_name(uri: str) -> str:
     return path.rsplit("/", 1)[-1] or "resource"
 
 
-def _auraclaw_meta(meta: dict[str, object]) -> dict[str, object]:
-    value = meta.get("auraclaw", {})
-    return dict(value) if isinstance(value, dict) else {}
-
-
-def _merge_metadata(
-    meta: dict[str, object],
-    values: dict[str, object],
-) -> dict[str, object]:
-    result = dict(meta)
-    auraclaw = _auraclaw_meta(result)
-    auraclaw.update({key: value for key, value in values.items() if value is not None})
-    result["auraclaw"] = auraclaw
-    return result
-
-
 def _with_cache_hit(
-    content: McpResourceContent,
+    content: HandsResourceContent,
     cache_hit: bool,
-) -> McpResourceContent:
-    return content.model_copy(
-        update={"meta": _merge_metadata(content.meta, {"cacheHit": cache_hit})}
-    )
+) -> HandsResourceContent:
+    return content.model_copy(update={"cache_hit": cache_hit})

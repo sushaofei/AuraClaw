@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from auraclaw.action.mcp import HandsMcpServer
+from auraclaw.action.hands import HandsGateway
 from auraclaw.action.mcp_primitives import McpResourceRegistry
 from auraclaw.action.model_skill_compiler import (
     ModelSkillCompiler,
@@ -28,8 +28,8 @@ from auraclaw.infrastructure.artifacts.store import (
     ArtifactStore,
     InMemoryObjectStorage,
 )
-from auraclaw.internal.mcp import InProcessMcpTransport
-from auraclaw.runtime.mcp_client import HandsMcpClient
+from auraclaw.internal.hands import InProcessHandsClient
+from auraclaw.runtime.hands_adapter import HandsRuntimeAdapter
 
 PRICE_INSIGHT_MODEL_CONFIG = (
     Path(__file__).parents[2]
@@ -212,9 +212,9 @@ def test_model_config_flows_through_skill_mcp_to_runtime_client() -> None:
         publications = await publisher.reconcile()
         assert len(publications) == 1
 
-        client = HandsMcpClient(
-            InProcessMcpTransport(
-                HandsMcpServer(
+        client = HandsRuntimeAdapter(
+            InProcessHandsClient(
+                HandsGateway(
                     registry=ToolRegistry(),
                     gateway=_UnusedGateway(),  # type: ignore[arg-type]
                     resources=resources,

@@ -98,6 +98,11 @@ def _error_code(exc: AuraClawError) -> InternalErrorCode:
         return aliases.get(exc.code, InternalErrorCode.INTERNAL_ERROR)
 
 
+def raise_contract_error(response: httpx.Response) -> NoReturn:
+    """Map an internal HTTP error payload onto the matching AuraClaw error type."""
+    _raise_contract_error(response)
+
+
 def _raise_contract_error(response: httpx.Response) -> NoReturn:
     try:
         error = InternalError.model_validate(response.json())

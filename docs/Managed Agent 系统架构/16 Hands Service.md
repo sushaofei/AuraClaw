@@ -11,7 +11,8 @@ Hands Service 承载工具的实际执行环境和适配器。它执行 Tool Gat
 | Tool Executor | 调用具体执行器并返回标准结果 |
 | Sandbox Manager | 隔离进程、文件系统、CPU、内存和时间 |
 | Browser / File Runtime | 浏览器、文件和桌面能力 |
-| MCP Adapter | 管理 MCP Server 连接和协议转换 |
+| MCP Adapter | 下游 ManagedMcpConnector，协议转换后进入 Hands DTO |
+| Java API Connector | 已注册 operation 的受管 REST 调用 |
 | Connector Adapter | 企业 API、数据库和消息系统适配 |
 | Resource Limit | 配额、超时、并发和输出大小 |
 | Network Egress Policy | 域名、地址、协议和数据外发限制 |

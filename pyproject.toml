@@ -122,7 +122,12 @@ forbidden_modules = ["auraclaw.infrastructure"]
 name = "Runtime does not embed Action Hands"
 type = "forbidden"
 source_modules = ["auraclaw.runtime"]
-forbidden_modules = ["auraclaw.action", "auraclaw.infrastructure.hands"]
+forbidden_modules = [
+  "auraclaw.action",
+  "auraclaw.contracts.mcp",
+  "auraclaw.infrastructure.connectors",
+  "auraclaw.infrastructure.hands",
+]
 
 [[tool.importlinter.contracts]]
 name = "Action Hands does not depend on Runtime or Control"

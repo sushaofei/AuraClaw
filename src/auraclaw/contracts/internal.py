@@ -327,7 +327,7 @@ class RuntimeServiceConfig(ContractModel):
     control_base_url: str
     session_base_url: str
     model_gateway_base_url: str
-    hands_mcp_url: str
+    hands_url: str
     artifact_base_url: str
     workload_token_file: str
 
