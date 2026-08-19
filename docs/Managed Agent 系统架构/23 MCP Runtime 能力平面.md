@@ -9,9 +9,10 @@
 
 ## 1. 目标
 
-本文定义 AuraClaw 如何通过 MCP 为 Agent Runtime 提供数据、工具和技能的发现、加载与调用能力。
-设计建立在现有 `Runtime -> Action Hands MCP` 链路上，并扩展为统一的 Capability Plane。
-实现跟踪见 [GitHub Issue #21](https://github.com/sushaofei/AuraClaw/issues/21)。
+本文定义 AuraClaw 如何通过协议无关的 Hands Contract 为 Agent Runtime 提供数据、工具和技能。
+MCP 与 Java API 只作为 Hands 下游 Connector。Issue #43 之后，Runtime 不再使用内部 `/mcp`。
+实现跟踪见 [ADR-002](../ADR-002%20Hands%20稳定能力边界与下游%20Connector.md) 与
+[GitHub Issue #43](https://github.com/sushaofei/AuraClaw/issues/43)。
 
 目标：
 
@@ -32,10 +33,11 @@
 
 现有代码已经具备：
 
-- `contracts/mcp.py` 中的 MCP 2026-07-28 JSON-RPC、Trusted Context 和 Transport 契约。
-- Runtime 侧 `HandsMcpClient` 的 `server/discover`、`tools/list`、`tools/call` 和取消。
+- `contracts/hands.py` 中的协议无关 Hands DTO 与内部路径。
+- Runtime 侧 `HandsClient` / `HttpHandsClient` 的 list/call/read/cancel。
+- 下游 `infrastructure/connectors/mcp` 中的 MCP 2026-07-28 wire 与 ManagedMcpConnector。
 - Action Hands 侧 Tool Registry、Schema、Policy、Approval、Invocation Store、Artifact 和 Credential 边界。
-- Streamable HTTP 的内部认证、协议版本和 Lease/Fencing 上下文。
+- 内部 Hands HTTP 的 workload/lease 认证与大小限制。
 
 尚缺：
 
@@ -418,7 +420,7 @@ class CapabilityClient(Protocol):
     async def load_skill_part(...)
 ```
 
-协议传输 DTO 归 `contracts/mcp.py`；Runtime 使用的稳定 Port 和归一化模型归 `runtime/ports.py`；
+协议传输 DTO 归 `infrastructure/connectors/mcp/wire.py`；Runtime 使用的稳定 Port 和 Hands DTO 归 `contracts/hands.py` 与 `runtime/ports.py`；
 Capability Catalog、Resource、Skill 和 Tool 执行实现在 `action`，具体 MCP/HTTP/Artifact 适配器在
 `infrastructure`，对象图仍只由 `composition` 选择。
 

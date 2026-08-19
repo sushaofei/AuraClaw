@@ -6,6 +6,16 @@ from datetime import datetime
 from typing import Any, Literal, Protocol
 
 from auraclaw.contracts.events import CanonicalEvent, NewEvent
+from auraclaw.contracts.hands import (
+    HandsPage,
+    HandsPromptDescriptor,
+    HandsPromptResult,
+    HandsResourceContent,
+    HandsResourceDescriptor,
+    HandsToolCall,
+    HandsToolDescriptor,
+    HandsToolResult,
+)
 from auraclaw.contracts.skills import SkillBinding
 from auraclaw.control.ports import RuntimeAssignment, RuntimeCheckpoint
 
@@ -125,6 +135,62 @@ class ToolClient(Protocol):
     async def execute(
         self, assignment: RuntimeAssignment, call: ToolCall
     ) -> dict[str, Any]: ...
+
+
+class HandsClient(Protocol):
+    async def list_tools(
+        self,
+        assignment: RuntimeAssignment,
+        *,
+        cursor: str | None = None,
+    ) -> HandsPage[HandsToolDescriptor]: ...
+
+    async def list_resources(
+        self,
+        assignment: RuntimeAssignment,
+        *,
+        cursor: str | None = None,
+    ) -> HandsPage[HandsResourceDescriptor]: ...
+
+    async def list_resource_templates(
+        self,
+        assignment: RuntimeAssignment,
+        *,
+        cursor: str | None = None,
+    ) -> HandsPage[HandsResourceDescriptor]: ...
+
+    async def read_resource(
+        self,
+        assignment: RuntimeAssignment,
+        uri: str,
+    ) -> tuple[HandsResourceContent, ...]: ...
+
+    async def list_prompts(
+        self,
+        assignment: RuntimeAssignment,
+        *,
+        cursor: str | None = None,
+    ) -> HandsPage[HandsPromptDescriptor]: ...
+
+    async def get_prompt(
+        self,
+        assignment: RuntimeAssignment,
+        name: str,
+        *,
+        arguments: dict[str, str] | None = None,
+    ) -> HandsPromptResult: ...
+
+    async def call_tool(
+        self,
+        assignment: RuntimeAssignment,
+        call: HandsToolCall,
+    ) -> HandsToolResult: ...
+
+    async def cancel_invocation(
+        self,
+        assignment: RuntimeAssignment,
+        tool_invocation_id: str,
+    ) -> bool: ...
 
 
 class CapabilityClient(ToolClient, Protocol):

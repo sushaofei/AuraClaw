@@ -18,7 +18,7 @@ from auraclaw.action.capability_catalog import (
     capability_search_tool,
     skill_resolve_tool,
 )
-from auraclaw.action.mcp import HandsMcpServer
+from auraclaw.action.hands import HandsGateway
 from auraclaw.action.mcp_primitives import McpResourceRegistry
 from auraclaw.action.policy import PolicyEngine
 from auraclaw.action.skill_packages import (
@@ -52,10 +52,10 @@ from auraclaw.infrastructure.artifacts.store import (
     ArtifactStore,
     InMemoryObjectStorage,
 )
-from auraclaw.internal.mcp import InProcessMcpTransport
+from auraclaw.internal.hands import InProcessHandsClient
 from auraclaw.runtime.capability_controller import RuntimeCapabilityController
+from auraclaw.runtime.hands_adapter import HandsRuntimeAdapter
 from auraclaw.runtime.harness import AgentHarness, InjectionPoint
-from auraclaw.runtime.mcp_client import HandsMcpClient
 from auraclaw.runtime.ports import ModelRequest, ModelResponse, ToolCall
 
 
@@ -598,9 +598,9 @@ def test_real_mcp_search_and_load_hydrates_authoritative_tool_schema() -> None:
                 signing_key=b"m11-capability-artifact-key",
             ),
         )
-        client = HandsMcpClient(
-            InProcessMcpTransport(
-                HandsMcpServer(registry=registry, gateway=gateway)
+        client = HandsRuntimeAdapter(
+            InProcessHandsClient(
+                HandsGateway(registry=registry, gateway=gateway)
             )
         )
         controller = RuntimeCapabilityController(client)
@@ -743,9 +743,9 @@ def test_real_mcp_skill_search_load_resolve_and_instruction_activation() -> None
                 signing_key=b"m11-result-artifact-key",
             ),
         )
-        client = HandsMcpClient(
-            InProcessMcpTransport(
-                HandsMcpServer(
+        client = HandsRuntimeAdapter(
+            InProcessHandsClient(
+                HandsGateway(
                     registry=registry,
                     gateway=gateway,
                     resources=resources,

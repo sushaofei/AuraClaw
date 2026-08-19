@@ -7,31 +7,27 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
-from auraclaw.action.mcp import HandsMcpServer
+from auraclaw.action.hands import HandsGateway
 from auraclaw.action.mcp_primitives import (
-    McpPromptRegistry,
-    McpResourceRegistry,
+    HandsPromptRegistry,
+    HandsResourceRegistry,
     RegisteredPrompt,
     RegisteredResource,
     RegisteredResourceTemplate,
 )
 from auraclaw.action.tool_gateway import ToolRegistry
-from auraclaw.contracts.errors import AuraClawError
-from auraclaw.contracts.mcp import (
-    MCP_PROTOCOL_VERSION,
-    McpAnnotations,
-    McpPromptArgument,
-    McpPromptDescriptor,
-    McpPromptMessage,
-    McpPromptResult,
-    McpResourceContent,
-    McpResourceDescriptor,
-    McpResourceTemplateDescriptor,
+from auraclaw.contracts.hands import (
+    HandsPromptArgument,
+    HandsPromptDescriptor,
+    HandsPromptMessage,
+    HandsPromptResult,
+    HandsResourceContent,
+    HandsResourceDescriptor,
 )
 from auraclaw.contracts.tools import RiskLevel, ToolCapability, ToolPermission
 from auraclaw.control.ports import RuntimeAssignment
-from auraclaw.internal.mcp import InProcessMcpTransport
-from auraclaw.runtime.mcp_client import HandsMcpClient
+from auraclaw.internal.hands import InProcessHandsClient
+from auraclaw.runtime.hands_adapter import HandsRuntimeAdapter
 
 
 class _UnusedToolGateway:
@@ -58,22 +54,18 @@ def _assignment(*, tenant_id: str = "tenant-a", runtime_id: str = "runtime-a") -
     )
 
 
-def _server() -> HandsMcpServer:
-    resources = McpResourceRegistry(
+def _gateway() -> HandsGateway:
+    resources = HandsResourceRegistry(
         resources=(
             RegisteredResource(
-                descriptor=McpResourceDescriptor(
+                descriptor=HandsResourceDescriptor(
                     uri="memory://a",
                     name="a",
                     mime_type="text/plain",
                     size=1,
-                    annotations=McpAnnotations(
-                        audience=("assistant",),
-                        priority=0.8,
-                    ),
                 ),
                 contents=(
-                    McpResourceContent(
+                    HandsResourceContent(
                         uri="memory://a",
                         mime_type="text/plain",
                         text="a",
@@ -81,24 +73,24 @@ def _server() -> HandsMcpServer:
                 ),
             ),
             RegisteredResource(
-                descriptor=McpResourceDescriptor(uri="memory://b", name="b"),
-                contents=(McpResourceContent(uri="memory://b", text="b"),),
+                descriptor=HandsResourceDescriptor(uri="memory://b", name="b"),
+                contents=(HandsResourceContent(uri="memory://b", text="b"),),
                 tenant_ids=("tenant-a",),
             ),
             RegisteredResource(
-                descriptor=McpResourceDescriptor(uri="memory://c", name="c"),
-                contents=(McpResourceContent(uri="memory://c", text="c"),),
+                descriptor=HandsResourceDescriptor(uri="memory://c", name="c"),
+                contents=(HandsResourceContent(uri="memory://c", text="c"),),
                 tenant_ids=("tenant-a",),
             ),
             RegisteredResource(
-                descriptor=McpResourceDescriptor(uri="memory://hidden", name="hidden"),
-                contents=(McpResourceContent(uri="memory://hidden", text="hidden"),),
+                descriptor=HandsResourceDescriptor(uri="memory://hidden", name="hidden"),
+                contents=(HandsResourceContent(uri="memory://hidden", text="hidden"),),
                 tenant_ids=("tenant-b",),
             ),
         ),
         templates=(
             RegisteredResourceTemplate(
-                descriptor=McpResourceTemplateDescriptor(
+                descriptor=HandsResourceDescriptor(
                     uri_template="memory://items/{id}",
                     name="item",
                     mime_type="application/json",
@@ -110,11 +102,11 @@ def _server() -> HandsMcpServer:
     def render_review(
         arguments: dict[str, str],
         trusted_context: Any,
-    ) -> McpPromptResult:
-        return McpPromptResult(
+    ) -> HandsPromptResult:
+        return HandsPromptResult(
             description="Review a named target",
             messages=(
-                McpPromptMessage(
+                HandsPromptMessage(
                     role="user",
                     content={
                         "type": "text",
@@ -127,26 +119,24 @@ def _server() -> HandsMcpServer:
             ),
         )
 
-    prompts = McpPromptRegistry(
+    prompts = HandsPromptRegistry(
         (
             RegisteredPrompt(
-                descriptor=McpPromptDescriptor(
+                descriptor=HandsPromptDescriptor(
                     name="review",
                     title="Review target",
-                    arguments=(
-                        McpPromptArgument(name="target", required=True),
-                    ),
+                    arguments=(HandsPromptArgument(name="target", required=True),),
                 ),
                 renderer=render_review,
                 tenant_ids=("tenant-a",),
             ),
             RegisteredPrompt(
-                descriptor=McpPromptDescriptor(name="summarize"),
-                renderer=lambda _arguments, _trusted: McpPromptResult(
+                descriptor=HandsPromptDescriptor(name="summarize"),
+                renderer=lambda arguments, trusted: HandsPromptResult(
                     messages=(
-                        McpPromptMessage(
+                        HandsPromptMessage(
                             role="user",
-                            content={"type": "text", "text": "Summarize"},
+                            content={"type": "text", "text": "summarize"},
                         ),
                     )
                 ),
@@ -165,7 +155,7 @@ def _server() -> HandsMcpServer:
         )
         for index in range(3)
     )
-    return HandsMcpServer(
+    return HandsGateway(
         registry=ToolRegistry(tools),
         gateway=_UnusedToolGateway(),  # type: ignore[arg-type]
         resources=resources,
@@ -174,39 +164,33 @@ def _server() -> HandsMcpServer:
     )
 
 
-def test_mcp_resources_prompts_and_tools_are_paginated_and_tenant_scoped() -> None:
+def test_hands_resources_prompts_and_tools_are_paginated_and_tenant_scoped() -> None:
     async def scenario() -> None:
-        client = HandsMcpClient(InProcessMcpTransport(_server()))
+        gateway = _gateway()
+        raw = InProcessHandsClient(gateway)
+        client = HandsRuntimeAdapter(raw)
         assignment = _assignment()
 
-        initialized = await client.initialize(assignment)
-        assert initialized["protocolVersion"] == MCP_PROTOCOL_VERSION
-        assert initialized["capabilities"]["resources"]["subscribe"] is False
-        assert initialized["capabilities"]["prompts"]["listChanged"] is False
-
-        first_page, cursor = await client.list_resources_page(assignment)
-        assert [item["uri"] for item in first_page] == ["memory://a", "memory://b"]
-        assert cursor is not None
-        second_page, final_cursor = await client.list_resources_page(
-            assignment, cursor=cursor
+        first_page = await raw.list_resources(assignment)
+        assert [item.uri for item in first_page.items] == ["memory://a", "memory://b"]
+        assert first_page.next_cursor is not None
+        second_page = await raw.list_resources(
+            assignment, cursor=first_page.next_cursor
         )
-        assert [item["uri"] for item in second_page] == ["memory://c"]
-        assert final_cursor is None
+        assert [item.uri for item in second_page.items] == ["memory://c"]
+        assert second_page.next_cursor is None
         assert [item["uri"] for item in await client.list_resources(assignment)] == [
             "memory://a",
             "memory://b",
             "memory://c",
         ]
-        assert await client.read_resource(assignment, "memory://a") == [
-            {
-                "uri": "memory://a",
-                "mimeType": "text/plain",
-                "text": "a",
-            }
-        ]
+        loaded = await client.read_resource(assignment, "memory://a")
+        assert loaded[0]["uri"] == "memory://a"
+        assert loaded[0]["text"] == "a"
+        assert loaded[0]["mimeType"] == "text/plain"
 
         templates = await client.list_resource_templates(assignment)
-        assert templates[0]["uriTemplate"] == "memory://items/{id}"
+        assert templates[0]["uri_template"] == "memory://items/{id}"
         assert [prompt["name"] for prompt in await client.list_prompts(assignment)] == [
             "review",
             "summarize",
@@ -230,16 +214,16 @@ def test_mcp_resources_prompts_and_tools_are_paginated_and_tenant_scoped() -> No
             "memory://a",
             "memory://hidden",
         ]
-        with pytest.raises(AuraClawError):
+        with pytest.raises(KeyError):
             await client.read_resource(other, "memory://b")
-        with pytest.raises(AuraClawError):
+        with pytest.raises(ValueError):
             await client.get_prompt(assignment, "review")
 
     asyncio.run(scenario())
 
 
-def test_mcp_resource_content_requires_exactly_one_payload() -> None:
+def test_hands_resource_content_requires_exactly_one_payload() -> None:
     with pytest.raises(ValidationError):
-        McpResourceContent(uri="memory://invalid")
+        HandsResourceContent(uri="memory://invalid")
     with pytest.raises(ValidationError):
-        McpResourceContent(uri="memory://invalid", text="x", blob="eA==")
+        HandsResourceContent(uri="memory://invalid", text="x", blob="eA==")

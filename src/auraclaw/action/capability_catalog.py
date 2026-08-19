@@ -335,12 +335,11 @@ class RoutedHandsExecutor:
         routes: Mapping[str, HandsExecutor],
     ) -> None:
         prefix = f"{owner}:"
-        if not routes:
-            self._routes = {
-                name: executor
-                for name, executor in self._routes.items()
-                if not getattr(executor, "route_owner", "").startswith(prefix)
-            }
+        self._routes = {
+            name: executor
+            for name, executor in self._routes.items()
+            if not getattr(executor, "route_owner", "").startswith(prefix)
+        }
         self._routes.update(routes)
 
 

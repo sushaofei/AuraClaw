@@ -1,8 +1,8 @@
 # AuraClaw MCP 开发手册
 
 > 面向：维护 Agent Runtime / Action Hands 的开发人员，以及要把现有 Java 服务接到 Agent 的开发人员。  
-> 代码基线：当前仓库实现，内部 MCP 默认协议为 `2026-07-28`，并保留显式
-> `2025-11-25` legacy profile。  
+> 代码基线：当前仓库实现，Runtime→Hands 使用协议无关内部 HTTP；下游 MCP 默认协议为
+> `2026-07-28`，并保留显式 `2025-11-25` legacy Connector profile。  
 > 配套文档：[MCP Runtime 能力平面](./Managed%20Agent%20系统架构/23%20MCP%20Runtime%20能力平面.md)、[M9 实施与运维](./M9%20MCP%20Runtime%20实施与运维.md)、[Java 服务 MCP 接入手册](./Java%20服务%20MCP%20接入手册.md)（后者偏评审与基础设施缺口）。
 
 本文回答三件事：
@@ -17,23 +17,22 @@
 
 | 你要做的事 | 正确做法 | 不要做 |
 |---|---|---|
-| 给 Agent 增加 AuraClaw **自己拥有** 的能力（如价格洞察） | 在 Hands 里注册 `ToolCapability` + `HandsExecutor` | 改 `HandsMcpServer` 的 method 分发 |
-| 把 **已有 Java 服务** 交给 Agent 调用 | Java（或紧邻的 Adapter）暴露 MCP；AuraClaw 只登记 Server | 在 `runtime/`、`action/`、`composition/services.py` 里逐接口写 Java REST |
+| 给 Agent 增加 AuraClaw **自己拥有** 的能力（如价格洞察） | 在 Hands 里注册 `ToolCapability` + `HandsExecutor` | 改内部 Hands HTTP 路由或 Runtime Client |
+| 把 **已有 Java 服务** 交给 Agent 调用 | Java 暴露 MCP **或** 登记受管 Java API operation；AuraClaw 只登记 Connector | 在 `runtime/` 里直连 Java URL |
 | 本周必须打通 1～2 个内网接口，Java 还不能改 | 过渡：Credential Proxy adapter 出站，或 Java 旁挂独立 MCP Adapter | 按价格洞察模式把业务 HTTP Client 堆进 Hands |
 
 判断标准：**业务契约属于谁，谁就拥有 Tool 定义。**  
 价格洞察的数据和计算在 AuraClaw，所以 Tool 写在 Python。订单/库存的数据和权限在 Java，所以 Tool 写在 Java MCP，AuraClaw 只做登记、策略、凭证和对账。
 
 ```text
-Agent Runtime  ──MCP 2026-07-28──►  Action Hands 内部网关 /mcp
+Agent Runtime  ──Hands HTTP/JSON──►  Action Hands Gateway /internal/v1/hands/*
                                       │
                                       ├─ 本地 Tool  → HandsExecutor（本进程）
-                                      └─ 远端 Tool  → Credential Proxy Egress
-                                                      → Java POST /mcp
-                                                      → Java application service
+                                      ├─ 远端 MCP   → ManagedMcpConnector → Java POST /mcp
+                                      └─ 远端 API   → ManagedJavaApiConnector → 已注册 REST operation
 ```
 
-Runtime **只连** `AURACLAW_HANDS_MCP_URL`（默认 `http://127.0.0.1:8006/mcp`）。它不接收 Java URL、stdio 命令或明文 Secret。
+Runtime **只连** `AURACLAW_HANDS_URL`（默认 `http://127.0.0.1:8006`）。它不接收 Java URL、stdio 命令或明文 Secret。
 
 ---
 
@@ -43,9 +42,9 @@ Runtime **只连** `AURACLAW_HANDS_MCP_URL`（默认 `http://127.0.0.1:8006/mcp`
 
 按这个顺序读代码：
 
-1. `src/auraclaw/contracts/mcp.py` — JSON-RPC 信封和可信上下文
-2. `src/auraclaw/runtime/mcp_client.py` — Runtime 怎么发 `tools/call`
-3. `src/auraclaw/action/mcp.py` — Hands MCP Server，协议适配器
+1. `src/auraclaw/contracts/hands.py` — 协议无关 Hands DTO 和内部路径
+2. `src/auraclaw/runtime/hands_client.py` — Runtime 怎么发 `call_tool`
+3. `src/auraclaw/action/hands.py` / `action/hands_http.py` — Hands Gateway 与内部 HTTP
 4. `src/auraclaw/action/tool_gateway.py` — 校验、策略、审批、幂等
 5. `src/auraclaw/action/capability_catalog.py` 中的 `RoutedHandsExecutor` — 按名字找执行器
 6. 本地范例：`src/auraclaw/action/price_insight.py`
@@ -62,7 +61,7 @@ Runtime **只连** `AURACLAW_HANDS_MCP_URL`（默认 `http://127.0.0.1:8006/mcp`
 5. 交给 AuraClaw 运维登记 `AURACLAW_MCP_EGRESS_SERVERS_JSON` + Vault `credential_ref`
 6. 用对账结果确认 Catalog / Registry 里出现了你的 Tool
 
-Java 开发 **不需要** 改 `HandsMcpServer`，也不需要在 Python 里为每个接口写 Executor。
+Java 开发 **不需要** 改 `HandsGateway`，也不需要在 Python 里为每个接口写 Executor。
 
 ---
 
@@ -70,7 +69,7 @@ Java 开发 **不需要** 改 `HandsMcpServer`，也不需要在 Python 里为�
 
 ### 2.1 协议，不是业务事实源
 
-MCP 是 Runtime 发现和调用「数据 / 工具 / 提示 / 技能」的运输协议。下面这些东西 **不** 由 MCP 保证：
+Hands Contract 是 Runtime 发现和调用「数据 / 工具 / 提示 / 技能」的内部运输协议。下游 MCP 只服务 Java/第三方 Server。下面这些东西 **不** 由 Hands 或 MCP 保证：
 
 - Canonical Session Event（任务事实）
 - Control Lease / fencing token（谁有权跑这次 Run）
@@ -100,92 +99,82 @@ MCP 规范只有三类 Server 原语。AuraClaw 的 Skill 不是第四类原语�
 
 ### 2.3 契约
 
-`src/auraclaw/contracts/` 是跨服务的稳定数据结构，不依赖 FastAPI 或数据库。MCP 相关主要有两份：
+`src/auraclaw/contracts/` 是跨服务的稳定数据结构，不依赖 FastAPI 或数据库。Hands 与下游 MCP 相关主要有：
 
 | 文件 | 内容 |
 |---|---|
-| `contracts/mcp.py` | JSON-RPC 请求/响应、Resource/Prompt DTO、`McpTrustedContext`、`McpTransport` |
+| `contracts/hands.py` | Runtime↔Hands DTO、内部 HTTP 路径、`HandsTrustedContext` |
+| `infrastructure/connectors/mcp/wire.py` | 下游 MCP JSON-RPC、`McpTrustedContext`、`McpTransport` |
 | `contracts/tools.py` | `ToolCapability`、`ToolInvocation`、`ToolResult`、权限与风险 |
 | `contracts/capabilities.py` | 受管 Server 定义、OAuth、Catalog 描述符 |
 
-`ContractModel` 是冻结且禁止多余字段的 Pydantic 模型。内部用 Python 字段名（`mime_type`），对外 JSON 用 MCP 规范名（`mimeType`），转换集中在 `as_mcp()`。
+`ContractModel` 是冻结且禁止多余字段的 Pydantic 模型。内部用 Python 字段名（`mime_type`），Hands 对外 JSON 用 camelCase；下游 MCP 转换集中在 Connector。
 
-身份不放进 JSON-RPC body。`McpJsonRpcRequest` 只说「做什么」；`McpTrustedContext` 由 Hands 从 workload token + lease assertion **自己还原**，说「凭什么做」。
+身份不放进 Hands 请求 body。`HandsToolCall` 只说「做什么」；`HandsTrustedContext` 由 Hands 从 workload token + lease assertion **自己还原**，说「凭什么做」。
 
 ---
 
-## 3. 内部 MCP 怎么跑起来
+## 3. 内部 Hands Contract 怎么跑起来
 
 ### 3.1 进程角色
 
 | 进程 | 入口 | 职责 |
 |---|---|---|
-| `agent-runtime` | 连 `hands_mcp_url` | `HandsMcpClient`：discover / list / call / 读 Skill Resource |
-| `action-hands` | `POST /mcp` | `HandsMcpServer`：鉴权、转 `ToolInvocation`、调 Gateway |
+| `agent-runtime` | 连 `hands_url` | `HttpHandsClient` / `HandsRuntimeAdapter`：list / call / 读 Skill Resource |
+| `action-hands` | `/internal/v1/hands/*` | `HandsGateway`：鉴权、转 `ToolInvocation`、调 Gateway |
 | `policy` | 内部 HTTP | 允许 / 拒绝 / 要求审批 |
-| `credential-proxy` | 内部 HTTP | 持有 Secret，出站打远端 MCP |
-| Java MCP | `POST /mcp` | 业务 Tool 的真正实现 |
+| `credential-proxy` | 内部 HTTP | 持有 Secret，出站打远端 MCP 或 Java API |
+| Java MCP | `POST /mcp` | 业务 Tool 的真正实现（Hands 下游） |
 
-开发/单测可以用进程内 `InProcessMcpTransport`，生产 Runtime 用 `HttpMcpTransport`。Client 代码相同，只换 Transport。
+开发/单测可以用进程内 `InProcessHandsClient`，生产 Runtime 用 `HttpHandsClient`。Gateway 代码相同，只换 Client。
 
 ### 3.2 HTTP 入口
 
 ```python
-# src/auraclaw/action/mcp_http.py
-@app.post("/mcp")
-async def mcp_endpoint(request, authorization, lease_assertion):
+# src/auraclaw/action/hands_http.py
+@app.post("/internal/v1/hands/tools/call")
+async def call_tool(request, authorization, lease_assertion):
     trusted = await authenticator.authenticate(authorization, lease_assertion)
-    return await server.handle(request, trusted_context=trusted)
+    return await gateway.call_tool(trusted, payload)
 ```
 
-请求体是 `McpJsonRpcRequest`。头里另带：
+请求体是 Hands DTO。头里另带：
 
 - `Authorization: Bearer <runtime workload token>`
-- `MCP-Protocol-Version: 2026-07-28`
-- `Mcp-Method: <JSON-RPC method>`
-- `Mcp-Name: <Tool/Prompt name 或 Resource URI>`（仅有目标名称的方法）
+- `X-AuraClaw-Contract-Version` / `X-AuraClaw-Hands-Contract: 2026-08-19`
 - `X-AuraClaw-Lease-Assertion`（生产：带签名的租约）
 
-每个 2026-07-28 请求还必须在 `params._meta` 携带协议版本、Client identity 和 Client
-capabilities；协议层不再创建 Session。
+tenant / session / run / lease / fencing **只来自** token + lease，不信任 body。
 
-Server 当前支持的 method：
+Server 当前支持的内部路径：
 
-`server/discover`、`ping`、`tools/list`、`tools/call`、`resources/list`、
-`resources/templates/list`、`resources/read`、`prompts/list`、`prompts/get` 和
-`com.auraclaw/invocations/cancel`。`initialize` 只服务 2025-11-25 legacy Client。
+`/internal/v1/hands/tools/list`、`/tools/call`、`/resources/list`、
+`/resources/templates/list`、`/resources/read`、`/prompts/list`、`/prompts/get` 和
+`/invocations/cancel`。
 
-### 3.3 `tools/call` 全程（两套信封）
+### 3.3 `tools/call` 全程
 
-**Runtime 封包**（`HandsMcpClient.execute`）：
+**Runtime 封包**（`HttpHandsClient.call_tool`）：
 
 ```python
-McpJsonRpcRequest(
-    method="tools/call",
-    params={
-        "name": call.name,
-        "arguments": dict(call.arguments),
-        "_meta": {"auraclaw": {
-            "toolInvocationId": ...,
-            "toolVersion": ...,
-            "idempotencyKey": ...,
-            "approvalId": ...,
-            "credentialRef": ...,   # 只传引用，不传 Secret
-            "deadline": ...,
-        }},
-    },
+HandsToolCall(
+    tool_invocation_id=...,
+    name=call.name,
+    version=call.version,
+    arguments=dict(call.arguments),
+    idempotency_key=...,
+    approval_id=...,
+    credential_ref=...,   # 只传引用，不传 Secret
 )
 ```
 
-官方 MCP 只要 `name` + `arguments`。AuraClaw 把调用控制放进 `_meta.auraclaw`。
+**Hands 拆包**（`HandsGateway.call_tool`）：
 
-**Hands 拆包**（`HandsMcpServer._call_tool`）：
-
-- `name` / `arguments` 来自 params
+- `name` / `arguments` 来自 `HandsToolCall`
 - `tenant_id` / `session_id` / `run_id` / `fencing_token` **只来自** `trusted_context`
 - 组装 `ToolInvocation`，交给 `ToolGateway.execute()`
 
-MCP Server 到这里就停了。它是适配器，不是执行器。
+Hands HTTP 适配器到这里就停了。它不是执行器。
 
 **Gateway 过门顺序**：
 
@@ -199,7 +188,7 @@ Registry.get(name, version)
  → 返回 ToolResult
 ```
 
-结果再封回 MCP：`content` 给模型看摘要/链接，`structuredContent` 给 Runtime 写 checkpoint。协议错误走 `error` 字段；工具业务失败仍是一次成功的 JSON-RPC，`isError=true`。
+结果再封回 `HandsToolResult`：摘要给模型，结构化内容给 Runtime 写 checkpoint。协议错误走 Hands error；工具业务失败仍是一次成功的 Hands 调用，`is_error=true`。
 
 ---
 
@@ -220,7 +209,7 @@ Tool 名字
 | 类型 | 谁在何时写入 |
 |---|---|
 | 平台 / 本地业务 Tool | `composition/services.py` 启动时写死 |
-| Java / 远端 MCP Tool | `McpCatalogReconciler` 对账成功后动态 `replace_owner` |
+| Java / 远端 MCP Tool | `CapabilityCatalogReconciler` 对账成功后动态 `replace_owner` |
 
 ### 4.1 用例 A：本地 Tool `procurement.price.metric.evidence.list`
 
@@ -632,23 +621,26 @@ AuraClaw 从不把 `order.order.get` 解析成 REST 路径。换一台 Java 服�
 
 | 职责 | 路径 |
 |---|---|
-| MCP JSON-RPC / Trusted Context | `src/auraclaw/contracts/mcp.py` |
+| Hands DTO / 内部路径 | `src/auraclaw/contracts/hands.py` |
+| 下游 MCP JSON-RPC / Trusted Context | `src/auraclaw/infrastructure/connectors/mcp/wire.py` |
 | Tool 契约 | `src/auraclaw/contracts/tools.py` |
 | 受管 Server / Catalog DTO | `src/auraclaw/contracts/capabilities.py` |
-| Runtime Client + HTTP Transport | `src/auraclaw/runtime/mcp_client.py` |
-| 进程内 Transport | `src/auraclaw/internal/mcp.py` |
-| Hands MCP Server | `src/auraclaw/action/mcp.py` |
-| `POST /mcp` 鉴权 | `src/auraclaw/action/mcp_http.py` |
+| Runtime Hands Client | `src/auraclaw/runtime/hands_client.py` |
+| 进程内 Hands Client | `src/auraclaw/internal/hands.py` |
+| Hands Gateway | `src/auraclaw/action/hands.py` |
+| 内部 Hands HTTP | `src/auraclaw/action/hands_http.py` |
 | Resource / Prompt 注册 | `src/auraclaw/action/mcp_primitives.py` |
 | Registry / Gateway | `src/auraclaw/action/tool_gateway.py` |
 | 按名路由 | `src/auraclaw/action/capability_catalog.py` |
-| 远端转发 | `src/auraclaw/action/remote_mcp.py` |
+| 下游 MCP Connector | `src/auraclaw/infrastructure/connectors/mcp` |
+| 下游 Java API Connector | `src/auraclaw/infrastructure/connectors/http` |
 | 目录对账 | `src/auraclaw/action/catalog_reconciler.py` |
 | OAuth / DNS pinning Egress | `src/auraclaw/infrastructure/credentials/mcp_egress.py` |
 | 本地业务范例 | `src/auraclaw/action/price_insight.py` |
 | 生产装配 | `src/auraclaw/composition/services.py` |
-| 配置 | `src/auraclaw/config.py`（`hands_mcp_url`、`mcp_egress_servers_json`） |
-| 协议单测 | `tests/unit/test_m9_mcp_primitives.py` |
+| 配置 | `src/auraclaw/config.py`（`hands_url`、`mcp_egress_servers_json`、`java_api_servers_json`） |
+| Hands 契约单测 | `tests/unit/test_hands_contract.py` |
+| Java API Connector 单测 | `tests/unit/test_java_api_connector.py` |
 | Egress 单测 | `tests/unit/test_m9_mcp_egress.py` |
 | 对账单测 | `tests/unit/test_m9_catalog_reconciliation.py` |
 | 价格洞察单测 | `tests/unit/test_m12_price_insight_skill.py` |
@@ -657,6 +649,6 @@ AuraClaw 从不把 `order.order.get` 解析成 REST 路径。换一台 Java 服�
 
 ## 10. 分享时可用的三句话
 
-1. Runtime 只认内部 Hands MCP；Java 永远不直连 Agent 进程。  
-2. Tool 名字是字典 key：本地 Tool 启动时挂上 Executor，Java Tool 对账时挂上「这台 Server 的转发器」。  
+1. Runtime 只认内部 Hands Contract；Java 永远不直连 Agent 进程。  
+2. Tool 名字是字典 key：本地 Tool 启动时挂上 Executor，Java Tool 对账时挂上「这台 Connector 的转发器」。  
 3. 业务契约在哪边演进，Tool 就定义在哪边；AuraClaw 负责治理，不负责翻译每一个 Java Controller。

@@ -12,11 +12,7 @@ from auraclaw.action.capability_catalog import (
     CapabilityCatalog,
     RoutedHandsExecutor,
 )
-from auraclaw.action.ports import CapabilityCatalogStore
-from auraclaw.action.remote_mcp import (
-    ManagedRemoteMcpTransport,
-    RemoteMcpToolExecutor,
-)
+from auraclaw.action.ports import CapabilityCatalogStore, CapabilityConnector
 from auraclaw.action.tool_gateway import ToolRegistry
 from auraclaw.contracts.capabilities import (
     CapabilityDescriptor,
@@ -24,25 +20,22 @@ from auraclaw.contracts.capabilities import (
     CapabilityStatus,
     McpServerDefinition,
 )
-from auraclaw.contracts.mcp import (
-    MCP_CLIENT_CAPABILITIES_META_KEY,
-    MCP_CLIENT_INFO_META_KEY,
-    MCP_LEGACY_PROTOCOL_VERSION,
-    MCP_PROTOCOL_VERSION,
-    MCP_PROTOCOL_VERSION_META_KEY,
-    McpJsonRpcRequest,
-    McpTransport,
-    McpTrustedContext,
+from auraclaw.contracts.hands import (
+    CapabilitySnapshot,
+    HandsPromptDescriptor,
+    HandsResourceDescriptor,
+    HandsToolDescriptor,
+    HandsToolResult,
+    HandsTrustedContext,
 )
-from auraclaw.contracts.tools import RiskLevel, ToolCapability, ToolPermission
+from auraclaw.contracts.tools import (
+    RiskLevel,
+    ToolCapability,
+    ToolInvocation,
+    ToolPermission,
+)
 
 _NAME = re.compile(r"^[A-Za-z0-9_.:/{}-]{1,256}$")
-_LIST_METHODS = (
-    ("tools/list", "tools"),
-    ("resources/list", "resources"),
-    ("resources/templates/list", "resourceTemplates"),
-    ("prompts/list", "prompts"),
-)
 
 
 class ResourceCacheInvalidator(Protocol):
@@ -57,7 +50,37 @@ class McpReconcileResult:
     error: str | None = None
 
 
-class McpCatalogReconciler:
+CapabilityReconcileResult = McpReconcileResult
+
+
+class ConnectorToolExecutor:
+    def __init__(self, connector: CapabilityConnector) -> None:
+        self._connector = connector
+        self.route_owner = f"{connector.connector_id}:tools"
+
+    async def execute(
+        self, invocation: ToolInvocation, capability: ToolCapability
+    ) -> object:
+        del capability
+        result = await self._connector.call_tool(
+            HandsTrustedContext(
+                tenant_id=invocation.tenant_id,
+                root_session_id=invocation.root_session_id,
+                session_id=invocation.session_id,
+                run_id=invocation.run_id,
+                runtime_id=invocation.actor_id,
+                lease_id=f"tool:{invocation.tool_invocation_id}",
+                fencing_token=invocation.fencing_token,
+                deadline=invocation.deadline,
+            ),
+            name=invocation.tool_name,
+            arguments=invocation.arguments,
+            invocation_id=invocation.tool_invocation_id,
+        )
+        return _executor_payload(result)
+
+
+class CapabilityCatalogReconciler:
     """Periodic source-of-truth sync; notifications only make reconciliation sooner."""
 
     def __init__(
@@ -65,7 +88,7 @@ class McpCatalogReconciler:
         *,
         catalog: CapabilityCatalog,
         store: CapabilityCatalogStore,
-        transports: dict[str, McpTransport],
+        connectors: dict[str, CapabilityConnector],
         resource_cache: ResourceCacheInvalidator | None = None,
         tool_registry: ToolRegistry | None = None,
         hands_router: RoutedHandsExecutor | None = None,
@@ -73,14 +96,14 @@ class McpCatalogReconciler:
         max_pages: int = 100,
         max_items: int = 10_000,
     ) -> None:
+        del max_pages
         self._catalog = catalog
         self._store = store
-        self._transports = transports
+        self._connectors = connectors
         self._resource_cache = resource_cache
         self._tool_registry = tool_registry
         self._hands_router = hands_router
         self._quarantine_after_failures = quarantine_after_failures
-        self._max_pages = max_pages
         self._max_items = max_items
         self._failures: dict[str, int] = {}
         self._dirty: set[str] = set()
@@ -88,7 +111,7 @@ class McpCatalogReconciler:
     async def reconcile_all(self) -> int:
         servers = {
             server_id: server
-            for server_id in self._transports
+            for server_id in self._connectors
             if (server := await self._store.get_server(server_id)) is not None
         }
         results = [
@@ -101,8 +124,8 @@ class McpCatalogReconciler:
         self,
         server: McpServerDefinition,
     ) -> McpReconcileResult:
-        transport = self._transports.get(server.server_id)
-        if transport is None or not server.enabled:
+        connector = self._connectors.get(server.server_id)
+        if connector is None or not server.enabled:
             return McpReconcileResult(
                 server_id=server.server_id,
                 status=server.status,
@@ -111,55 +134,11 @@ class McpCatalogReconciler:
             )
         trusted = _reconcile_context(server)
         try:
-            if server.protocol_revision == MCP_PROTOCOL_VERSION:
-                discovery = await _send(
-                    transport,
-                    trusted,
-                    "server/discover",
-                    {},
-                    protocol_version=server.protocol_revision,
-                )
-                if MCP_PROTOCOL_VERSION not in discovery.get("supportedVersions", []):
-                    raise ValueError("remote MCP protocol version is incompatible")
-            elif server.protocol_revision == MCP_LEGACY_PROTOCOL_VERSION:
-                discovery = await _send(
-                    transport,
-                    trusted,
-                    "initialize",
-                    {
-                        "protocolVersion": MCP_LEGACY_PROTOCOL_VERSION,
-                        "capabilities": {},
-                        "clientInfo": {
-                            "name": "auraclaw-capability-reconciler",
-                            "version": "1",
-                        },
-                    },
-                    protocol_version=server.protocol_revision,
-                )
-                if discovery.get("protocolVersion") != MCP_LEGACY_PROTOCOL_VERSION:
-                    raise ValueError("remote MCP protocol version is incompatible")
-            else:
-                raise ValueError("remote MCP protocol version is not supported")
-            snapshot: list[CapabilityDescriptor] = []
-            listed_resources: list[str] = []
-            for method, key in _LIST_METHODS:
-                items = await self._list_all(
-                    transport,
-                    trusted,
-                    method,
-                    key,
-                    protocol_version=server.protocol_revision,
-                )
-                if key == "resources":
-                    listed_resources = [
-                        str(item.get("uri", "")) for item in items
-                    ]
-                snapshot.extend(_normalize_items(server, key, items))
-                if len(snapshot) > self._max_items:
-                    raise ValueError("remote MCP capability count exceeds limit")
-            ids = [item.capability_id for item in snapshot]
+            snapshot = await connector.snapshot(trusted)
+            descriptors = _normalize_snapshot(server, snapshot, self._max_items)
+            ids = [item.capability_id for item in descriptors]
             if len(ids) != len(set(ids)):
-                raise ValueError("remote MCP returned duplicate capabilities")
+                raise ValueError("remote connector returned duplicate capabilities")
             existing = {
                 (item.kind, item.canonical_name, item.version): item
                 for item in await self._store.list_capabilities(
@@ -167,7 +146,7 @@ class McpCatalogReconciler:
                 )
                 if item.server_id == server.server_id
             }
-            for item in snapshot:
+            for item in descriptors:
                 previous = existing.get(
                     (item.kind, item.canonical_name, item.version)
                 )
@@ -180,9 +159,9 @@ class McpCatalogReconciler:
                     )
             await self._catalog.replace_server_capabilities(
                 server.server_id,
-                tuple(snapshot),
+                descriptors,
             )
-            self._replace_remote_tools(server, snapshot, transport)
+            self._replace_remote_tools(server, descriptors, connector)
             active = server.model_copy(
                 update={
                     "status": CapabilityStatus.ACTIVE,
@@ -196,28 +175,10 @@ class McpCatalogReconciler:
             await self._catalog.register_server(active)
             self._failures.pop(server.server_id, None)
             self._dirty.discard(server.server_id)
-            resources_capability = discovery.get("capabilities", {}).get(
-                "resources", {}
-            )
-            if (
-                server.protocol_revision == MCP_LEGACY_PROTOCOL_VERSION
-                and resources_capability.get("subscribe") is True
-            ):
-                for uri in listed_resources[:100]:
-                    try:
-                        await _send(
-                            transport,
-                            trusted,
-                            "resources/subscribe",
-                            {"uri": uri},
-                            protocol_version=server.protocol_revision,
-                        )
-                    except Exception:
-                        break
             return McpReconcileResult(
                 server_id=server.server_id,
                 status=CapabilityStatus.ACTIVE,
-                capability_count=len(snapshot),
+                capability_count=len(descriptors),
             )
         except Exception as exc:
             failures = self._failures.get(server.server_id, 0) + 1
@@ -255,7 +216,7 @@ class McpCatalogReconciler:
         method: str,
         params: dict[str, Any],
     ) -> bool:
-        if server_id not in self._transports:
+        if server_id not in self._connectors:
             return False
         if method in {
             "notifications/tools/list_changed",
@@ -291,60 +252,21 @@ class McpCatalogReconciler:
             reconciled += result.status == CapabilityStatus.ACTIVE
         return reconciled
 
-    async def _list_all(
-        self,
-        transport: McpTransport,
-        trusted: McpTrustedContext,
-        method: str,
-        key: str,
-        *,
-        protocol_version: str,
-    ) -> list[dict[str, Any]]:
-        items: list[dict[str, Any]] = []
-        cursor: str | None = None
-        seen: set[str] = set()
-        for _page in range(self._max_pages):
-            result = await _send(
-                transport,
-                trusted,
-                method,
-                {"cursor": cursor} if cursor is not None else {},
-                protocol_version=protocol_version,
-            )
-            raw_items = result.get(key, [])
-            if not isinstance(raw_items, list) or any(
-                not isinstance(item, dict) for item in raw_items
-            ):
-                raise ValueError(f"remote MCP {key} list is invalid")
-            items.extend(dict(item) for item in raw_items)
-            if len(items) > self._max_items:
-                raise ValueError(f"remote MCP {key} list exceeds limit")
-            raw_cursor = result.get("nextCursor")
-            if raw_cursor is None:
-                return items
-            cursor = str(raw_cursor)
-            if not cursor or cursor in seen:
-                raise ValueError("remote MCP pagination cursor did not advance")
-            seen.add(cursor)
-        raise ValueError("remote MCP pagination exceeded page limit")
-
     def _replace_remote_tools(
         self,
         server: McpServerDefinition,
-        snapshot: list[CapabilityDescriptor],
-        transport: McpTransport,
+        snapshot: tuple[CapabilityDescriptor, ...],
+        connector: CapabilityConnector,
     ) -> None:
         if self._tool_registry is None or self._hands_router is None:
             return
-        if not isinstance(transport, ManagedRemoteMcpTransport):
-            return
-        owner = f"mcp:{server.server_id}"
+        owner = connector.connector_id
         capabilities = tuple(
-            _tool_capability(descriptor)
+            _tool_capability(descriptor, owner)
             for descriptor in snapshot
             if descriptor.kind == CapabilityKind.TOOL
         )
-        executor = RemoteMcpToolExecutor(server, transport)
+        executor = ConnectorToolExecutor(connector)
         self._tool_registry.replace_owner(owner, capabilities)
         self._hands_router.replace_owner_routes(
             owner,
@@ -355,111 +277,164 @@ class McpCatalogReconciler:
         if self._tool_registry is None or self._hands_router is None:
             return
         owner = f"mcp:{server.server_id}"
+        connector = self._connectors.get(server.server_id)
+        if connector is not None:
+            owner = connector.connector_id
         self._tool_registry.revoke_owner(owner)
         self._hands_router.replace_owner_routes(owner, {})
 
 
-async def _send(
-    transport: McpTransport,
-    trusted: McpTrustedContext,
-    method: str,
-    params: dict[str, Any],
-    *,
-    protocol_version: str,
-) -> dict[str, Any]:
-    request_params = dict(params)
-    if protocol_version == MCP_PROTOCOL_VERSION:
-        request_params["_meta"] = {
-            MCP_PROTOCOL_VERSION_META_KEY: MCP_PROTOCOL_VERSION,
-            MCP_CLIENT_INFO_META_KEY: {
-                "name": "auraclaw-capability-reconciler",
-                "version": "1",
-            },
-            MCP_CLIENT_CAPABILITIES_META_KEY: {},
-        }
-    response = await transport.send(
-        McpJsonRpcRequest(
-            id=f"reconcile:{method}", method=method, params=request_params
-        ),
-        trusted_context=trusted,
-    )
-    if response.error is not None:
-        raise ValueError(f"remote MCP error {response.error.code}")
-    return dict(response.result or {})
+McpCatalogReconciler = CapabilityCatalogReconciler
 
 
-def _normalize_items(
+def _normalize_snapshot(
     server: McpServerDefinition,
-    key: str,
-    items: list[dict[str, Any]],
+    snapshot: CapabilitySnapshot,
+    max_items: int,
+) -> tuple[CapabilityDescriptor, ...]:
+    items: list[CapabilityDescriptor] = []
+    items.extend(_normalize_tools(server, snapshot.tools))
+    items.extend(_normalize_resources(server, snapshot.resources, CapabilityKind.RESOURCE))
+    items.extend(
+        _normalize_resources(
+            server, snapshot.resource_templates, CapabilityKind.RESOURCE_TEMPLATE
+        )
+    )
+    items.extend(_normalize_prompts(server, snapshot.prompts))
+    if len(items) > max_items:
+        raise ValueError("remote MCP capability count exceeds limit")
+    return tuple(items)
+
+
+def _normalize_tools(
+    server: McpServerDefinition,
+    tools: tuple[HandsToolDescriptor, ...],
 ) -> tuple[CapabilityDescriptor, ...]:
     normalized: list[CapabilityDescriptor] = []
-    for item in items:
-        safe = _sanitize_item(item)
-        if key == "tools":
-            raw_name = str(safe.get("name", ""))
-            if not _prefix_allowed(raw_name, server.allowed_tool_prefixes):
-                continue
-            kind = CapabilityKind.TOOL
-            canonical_name = raw_name
-            permission = "read-only"
-            risk_level = "medium"
-        elif key in {"resources", "resourceTemplates"}:
-            uri_key = "uri" if key == "resources" else "uriTemplate"
-            uri = str(safe.get(uri_key, ""))
-            if urlsplit(uri).scheme not in server.allowed_resource_schemes:
-                continue
-            kind = (
-                CapabilityKind.RESOURCE
-                if key == "resources"
-                else CapabilityKind.RESOURCE_TEMPLATE
-            )
-            raw_name = str(safe.get("name", "resource"))
-            canonical_name = f"{server.server_id}.{kind.value}.{raw_name}"
-            permission = "read-only"
-            risk_level = "low"
-        else:
-            raw_name = str(safe.get("name", ""))
-            if not _prefix_allowed(raw_name, server.allowed_prompt_prefixes):
-                continue
-            kind = CapabilityKind.PROMPT
-            canonical_name = raw_name
-            permission = "read-only"
-            risk_level = "low"
-        if not _NAME.fullmatch(canonical_name):
+    for tool in tools:
+        if not _prefix_allowed(tool.name, server.allowed_tool_prefixes):
             continue
-        digest = _digest(safe)
-        metadata: dict[str, Any] = {"source": safe}
-        if key == "resourceTemplates":
-            metadata["uri_template"] = str(safe["uriTemplate"])
-        capability_key = f"{server.server_id}:{kind.value}:{canonical_name}"
+        source = {
+            "name": tool.name,
+            "description": tool.description,
+            "inputSchema": tool.input_schema,
+            "outputSchema": tool.output_schema,
+            "version": tool.version,
+        }
         normalized.append(
-            CapabilityDescriptor(
-                capability_id=(
-                    f"cap_{hashlib.sha256(capability_key.encode()).hexdigest()[:32]}"
-                ),
-                kind=kind,
-                server_id=server.server_id,
-                canonical_name=canonical_name,
-                version=_version(safe),
-                content_digest=digest,
-                title=_text(safe.get("title") or raw_name, 256),
-                description=_text(safe.get("description", ""), 4096),
-                tenant_id=server.tenant_id,
-                trust_level=server.trust_level,
-                classification="internal",
-                permission=permission,
-                risk_level=risk_level,
-                status=CapabilityStatus.ACTIVE,
-                source_revision=digest,
-                updated_at=datetime.now(UTC),
-                metadata=metadata,
+            _descriptor(
+                server,
+                kind=CapabilityKind.TOOL,
+                canonical_name=tool.name,
+                source=source,
+                title=tool.name,
+                description=tool.description,
+                permission="read-only" if tool.read_only else "write-with-approval",
+                risk_level=tool.risk_level or "medium",
+                version=tool.version if _semver(tool.version) else "0.0.0",
             )
         )
     return tuple(normalized)
 
 
-def _tool_capability(descriptor: CapabilityDescriptor) -> ToolCapability:
+def _normalize_resources(
+    server: McpServerDefinition,
+    resources: tuple[HandsResourceDescriptor, ...],
+    kind: CapabilityKind,
+) -> tuple[CapabilityDescriptor, ...]:
+    normalized: list[CapabilityDescriptor] = []
+    for resource in resources:
+        locator = resource.uri or resource.uri_template or ""
+        if urlsplit(locator).scheme not in server.allowed_resource_schemes:
+            continue
+        canonical_name = f"{server.server_id}.{kind.value}.{resource.name}"
+        source = resource.model_dump(mode="json")
+        descriptor = _descriptor(
+            server,
+            kind=kind,
+            canonical_name=canonical_name,
+            source=source,
+            title=resource.title or resource.name,
+            description=resource.description or "",
+            permission="read-only",
+            risk_level="low",
+            version="0.0.0",
+        )
+        if kind == CapabilityKind.RESOURCE_TEMPLATE and resource.uri_template:
+            descriptor = descriptor.model_copy(
+                update={
+                    "metadata": {
+                        **descriptor.metadata,
+                        "uri_template": resource.uri_template,
+                    }
+                }
+            )
+        normalized.append(descriptor)
+    return tuple(normalized)
+
+
+def _normalize_prompts(
+    server: McpServerDefinition,
+    prompts: tuple[HandsPromptDescriptor, ...],
+) -> tuple[CapabilityDescriptor, ...]:
+    normalized: list[CapabilityDescriptor] = []
+    for prompt in prompts:
+        if not _prefix_allowed(prompt.name, server.allowed_prompt_prefixes):
+            continue
+        normalized.append(
+            _descriptor(
+                server,
+                kind=CapabilityKind.PROMPT,
+                canonical_name=prompt.name,
+                source=prompt.model_dump(mode="json"),
+                title=prompt.title or prompt.name,
+                description=prompt.description or "",
+                permission="read-only",
+                risk_level="low",
+                version="0.0.0",
+            )
+        )
+    return tuple(normalized)
+
+
+def _descriptor(
+    server: McpServerDefinition,
+    *,
+    kind: CapabilityKind,
+    canonical_name: str,
+    source: dict[str, Any],
+    title: str,
+    description: str,
+    permission: str,
+    risk_level: str,
+    version: str,
+) -> CapabilityDescriptor:
+    if not _NAME.fullmatch(canonical_name):
+        raise ValueError("remote capability name is invalid")
+    digest = _digest(source)
+    capability_key = f"{server.server_id}:{kind.value}:{canonical_name}"
+    return CapabilityDescriptor(
+        capability_id=f"cap_{hashlib.sha256(capability_key.encode()).hexdigest()[:32]}",
+        kind=kind,
+        server_id=server.server_id,
+        canonical_name=canonical_name,
+        version=version,
+        content_digest=digest,
+        title=_text(title, 256),
+        description=_text(description, 4096),
+        tenant_id=server.tenant_id,
+        trust_level=server.trust_level,
+        classification="internal",
+        permission=permission,
+        risk_level=risk_level,
+        status=CapabilityStatus.ACTIVE,
+        source_revision=digest,
+        updated_at=datetime.now(UTC),
+        metadata={"source": source},
+    )
+
+
+def _tool_capability(descriptor: CapabilityDescriptor, owner: str) -> ToolCapability:
     source = descriptor.metadata.get("source", {})
     if not isinstance(source, dict):
         source = {}
@@ -476,19 +451,30 @@ def _tool_capability(descriptor: CapabilityDescriptor) -> ToolCapability:
         permission=ToolPermission.WRITE_WITH_APPROVAL,
         risk_level=RiskLevel.HIGH,
         runtime_location="remote-mcp",
-        owner=f"mcp:{descriptor.server_id}",
+        owner=owner,
     )
 
 
-def _sanitize_item(item: dict[str, Any]) -> dict[str, Any]:
-    encoded = json.dumps(item, sort_keys=True, separators=(",", ":")).encode()
+def _text(value: object, limit: int) -> str:
+    return "".join(
+        character for character in str(value)[:limit] if character >= " " or character == "\n"
+    )
+
+
+def _semver(value: str) -> bool:
+    return bool(re.fullmatch(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?", value))
+
+
+def _prefix_allowed(value: str, prefixes: tuple[str, ...]) -> bool:
+    return bool(value) and any(value.startswith(prefix) for prefix in prefixes)
+
+
+def _digest(value: dict[str, Any]) -> str:
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
     if len(encoded) > 256 * 1024:
         raise ValueError("remote MCP descriptor exceeds size limit")
-    _validate_depth(item, depth=0)
-    payload = json.loads(encoded)
-    if not isinstance(payload, dict):
-        raise ValueError("remote MCP descriptor must be an object")
-    return dict(payload)
+    _validate_depth(value, depth=0)
+    return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
 
 
 def _validate_depth(value: Any, *, depth: int) -> None:
@@ -506,35 +492,17 @@ def _validate_depth(value: Any, *, depth: int) -> None:
         raise ValueError("remote MCP descriptor contains unsupported data")
 
 
-def _text(value: object, limit: int) -> str:
-    return "".join(
-        character for character in str(value)[:limit] if character >= " " or character == "\n"
-    )
+def _executor_payload(result: HandsToolResult) -> dict[str, object]:
+    if result.status != "success":
+        raise RuntimeError(result.summary or "remote connector Tool returned an error")
+    if isinstance(result.content, dict):
+        return dict(result.content)
+    return result.as_dict()
 
 
-def _version(item: dict[str, Any]) -> str:
-    meta = item.get("_meta", {})
-    if isinstance(meta, dict):
-        auraclaw = meta.get("auraclaw", {})
-        if isinstance(auraclaw, dict):
-            value = str(auraclaw.get("version", ""))
-            if re.fullmatch(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?", value):
-                return value
-    return "0.0.0"
-
-
-def _prefix_allowed(value: str, prefixes: tuple[str, ...]) -> bool:
-    return bool(value) and any(value.startswith(prefix) for prefix in prefixes)
-
-
-def _digest(value: dict[str, Any]) -> str:
-    content = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
-    return f"sha256:{hashlib.sha256(content).hexdigest()}"
-
-
-def _reconcile_context(server: McpServerDefinition) -> McpTrustedContext:
+def _reconcile_context(server: McpServerDefinition) -> HandsTrustedContext:
     now = datetime.now(UTC)
-    return McpTrustedContext(
+    return HandsTrustedContext(
         tenant_id=server.tenant_id or "platform",
         root_session_id=f"catalog:{server.server_id}",
         session_id=f"catalog:{server.server_id}",

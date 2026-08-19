@@ -3,14 +3,14 @@
 ## 1. 交付边界
 
 M11 将 M9 的 Capability Plane 接入普通 Agent 任务。生产 Runtime 仍只连接 Model Gateway、
-Session、Control 和内部 Action Hands MCP，不增加服务或外部凭证路径。
+Session、Control 和内部 Action Hands Contract，不增加服务或外部凭证路径。
 
 核心组件：
 
 - `runtime/harness.py`：可恢复的 bounded multi-turn loop；
 - `runtime/capability_controller.py`：bootstrap control tools、候选和固定 binding；
 - `action/capability_catalog.py`：按 `capability_id` 加载权威契约和内部 Skill resolve；
-- `runtime/mcp_client.py`：Capability、Resource 和 Skill 的单一受控客户端；
+- `runtime/hands_adapter.py`：Capability、Resource 和 Skill 的单一受控 Hands 客户端；
 - `session/internal_service.py`：Runtime 写入 Skill 和 Resource 证据的身份边界。
 
 未配置 Capability Controller 的旧测试 Harness 保持 one-step 兼容；生产 `agent-runtime`

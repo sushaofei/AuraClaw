@@ -16,7 +16,7 @@ from auraclaw.contracts.capabilities import (
     CapabilityStatus,
     CapabilityTrustLevel,
 )
-from auraclaw.contracts.mcp import McpResourceContent, McpResourceDescriptor
+from auraclaw.contracts.hands import HandsResourceContent, HandsResourceDescriptor
 from auraclaw.contracts.skills import SkillManifest
 
 PRICE_INSIGHT_SERVER_ID = "auraclaw-price-insight"
@@ -94,33 +94,25 @@ def price_insight_resources(
         digest = f"sha256:{hashlib.sha256(content.encode()).hexdigest()}"
         resources.append(
             RegisteredResource(
-                descriptor=McpResourceDescriptor(
+                descriptor=HandsResourceDescriptor(
                     uri=uri,
                     name=title,
                     title=title,
                     description=description,
                     mime_type=mime_type,
                     size=len(content.encode()),
-                    meta={
-                        "auraclaw": {
-                            "classification": "internal",
-                            "contentDigest": digest,
-                            "sourceRevision": "1.0.0",
-                        }
-                    },
+                    classification="internal",
+                    content_digest=digest,
+                    source_revision="1.0.0",
                 ),
                 contents=(
-                    McpResourceContent(
+                    HandsResourceContent(
                         uri=uri,
                         mime_type=mime_type,
                         text=content,
-                        meta={
-                            "auraclaw": {
-                                "classification": "internal",
-                                "contentDigest": digest,
-                                "sourceRevision": "1.0.0",
-                            }
-                        },
+                        classification="internal",
+                        content_digest=digest,
+                        source_revision="1.0.0",
                     ),
                 ),
                 tenant_ids=(tenant_id,),
@@ -135,9 +127,8 @@ def price_insight_resource_descriptors(
     descriptors = []
     for resource in price_insight_resources(tenant_id):
         descriptor = resource.descriptor
-        auraclaw_meta = descriptor.meta["auraclaw"]
-        uri = descriptor.uri
-        digest = str(auraclaw_meta["contentDigest"])
+        uri = descriptor.uri or descriptor.name
+        digest = str(descriptor.content_digest or "")
         descriptors.append(
             CapabilityDescriptor(
                 capability_id=f"cap_{hashlib.sha256(uri.encode()).hexdigest()[:32]}",

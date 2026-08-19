@@ -39,7 +39,7 @@ MySQL ct_model_* 固定只读 SELECT
  -> 签名 SkillPackage
  -> 现有 SkillPackageRegistry / McpResourceRegistry
  -> skill://ct-model/... Resources
- -> HandsMcpClient
+ -> HandsClient / HandsRuntimeAdapter
  -> Agent Runtime
 ```
 

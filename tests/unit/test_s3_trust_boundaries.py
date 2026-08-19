@@ -15,6 +15,7 @@ from auraclaw.config import Settings
 from auraclaw.contracts.commands import CommandContext
 from auraclaw.contracts.errors import AuraClawError
 from auraclaw.contracts.events import Actor, NewEvent
+from auraclaw.contracts.hands import HANDS_TOOLS_LIST
 from auraclaw.contracts.internal import (
     AssignmentClaimRequest,
     AssignmentClaimResponse,
@@ -26,7 +27,6 @@ from auraclaw.contracts.internal import (
     RuntimeRegistrationRequest,
     ServiceIdentity,
 )
-from auraclaw.contracts.mcp import MCP_PROTOCOL_VERSION
 from auraclaw.contracts.tools import (
     ApprovalRecord,
     CredentialReference,
@@ -491,17 +491,6 @@ def test_production_hands_requires_signed_runtime_lease_capability() -> None:
             lease_signing_key=key.decode(),
         ),
     )
-    request = {
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "server/discover",
-        "params": {
-            "_meta": {
-                "io.modelcontextprotocol/protocolVersion": MCP_PROTOCOL_VERSION,
-                "io.modelcontextprotocol/clientCapabilities": {},
-            }
-        },
-    }
     capability = LeaseAssertionSigner(key_id="development", signing_key=key).sign(
         LeaseAssertion(
             key_id="pending",
@@ -519,23 +508,21 @@ def test_production_hands_requires_signed_runtime_lease_capability() -> None:
     )
     with TestClient(app) as client:
         missing = client.post(
-            "/mcp",
-            json=request,
+            HANDS_TOOLS_LIST,
+            json={},
             headers={"Authorization": "Bearer runtime-token"},
         )
         assert missing.status_code == 401
         accepted = client.post(
-            "/mcp",
-            json=request,
+            HANDS_TOOLS_LIST,
+            json={},
             headers={
                 "Authorization": "Bearer runtime-token",
-                "MCP-Protocol-Version": MCP_PROTOCOL_VERSION,
-                "Mcp-Method": "server/discover",
                 "X-AuraClaw-Lease-Assertion": capability.model_dump_json(),
             },
         )
         assert accepted.status_code == 200
-        assert MCP_PROTOCOL_VERSION in accepted.json()["result"]["supportedVersions"]
+        assert "items" in accepted.json()
 
 
 @pytest.mark.asyncio

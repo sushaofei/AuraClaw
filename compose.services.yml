@@ -108,7 +108,7 @@ services:
       AURACLAW_SESSION_BASE_URL: http://session:8001
       AURACLAW_CONTROL_BASE_URL: http://orchestrator:8003
       AURACLAW_MODEL_GATEWAY_BASE_URL: http://model-gateway:8005
-      AURACLAW_HANDS_MCP_URL: http://action-hands:8006/mcp
+      AURACLAW_HANDS_URL: http://action-hands:8006
       AURACLAW_ARTIFACT_BASE_URL: http://artifact-service:8009
       AURACLAW_RUNTIME_WORKLOAD_TOKEN: ${RUNTIME_WORKLOAD_TOKEN:-}
       AURACLAW_RUNTIME_EVENT_BACKEND: ${AURACLAW_RUNTIME_EVENT_BACKEND:-memory}

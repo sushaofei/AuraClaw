@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import Field, model_validator
 
@@ -64,6 +64,70 @@ class McpServerDefinition(ContractModel):
             raise ValueError("OAuth MCP server requires a credential_ref")
         if "_auraclaw_oauth" in self.metadata:
             raise ValueError("MCP server metadata uses a reserved key")
+        return self
+
+
+class JavaApiArgumentBinding(ContractModel):
+    name: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.-]+$")
+    location: Literal["path", "query", "body"]
+    required: bool = False
+
+
+class JavaApiOperationDefinition(ContractModel):
+    operation_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.-]+$")
+    tool_name: str = Field(min_length=1, max_length=256)
+    version: str = "1"
+    description: str = ""
+    method: Literal["GET", "POST", "PUT", "PATCH", "DELETE"]
+    path_template: str = Field(min_length=1, max_length=512)
+    argument_bindings: tuple[JavaApiArgumentBinding, ...] = ()
+    input_schema: dict[str, Any] = Field(default_factory=lambda: {"type": "object"})
+    output_schema: dict[str, Any] = Field(default_factory=lambda: {"type": "object"})
+    timeout_seconds: float = Field(default=30.0, gt=0, le=120)
+    idempotent: bool = False
+    read_only: bool = False
+    permission: str = "read-only"
+    risk_level: str = "low"
+    credential_ref: str | None = None
+
+    @model_validator(mode="after")
+    def validate_path_template(self) -> JavaApiOperationDefinition:
+        path = self.path_template
+        if (
+            not path.startswith("/")
+            or "://" in path
+            or ".." in path
+            or "//" in path
+            or any(character.isspace() for character in path)
+        ):
+            raise ValueError("Java API path template must be a relative absolute path")
+        names = {binding.name for binding in self.argument_bindings}
+        if len(names) != len(self.argument_bindings):
+            raise ValueError("Java API argument bindings must be unique")
+        return self
+
+
+class JavaApiServerDefinition(ContractModel):
+    server_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.-]+$")
+    tenant_id: str | None = None
+    title: str = Field(min_length=1, max_length=256)
+    base_url: str = Field(min_length=1, pattern=r"^https://")
+    credential_ref: str | None = None
+    trust_level: CapabilityTrustLevel = CapabilityTrustLevel.TENANT_VERIFIED
+    operations: tuple[JavaApiOperationDefinition, ...] = ()
+    allowed_private_hosts: tuple[str, ...] = ()
+    status: CapabilityStatus = CapabilityStatus.QUARANTINED
+    enabled: bool = False
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_server(self) -> JavaApiServerDefinition:
+        if self.credential_ref is None and self.enabled:
+            raise ValueError("enabled Java API server requires a credential_ref")
+        ids = [item.operation_id for item in self.operations]
+        names = [item.tool_name for item in self.operations]
+        if len(ids) != len(set(ids)) or len(names) != len(set(names)):
+            raise ValueError("Java API operations must have unique ids and tool names")
         return self
 
 

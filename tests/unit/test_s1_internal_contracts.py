@@ -8,14 +8,12 @@ import httpx
 import pytest
 from pydantic import ValidationError
 
-from auraclaw.action.mcp import HandsMcpServer
-from auraclaw.action.mcp_http import (
-    StaticWorkloadAuthenticator,
-    create_hands_mcp_app,
-)
+from auraclaw.action.hands import HandsGateway
+from auraclaw.action.hands_http import StaticHandsAuthenticator, create_hands_http_app
 from auraclaw.action.policy import PolicyEngine
 from auraclaw.action.tool_gateway import ToolGateway, ToolRegistry
 from auraclaw.contracts.errors import AuraClawError, AuthorizationError, FencingTokenError
+from auraclaw.contracts.hands import HANDS_TOOLS_LIST, HandsTrustedContext
 from auraclaw.contracts.internal import (
     INTERNAL_API_VERSION,
     AdminOperationRequest,
@@ -44,35 +42,27 @@ from auraclaw.contracts.internal import (
     SessionAppendRequest,
     SessionAppendResponse,
 )
-from auraclaw.contracts.mcp import (
-    MCP_CLIENT_CAPABILITIES_META_KEY,
-    MCP_LEGACY_PROTOCOL_VERSION,
-    MCP_PROTOCOL_VERSION,
-    MCP_PROTOCOL_VERSION_META_KEY,
-    MCP_SERVER_INFO_META_KEY,
-    McpJsonRpcRequest,
-    McpTrustedContext,
-)
 from auraclaw.contracts.tools import RiskLevel, ToolCapability, ToolPermission
 from auraclaw.control.internal_service import ControlInternalService
 from auraclaw.control.ports import RuntimeAssignment
 from auraclaw.infrastructure.artifacts.store import ArtifactStore, InMemoryObjectStorage
 from auraclaw.infrastructure.persistence.memory_control_store import InMemoryControlStateStore
 from auraclaw.infrastructure.persistence.memory_event_store import InMemoryEventStore
+from auraclaw.internal.hands import InProcessHandsClient
 from auraclaw.internal.http import (
     HttpContractClient,
     InProcessContractClient,
     contract_route,
     create_contract_app,
 )
-from auraclaw.internal.mcp import InProcessMcpTransport
 from auraclaw.internal.routes import control_routes, session_routes
 from auraclaw.internal.security import (
     InMemoryFencingTokenLedger,
     LeaseAssertionSigner,
     LeaseAssertionVerifier,
 )
-from auraclaw.runtime.mcp_client import HandsMcpClient, HttpMcpTransport
+from auraclaw.runtime.hands_adapter import HandsRuntimeAdapter
+from auraclaw.runtime.hands_client import HttpHandsClient
 from auraclaw.runtime.ports import ToolCall
 from auraclaw.session.internal_service import SessionInternalService
 
@@ -439,7 +429,7 @@ class _RecordingHands:
         return {"ok": True, "tenant": invocation.tenant_id}
 
 
-def _mcp_fixture() -> tuple[HandsMcpServer, _RecordingHands]:
+def _hands_fixture() -> tuple[HandsGateway, _RecordingHands]:
     capability = ToolCapability(
         name="lookup",
         version="1",
@@ -458,7 +448,7 @@ def _mcp_fixture() -> tuple[HandsMcpServer, _RecordingHands]:
         hands=hands,
         artifacts=ArtifactStore(InMemoryObjectStorage(), signing_key=b"s1-artifact-key-0001"),
     )
-    return HandsMcpServer(registry=registry, gateway=gateway), hands
+    return HandsGateway(registry=registry, gateway=gateway), hands
 
 
 def _assignment() -> RuntimeAssignment:
@@ -476,13 +466,11 @@ def _assignment() -> RuntimeAssignment:
     )
 
 
-def test_hands_mcp_in_process_negotiates_lists_and_calls_with_trusted_context() -> None:
+def test_hands_in_process_lists_and_calls_with_trusted_context() -> None:
     async def scenario() -> None:
-        server, hands = _mcp_fixture()
-        client = HandsMcpClient(InProcessMcpTransport(server))
+        gateway, hands = _hands_fixture()
+        client = HandsRuntimeAdapter(InProcessHandsClient(gateway))
         assignment = _assignment()
-        initialized = await client.initialize(assignment)
-        assert initialized["protocolVersion"] == MCP_PROTOCOL_VERSION
         assert [tool["name"] for tool in await client.list_tools(assignment)] == ["lookup"]
 
         result = await client.execute(
@@ -512,11 +500,11 @@ def test_hands_mcp_in_process_negotiates_lists_and_calls_with_trusted_context() 
     asyncio.run(scenario())
 
 
-def test_hands_mcp_streamable_http_auth_and_version_failure() -> None:
+def test_hands_http_auth_and_version_failure() -> None:
     async def scenario() -> None:
-        server, hands = _mcp_fixture()
+        gateway, hands = _hands_fixture()
         assignment = _assignment()
-        trusted = McpTrustedContext(
+        trusted = HandsTrustedContext(
             tenant_id=assignment.tenant_id,
             root_session_id=assignment.root_session_id,
             session_id=assignment.session_id,
@@ -526,78 +514,28 @@ def test_hands_mcp_streamable_http_auth_and_version_failure() -> None:
             fencing_token=assignment.fencing_token,
             deadline=assignment.deadline,
         )
-        app = create_hands_mcp_app(
-            server,
-            authenticator=StaticWorkloadAuthenticator({"runtime-token": trusted}),
+        app = create_hands_http_app(
+            gateway,
+            authenticator=StaticHandsAuthenticator({"runtime-token": trusted}),
         )
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://hands"
         ) as raw:
-            unauthenticated = await raw.post(
-                "/mcp",
-                json=McpJsonRpcRequest(
-                    id=1,
-                    method="initialize",
-                    params={"protocolVersion": MCP_PROTOCOL_VERSION},
-                ).model_dump(mode="json"),
-            )
+            unauthenticated = await raw.post(HANDS_TOOLS_LIST, json={})
             assert unauthenticated.status_code == 401
 
             unsupported = await raw.post(
-                "/mcp",
-                headers={"Authorization": "Bearer runtime-token"},
-                json=McpJsonRpcRequest(
-                    id=2,
-                    method="initialize",
-                    params={"protocolVersion": "2024-11-05"},
-                ).model_dump(mode="json"),
-            )
-            assert unsupported.json()["error"]["data"]["supported"] == [
-                MCP_PROTOCOL_VERSION,
-                "2025-11-25",
-            ]
-
-            discovery_request = McpJsonRpcRequest(
-                id=3,
-                method="server/discover",
-                params={
-                    "_meta": {
-                        MCP_PROTOCOL_VERSION_META_KEY: MCP_PROTOCOL_VERSION,
-                        MCP_CLIENT_CAPABILITIES_META_KEY: {},
-                    }
-                },
-            ).model_dump(mode="json")
-            mismatched = await raw.post(
-                "/mcp",
+                HANDS_TOOLS_LIST,
+                json={},
                 headers={
                     "Authorization": "Bearer runtime-token",
-                    "MCP-Protocol-Version": MCP_PROTOCOL_VERSION,
-                    "Mcp-Method": "tools/list",
+                    "X-AuraClaw-Contract-Version": "2024-11-05",
                 },
-                json=discovery_request,
             )
-            assert mismatched.status_code == 400
-            assert mismatched.json()["error"]["code"] == -32020
+            assert unsupported.status_code == 426
 
-            discovered = await raw.post(
-                "/mcp",
-                headers={
-                    "Authorization": "Bearer runtime-token",
-                    "MCP-Protocol-Version": MCP_PROTOCOL_VERSION,
-                    "Mcp-Method": "server/discover",
-                },
-                json=discovery_request,
-            )
-            discovery = discovered.json()["result"]
-            assert discovery["resultType"] == "complete"
-            assert discovery["ttlMs"] == 0
-            assert discovery["cacheScope"] == "private"
-            assert discovery["_meta"][MCP_SERVER_INFO_META_KEY]["name"] == (
-                "auraclaw-action-hands"
-            )
-
-            client = HandsMcpClient(
-                HttpMcpTransport(raw, bearer_tokens={"runtime-s1": "runtime-token"})
+            client = HandsRuntimeAdapter(
+                HttpHandsClient(raw, bearer_tokens={"runtime-s1": "runtime-token"})
             )
             result = await client.execute(
                 assignment,
@@ -608,70 +546,6 @@ def test_hands_mcp_streamable_http_auth_and_version_failure() -> None:
                 ),
             )
             assert result["status"] == "success"
-            assert len(hands.invocations) == 1
-
-    asyncio.run(scenario())
-
-
-def test_hands_mcp_legacy_profile_accepts_tools_call_with_auraclaw_meta() -> None:
-    async def scenario() -> None:
-        server, hands = _mcp_fixture()
-        assignment = _assignment()
-        trusted = McpTrustedContext(
-            tenant_id=assignment.tenant_id,
-            root_session_id=assignment.root_session_id,
-            session_id=assignment.session_id,
-            run_id=assignment.run_id,
-            runtime_id=assignment.runtime_id,
-            lease_id=assignment.lease_id,
-            fencing_token=assignment.fencing_token,
-            deadline=assignment.deadline,
-        )
-        app = create_hands_mcp_app(
-            server,
-            authenticator=StaticWorkloadAuthenticator({"runtime-token": trusted}),
-        )
-        async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app), base_url="http://hands"
-        ) as raw:
-            initialized = await raw.post(
-                "/mcp",
-                headers={
-                    "Authorization": "Bearer runtime-token",
-                    "MCP-Protocol-Version": MCP_LEGACY_PROTOCOL_VERSION,
-                },
-                json=McpJsonRpcRequest(
-                    id=1,
-                    method="initialize",
-                    params={"protocolVersion": MCP_LEGACY_PROTOCOL_VERSION},
-                ).model_dump(mode="json"),
-            )
-            assert initialized.status_code == 200
-            assert (
-                initialized.json()["result"]["protocolVersion"]
-                == MCP_LEGACY_PROTOCOL_VERSION
-            )
-
-            called = await raw.post(
-                "/mcp",
-                headers={
-                    "Authorization": "Bearer runtime-token",
-                    "MCP-Protocol-Version": MCP_LEGACY_PROTOCOL_VERSION,
-                },
-                json=McpJsonRpcRequest(
-                    id=2,
-                    method="tools/call",
-                    params={
-                        "name": "lookup",
-                        "arguments": {"query": "state"},
-                        "_meta": {"auraclaw": {"toolInvocationId": "tool-legacy-1"}},
-                    },
-                ).model_dump(mode="json"),
-            )
-            payload = called.json()
-            assert called.status_code == 200
-            assert payload.get("error") is None
-            assert payload["result"]["structuredContent"]["status"] == "success"
             assert len(hands.invocations) == 1
 
     asyncio.run(scenario())
@@ -797,7 +671,7 @@ def test_runtime_config_and_wire_models_cannot_accept_provider_secrets() -> None
         control_base_url="http://control",
         session_base_url="http://session",
         model_gateway_base_url="http://model-gateway",
-        hands_mcp_url="http://hands/mcp",
+        hands_url="http://hands",
         artifact_base_url="http://artifact",
         workload_token_file="/var/run/secrets/auraclaw/token",
     )

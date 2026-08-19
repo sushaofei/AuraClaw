@@ -28,7 +28,7 @@ x-common-environment: &common-environment
   AURACLAW_CONTROL_BASE_URL: http://orchestrator:8003
   AURACLAW_RUNTIME_BASE_URL: http://agent-runtime:8004
   AURACLAW_MODEL_GATEWAY_BASE_URL: http://model-gateway:8005
-  AURACLAW_HANDS_MCP_URL: http://action-hands:8006/mcp
+  AURACLAW_HANDS_URL: http://action-hands:8006
   AURACLAW_POLICY_BASE_URL: http://policy:8007
   AURACLAW_CREDENTIAL_PROXY_BASE_URL: http://credential-proxy:8008
   AURACLAW_ARTIFACT_BASE_URL: http://artifact-service:8009

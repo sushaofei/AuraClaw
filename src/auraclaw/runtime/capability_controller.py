@@ -649,23 +649,41 @@ def _expand_uri_template(template: str, arguments: dict[str, Any]) -> str:
 def _resource_evidence(
     capability_id: str, uri: str, contents: list[dict[str, Any]]
 ) -> dict[str, Any]:
-    metadata: Any = next(
-        (
-            dict(item.get("_meta", {})).get("auraclaw", {})
-            for item in contents
-            if isinstance(item, dict) and isinstance(item.get("_meta"), dict)
-        ),
-        {},
+    first = contents[0] if contents and isinstance(contents[0], dict) else {}
+    governance = (
+        dict(first["_governance"]) if isinstance(first.get("_governance"), dict) else {}
     )
-    metadata = dict(metadata) if isinstance(metadata, dict) else {}
+    meta = dict(first["_meta"]) if isinstance(first.get("_meta"), dict) else {}
+    auraclaw = dict(meta["auraclaw"]) if isinstance(meta.get("auraclaw"), dict) else {}
     return {
         "capability_id": capability_id,
         "uri": uri,
-        "content_digest": metadata.get("contentDigest"),
-        "source_revision": metadata.get("sourceRevision"),
-        "classification": metadata.get("classification", "internal"),
-        "policy_decision_id": metadata.get("policyDecisionId"),
-        "artifact_ref": metadata.get("artifactRef"),
+        "content_digest": (
+            governance.get("contentDigest")
+            or first.get("content_digest")
+            or auraclaw.get("contentDigest")
+        ),
+        "source_revision": (
+            governance.get("sourceRevision")
+            or first.get("source_revision")
+            or auraclaw.get("sourceRevision")
+        ),
+        "classification": (
+            governance.get("classification")
+            or first.get("classification")
+            or auraclaw.get("classification")
+            or "internal"
+        ),
+        "policy_decision_id": (
+            governance.get("policyDecisionId")
+            or first.get("policy_decision_id")
+            or auraclaw.get("policyDecisionId")
+        ),
+        "artifact_ref": (
+            governance.get("artifactRef")
+            or first.get("artifact_ref")
+            or auraclaw.get("artifactRef")
+        ),
     }
 
 
@@ -678,11 +696,14 @@ def _contextualize_contents(
     remaining = max_text_chars
     for raw in contents:
         item = copy.deepcopy(raw)
-        raw_meta = item.get("_meta", {})
+        raw_meta = item.get("_governance", item.get("_meta", {}))
         meta = dict(raw_meta) if isinstance(raw_meta, dict) else {}
-        raw_auraclaw = meta.get("auraclaw", {})
-        auraclaw = dict(raw_auraclaw) if isinstance(raw_auraclaw, dict) else {}
-        findings = {str(value) for value in auraclaw.get("securityFindings", ())}
+        auraclaw_meta = meta.get("auraclaw")
+        auraclaw = dict(auraclaw_meta) if isinstance(auraclaw_meta, dict) else dict(meta)
+        findings = {
+            str(value)
+            for value in auraclaw.get("securityFindings", item.get("security_findings", ()))
+        }
         if "prompt_injection" in findings:
             item.pop("text", None)
             item.pop("blob", None)

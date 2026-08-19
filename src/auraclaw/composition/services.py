@@ -31,15 +31,15 @@ from auraclaw.action.capability_catalog import (
     capability_search_tool,
     skill_resolve_tool,
 )
-from auraclaw.action.catalog_reconciler import McpCatalogReconciler
-from auraclaw.action.mcp import HandsMcpServer
-from auraclaw.action.mcp_http import (
-    SignedLeaseWorkloadAuthenticator,
-    StaticWorkloadAuthenticator,
-    WorkloadAuthenticator,
-    create_hands_mcp_app,
+from auraclaw.action.catalog_reconciler import CapabilityCatalogReconciler
+from auraclaw.action.hands import HandsGateway
+from auraclaw.action.hands_http import (
+    HandsWorkloadAuthenticator,
+    SignedLeaseHandsAuthenticator,
+    StaticHandsAuthenticator,
+    create_hands_http_app,
 )
-from auraclaw.action.mcp_primitives import McpResourceRegistry
+from auraclaw.action.mcp_primitives import HandsResourceRegistry
 from auraclaw.action.model_skill_compiler import (
     ModelSkillCompiler,
     ModelSkillPublisher,
@@ -52,7 +52,6 @@ from auraclaw.action.price_insight import (
     price_insight_tool_descriptors,
     price_insight_tools,
 )
-from auraclaw.action.remote_mcp import ManagedRemoteMcpTransport
 from auraclaw.action.resource_gateway import ManagedResourceGateway
 from auraclaw.action.skill_packages import (
     HmacSkillSignatureVerifier,
@@ -89,8 +88,8 @@ from auraclaw.contracts.capabilities import (
     CapabilityTrustLevel,
     McpServerDefinition,
 )
+from auraclaw.contracts.hands import HandsTrustedContext
 from auraclaw.contracts.internal import ServiceIdentity
-from auraclaw.contracts.mcp import McpTrustedContext
 from auraclaw.control.internal_service import ControlInternalService
 from auraclaw.control.orchestrator import (
     ManagedOrchestrator,
@@ -129,6 +128,12 @@ from auraclaw.infrastructure.clients.worker_wake import (
     HttpWorkerWakeClient,
     OutboxWakeNotifier,
 )
+from auraclaw.infrastructure.connectors.http.connector import (
+    ManagedJavaApiConnector,
+    catalog_server_definition,
+)
+from auraclaw.infrastructure.connectors.http.egress import ManagedJavaApiEgressAdapter
+from auraclaw.infrastructure.connectors.mcp.connector import ManagedMcpConnector
 from auraclaw.infrastructure.credentials.mcp_egress import ManagedMcpEgressAdapter
 from auraclaw.infrastructure.credentials.proxy import CredentialProxy, InMemoryVault
 from auraclaw.infrastructure.credentials.vault import HashiCorpVault
@@ -214,8 +219,9 @@ from auraclaw.projection.ports import (
 from auraclaw.projection.relay import OutboxRelay
 from auraclaw.projection.task.projector import InMemoryTaskProjection
 from auraclaw.runtime.capability_controller import RuntimeCapabilityController
+from auraclaw.runtime.hands_adapter import HandsRuntimeAdapter
+from auraclaw.runtime.hands_client import HttpHandsClient
 from auraclaw.runtime.harness import AgentHarness
-from auraclaw.runtime.mcp_client import HandsMcpClient, HttpMcpTransport
 from auraclaw.session.internal_service import SessionInternalService
 from auraclaw.session.task_service import TaskService
 
@@ -1026,7 +1032,7 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         closeables=closeables,
     )
     capability_catalog = CapabilityCatalog(capability_catalog_store)
-    resources = McpResourceRegistry()
+    resources = HandsResourceRegistry()
     resource_gateway = ManagedResourceGateway(
         resources,
         artifacts=artifacts,
@@ -1141,9 +1147,20 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         for server in settings.mcp_egress_servers:
             await capability_catalog.register_server(server)
             if credential_proxy is not None and isinstance(policy, RemotePolicyClient):
-                app.state.remote_mcp_transports[server.server_id] = (
-                    ManagedRemoteMcpTransport(
+                app.state.capability_connectors[server.server_id] = (
+                    ManagedMcpConnector(
                         server,
+                        credentials=credential_proxy,
+                        policy=policy,
+                    )
+                )
+        for java_server in settings.java_api_servers:
+            catalog_server = catalog_server_definition(java_server)
+            await capability_catalog.register_server(catalog_server)
+            if credential_proxy is not None and isinstance(policy, RemotePolicyClient):
+                app.state.capability_connectors[java_server.server_id] = (
+                    ManagedJavaApiConnector(
+                        java_server,
                         credentials=credential_proxy,
                         policy=policy,
                     )
@@ -1188,7 +1205,7 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         if model_skill_publisher is not None:
             await model_skill_publisher.reconcile()
 
-    app.state.remote_mcp_transports = {}
+    app.state.capability_connectors = {}
     app.state.catalog_reconciler = None
     app.state.initialize = initialize_registry
     price_executor = (
@@ -1234,11 +1251,11 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
             else secrets.token_urlsafe(32)
         )
     )
-    authenticator: WorkloadAuthenticator
+    authenticator: HandsWorkloadAuthenticator
     if settings.deployment_profile == "development":
-        authenticator = StaticWorkloadAuthenticator(
+        authenticator = StaticHandsAuthenticator(
             {
-                token: McpTrustedContext(
+                token: HandsTrustedContext(
                     tenant_id="development",
                     root_session_id="development",
                     session_id="development",
@@ -1252,7 +1269,7 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         )
     else:
         key = _development_lease_key(settings)
-        authenticator = SignedLeaseWorkloadAuthenticator(
+        authenticator = SignedLeaseHandsAuthenticator(
             {token: "*"},
             verifier=LeaseAssertionVerifier(
                 {"development": key},
@@ -1260,13 +1277,14 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
                 audience="runtime",
             ),
         )
-    mcp_app = create_hands_mcp_app(
-        HandsMcpServer(
-            registry=registry,
-            gateway=gateway,
-            resources=resources,
-            resource_reader=resource_gateway,
-        ),
+    hands_gateway = HandsGateway(
+        registry=registry,
+        gateway=gateway,
+        resources=resources,
+        resource_reader=resource_gateway,
+    )
+    hands_http_app = create_hands_http_app(
+        hands_gateway,
         authenticator=authenticator,
     )
     app.state.capability_catalog = capability_catalog
@@ -1287,10 +1305,10 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
             )
         )
     if credential_proxy is not None and isinstance(policy, RemotePolicyClient):
-        reconciler = McpCatalogReconciler(
+        reconciler = CapabilityCatalogReconciler(
             catalog=capability_catalog,
             store=capability_catalog_store,
-            transports=app.state.remote_mcp_transports,
+            connectors=app.state.capability_connectors,
             resource_cache=resource_gateway,
             tool_registry=registry,
             hands_router=routed_hands,
@@ -1299,14 +1317,16 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
 
         async def initialize_remote_catalog() -> None:
             await initialize_registry()
-            for transport in app.state.remote_mcp_transports.values():
-                transport.set_notification_handler(reconciler.handle_notification)
+            for connector in app.state.capability_connectors.values():
+                setter = getattr(connector, "set_notification_handler", None)
+                if setter is not None:
+                    setter(reconciler.handle_notification)
             await reconciler.reconcile_all()
 
         app.state.initialize = initialize_remote_catalog
         periodic_jobs.append(
             (
-                "mcp-catalog",
+                "capability-catalog",
                 settings.mcp_reconcile_interval_seconds,
                 reconciler.reconcile_all,
             )
@@ -1357,7 +1377,7 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         app.state.worker_interval = min(
             interval for _name, interval, _run in periodic_jobs
         )
-    app.mount("/", mcp_app)
+    app.mount("/", hands_http_app)
     return app
 
 
@@ -1423,11 +1443,16 @@ def _credential_proxy_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         f"mcp:{server.server_id}": ManagedMcpEgressAdapter(server)
         for server in settings.mcp_egress_servers
     }
+    java_api_adapters = {
+        f"java-api:{server.server_id}": ManagedJavaApiEgressAdapter(server)
+        for server in settings.java_api_servers
+    }
     closeables: tuple[Any, ...] = (
         *((registry,) if registry is not None else ()),
         *((vault,) if isinstance(vault, HashiCorpVault) else ()),
         *((policy,) if policy is not None else ()),
         *mcp_adapters.values(),
+        *java_api_adapters.values(),
     )
     app = _base_service_app(
         spec,
@@ -1444,6 +1469,7 @@ def _credential_proxy_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
                 allowed_hosts=settings.allowed_credential_egress_hosts
             ),
             **mcp_adapters,
+            **java_api_adapters,
         },
         policy=policy,
     )
@@ -1820,11 +1846,11 @@ def _runtime_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         timeout=settings.model_timeout_seconds,
     )
     hands_http = httpx.AsyncClient(
-        base_url=settings.hands_mcp_url.removesuffix("/mcp"),
+        base_url=settings.hands_url,
         timeout=settings.model_timeout_seconds,
     )
-    hands = HandsMcpClient(
-        HttpMcpTransport(
+    hands = HandsRuntimeAdapter(
+        HttpHandsClient(
             hands_http,
             bearer_tokens={runtime_id: bearer_token},
         )

@@ -10,7 +10,7 @@ from urllib.parse import quote
 from pydantic import Field, SecretStr, TypeAdapter, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from auraclaw.contracts.capabilities import McpServerDefinition
+from auraclaw.contracts.capabilities import JavaApiServerDefinition, McpServerDefinition
 
 _SECRET_FILE_VARIABLES = {
     "AURACLAW_DATABASE_URL",
@@ -91,11 +91,12 @@ class Settings(BaseSettings):
     control_base_url: str = "http://127.0.0.1:8003"
     runtime_base_url: str = "http://127.0.0.1:8004"
     model_gateway_base_url: str = "http://127.0.0.1:8005"
-    hands_mcp_url: str = "http://127.0.0.1:8006/mcp"
+    hands_url: str = "http://127.0.0.1:8006"
     policy_base_url: str = "http://127.0.0.1:8007"
     credential_proxy_base_url: str = "http://127.0.0.1:8008"
     credential_egress_allowlist: str = ""
     mcp_egress_servers_json: str = "[]"
+    java_api_servers_json: str = "[]"
     mcp_reconcile_interval_seconds: float = Field(default=60.0, ge=5.0, le=3600.0)
     model_skill_source_enabled: bool = True
     model_skill_source_tenant_id: int = Field(default=1, ge=0)
@@ -362,6 +363,14 @@ class Settings(BaseSettings):
         except json.JSONDecodeError as exc:
             raise ValueError("MCP egress server configuration is invalid JSON") from exc
         return TypeAdapter(tuple[McpServerDefinition, ...]).validate_python(payload)
+
+    @property
+    def java_api_servers(self) -> tuple[JavaApiServerDefinition, ...]:
+        try:
+            payload = json.loads(self.java_api_servers_json)
+        except json.JSONDecodeError as exc:
+            raise ValueError("Java API server configuration is invalid JSON") from exc
+        return TypeAdapter(tuple[JavaApiServerDefinition, ...]).validate_python(payload)
 
     @property
     def model_gateway_configured(self) -> bool:

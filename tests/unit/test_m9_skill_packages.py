@@ -10,7 +10,7 @@ from auraclaw.action.capability_catalog import (
     CapabilityCatalog,
     InMemoryCapabilityCatalogStore,
 )
-from auraclaw.action.mcp import HandsMcpServer
+from auraclaw.action.hands import HandsGateway
 from auraclaw.action.mcp_primitives import McpResourceRegistry
 from auraclaw.action.ports import PolicyEvaluation
 from auraclaw.action.skill_packages import (
@@ -44,8 +44,8 @@ from auraclaw.infrastructure.artifacts.store import (
     ArtifactStore,
     InMemoryObjectStorage,
 )
-from auraclaw.internal.mcp import InProcessMcpTransport
-from auraclaw.runtime.mcp_client import HandsMcpClient
+from auraclaw.internal.hands import InProcessHandsClient
+from auraclaw.runtime.hands_adapter import HandsRuntimeAdapter
 
 _PUBLISHER_KEY = b"platform-skill-signing-key-v1"
 
@@ -203,9 +203,9 @@ def test_skill_package_publish_is_signed_immutable_and_progressively_loadable() 
             "tenant-a", "skill://platform/release.prepare/1.4.0/manifest"
         )[0]
         assert json.loads(manifest_payload.text or "{}")["name"] == "release.prepare"
-        client = HandsMcpClient(
-            InProcessMcpTransport(
-                HandsMcpServer(
+        client = HandsRuntimeAdapter(
+            InProcessHandsClient(
+                HandsGateway(
                     registry=ToolRegistry(),
                     gateway=_UnusedGateway(),  # type: ignore[arg-type]
                     resources=resources,

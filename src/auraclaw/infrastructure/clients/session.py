@@ -202,7 +202,7 @@ class RemoteSessionEventStore:
             "/internal/v1/session/outbox/claim",
             OutboxClaimRequest(
                 context=context,
-                destination=destination,  # type: ignore[arg-type]
+                destination=destination,
                 worker_id=worker_id,
                 limit=limit,
                 claim_ttl_seconds=max(1, int(claim_ttl.total_seconds())),

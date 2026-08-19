@@ -14,7 +14,7 @@ Java 服务接口应在 **Java 服务自身的适配层**，或紧邻 Java 服�
 
 不要在以下位置逐接口编写 Java REST 调用：
 
-- `runtime/`：Runtime 只能连接内部 Action Hands MCP，不能直连业务服务。
+- `runtime/`：Runtime 只能连接内部 Action Hands Contract，不能直连业务服务。
 - `contracts/`：这里只放稳定协议 DTO，不放 HTTP Client 或业务映射。
 - `api/`：这是 AuraClaw 的交付面，不应选择或实现下游基础设施适配器。
 - `composition/services.py`：这里只装配实现，不应继续堆积每个 Java 服务的接口逻辑。
@@ -23,9 +23,9 @@ Java 服务接口应在 **Java 服务自身的适配层**，或紧邻 Java 服�
 
 ```text
 Agent Runtime
-  -> AuraClaw Action Hands MCP
+  -> AuraClaw Action Hands Contract
   -> Tool Gateway / Policy / Approval / Invocation Store
-  -> Managed Remote MCP Transport
+  -> ManagedMcpConnector
   -> Credential Proxy / Egress
   -> Java MCP endpoint (/mcp)
   -> Java application service
@@ -313,13 +313,13 @@ npx @modelcontextprotocol/conformance server \
 
 | 职责 | 当前文件 | 判断 |
 | --- | --- | --- |
-| MCP DTO/版本 | `src/auraclaw/contracts/mcp.py` | 位置正确，版本模型需升级 |
+| 下游 MCP DTO/版本 | `src/auraclaw/infrastructure/connectors/mcp/wire.py` | MCP 仅作为 Hands 下游 Connector |
 | 受管 Server/OAuth 描述 | `src/auraclaw/contracts/capabilities.py` | 位置正确，认证/网络模型过窄 |
-| 内部 Hands MCP Server | `src/auraclaw/action/mcp.py` | 位置正确，不应加入 Java 业务逻辑 |
-| 远端目录对账 | `src/auraclaw/action/catalog_reconciler.py` | 位置正确，应拆协议协商与规范化策略 |
-| 远端 Tool 路由 | `src/auraclaw/action/remote_mcp.py` | 位置正确，可保留 |
+| 内部 Hands Gateway | `src/auraclaw/action/hands.py` / `hands_http.py` | 协议无关边界，不应加入 Java 业务逻辑 |
+| 远端目录对账 | `src/auraclaw/action/catalog_reconciler.py` | 只调用 `CapabilityConnector.snapshot()` |
+| 下游 MCP Connector | `src/auraclaw/infrastructure/connectors/mcp` | Java MCP 的受管适配 |
 | OAuth/网络 Egress | `src/auraclaw/infrastructure/credentials/mcp_egress.py` | 位置正确，应拆公网/私网 Transport |
-| Runtime MCP Client | `src/auraclaw/runtime/mcp_client.py` | 位置正确，只连接内部 Hands |
+| Runtime Hands Client | `src/auraclaw/runtime/hands_client.py` | 只连接内部 Hands Contract |
 | 生产装配 | `src/auraclaw/composition/services.py` | 装配职责正确，但函数过大、条件耦合过多 |
 | Server 注册入口 | 环境变量 + composition | 不完整；与架构文档中的版本化 Admin API 不一致 |
 
