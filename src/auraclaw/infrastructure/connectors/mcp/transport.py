@@ -119,4 +119,9 @@ class ManagedRemoteMcpTransport:
                         method,
                         dict(params),
                     )
-        return McpJsonRpcResponse.model_validate(response)
+        parsed = McpJsonRpcResponse.model_validate(response)
+        if parsed.id != request.id:
+            raise ValueError("remote MCP response id does not match request")
+        if (parsed.result is None) == (parsed.error is None):
+            raise ValueError("remote MCP response must contain exactly one result or error")
+        return parsed

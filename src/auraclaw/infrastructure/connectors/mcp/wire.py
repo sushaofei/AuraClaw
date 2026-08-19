@@ -18,6 +18,7 @@ MCP_PROTOCOL_VERSION_META_KEY = "io.modelcontextprotocol/protocolVersion"
 MCP_CLIENT_INFO_META_KEY = "io.modelcontextprotocol/clientInfo"
 MCP_CLIENT_CAPABILITIES_META_KEY = "io.modelcontextprotocol/clientCapabilities"
 MCP_SERVER_INFO_META_KEY = "io.modelcontextprotocol/serverInfo"
+MCP_AURACLAW_INVOCATION_ID_META_KEY = "io.auraclaw/invocationId"
 
 
 class McpTrustedContext(ContractModel):

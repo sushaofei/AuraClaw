@@ -420,6 +420,27 @@ def test_hands_remote_transport_passes_only_reference_and_policy_evidence() -> N
     asyncio.run(scenario())
 
 
+def test_hands_remote_transport_rejects_mismatched_response_id() -> None:
+    class MismatchedCredentials(_Credentials):
+        async def invoke(self, **arguments: object) -> dict[str, object]:
+            del arguments
+            return {"jsonrpc": "2.0", "id": "wrong", "result": {}}
+
+    async def scenario() -> None:
+        transport = ManagedRemoteMcpTransport(
+            _server(),
+            credentials=MismatchedCredentials(),
+            policy=_AllowPolicy(),
+        )
+        with pytest.raises(ValueError, match="response id"):
+            await transport.send(
+                McpJsonRpcRequest(id="expected", method="tools/list"),
+                trusted_context=_trusted(),
+            )
+
+    asyncio.run(scenario())
+
+
 def test_mcp_egress_server_configuration_is_typed_and_secret_free() -> None:
     server = _server()
     settings = Settings(

@@ -96,7 +96,9 @@ class Settings(BaseSettings):
     credential_proxy_base_url: str = "http://127.0.0.1:8008"
     credential_egress_allowlist: str = ""
     mcp_egress_servers_json: str = "[]"
+    mcp_egress_servers_file: str | None = None
     java_api_servers_json: str = "[]"
+    debug_vault_secrets_json: str = "{}"
     mcp_reconcile_interval_seconds: float = Field(default=60.0, ge=5.0, le=3600.0)
     model_skill_source_enabled: bool = True
     model_skill_source_tenant_id: int = Field(default=1, ge=0)
@@ -358,11 +360,24 @@ class Settings(BaseSettings):
 
     @property
     def mcp_egress_servers(self) -> tuple[McpServerDefinition, ...]:
+        raw = self.mcp_egress_servers_json
+        if self.mcp_egress_servers_file:
+            raw = Path(self.mcp_egress_servers_file).read_text(encoding="utf-8")
         try:
-            payload = json.loads(self.mcp_egress_servers_json)
+            payload = json.loads(raw)
         except json.JSONDecodeError as exc:
             raise ValueError("MCP egress server configuration is invalid JSON") from exc
         return TypeAdapter(tuple[McpServerDefinition, ...]).validate_python(payload)
+
+    @property
+    def debug_vault_secrets(self) -> dict[str, str]:
+        try:
+            payload = json.loads(self.debug_vault_secrets_json)
+        except json.JSONDecodeError as exc:
+            raise ValueError("debug vault secrets configuration is invalid JSON") from exc
+        if not isinstance(payload, dict):
+            raise ValueError("debug vault secrets must be a JSON object")
+        return {str(key): str(value) for key, value in payload.items()}
 
     @property
     def java_api_servers(self) -> tuple[JavaApiServerDefinition, ...]:

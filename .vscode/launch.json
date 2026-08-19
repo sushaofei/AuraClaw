@@ -1,0 +1,53 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Policy",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "auraclaw",
+      "args": ["policy", "run", "--host", "127.0.0.1", "--port", "8007"],
+      "cwd": "${workspaceFolder}",
+      "python": "${workspaceFolder}/.venv/bin/python",
+      "envFile": "${workspaceFolder}/.env.hands-debug",
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+    {
+      "name": "Credential Proxy",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "auraclaw",
+      "args": ["credential-proxy", "run", "--host", "127.0.0.1", "--port", "8008"],
+      "cwd": "${workspaceFolder}",
+      "python": "${workspaceFolder}/.venv/bin/python",
+      "envFile": "${workspaceFolder}/.env.hands-debug",
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+    {
+      "name": "Action Hands Gateway",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "auraclaw",
+      "args": ["hands", "run", "--host", "127.0.0.1", "--port", "8006"],
+      "cwd": "${workspaceFolder}",
+      "python": "${workspaceFolder}/.venv/bin/python",
+      "envFile": "${workspaceFolder}/.env.hands-debug",
+      "preLaunchTask": "wait-for-policy-and-credential-proxy",
+      "console": "integratedTerminal",
+      "justMyCode": false
+    }
+  ],
+  "compounds": [
+    {
+      "name": "Hands: Java MCP reconcile",
+      "configurations": ["Policy", "Credential Proxy", "Action Hands Gateway"],
+      "stopAll": true,
+      "presentation": {
+        "group": "auraclaw",
+        "order": 1
+      }
+    }
+  ]
+}
