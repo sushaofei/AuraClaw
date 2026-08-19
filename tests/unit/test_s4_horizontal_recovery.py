@@ -307,3 +307,73 @@ async def test_runnable_feed_and_orchestrator_replicas_schedule_once_without_log
     assert len(scheduled) == 1
     assert scheduled[0].runtime_id in {"runtime-a", "runtime-b"}
     assert len(session.appended) == 1
+
+
+@pytest.mark.asyncio
+async def test_child_runnable_inherits_root_user_instead_of_coordinator_actor() -> None:
+    events = InMemoryEventStore()
+    root_context = CommandContext(
+        command_id="create-owner-root",
+        tenant_id="tenant-owner",
+        actor=Actor(type="user", id="owner-user"),
+        correlation_id="corr-owner",
+        expected_version=0,
+        operation="create_task",
+    )
+    await events.append(
+        root_session_id="session-owner-root",
+        session_id="session-owner-root",
+        run_id="run-owner-root",
+        context=root_context,
+        events=(
+            NewEvent(type="session.created", payload={"role": "root"}),
+            NewEvent(type="run.requested", payload={"run_id": "run-owner-root"}),
+        ),
+        command_result={},
+    )
+    root_outbox = await events.claim_outbox(
+        "control", "drain-root", limit=10, claim_ttl=timedelta(seconds=30)
+    )
+    for record in root_outbox:
+        assert await events.disposition_outbox(
+            "control",
+            "drain-root",
+            record.outbox_id,
+            record.claim_token,
+            "ack",
+        )
+
+    coordinator_context = CommandContext(
+        command_id="create-owner-child",
+        tenant_id="tenant-owner",
+        actor=Actor(type="coordinator", id="coordinator-runtime"),
+        correlation_id="corr-owner",
+        expected_version=0,
+        operation="collaboration.create_child",
+    )
+    await events.append(
+        root_session_id="session-owner-root",
+        session_id="session-owner-child",
+        run_id="run-owner-child",
+        context=coordinator_context,
+        events=(
+            NewEvent(
+                type="child.created",
+                payload={
+                    "role": "worker",
+                    "root_session_id": "session-owner-root",
+                },
+            ),
+            NewEvent(type="run.requested", payload={"run_id": "run-owner-child"}),
+        ),
+        command_result={},
+    )
+    control = InMemoryControlStateStore()
+    feed = RunnableFeedConsumer(events, control, worker_id="owner-feed")
+    assert await feed.run_once() == 1
+    claimed = await control.claim(
+        "owner-orchestrator", claim_ttl=timedelta(seconds=30), limit=10
+    )
+    assert len(claimed) == 1
+    assert claimed[0].item.session_id == "session-owner-child"
+    assert claimed[0].item.user_id == "owner-user"

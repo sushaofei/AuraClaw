@@ -30,6 +30,11 @@ class CapabilityStatus(StrEnum):
     RETIRED = "retired"
 
 
+class McpAuthStrategy(StrEnum):
+    OAUTH_CLIENT_CREDENTIALS = "oauth_client_credentials"
+    WORKLOAD_TRUSTED_CONTEXT = "workload_trusted_context"
+
+
 class McpOAuthConfiguration(ContractModel):
     protected_resource_metadata_url: str = Field(pattern=r"^https://")
     authorization_server_metadata_url: str = Field(pattern=r"^https://")
@@ -48,6 +53,7 @@ class McpServerDefinition(ContractModel):
     protocol_revision: str = "2026-07-28"
     credential_ref: str | None = None
     oauth: McpOAuthConfiguration | None = None
+    auth_strategy: McpAuthStrategy | None = None
     trust_level: CapabilityTrustLevel = CapabilityTrustLevel.EXTERNAL_UNTRUSTED
     allowed_tool_prefixes: tuple[str, ...] = ()
     allowed_resource_schemes: tuple[str, ...] = ()
@@ -62,9 +68,31 @@ class McpServerDefinition(ContractModel):
             raise ValueError("MCP server protocol revision is not supported")
         if self.oauth is not None and self.credential_ref is None:
             raise ValueError("OAuth MCP server requires a credential_ref")
+        if (
+            self.auth_strategy == McpAuthStrategy.OAUTH_CLIENT_CREDENTIALS
+            and (self.oauth is None or self.credential_ref is None)
+        ):
+            raise ValueError(
+                "OAuth MCP server requires oauth configuration and a credential_ref"
+            )
+        if (
+            self.auth_strategy == McpAuthStrategy.WORKLOAD_TRUSTED_CONTEXT
+            and self.credential_ref is None
+        ):
+            raise ValueError(
+                "workload trusted-context MCP server requires a credential_ref"
+            )
         if "_auraclaw_oauth" in self.metadata:
             raise ValueError("MCP server metadata uses a reserved key")
         return self
+
+    @property
+    def resolved_auth_strategy(self) -> McpAuthStrategy:
+        if self.auth_strategy is not None:
+            return self.auth_strategy
+        if self.oauth is not None:
+            return McpAuthStrategy.OAUTH_CLIENT_CREDENTIALS
+        return McpAuthStrategy.WORKLOAD_TRUSTED_CONTEXT
 
 
 class JavaApiArgumentBinding(ContractModel):

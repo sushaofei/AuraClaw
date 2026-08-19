@@ -121,6 +121,7 @@ class ManagedOrchestrator:
                 deadline=item.deadline,
                 budget=item.budget,
                 lease_expires_at=lease.expires_at,
+                user_id=item.user_id,
             )
             if not await self._control.assign(
                 item.task_id, assignment, claim_token=claim.claim_token

@@ -73,6 +73,7 @@ class LeaseAssertion(ContractModel):
     session_id: str
     run_id: str
     runtime_id: str | None = None
+    user_id: str | None = None
     lease_id: str
     fencing_token: int = Field(ge=1)
     expires_at: datetime

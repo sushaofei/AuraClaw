@@ -450,14 +450,19 @@ def _seed_managed_connector_credentials(
 ) -> None:
     expires_at = datetime.now(UTC) + timedelta(days=365)
     for mcp_server in settings.mcp_egress_servers:
-        if mcp_server.credential_ref is None or mcp_server.oauth is None:
+        if mcp_server.credential_ref is None:
             continue
+        account_scope = (
+            mcp_server.oauth.resource
+            if mcp_server.oauth is not None
+            else mcp_server.endpoint
+        )
         proxy.register_reference(
             mcp_server.tenant_id or "platform",
             CredentialReference(
                 credential_ref=mcp_server.credential_ref,
                 provider=mcp_server.server_id,
-                account_scope=mcp_server.oauth.resource,
+                account_scope=account_scope,
                 allowed_operations=("mcp.invoke",),
                 expires_at=expires_at,
             ),
@@ -482,7 +487,11 @@ def _task_api_app(settings: Settings) -> FastAPI:
     if settings.deployment_profile == "development":
         return app
     token = settings.workload_token_value(ServiceIdentity.TASK_API.value)
-    config_ready = bool(token and settings.sql_storage_enabled)
+    config_ready = bool(
+        token
+        and settings.sql_storage_enabled
+        and settings.signed_identity_configured
+    )
     remote_session = RemoteSessionEventStore(
         settings.session_base_url,
         service_identity=ServiceIdentity.TASK_API,
@@ -525,7 +534,13 @@ def _task_api_app(settings: Settings) -> FastAPI:
     )
     app.dependency_overrides[get_observability_service] = lambda: observability
     app.state.observability_service = observability
+    identity_closeables = (
+        (app.state.identity_verifier,)
+        if hasattr(app.state.identity_verifier, "close")
+        else ()
+    )
     app.state.closeables = (
+        *identity_closeables,
         remote_session,
         policy,
         *(
@@ -569,6 +584,19 @@ def _readiness(name: str, settings: Settings) -> tuple[bool, dict[str, str]]:
             else "missing"
         )
         ready = ready and database_ready
+    if name == "task-api":
+        identity_ready = (
+            settings.insecure_identity_headers_enabled
+            or settings.signed_identity_configured
+        )
+        dependencies["chaintower_identity"] = (
+            "development-headers"
+            if settings.insecure_identity_headers_enabled
+            else "ready"
+            if identity_ready
+            else "missing"
+        )
+        ready = ready and identity_ready
     if name == "model-gateway":
         dependencies["model_provider"] = (
             "ready" if settings.model_gateway_configured else "missing"

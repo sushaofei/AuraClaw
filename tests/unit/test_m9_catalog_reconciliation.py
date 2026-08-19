@@ -30,6 +30,7 @@ from auraclaw.contracts.tools import (
 from auraclaw.infrastructure.connectors.mcp.connector import ManagedMcpConnector
 from auraclaw.infrastructure.connectors.mcp.wire import (
     MCP_AURACLAW_INVOCATION_ID_META_KEY,
+    MCP_AURACLAW_TENANT_ID_META_KEY,
     MCP_LEGACY_PROTOCOL_VERSION,
 )
 
@@ -387,7 +388,8 @@ def test_legacy_connector_uses_initialize_and_preserves_invocation_id() -> None:
         assert credentials.calls[0]["request"]["method"] == "initialize"  # type: ignore[index]
         call_request = credentials.calls[-1]["request"]
         assert call_request["params"]["_meta"] == {  # type: ignore[index]
-            MCP_AURACLAW_INVOCATION_ID_META_KEY: "legacy-invocation-1"
+            MCP_AURACLAW_INVOCATION_ID_META_KEY: "legacy-invocation-1",
+            MCP_AURACLAW_TENANT_ID_META_KEY: "tenant-a",
         }
 
     asyncio.run(scenario())

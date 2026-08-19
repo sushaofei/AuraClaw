@@ -30,9 +30,12 @@ Delivery DLQ 告警。Runtime Event 只能辅助实时诊断，不能用作完�
 | Webhook delivery | Sink 可用时 99%/60 s | `delivery.dlq.count > 0` 立即告警 |
 | Tool side effect | Unknown 为 0 | `tool.side_effect_unknown.count > 0` 立即告警 |
 | Secret leakage | 0 | 发布 Secret 扫描任一命中即失败 |
+| Task API 身份 | 写命令认证可用 | Task API span `http_status` 401/403 突增立即告警 |
+| Assertion 重放 | 0 副作用 | 同一 `jti` 绑定不同 command 必须拒绝 |
 
-`projection.lag.seconds` 为 warning；lease lost、unknown side effect 和 delivery DLQ 为 critical。
-告警保留 Session/Run 关联字段，但不复制敏感 Payload。
+`projection.lag.seconds` 为 warning；lease lost、unknown side effect、delivery DLQ 和身份
+fail-open 为 critical。告警可带 tenant/user/`identity_kid`/`identity_jti` 摘要，但不复制
+Assertion、workload token 或 OAuth secret。
 
 ## 故障处置
 
@@ -78,6 +81,12 @@ uv run auraclaw operations redrive --tenant TENANT --queue delivery --item-id DE
 
 重投增加 attempt，不覆盖历史；稳定 `delivery_id` 和接收方 Idempotency-Key 防止重复业务效果。
 
+### chaintower Assertion 验签失败或密钥不可用
+
+Task API 写与敏感读必须 fail closed（401）。先确认 `kid` 仍在 N/N-1 集合、clock skew
+未超出配置，再检查 chaintower 签发服务。禁止为恢复流量改回裸 `X-Tenant-ID` /
+`X-Actor-ID`。轮换时先加载新 `kid`，chaintower 切签发后再撤旧密钥。
+
 ## 保留、GC 与安全
 
 默认 Metric 30 天、Trace 14 天、Audit 365 天、Alert 90 天：
@@ -92,8 +101,8 @@ Audit 保留时间独立于普通 Log/Trace。租户删除或合规保留必须�
 
 ## 灰度与回滚
 
-按以下顺序放量，每级观察错误率、恢复率、Projection lag、unknown side effect、Delivery DLQ 和
-Secret 扫描；任一门禁失败立即停止放量：
+按以下顺序放量，每级观察错误率、恢复率、Projection lag、unknown side effect、Delivery DLQ、
+Task API 401/403 和 Secret 扫描；任一门禁失败立即停止放量：
 
 1. PostgreSQL 影子对照与只读 Timeline。
 2. 内部 managed 单 Agent，无外部写工具。
@@ -101,6 +110,8 @@ Secret 扫描；任一门禁失败立即停止放量：
 4. 审批后的写工具。
 5. Child DAG 与 Reviewer。
 6. 外部 Webhook Delivery。
+7. chaintower signed Agent Context（保留 development Header adapter，生产不得开启）。
+8. Hands → chaintower MCP `workload_trusted_context`。
 
 应用回滚不得回滚或删除 Canonical Event。Schema 回滚仅在确认新表没有继续写入且已导出审计记录后，
 执行 `0007_m6_observability_reliability.down.sql`；通常优先回滚应用并保留向前兼容的观测 Schema。

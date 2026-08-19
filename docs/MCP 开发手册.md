@@ -57,7 +57,7 @@ Runtime **只连** `AURACLAW_HANDS_URL`（默认 `http://127.0.0.1:8006`）。�
 1. 把业务意图映射成 MCP Tool（不要一对一映射 Controller）
 2. 在 Java 进程或独立 Adapter 暴露 `POST /mcp`
 3. 实现 `server/discover`、`tools/list`、`tools/call`
-4. 准备 HTTPS、OAuth client credentials、名称前缀
+4. 准备 HTTPS、受管认证（chaintower：workload + trusted context；第三方：可选 OAuth）、名称前缀
 5. 交给 AuraClaw 运维登记 `AURACLAW_MCP_EGRESS_SERVERS_JSON` + Vault `credential_ref`
 6. 用对账结果确认 Catalog / Registry 里出现了你的 Tool
 

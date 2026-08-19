@@ -177,6 +177,7 @@ class ControlInternalService:
                     session_id=assignment.session_id,
                     run_id=assignment.run_id,
                     runtime_id=assignment.runtime_id,
+                    user_id=assignment.user_id,
                     lease_id=assignment.lease_id,
                     fencing_token=assignment.fencing_token,
                     expires_at=assignment.lease_expires_at,

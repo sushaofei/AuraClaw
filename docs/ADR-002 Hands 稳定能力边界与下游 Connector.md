@@ -45,6 +45,8 @@ composition -> 选择具体 Client 与 Connector
 
 - Runtime 不得导入 `contracts.mcp`、MCP SDK 或 `infrastructure.connectors`。
 - tenant / session / run / lease / fencing 只能从 workload token + signed lease 恢复，不能信任 body。
+- 公开 Task API 的 tenant/user 只能从 chaintower 签名身份上下文恢复，见
+  [ADR-003](./ADR-003%20用户身份归属与可信上下文.md)。
 - 不实现任意 REST 代理；Java API 只能调用已注册 operation。
 - Policy、Approval、Invocation Store、Artifact 与 Canonical Event 语义仍留在 AuraClaw，不迁入 Java 业务服务。
 - MCP 2026-07-28 仅作为下游 Connector profile 保留，不再作为 Runtime→Hands 内部协议。

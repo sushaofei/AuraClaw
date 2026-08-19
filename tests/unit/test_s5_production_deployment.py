@@ -138,6 +138,15 @@ def test_production_compose_mounts_least_privilege_secrets() -> None:
         "/runtime_workload_token"
     )
     assert secrets["lease_signing_key"]["file"].endswith("/lease_signing_key")
+    assert {
+        "chaintower_workload_token",
+        "agent_context_signing_keys_json",
+    } <= secret_sources("task-api")
+    assert all(
+        "chaintower_workload_token" not in secret_sources(service)
+        and "agent_context_signing_keys_json" not in secret_sources(service)
+        for service in APPLICATION_SERVICES - {"task-api"}
+    )
 
 
 def test_secret_file_loading_is_allowlisted_precedence_safe_and_redacted(
@@ -232,6 +241,8 @@ def test_production_preflight_accepts_isolated_roles_and_unique_tokens(
         "SEAWEEDFS_HOST=seaweed.example",
         "SEAWEEDFS_ACCESS_KEY=test-access",
         "SEAWEEDFS_SECRET_KEY=test-secret",
+        "AURACLAW_CHAINTOWER_WORKLOAD_TOKEN=ct-" + "t" * 40,
+        'AURACLAW_AGENT_CONTEXT_SIGNING_KEYS_JSON={"k1":"chaintower-agent-context-signing-key-01"}',
     ]
     lines.extend(
         f"{variable}=postgresql://{role}:secret@db/auraclaw"

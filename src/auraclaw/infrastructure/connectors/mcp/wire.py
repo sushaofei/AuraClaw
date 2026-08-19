@@ -19,6 +19,8 @@ MCP_CLIENT_INFO_META_KEY = "io.modelcontextprotocol/clientInfo"
 MCP_CLIENT_CAPABILITIES_META_KEY = "io.modelcontextprotocol/clientCapabilities"
 MCP_SERVER_INFO_META_KEY = "io.modelcontextprotocol/serverInfo"
 MCP_AURACLAW_INVOCATION_ID_META_KEY = "io.auraclaw/invocationId"
+MCP_AURACLAW_TENANT_ID_META_KEY = "io.auraclaw/tenantId"
+MCP_AURACLAW_USER_ID_META_KEY = "io.auraclaw/userId"
 
 
 class McpTrustedContext(ContractModel):
@@ -31,6 +33,7 @@ class McpTrustedContext(ContractModel):
     fencing_token: int = Field(ge=1)
     deadline: datetime | None = None
     lease_assertion: LeaseAssertion | None = None
+    user_id: str | None = None
 
 
 class McpJsonRpcRequest(ContractModel):
