@@ -1,13 +1,23 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Protocol
+from typing import Any, Protocol
 
 from fastapi import FastAPI, Header, HTTPException
+from fastapi.responses import JSONResponse
 
 from auraclaw.action.mcp import HandsMcpServer
 from auraclaw.contracts.internal import LeaseAssertion
-from auraclaw.contracts.mcp import McpJsonRpcRequest, McpJsonRpcResponse, McpTrustedContext
+from auraclaw.contracts.mcp import (
+    MCP_LEGACY_PROTOCOL_VERSION,
+    MCP_PROTOCOL_VERSION,
+    MCP_PROTOCOL_VERSION_META_KEY,
+    MCP_SUPPORTED_PROTOCOL_VERSIONS,
+    McpJsonRpcError,
+    McpJsonRpcRequest,
+    McpJsonRpcResponse,
+    McpTrustedContext,
+)
 from auraclaw.internal.security import LeaseAssertionVerifier
 
 
@@ -97,17 +107,89 @@ def create_hands_mcp_app(
     *,
     authenticator: WorkloadAuthenticator,
 ) -> FastAPI:
-    app = FastAPI(title="AuraClaw Action Hands MCP Server", version="2025-11-25")
+    app = FastAPI(title="AuraClaw Action Hands MCP Server", version=MCP_PROTOCOL_VERSION)
 
-    @app.post("/mcp", response_model=McpJsonRpcResponse)
+    @app.post("/mcp", response_model=None)
     async def mcp_endpoint(
         request: McpJsonRpcRequest,
         authorization: str | None = Header(default=None),
+        protocol_version: str | None = Header(
+            default=None, alias="MCP-Protocol-Version"
+        ),
+        mcp_method: str | None = Header(default=None, alias="Mcp-Method"),
+        mcp_name: str | None = Header(default=None, alias="Mcp-Name"),
         lease_assertion: str | None = Header(
             default=None, alias="X-AuraClaw-Lease-Assertion"
         ),
-    ) -> McpJsonRpcResponse:
+    ) -> Any:
         trusted = await authenticator.authenticate(authorization, lease_assertion)
+        header_error = _validate_modern_headers(
+            request,
+            protocol_version=protocol_version,
+            mcp_method=mcp_method,
+            mcp_name=mcp_name,
+        )
+        if header_error is not None:
+            return JSONResponse(
+                status_code=400,
+                content=header_error.model_dump(mode="json"),
+            )
         return await server.handle(request, trusted_context=trusted)
 
     return app
+
+
+def _validate_modern_headers(
+    request: McpJsonRpcRequest,
+    *,
+    protocol_version: str | None,
+    mcp_method: str | None,
+    mcp_name: str | None,
+) -> McpJsonRpcResponse | None:
+    if request.method == "initialize":
+        return None
+    if protocol_version == MCP_LEGACY_PROTOCOL_VERSION:
+        return None
+    raw_meta = request.params.get("_meta")
+    meta = raw_meta if isinstance(raw_meta, dict) else {}
+    body_version = meta.get(MCP_PROTOCOL_VERSION_META_KEY)
+    if protocol_version != MCP_PROTOCOL_VERSION or body_version != protocol_version:
+        return _http_protocol_error(
+            request,
+            -32022,
+            "Unsupported MCP protocol version",
+            {
+                "requested": protocol_version or body_version or "",
+                "supported": list(MCP_SUPPORTED_PROTOCOL_VERSIONS),
+            },
+        )
+    expected_name = _request_target_name(request)
+    if mcp_method != request.method or mcp_name != expected_name:
+        return _http_protocol_error(
+            request,
+            -32020,
+            "MCP routing headers do not match the request body",
+        )
+    return None
+
+
+def _request_target_name(request: McpJsonRpcRequest) -> str | None:
+    key = {
+        "tools/call": "name",
+        "prompts/get": "name",
+        "resources/read": "uri",
+    }.get(request.method)
+    value = request.params.get(key) if key is not None else None
+    return str(value) if value is not None else None
+
+
+def _http_protocol_error(
+    request: McpJsonRpcRequest,
+    code: int,
+    message: str,
+    data: dict[str, Any] | None = None,
+) -> McpJsonRpcResponse:
+    return McpJsonRpcResponse(
+        id=request.id,
+        error=McpJsonRpcError(code=code, message=message, data=data or {}),
+    )

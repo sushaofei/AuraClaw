@@ -8,7 +8,10 @@ import httpx
 
 from auraclaw.contracts.errors import AuraClawError
 from auraclaw.contracts.mcp import (
+    MCP_CLIENT_CAPABILITIES_META_KEY,
+    MCP_CLIENT_INFO_META_KEY,
     MCP_PROTOCOL_VERSION,
+    MCP_PROTOCOL_VERSION_META_KEY,
     McpJsonRpcRequest,
     McpJsonRpcResponse,
     McpTransport,
@@ -27,7 +30,7 @@ class HandsMcpClient:
     def __init__(self, transport: McpTransport) -> None:
         self._transport = transport
         self._request_id = 0
-        self._initialized: set[str] = set()
+        self._discovered: set[str] = set()
 
     def _next_id(self) -> int:
         self._request_id += 1
@@ -47,23 +50,48 @@ class HandsMcpClient:
             lease_assertion=assignment.lease_assertion,
         )
 
-    async def initialize(self, assignment: RuntimeAssignment) -> dict[str, Any]:
+    def _request(
+        self,
+        method: str,
+        params: Mapping[str, Any] | None = None,
+    ) -> McpJsonRpcRequest:
+        payload = dict(params or {})
+        raw_meta = payload.get("_meta")
+        meta = dict(raw_meta) if isinstance(raw_meta, dict) else {}
+        meta.update(
+            {
+                MCP_PROTOCOL_VERSION_META_KEY: MCP_PROTOCOL_VERSION,
+                MCP_CLIENT_INFO_META_KEY: {
+                    "name": "auraclaw-agent-runtime",
+                    "version": "1",
+                },
+                MCP_CLIENT_CAPABILITIES_META_KEY: {},
+            }
+        )
+        payload["_meta"] = meta
+        return McpJsonRpcRequest(
+            id=self._next_id(),
+            method=method,
+            params=payload,
+        )
+
+    async def discover(self, assignment: RuntimeAssignment) -> dict[str, Any]:
         context = self._trusted_context(assignment)
         response = await self._transport.send(
-            McpJsonRpcRequest(
-                id=self._next_id(),
-                method="initialize",
-                params={
-                    "protocolVersion": MCP_PROTOCOL_VERSION,
-                    "capabilities": {"progress": {}, "cancellation": {}},
-                    "clientInfo": {"name": "auraclaw-agent-runtime", "version": "1"},
-                },
-            ),
+            self._request("server/discover"),
             trusted_context=context,
         )
         result = _unwrap(response)
-        self._initialized.add(assignment.runtime_id)
+        supported = result.get("supportedVersions", [])
+        if MCP_PROTOCOL_VERSION not in supported:
+            raise AuraClawError("MCP server does not support the required protocol version")
+        self._discovered.add(assignment.runtime_id)
         return result
+
+    async def initialize(self, assignment: RuntimeAssignment) -> dict[str, Any]:
+        """Compatibility alias for callers migrating from handshake-era MCP."""
+        result = await self.discover(assignment)
+        return {**result, "protocolVersion": MCP_PROTOCOL_VERSION}
 
     async def list_tools(self, assignment: RuntimeAssignment) -> list[dict[str, Any]]:
         tools: list[dict[str, Any]] = []
@@ -80,13 +108,9 @@ class HandsMcpClient:
         *,
         cursor: str | None = None,
     ) -> tuple[list[dict[str, Any]], str | None]:
-        await self._ensure_initialized(assignment)
+        await self._ensure_discovered(assignment)
         response = await self._transport.send(
-            McpJsonRpcRequest(
-                id=self._next_id(),
-                method="tools/list",
-                params=_cursor_params(cursor),
-            ),
+            self._request("tools/list", _cursor_params(cursor)),
             trusted_context=self._trusted_context(assignment),
         )
         return _unwrap_page(response, "tools")
@@ -108,13 +132,9 @@ class HandsMcpClient:
         *,
         cursor: str | None = None,
     ) -> tuple[list[dict[str, Any]], str | None]:
-        await self._ensure_initialized(assignment)
+        await self._ensure_discovered(assignment)
         response = await self._transport.send(
-            McpJsonRpcRequest(
-                id=self._next_id(),
-                method="resources/list",
-                params=_cursor_params(cursor),
-            ),
+            self._request("resources/list", _cursor_params(cursor)),
             trusted_context=self._trusted_context(assignment),
         )
         return _unwrap_page(response, "resources")
@@ -138,13 +158,9 @@ class HandsMcpClient:
         *,
         cursor: str | None = None,
     ) -> tuple[list[dict[str, Any]], str | None]:
-        await self._ensure_initialized(assignment)
+        await self._ensure_discovered(assignment)
         response = await self._transport.send(
-            McpJsonRpcRequest(
-                id=self._next_id(),
-                method="resources/templates/list",
-                params=_cursor_params(cursor),
-            ),
+            self._request("resources/templates/list", _cursor_params(cursor)),
             trusted_context=self._trusted_context(assignment),
         )
         return _unwrap_page(response, "resourceTemplates")
@@ -154,13 +170,9 @@ class HandsMcpClient:
         assignment: RuntimeAssignment,
         uri: str,
     ) -> list[dict[str, Any]]:
-        await self._ensure_initialized(assignment)
+        await self._ensure_discovered(assignment)
         response = await self._transport.send(
-            McpJsonRpcRequest(
-                id=self._next_id(),
-                method="resources/read",
-                params={"uri": uri},
-            ),
+            self._request("resources/read", {"uri": uri}),
             trusted_context=self._trusted_context(assignment),
         )
         return list(_unwrap(response).get("contents", []))
@@ -182,13 +194,9 @@ class HandsMcpClient:
         *,
         cursor: str | None = None,
     ) -> tuple[list[dict[str, Any]], str | None]:
-        await self._ensure_initialized(assignment)
+        await self._ensure_discovered(assignment)
         response = await self._transport.send(
-            McpJsonRpcRequest(
-                id=self._next_id(),
-                method="prompts/list",
-                params=_cursor_params(cursor),
-            ),
+            self._request("prompts/list", _cursor_params(cursor)),
             trusted_context=self._trusted_context(assignment),
         )
         return _unwrap_page(response, "prompts")
@@ -200,12 +208,11 @@ class HandsMcpClient:
         *,
         arguments: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
-        await self._ensure_initialized(assignment)
+        await self._ensure_discovered(assignment)
         response = await self._transport.send(
-            McpJsonRpcRequest(
-                id=self._next_id(),
-                method="prompts/get",
-                params={
+            self._request(
+                "prompts/get",
+                {
                     "name": name,
                     "arguments": dict(arguments or {}),
                 },
@@ -292,12 +299,11 @@ class HandsMcpClient:
         assignment: RuntimeAssignment,
         call: ToolCall,
     ) -> dict[str, Any]:
-        await self._ensure_initialized(assignment)
+        await self._ensure_discovered(assignment)
         response = await self._transport.send(
-            McpJsonRpcRequest(
-                id=self._next_id(),
-                method="tools/call",
-                params={
+            self._request(
+                "tools/call",
+                {
                     "name": call.name,
                     "arguments": dict(call.arguments),
                     "_meta": {
@@ -322,20 +328,19 @@ class HandsMcpClient:
         return dict(_unwrap(response).get("structuredContent", {}))
 
     async def cancel(self, assignment: RuntimeAssignment, tool_invocation_id: str) -> bool:
-        await self._ensure_initialized(assignment)
+        await self._ensure_discovered(assignment)
         response = await self._transport.send(
-            McpJsonRpcRequest(
-                id=self._next_id(),
-                method="notifications/cancelled",
-                params={"toolInvocationId": tool_invocation_id},
+            self._request(
+                "com.auraclaw/invocations/cancel",
+                {"toolInvocationId": tool_invocation_id},
             ),
             trusted_context=self._trusted_context(assignment),
         )
         return bool(_unwrap(response).get("cancelled"))
 
-    async def _ensure_initialized(self, assignment: RuntimeAssignment) -> None:
-        if assignment.runtime_id not in self._initialized:
-            await self.initialize(assignment)
+    async def _ensure_discovered(self, assignment: RuntimeAssignment) -> None:
+        if assignment.runtime_id not in self._discovered:
+            await self.discover(assignment)
 
 
 class HttpMcpTransport:
@@ -359,6 +364,12 @@ class HttpMcpTransport:
                 "Authorization": f"Bearer {token}",
                 "Accept": "application/json, text/event-stream",
                 "MCP-Protocol-Version": MCP_PROTOCOL_VERSION,
+                "Mcp-Method": request.method,
+                **(
+                    {"Mcp-Name": name}
+                    if (name := _request_target_name(request)) is not None
+                    else {}
+                ),
                 **(
                     {
                         "X-AuraClaw-Lease-Assertion": (
@@ -395,3 +406,15 @@ def _unwrap_page(
 
 def _cursor_params(cursor: str | None) -> dict[str, Any]:
     return {"cursor": cursor} if cursor is not None else {}
+
+
+def _request_target_name(request: McpJsonRpcRequest) -> str | None:
+    key = {
+        "tools/call": "name",
+        "prompts/get": "name",
+        "resources/read": "uri",
+    }.get(request.method)
+    if key is None:
+        return None
+    value = request.params.get(key)
+    return str(value) if value is not None else None

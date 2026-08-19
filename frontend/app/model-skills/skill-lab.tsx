@@ -190,7 +190,7 @@ export function ModelSkillLab() {
   const [activeTab, setActiveTab] = useState<"manifest" | "instructions" | "config">("manifest");
   const [steps, setSteps] = useState<Step[]>(INITIAL_STEPS);
   const [logs, setLogs] = useState<RequestLog[]>([
-    { id: 1, method: "initialize", status: "passed", duration: 12, detail: "MCP 2025-11-25" },
+    { id: 1, method: "server/discover", status: "passed", duration: 12, detail: "MCP 2026-07-28" },
     { id: 2, method: "resources/list", status: "passed", duration: 18, detail: "8 Model Skill resources" },
     { id: 3, method: "resources/read", status: "passed", duration: 9, detail: "manifest + SKILL.md + config" },
   ]);
@@ -214,7 +214,7 @@ export function ModelSkillLab() {
     setSelectedId(DEMO_SKILLS[0].id);
     setSteps(INITIAL_STEPS);
     setLogs([
-      { id: 1, method: "initialize", status: "passed", duration: 12, detail: "MCP 2025-11-25" },
+      { id: 1, method: "server/discover", status: "passed", duration: 12, detail: "MCP 2026-07-28" },
       { id: 2, method: "resources/list", status: "passed", duration: 18, detail: "8 Model Skill resources" },
       { id: 3, method: "resources/read", status: "passed", duration: 9, detail: "manifest + SKILL.md + config" },
     ]);
@@ -238,14 +238,30 @@ export function ModelSkillLab() {
       const started = performance.now();
       const id = ++requestId;
       try {
+        const nameKey = method === "resources/read" ? "uri" : "name";
+        const routeName = ["tools/call", "prompts/get", "resources/read"].includes(method)
+          ? String(params[nameKey] ?? "")
+          : "";
+        const requestParams = {
+          ...params,
+          _meta: {
+            ...(typeof params._meta === "object" ? (params._meta as Json) : {}),
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientInfo": { name: "auraclaw-skill-lab", version: "1" },
+            "io.modelcontextprotocol/clientCapabilities": {},
+          },
+        };
         const response = await fetch(endpoint, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
             Accept: "application/json, text/event-stream",
+            "MCP-Protocol-Version": "2026-07-28",
+            "Mcp-Method": method,
+            ...(routeName ? { "Mcp-Name": routeName } : {}),
             ...(token ? { Authorization: `Bearer ${token}` } : {}),
           },
-          body: JSON.stringify({ jsonrpc: "2.0", id, method, params }),
+          body: JSON.stringify({ jsonrpc: "2.0", id, method, params: requestParams }),
         });
         const payload = (await response.json()) as Json;
         const error = payload.error as Json | undefined;
@@ -287,8 +303,11 @@ export function ModelSkillLab() {
 
     try {
       updateStep("config", "running", "connecting to source-backed MCP");
-      const initialized = await call("initialize", { protocolVersion: "2025-11-25" });
-      updateStep("config", "passed", `protocol ${String(initialized.protocolVersion ?? "ready")}`);
+      const discovered = await call("server/discover");
+      const versions = Array.isArray(discovered.supportedVersions)
+        ? discovered.supportedVersions.join(", ")
+        : "ready";
+      updateStep("config", "passed", `protocol ${versions}`);
 
       updateStep("skill", "running", "discovering generated packages");
       const listed = await call("resources/list");

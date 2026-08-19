@@ -10,13 +10,24 @@ from auraclaw.action.ports import McpResourceReader
 from auraclaw.action.tool_gateway import ToolGateway, ToolRegistry
 from auraclaw.contracts.errors import AuraClawError
 from auraclaw.contracts.mcp import (
+    MCP_CLIENT_CAPABILITIES_META_KEY,
+    MCP_CLIENT_INFO_META_KEY,
+    MCP_LEGACY_PROTOCOL_VERSION,
     MCP_PROTOCOL_VERSION,
+    MCP_PROTOCOL_VERSION_META_KEY,
+    MCP_SERVER_INFO_META_KEY,
+    MCP_SUPPORTED_PROTOCOL_VERSIONS,
     McpJsonRpcError,
     McpJsonRpcRequest,
     McpJsonRpcResponse,
     McpTrustedContext,
 )
 from auraclaw.contracts.tools import ArtifactRef, ToolInvocation
+
+
+class _UnsupportedProtocolVersion(Exception):
+    def __init__(self, requested: str) -> None:
+        self.requested = requested
 
 
 class HandsMcpServer:
@@ -38,7 +49,6 @@ class HandsMcpServer:
         self._resource_reader = resource_reader
         self._prompts = prompts or McpPromptRegistry()
         self._page_size = page_size
-        self._initialized_runtimes: set[str] = set()
 
     async def handle(
         self,
@@ -49,30 +59,40 @@ class HandsMcpServer:
         try:
             if request.method == "initialize":
                 return self._initialize(request, trusted_context)
-            # Lease-authenticated calls may land on a different replica than the
-            # prior initialize. Treat a verified lease as enough to continue.
-            if trusted_context.runtime_id not in self._initialized_runtimes:
-                self._initialized_runtimes.add(trusted_context.runtime_id)
+            modern = self._validate_protocol(request, trusted_context)
+            if request.method == "server/discover":
+                return self._decorate(self._discover(request), cacheable=True)
             if request.method == "ping":
-                return McpJsonRpcResponse(id=request.id, result={})
+                response = McpJsonRpcResponse(id=request.id, result={})
+                return self._decorate(response) if modern else response
             if request.method == "tools/list":
-                return self._list_tools(request)
+                response = self._list_tools(request)
+                return self._decorate(response, cacheable=True) if modern else response
             if request.method == "resources/list":
-                return self._list_resources(request, trusted_context)
+                response = self._list_resources(request, trusted_context)
+                return self._decorate(response, cacheable=True) if modern else response
             if request.method == "resources/templates/list":
-                return self._list_resource_templates(request, trusted_context)
+                response = self._list_resource_templates(request, trusted_context)
+                return self._decorate(response, cacheable=True) if modern else response
             if request.method == "resources/read":
-                return await self._read_resource(request, trusted_context)
+                response = await self._read_resource(request, trusted_context)
+                return self._decorate(response, cacheable=True) if modern else response
             if request.method == "prompts/list":
-                return self._list_prompts(request, trusted_context)
+                response = self._list_prompts(request, trusted_context)
+                return self._decorate(response, cacheable=True) if modern else response
             if request.method == "prompts/get":
-                return self._get_prompt(request, trusted_context)
+                response = self._get_prompt(request, trusted_context)
+                return self._decorate(response) if modern else response
             if request.method == "tools/call":
-                return await self._call_tool(request, trusted_context)
-            if request.method == "notifications/cancelled":
+                response = await self._call_tool(request, trusted_context)
+                return self._decorate(response) if modern else response
+            if request.method == "com.auraclaw/invocations/cancel":
                 invocation_id = str(request.params.get("toolInvocationId", ""))
                 cancelled = await self._gateway.cancel(invocation_id)
-                return McpJsonRpcResponse(id=request.id, result={"cancelled": cancelled})
+                response = McpJsonRpcResponse(
+                    id=request.id, result={"cancelled": cancelled}
+                )
+                return self._decorate(response) if modern else response
             return self._error(request, -32601, "MCP method not found")
         except AuraClawError as exc:
             return self._error(request, -32001, exc.message, {"code": exc.code})
@@ -85,6 +105,16 @@ class HandsMcpServer:
             )
         except (TypeError, ValueError) as exc:
             return self._error(request, -32602, "Invalid MCP params", {"detail": str(exc)})
+        except _UnsupportedProtocolVersion as exc:
+            return self._error(
+                request,
+                -32022,
+                "Unsupported MCP protocol version",
+                {
+                    "requested": exc.requested,
+                    "supported": list(MCP_SUPPORTED_PROTOCOL_VERSIONS),
+                },
+            )
 
     def _initialize(
         self,
@@ -92,28 +122,87 @@ class HandsMcpServer:
         trusted_context: McpTrustedContext,
     ) -> McpJsonRpcResponse:
         requested = str(request.params.get("protocolVersion", ""))
-        if requested != MCP_PROTOCOL_VERSION:
+        if requested != MCP_LEGACY_PROTOCOL_VERSION:
             return self._error(
                 request,
-                -32602,
+                -32022,
                 "Unsupported MCP protocol version",
-                {"supported": [MCP_PROTOCOL_VERSION]},
+                {"supported": list(MCP_SUPPORTED_PROTOCOL_VERSIONS)},
             )
-        self._initialized_runtimes.add(trusted_context.runtime_id)
+        del trusted_context
         return McpJsonRpcResponse(
             id=request.id,
             result={
-                "protocolVersion": MCP_PROTOCOL_VERSION,
-                "capabilities": {
-                    "tools": {"listChanged": False},
-                    "resources": {"subscribe": False, "listChanged": False},
-                    "prompts": {"listChanged": False},
-                    "progress": {},
-                    "cancellation": {},
-                },
+                "protocolVersion": MCP_LEGACY_PROTOCOL_VERSION,
+                "capabilities": self._capabilities(),
                 "serverInfo": {"name": "auraclaw-action-hands", "version": "1"},
             },
         )
+
+    def _validate_protocol(
+        self,
+        request: McpJsonRpcRequest,
+        trusted_context: McpTrustedContext,
+    ) -> bool:
+        raw_meta = request.params.get("_meta")
+        meta = raw_meta if isinstance(raw_meta, dict) else None
+        requested = None if meta is None else meta.get(MCP_PROTOCOL_VERSION_META_KEY)
+        if requested is None:
+            # Legacy HTTP calls are authenticated before dispatch and may land
+            # on a different replica than their initialize request. tools/call
+            # still carries `_meta.auraclaw`; only the protocol version key
+            # marks a request as the 2026-07-28 profile.
+            del trusted_context
+            return False
+        assert meta is not None
+        if requested != MCP_PROTOCOL_VERSION:
+            raise _UnsupportedProtocolVersion(str(requested))
+        client_info = meta.get(MCP_CLIENT_INFO_META_KEY)
+        capabilities = meta.get(MCP_CLIENT_CAPABILITIES_META_KEY)
+        if client_info is not None and not isinstance(client_info, dict):
+            raise ValueError("MCP clientInfo metadata must be an object")
+        if not isinstance(capabilities, dict):
+            raise ValueError("MCP clientCapabilities metadata is required")
+        return True
+
+    def _discover(self, request: McpJsonRpcRequest) -> McpJsonRpcResponse:
+        return McpJsonRpcResponse(
+            id=request.id,
+            result={
+                "supportedVersions": [MCP_PROTOCOL_VERSION],
+                "capabilities": self._capabilities(),
+            },
+        )
+
+    @staticmethod
+    def _capabilities() -> dict[str, Any]:
+        return {
+            "tools": {"listChanged": False},
+            "resources": {"subscribe": False, "listChanged": False},
+            "prompts": {"listChanged": False},
+        }
+
+    @staticmethod
+    def _decorate(
+        response: McpJsonRpcResponse,
+        *,
+        cacheable: bool = False,
+    ) -> McpJsonRpcResponse:
+        if response.result is None:
+            return response
+        result = dict(response.result)
+        result.setdefault("resultType", "complete")
+        raw_meta = result.get("_meta")
+        result_meta = dict(raw_meta) if isinstance(raw_meta, dict) else {}
+        result_meta[MCP_SERVER_INFO_META_KEY] = {
+            "name": "auraclaw-action-hands",
+            "version": "1",
+        }
+        result["_meta"] = result_meta
+        if cacheable:
+            result.setdefault("ttlMs", 0)
+            result.setdefault("cacheScope", "private")
+        return response.model_copy(update={"result": result})
 
     def _list_tools(self, request: McpJsonRpcRequest) -> McpJsonRpcResponse:
         tools = []

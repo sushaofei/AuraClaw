@@ -117,7 +117,7 @@ def test_production_readiness_fails_when_hard_dependencies_are_missing() -> None
             assert "api_key" not in serialized.lower()
 
 
-def test_hands_exposes_authenticated_mcp_initialize() -> None:
+def test_hands_exposes_authenticated_mcp_discovery() -> None:
     app = create_service_app(
         "hands",
         _settings(storage_backend="memory", artifact_backend="local"),
@@ -125,8 +125,13 @@ def test_hands_exposes_authenticated_mcp_initialize() -> None:
     request = {
         "jsonrpc": "2.0",
         "id": 1,
-        "method": "initialize",
-        "params": {"protocolVersion": MCP_PROTOCOL_VERSION},
+        "method": "server/discover",
+        "params": {
+            "_meta": {
+                "io.modelcontextprotocol/protocolVersion": MCP_PROTOCOL_VERSION,
+                "io.modelcontextprotocol/clientCapabilities": {},
+            }
+        },
     }
     with TestClient(app) as client:
         denied = client.post("/mcp", json=request)
@@ -134,10 +139,14 @@ def test_hands_exposes_authenticated_mcp_initialize() -> None:
         initialized = client.post(
             "/mcp",
             json=request,
-            headers={"Authorization": "Bearer development-runtime-token"},
+            headers={
+                "Authorization": "Bearer development-runtime-token",
+                "MCP-Protocol-Version": MCP_PROTOCOL_VERSION,
+                "Mcp-Method": "server/discover",
+            },
         )
         assert initialized.status_code == 200
-        assert initialized.json()["result"]["protocolVersion"] == MCP_PROTOCOL_VERSION
+        assert MCP_PROTOCOL_VERSION in initialized.json()["result"]["supportedVersions"]
 
 
 def test_compose_uses_one_image_twelve_commands_and_ingress_split() -> None:

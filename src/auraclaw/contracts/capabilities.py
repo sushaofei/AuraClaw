@@ -45,7 +45,7 @@ class McpServerDefinition(ContractModel):
     tenant_id: str | None = None
     title: str = Field(min_length=1, max_length=256)
     endpoint: str = Field(min_length=1, pattern=r"^https://")
-    protocol_revision: str = "2025-11-25"
+    protocol_revision: str = "2026-07-28"
     credential_ref: str | None = None
     oauth: McpOAuthConfiguration | None = None
     trust_level: CapabilityTrustLevel = CapabilityTrustLevel.EXTERNAL_UNTRUSTED
@@ -58,6 +58,8 @@ class McpServerDefinition(ContractModel):
 
     @model_validator(mode="after")
     def validate_remote_auth(self) -> McpServerDefinition:
+        if self.protocol_revision not in {"2026-07-28", "2025-11-25"}:
+            raise ValueError("MCP server protocol revision is not supported")
         if self.oauth is not None and self.credential_ref is None:
             raise ValueError("OAuth MCP server requires a credential_ref")
         if "_auraclaw_oauth" in self.metadata:

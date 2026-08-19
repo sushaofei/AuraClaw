@@ -45,7 +45,11 @@ from auraclaw.contracts.internal import (
     SessionAppendResponse,
 )
 from auraclaw.contracts.mcp import (
+    MCP_CLIENT_CAPABILITIES_META_KEY,
+    MCP_LEGACY_PROTOCOL_VERSION,
     MCP_PROTOCOL_VERSION,
+    MCP_PROTOCOL_VERSION_META_KEY,
+    MCP_SERVER_INFO_META_KEY,
     McpJsonRpcRequest,
     McpTrustedContext,
 )
@@ -549,8 +553,48 @@ def test_hands_mcp_streamable_http_auth_and_version_failure() -> None:
                 ).model_dump(mode="json"),
             )
             assert unsupported.json()["error"]["data"]["supported"] == [
-                MCP_PROTOCOL_VERSION
+                MCP_PROTOCOL_VERSION,
+                "2025-11-25",
             ]
+
+            discovery_request = McpJsonRpcRequest(
+                id=3,
+                method="server/discover",
+                params={
+                    "_meta": {
+                        MCP_PROTOCOL_VERSION_META_KEY: MCP_PROTOCOL_VERSION,
+                        MCP_CLIENT_CAPABILITIES_META_KEY: {},
+                    }
+                },
+            ).model_dump(mode="json")
+            mismatched = await raw.post(
+                "/mcp",
+                headers={
+                    "Authorization": "Bearer runtime-token",
+                    "MCP-Protocol-Version": MCP_PROTOCOL_VERSION,
+                    "Mcp-Method": "tools/list",
+                },
+                json=discovery_request,
+            )
+            assert mismatched.status_code == 400
+            assert mismatched.json()["error"]["code"] == -32020
+
+            discovered = await raw.post(
+                "/mcp",
+                headers={
+                    "Authorization": "Bearer runtime-token",
+                    "MCP-Protocol-Version": MCP_PROTOCOL_VERSION,
+                    "Mcp-Method": "server/discover",
+                },
+                json=discovery_request,
+            )
+            discovery = discovered.json()["result"]
+            assert discovery["resultType"] == "complete"
+            assert discovery["ttlMs"] == 0
+            assert discovery["cacheScope"] == "private"
+            assert discovery["_meta"][MCP_SERVER_INFO_META_KEY]["name"] == (
+                "auraclaw-action-hands"
+            )
 
             client = HandsMcpClient(
                 HttpMcpTransport(raw, bearer_tokens={"runtime-s1": "runtime-token"})
@@ -564,6 +608,70 @@ def test_hands_mcp_streamable_http_auth_and_version_failure() -> None:
                 ),
             )
             assert result["status"] == "success"
+            assert len(hands.invocations) == 1
+
+    asyncio.run(scenario())
+
+
+def test_hands_mcp_legacy_profile_accepts_tools_call_with_auraclaw_meta() -> None:
+    async def scenario() -> None:
+        server, hands = _mcp_fixture()
+        assignment = _assignment()
+        trusted = McpTrustedContext(
+            tenant_id=assignment.tenant_id,
+            root_session_id=assignment.root_session_id,
+            session_id=assignment.session_id,
+            run_id=assignment.run_id,
+            runtime_id=assignment.runtime_id,
+            lease_id=assignment.lease_id,
+            fencing_token=assignment.fencing_token,
+            deadline=assignment.deadline,
+        )
+        app = create_hands_mcp_app(
+            server,
+            authenticator=StaticWorkloadAuthenticator({"runtime-token": trusted}),
+        )
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://hands"
+        ) as raw:
+            initialized = await raw.post(
+                "/mcp",
+                headers={
+                    "Authorization": "Bearer runtime-token",
+                    "MCP-Protocol-Version": MCP_LEGACY_PROTOCOL_VERSION,
+                },
+                json=McpJsonRpcRequest(
+                    id=1,
+                    method="initialize",
+                    params={"protocolVersion": MCP_LEGACY_PROTOCOL_VERSION},
+                ).model_dump(mode="json"),
+            )
+            assert initialized.status_code == 200
+            assert (
+                initialized.json()["result"]["protocolVersion"]
+                == MCP_LEGACY_PROTOCOL_VERSION
+            )
+
+            called = await raw.post(
+                "/mcp",
+                headers={
+                    "Authorization": "Bearer runtime-token",
+                    "MCP-Protocol-Version": MCP_LEGACY_PROTOCOL_VERSION,
+                },
+                json=McpJsonRpcRequest(
+                    id=2,
+                    method="tools/call",
+                    params={
+                        "name": "lookup",
+                        "arguments": {"query": "state"},
+                        "_meta": {"auraclaw": {"toolInvocationId": "tool-legacy-1"}},
+                    },
+                ).model_dump(mode="json"),
+            )
+            payload = called.json()
+            assert called.status_code == 200
+            assert payload.get("error") is None
+            assert payload["result"]["structuredContent"]["status"] == "success"
             assert len(hands.invocations) == 1
 
     asyncio.run(scenario())
