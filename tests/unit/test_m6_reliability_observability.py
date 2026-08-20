@@ -167,6 +167,7 @@ def test_http_trace_context_is_returned_and_tenant_timeline_is_authorized(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("AURACLAW_STORAGE_BACKEND", "memory")
+    monkeypatch.setenv("AURACLAW_ALLOW_INSECURE_IDENTITY_HEADERS", "true")
     get_settings.cache_clear()
     get_event_store.cache_clear()
     get_task_projection.cache_clear()

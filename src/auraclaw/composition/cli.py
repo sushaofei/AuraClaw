@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import multiprocessing
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
@@ -7,7 +8,7 @@ from typing import Any
 import uvicorn
 
 from auraclaw.composition.services import SERVICE_BY_COMMAND, create_service_app, service_spec
-from auraclaw.config import get_settings
+from auraclaw.config import Settings, get_settings
 from auraclaw.contracts.internal import ServiceIdentity
 from auraclaw.infrastructure.clients.admin import RemoteAdminClient
 from auraclaw.infrastructure.persistence.migration_runner import (
@@ -24,10 +25,8 @@ async def _run_projection_command(
     action: str, tenant_id: str | None, *, watch: bool = False, interval: float = 1.0
 ) -> None:
     settings = get_settings()
-    if settings.deployment_profile == "production":
-        token = settings.workload_token_value(ServiceIdentity.TASK_API.value)
-        if not token:
-            raise SystemExit("projection admin requires Task API workload identity")
+    token = settings.workload_token_value(ServiceIdentity.TASK_API.value)
+    if token:
         client = RemoteAdminClient(settings.projection_base_url, bearer_token=token)
         try:
             response = await client.execute(
@@ -130,13 +129,6 @@ async def _run_migration_command(
     confirm_existing_schema: bool = False,
 ) -> None:
     settings = get_settings()
-    if (
-        settings.deployment_profile == "production"
-        and settings.migration_database_url is None
-    ):
-        raise SystemExit(
-            "production migration requires AURACLAW_MIGRATION_DATABASE_URL"
-        )
     migration_dir = Path(directory) if directory else default_migrations_directory(
         settings.resolved_db_dialect if settings.sql_storage_enabled else settings.db_dialect
     )
@@ -165,9 +157,11 @@ async def _run_migration_command(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="auraclaw")
     subcommands = parser.add_subparsers(dest="command")
-    serve = subcommands.add_parser("serve", help="development combined profile")
+    serve = subcommands.add_parser(
+        "serve",
+        help="run all 12 production service entrypoints on their configured ports",
+    )
     serve.add_argument("--host")
-    serve.add_argument("--port", type=int)
     projection = subcommands.add_parser("projection")
     projection.add_argument("action", choices=("relay", "rebuild"))
     projection.add_argument("--tenant")
@@ -199,13 +193,74 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _run_service_process(
+    command: str,
+    host: str,
+    port: int,
+    log_level: str,
+    worker_interval: float | None,
+) -> None:
+    settings = get_settings()
+    app = (
+        create_service_app(command, settings, worker_interval=worker_interval)
+        if command == "projection" and worker_interval is not None
+        else create_service_app(command, settings)
+    )
+    uvicorn.run(app, host=host, port=port, log_level=log_level)
+
+
+def _serve_topology(settings: Settings, *, host: str) -> None:
+    processes: list[multiprocessing.Process] = []
+    for command in SERVICE_BY_COMMAND:
+        spec = service_spec(command, settings)
+        worker_interval = None
+        if command == "projection":
+            worker_interval = (
+                settings.worker_idle_interval
+                if settings.worker_wake_enabled
+                else settings.projection_worker_interval
+            )
+        process = multiprocessing.Process(
+            target=_run_service_process,
+            args=(
+                command,
+                host,
+                spec.port,
+                settings.log_level.lower(),
+                worker_interval,
+            ),
+            name=spec.name,
+        )
+        process.start()
+        processes.append(process)
+    try:
+        for process in processes:
+            process.join()
+            if process.exitcode not in {0, None}:
+                raise SystemExit(process.exitcode or 1)
+    except KeyboardInterrupt:
+        for process in processes:
+            if process.is_alive():
+                process.terminate()
+        for process in processes:
+            process.join(timeout=5)
+
+
 def main(
     argv: Sequence[str] | None = None,
     *,
     uvicorn_runner: Callable[..., Any] = uvicorn.run,
+    serve_runner: Callable[..., Any] | None = None,
 ) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.command is None:
+        parser.error("specify a command, for example: auraclaw serve")
+    if args.command == "serve":
+        settings = get_settings()
+        runner = serve_runner or _serve_topology
+        runner(settings, host=args.host or settings.host)
+        return
     if args.command == "projection":
         if args.action == "relay" and args.watch:
             settings = get_settings()
@@ -274,13 +329,7 @@ def main(
             log_level=settings.log_level.lower(),
         )
         return
-    settings = get_settings()
-    uvicorn_runner(
-        "auraclaw.main:app",
-        host=getattr(args, "host", None) or settings.host,
-        port=getattr(args, "port", None) or settings.port,
-        log_level=settings.log_level.lower(),
-    )
+    parser.error(f"unknown command: {args.command}")
 
 
 if __name__ == "__main__":

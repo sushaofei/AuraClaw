@@ -45,7 +45,7 @@ from auraclaw.infrastructure.observability.stores import StructuredLogger
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    app.state.service_name = "development-combined"
+    app.state.service_name = "combined"
     settings = get_settings()
     producer = providers.get_runtime_event_producer()
     ingestor = providers.get_streaming_ingestor()

@@ -20,6 +20,7 @@ def setup_function() -> None:
     get_settings().storage_backend = "memory"
     get_settings().runtime_event_backend = "memory"
     get_settings().runtime_enabled = False
+    get_settings().allow_insecure_identity_headers = True
     get_task_service.cache_clear()
     get_event_store.cache_clear()
     get_task_projection.cache_clear()

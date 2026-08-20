@@ -133,15 +133,15 @@ Review Evidence 和 Artifact lineage。
 
 ## 本地启动
 
-`auraclaw serve` 是显式的 development combined profile，不是生产入口：
+`auraclaw serve` 会按生产拓扑拉起全部 12 个独立入口（端口 8000–8011），装配与生产相同，差异只来自 `.env` 里的资源：
 
 ```bash
 uv sync --extra dev
+cp .env.debug.example .env.debug   # 或使用已有 .env
 uv run auraclaw serve
 ```
 
-development profile 的 API lifespan 内启动统一 Runtime Worker。正式服务使用同一镜像和不同
-entrypoint：
+也可单独启动某一个入口：
 
 ```text
 auraclaw api run                  auraclaw session run
@@ -214,11 +214,9 @@ S3 生产装配已切换为 owner HTTP/MCP Client：Session、Control、Model、
 Artifact 和 Admin 写路径不再共享跨域 Store。Action Hands 以 MCP Server 暴露工具，并通过持久
 Invocation Store、Policy、Credential Proxy 和 Artifact Service 执行；Runtime 只持有 MCP Client。
 SeaweedFS 管理密钥只注入 Artifact Service，Vault Token 只注入 Credential Proxy，Runtime 位于
-无 platform egress 的内部 Docker network。development combined profile 继续使用进程内适配器。
-所有环境都经过相同的
-Runnable Queue、Orchestrator、Agent Harness、Model Gateway 和 Runtime Event Producer SDK；
-环境差异只来自各自 `.env` 提供的 PostgreSQL/内存、Kafka/内存、模型端点和 CORS 等资源。
-已部署外部 Runtime 时可设置 `AURACLAW_RUNTIME_ENABLED=false` 关闭同进程 Worker。
+无 platform egress 的内部 Docker network。本地 `auraclaw serve` 与生产 Compose 使用同一组
+12 个入口；环境差异只来自各自 `.env` 提供的 PostgreSQL/内存、Kafka/内存、模型端点和 CORS
+等资源。
 
 每套部署使用自己的 gitignored 配置文件，例如 `.env.development` 与 `.env.production`，无需
 在文件内容中加入环境标签。启动时由文件名选择资源集合：

@@ -192,10 +192,7 @@ def get_streaming_gateway() -> StreamingGateway:
 @lru_cache
 def get_model_gateway() -> ModelClient:
     settings = get_settings()
-    if (
-        settings.deployment_profile == "development"
-        and settings.development_model_mode == "price-insight-scripted"
-    ):
+    if settings.development_model_mode == "price-insight-scripted":
         return DevelopmentPriceInsightModel()
     if not settings.model_gateway_configured:
         raise RuntimeError("AURACLAW_MODEL_API_KEY, BASE_URL and NAME must be configured")

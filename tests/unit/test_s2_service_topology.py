@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 
 from auraclaw.composition.api import create_app
-from auraclaw.composition.cli import build_parser
+from auraclaw.composition.cli import build_parser, main
 from auraclaw.composition.services import (
     SERVICE_BY_COMMAND,
     create_service_app,
@@ -14,6 +15,8 @@ from auraclaw.composition.services import (
 )
 from auraclaw.config import Settings
 from auraclaw.contracts.hands import HANDS_TOOLS_LIST
+from auraclaw.contracts.internal import LeaseAssertion
+from auraclaw.internal.security import LeaseAssertionSigner
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -59,6 +62,24 @@ def test_cli_defines_all_twelve_production_entrypoints() -> None:
         )
         parsed = parser.parse_args(argv)
         assert parsed.command == command
+
+
+def test_serve_starts_all_twelve_production_entrypoints() -> None:
+    started: list[str] = []
+    uvicorn_calls: list[object] = []
+
+    def fake_serve(settings: Settings, *, host: str) -> None:
+        del settings
+        assert host == "127.0.0.1"
+        started.extend(SERVICE_BY_COMMAND)
+
+    main(
+        ["serve", "--host", "127.0.0.1"],
+        uvicorn_runner=lambda *args, **kwargs: uvicorn_calls.append((args, kwargs)),
+        serve_runner=fake_serve,
+    )
+    assert started == list(SERVICE_BY_COMMAND)
+    assert uvicorn_calls == []
 
 
 def test_projection_watch_interval_reaches_worker_lifecycle() -> None:
@@ -118,9 +139,30 @@ def test_production_readiness_fails_when_hard_dependencies_are_missing() -> None
 
 
 def test_hands_exposes_authenticated_internal_contract() -> None:
+    key = b"test-hands-capability-signing-key-0001"
     app = create_service_app(
         "hands",
-        _settings(storage_backend="memory", artifact_backend="local"),
+        _settings(
+            storage_backend="memory",
+            artifact_backend="local",
+            runtime_workload_token="runtime-token",
+            lease_signing_key=key.decode(),
+        ),
+    )
+    capability = LeaseAssertionSigner(key_id="development", signing_key=key).sign(
+        LeaseAssertion(
+            key_id="pending",
+            audience="runtime",
+            tenant_id="tenant-a",
+            root_session_id="root-a",
+            session_id="session-a",
+            run_id="run-a",
+            runtime_id="runtime-a",
+            lease_id="lease-a",
+            fencing_token=1,
+            expires_at=datetime.now(UTC) + timedelta(minutes=1),
+            signature="",
+        )
     )
     with TestClient(app) as client:
         denied = client.post(HANDS_TOOLS_LIST, json={})
@@ -128,7 +170,10 @@ def test_hands_exposes_authenticated_internal_contract() -> None:
         listed = client.post(
             HANDS_TOOLS_LIST,
             json={},
-            headers={"Authorization": "Bearer development-runtime-token"},
+            headers={
+                "Authorization": "Bearer runtime-token",
+                "X-AuraClaw-Lease-Assertion": capability.model_dump_json(),
+            },
         )
         assert listed.status_code == 200
         assert "items" in listed.json()

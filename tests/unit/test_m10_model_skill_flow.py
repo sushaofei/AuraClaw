@@ -47,6 +47,17 @@ class _SnapshotSource:
         return self.snapshots
 
 
+class _LocalArtifactWriter(ArtifactStore):
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        del args, kwargs
+        super().__init__(
+            InMemoryObjectStorage(), signing_key=b"auraclaw-s3-artifact-key"
+        )
+
+    async def aclose(self) -> None:
+        return None
+
+
 class _ConcurrentSource(_SnapshotSource):
     def __init__(self, *snapshots: ModelSkillSnapshot) -> None:
         super().__init__(*snapshots)
@@ -497,9 +508,15 @@ def test_action_hands_lifespan_reconciles_and_revokes_model_skills() -> None:
         model_skill_reconcile_interval_seconds=5,
     )
 
-    with patch(
-        "auraclaw.composition.services.MySqlModelSkillSource",
-        return_value=source,
+    with (
+        patch(
+            "auraclaw.composition.services.MySqlModelSkillSource",
+            return_value=source,
+        ),
+        patch(
+            "auraclaw.composition.services.RemoteArtifactWriter",
+            return_value=_LocalArtifactWriter(),
+        ),
     ):
         app = create_service_app("hands", settings)
 
