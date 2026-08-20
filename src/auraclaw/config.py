@@ -427,7 +427,9 @@ class Settings(BaseSettings):
     ) -> Literal["disabled", "fixture", "mysql"]:
         if self.price_insight_source != "auto":
             return self.price_insight_source
-        return "fixture" if self.deployment_profile == "development" else "disabled"
+        if self.price_insight_mysql_configured:
+            return "mysql"
+        return "disabled"
 
     @property
     def price_insight_mysql_configured(self) -> bool:
@@ -443,11 +445,7 @@ class Settings(BaseSettings):
     def insecure_identity_headers_enabled(self) -> bool:
         if self.deployment_profile == "production":
             return False
-        if self.allow_insecure_identity_headers is False:
-            return False
-        if self.allow_insecure_identity_headers is True:
-            return True
-        return self.deployment_profile == "development"
+        return self.allow_insecure_identity_headers is True
 
     @property
     def agent_context_signing_keys(self) -> dict[str, bytes]:

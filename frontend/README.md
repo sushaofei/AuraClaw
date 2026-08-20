@@ -45,7 +45,7 @@ http://localhost:3000/price-insight 。也可分别启动：
 
 ```bash
 AURACLAW_DEV_API_TARGET=http://127.0.0.1:8000 npm run dev
-uv run auraclaw serve
+uv run auraclaw serve            # 12 个生产入口，端口 8000–8011
 ```
 
 `/auraclaw-api` 只在设置了 `AURACLAW_DEV_API_TARGET`（或 `npm run dev:remote`）时由开发服务器代理到后端。

@@ -14,7 +14,7 @@ async def liveness() -> dict[str, str]:
 @router.get("/health/ready")
 async def readiness(request: Request) -> JSONResponse:
     settings = get_settings()
-    service_name = str(getattr(request.app.state, "service_name", "development-combined"))
+    service_name = str(getattr(request.app.state, "service_name", "combined"))
     if service_name in {"task-api", "streaming-gateway"}:
         ready = bool(getattr(request.app.state, "service_ready", False))
         return JSONResponse(

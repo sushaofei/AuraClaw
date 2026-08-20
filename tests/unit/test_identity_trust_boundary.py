@@ -123,9 +123,10 @@ def test_verified_envelope_repr_and_dump_omit_raw_assertion() -> None:
     assert "raw-secret-assertion" not in repr(request)
 
 
-def test_development_profile_still_accepts_tenant_actor_headers() -> None:
+def test_explicit_insecure_headers_accept_tenant_actor_headers() -> None:
     get_settings().storage_backend = "memory"
     get_settings().runtime_enabled = False
+    get_settings().allow_insecure_identity_headers = True
     with TestClient(create_app()) as client:
         created = client.post(
             "/v1/tasks",
@@ -145,6 +146,19 @@ def test_development_profile_still_accepts_tenant_actor_headers() -> None:
             json={"goal": "defaults"},
         )
         assert missing.status_code == 202
+
+
+def test_tenant_actor_headers_require_explicit_flag() -> None:
+    get_settings().storage_backend = "memory"
+    get_settings().runtime_enabled = False
+    get_settings().allow_insecure_identity_headers = False
+    with TestClient(create_app()) as client:
+        created = client.post(
+            "/v1/tasks",
+            headers={"Idempotency-Key": "id-char-required", "X-Tenant-ID": "tenant-dev"},
+            json={"goal": "requires signed identity"},
+        )
+        assert created.status_code == 401
 
 
 def test_production_rejects_insecure_identity_header_flag() -> None:
@@ -340,6 +354,11 @@ def test_development_header_adapter_is_explicit() -> None:
         )
         assert isinstance(
             build_identity_verifier(settings), DevelopmentHeaderIdentityVerifier
+        )
+        implicit = Settings(_env_file=None, deployment_profile="development")
+        assert implicit.insecure_identity_headers_enabled is False
+        assert isinstance(
+            build_identity_verifier(implicit), SignedAgentContextVerifier
         )
         production = Settings(
             _env_file=None,

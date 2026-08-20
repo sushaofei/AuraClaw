@@ -36,5 +36,6 @@ logs/
 .env
 .env.*
 !.env.example
+!.env.debug.example
 !.env.hands-debug.example
 debug/java-mcp-servers.json

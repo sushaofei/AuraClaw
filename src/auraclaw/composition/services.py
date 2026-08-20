@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import secrets
-import socket
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
@@ -36,7 +35,6 @@ from auraclaw.action.hands import HandsGateway
 from auraclaw.action.hands_http import (
     HandsWorkloadAuthenticator,
     SignedLeaseHandsAuthenticator,
-    StaticHandsAuthenticator,
     create_hands_http_app,
 )
 from auraclaw.action.mcp_primitives import HandsResourceRegistry
@@ -44,7 +42,6 @@ from auraclaw.action.model_skill_compiler import (
     ModelSkillCompiler,
     ModelSkillPublisher,
 )
-from auraclaw.action.policy import PolicyEngine
 from auraclaw.action.ports import PriceInsightSource
 from auraclaw.action.price_insight import (
     PriceInsightService,
@@ -88,7 +85,6 @@ from auraclaw.contracts.capabilities import (
     CapabilityTrustLevel,
     McpServerDefinition,
 )
-from auraclaw.contracts.hands import HandsTrustedContext
 from auraclaw.contracts.internal import ServiceIdentity
 from auraclaw.contracts.tools import CredentialReference
 from auraclaw.control.internal_service import ControlInternalService
@@ -106,7 +102,6 @@ from auraclaw.infrastructure.artifacts.seaweedfs import (
     SeaweedFSMultipartClient,
     SeaweedFSS3Presigner,
 )
-from auraclaw.infrastructure.artifacts.store import ArtifactStore, InMemoryObjectStorage
 from auraclaw.infrastructure.clients.artifact import RemoteArtifactWriter
 from auraclaw.infrastructure.clients.credential import RemoteCredentialProxy
 from auraclaw.infrastructure.clients.model import RemoteModelClient
@@ -402,26 +397,12 @@ class RemoteRuntimeWorker:
 
 
 def _runtime_instance_identity(settings: Settings) -> tuple[str, str]:
-    """Give every production replica a stable pod/host-scoped identity by default."""
-    if settings.deployment_profile != "production":
-        return settings.runtime_id, settings.runtime_node_id
-    hostname = socket.gethostname()
-    runtime_id = (
-        f"runtime-{hostname}"
-        if settings.runtime_id == "runtime-local-1"
-        else settings.runtime_id
-    )
-    node_id = (
-        hostname if settings.runtime_node_id == "local" else settings.runtime_node_id
-    )
-    return runtime_id, node_id
+    return settings.runtime_id, settings.runtime_node_id
 
 
 def _configured_identities(
     settings: Settings, identities: tuple[ServiceIdentity, ...]
 ) -> dict[str, ServiceIdentity]:
-    if settings.deployment_profile == "development":
-        return {f"development-{identity.value}": identity for identity in identities}
     configured: dict[str, ServiceIdentity] = {}
     for identity in identities:
         token = settings.workload_token_value(identity.value)
@@ -431,16 +412,27 @@ def _configured_identities(
 
 
 def _service_bearer_token(settings: Settings, identity: ServiceIdentity) -> str:
-    if settings.deployment_profile == "development":
-        return f"development-{identity.value}"
     return settings.workload_token_value(identity.value) or secrets.token_urlsafe(32)
 
 
-def _uses_remote_capability_plane(settings: Settings) -> bool:
+def _lease_signing_key(settings: Settings) -> bytes:
+    if settings.lease_signing_key is not None:
+        value = settings.lease_signing_key.get_secret_value().encode()
+        if len(value) >= 32:
+            return value
+    return secrets.token_bytes(32)
+
+
+def _has_workload_tokens(
+    settings: Settings, identities: tuple[ServiceIdentity, ...]
+) -> bool:
+    return all(settings.workload_token_value(identity.value) for identity in identities)
+
+
+def _lease_key_configured(settings: Settings) -> bool:
     return (
-        settings.deployment_profile == "production"
-        or bool(settings.mcp_egress_servers)
-        or bool(settings.java_api_servers)
+        settings.lease_signing_key is not None
+        and len(settings.lease_signing_key.get_secret_value()) >= 32
     )
 
 
@@ -484,13 +476,14 @@ def _seed_managed_connector_credentials(
 
 def _task_api_app(settings: Settings) -> FastAPI:
     app = create_app(profile="task-api")
-    if settings.deployment_profile == "development":
-        return app
     token = settings.workload_token_value(ServiceIdentity.TASK_API.value)
     config_ready = bool(
         token
-        and settings.sql_storage_enabled
-        and settings.signed_identity_configured
+        and (settings.sql_storage_enabled or settings.storage_backend == "memory")
+        and (
+            settings.signed_identity_configured
+            or settings.insecure_identity_headers_enabled
+        )
     )
     remote_session = RemoteSessionEventStore(
         settings.session_base_url,
@@ -574,13 +567,13 @@ def _readiness(name: str, settings: Settings) -> tuple[bool, dict[str, str]]:
     ready = True
     if name in DATABASE_SERVICES:
         database_ready = (
-            settings.sql_storage_enabled or settings.deployment_profile == "development"
+            settings.sql_storage_enabled or settings.storage_backend == "memory"
         )
         dependencies["postgres"] = (
             "ready"
             if settings.sql_storage_enabled
-            else "development-memory"
-            if settings.deployment_profile == "development"
+            else "memory"
+            if settings.storage_backend == "memory"
             else "missing"
         )
         ready = ready and database_ready
@@ -590,7 +583,7 @@ def _readiness(name: str, settings: Settings) -> tuple[bool, dict[str, str]]:
             or settings.signed_identity_configured
         )
         dependencies["chaintower_identity"] = (
-            "development-headers"
+            "insecure-headers"
             if settings.insecure_identity_headers_enabled
             else "ready"
             if identity_ready
@@ -602,7 +595,7 @@ def _readiness(name: str, settings: Settings) -> tuple[bool, dict[str, str]]:
             "ready" if settings.model_gateway_configured else "missing"
         )
         ready = ready and settings.model_gateway_configured
-        identity_ready = settings.deployment_profile == "development" or bool(
+        identity_ready = bool(
             settings.workload_token_value(ServiceIdentity.AGENT_RUNTIME.value)
         )
         dependencies["runtime_workload_identity"] = (
@@ -610,11 +603,7 @@ def _readiness(name: str, settings: Settings) -> tuple[bool, dict[str, str]]:
         )
         ready = ready and identity_ready
     if name == "session":
-        lease_ready = (
-            settings.lease_signing_key is not None
-            and len(settings.lease_signing_key.get_secret_value()) >= 32
-            or settings.deployment_profile == "development"
-        )
+        lease_ready = _lease_key_configured(settings)
         dependencies["lease_signing_key"] = "ready" if lease_ready else "missing"
         ready = ready and lease_ready
         required_identities = (
@@ -625,22 +614,14 @@ def _readiness(name: str, settings: Settings) -> tuple[bool, dict[str, str]]:
             ServiceIdentity.POLICY,
             ServiceIdentity.DELIVERY_WORKER,
         )
-        identity_ready = settings.deployment_profile == "development" or all(
-            settings.workload_token_value(identity.value)
-            for identity in required_identities
-        )
+        identity_ready = _has_workload_tokens(settings, required_identities)
         dependencies["workload_identities"] = "ready" if identity_ready else "missing"
         ready = ready and identity_ready
     if name == "orchestrator":
-        lease_ready = (
-            settings.deployment_profile == "development"
-            or settings.lease_signing_key is not None
-            and len(settings.lease_signing_key.get_secret_value()) >= 32
-        )
-        identity_ready = (
-            settings.deployment_profile == "development"
-            or bool(settings.workload_token_value(ServiceIdentity.AGENT_RUNTIME.value))
-            and bool(settings.workload_token_value(ServiceIdentity.TASK_API.value))
+        lease_ready = _lease_key_configured(settings)
+        identity_ready = _has_workload_tokens(
+            settings,
+            (ServiceIdentity.AGENT_RUNTIME, ServiceIdentity.TASK_API),
         )
         dependencies["lease_signer"] = "ready" if lease_ready else "missing"
         dependencies["control_workload_identities"] = (
@@ -649,10 +630,16 @@ def _readiness(name: str, settings: Settings) -> tuple[bool, dict[str, str]]:
         ready = ready and lease_ready and identity_ready
     if name == "artifact-service":
         storage_ready = (
-            settings.seaweedfs_enabled or settings.deployment_profile == "development"
+            settings.seaweedfs_enabled or settings.artifact_backend == "local"
         )
-        dependencies["seaweedfs"] = "ready" if storage_ready else "missing"
-        policy_identity_ready = settings.deployment_profile == "development" or bool(
+        dependencies["object_storage"] = (
+            "seaweedfs"
+            if settings.seaweedfs_enabled
+            else "local"
+            if settings.artifact_backend == "local"
+            else "missing"
+        )
+        policy_identity_ready = bool(
             settings.workload_token_value(ServiceIdentity.ARTIFACT_SERVICE.value)
         )
         dependencies["policy_workload_identity"] = (
@@ -660,7 +647,7 @@ def _readiness(name: str, settings: Settings) -> tuple[bool, dict[str, str]]:
         )
         ready = ready and storage_ready and policy_identity_ready
     if name == "projection-worker":
-        token_ready = settings.deployment_profile == "development" or bool(
+        token_ready = bool(
             settings.workload_token_value(ServiceIdentity.PROJECTION_WORKER.value)
         )
         dependencies["session_workload_identity"] = (
@@ -668,13 +655,10 @@ def _readiness(name: str, settings: Settings) -> tuple[bool, dict[str, str]]:
         )
         ready = ready and token_ready
     if name == "agent-runtime":
-        token_ready = settings.deployment_profile == "development" or bool(
+        token_ready = bool(
             settings.workload_token_value(ServiceIdentity.AGENT_RUNTIME.value)
         )
-        provider_secret_absent = (
-            settings.deployment_profile == "development"
-            or settings.model_api_key is None
-        )
+        provider_secret_absent = settings.model_api_key is None
         dependencies["workload_identity"] = "ready" if token_ready else "missing"
         dependencies["provider_secret_isolation"] = (
             "ready" if provider_secret_absent else "forbidden"
@@ -684,18 +668,12 @@ def _readiness(name: str, settings: Settings) -> tuple[bool, dict[str, str]]:
         identity_ready = (
             settings.runtime_workload_token is not None
             and bool(settings.runtime_workload_token.get_secret_value())
-            or settings.deployment_profile == "development"
         )
         dependencies["workload_identity"] = "ready" if identity_ready else "missing"
-        lease_ready = (
-            settings.deployment_profile == "development"
-            or settings.lease_signing_key is not None
-            and len(settings.lease_signing_key.get_secret_value()) >= 32
-        )
+        lease_ready = _lease_key_configured(settings)
         dependencies["lease_verifier"] = "ready" if lease_ready else "missing"
-        downstream_identity_ready = (
-            settings.deployment_profile == "development"
-            or bool(settings.workload_token_value(ServiceIdentity.ACTION_HANDS.value))
+        downstream_identity_ready = bool(
+            settings.workload_token_value(ServiceIdentity.ACTION_HANDS.value)
         )
         dependencies["downstream_workload_identity"] = (
             "ready" if downstream_identity_ready else "missing"
@@ -711,30 +689,29 @@ def _readiness(name: str, settings: Settings) -> tuple[bool, dict[str, str]]:
             ServiceIdentity.CREDENTIAL_PROXY,
             ServiceIdentity.ARTIFACT_SERVICE,
         )
-        identity_ready = settings.deployment_profile == "development" or all(
-            settings.workload_token_value(item.value) for item in identities
-        )
+        identity_ready = _has_workload_tokens(settings, identities)
         dependencies["enforcement_identities"] = (
             "ready" if identity_ready else "missing"
         )
         ready = ready and identity_ready
     if name == "credential-proxy":
-        identity_ready = settings.deployment_profile == "development" or all(
-            settings.workload_token_value(item.value)
-            for item in (
+        identity_ready = _has_workload_tokens(
+            settings,
+            (
                 ServiceIdentity.TASK_API,
                 ServiceIdentity.ACTION_HANDS,
                 ServiceIdentity.DELIVERY_WORKER,
-            )
+            ),
         )
-        vault_ready = (
-            settings.deployment_profile == "development"
-            or bool(settings.credential_vault_addr)
-            and settings.credential_vault_token is not None
+        vault_configured = bool(settings.credential_vault_addr) and (
+            settings.credential_vault_token is not None
         )
+        vault_ready = vault_configured or not settings.credential_vault_addr
         dependencies["caller_identities"] = "ready" if identity_ready else "missing"
-        dependencies["vault"] = "ready" if vault_ready else "missing"
-        policy_identity_ready = settings.deployment_profile == "development" or bool(
+        dependencies["vault"] = "ready" if vault_configured else (
+            "memory" if vault_ready else "missing"
+        )
+        policy_identity_ready = bool(
             settings.workload_token_value(ServiceIdentity.CREDENTIAL_PROXY.value)
         )
         dependencies["policy_workload_identity"] = (
@@ -742,7 +719,7 @@ def _readiness(name: str, settings: Settings) -> tuple[bool, dict[str, str]]:
         )
         ready = ready and identity_ready and vault_ready and policy_identity_ready
     if name == "delivery-worker":
-        identity_ready = settings.deployment_profile == "development" or bool(
+        identity_ready = bool(
             settings.workload_token_value(ServiceIdentity.DELIVERY_WORKER.value)
         )
         dependencies["delivery_workload_identity"] = (
@@ -905,20 +882,10 @@ def _base_service_app(
     return app
 
 
-def _development_lease_key(settings: Settings) -> bytes:
-    if settings.lease_signing_key is not None:
-        value = settings.lease_signing_key.get_secret_value().encode()
-        if len(value) >= 32:
-            return value
-    if settings.deployment_profile == "development":
-        return b"auraclaw-development-lease-key-0001"
-    return secrets.token_bytes(32)
-
-
 def _session_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
     wake: OutboxWakeNotifier | None = None
     closeables: tuple[Any, ...] = ()
-    if settings.worker_wake_enabled and settings.deployment_profile == "production":
+    if settings.worker_wake_enabled:
         wake = OutboxWakeNotifier(
             {
                 "projection": HttpWorkerWakeClient(settings.projection_base_url),
@@ -929,7 +896,7 @@ def _session_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         )
         closeables = (wake,)
     app = _base_service_app(spec, settings, closeables=closeables)
-    key = _development_lease_key(settings)
+    key = _lease_signing_key(settings)
     verifier = LeaseAssertionVerifier(
         {"development": key},
         ledger=InMemoryFencingTokenLedger(),
@@ -966,66 +933,64 @@ def _orchestrator_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         if settings.sql_storage_enabled
         else InMemoryControlStateStore()
     )
-    key = _development_lease_key(settings)
+    key = _lease_signing_key(settings)
     closeables: tuple[Any, ...] = (store,) if settings.sql_storage_enabled else ()
-    tick: Callable[[], Awaitable[int | None]] = store.recover_expired
-    if settings.deployment_profile == "production":
-        token = settings.workload_token_value(ServiceIdentity.ORCHESTRATOR.value)
-        bearer_token = token or secrets.token_urlsafe(32)
-        feed_session = RemoteSessionEventStore(
-            settings.session_base_url,
-            service_identity=ServiceIdentity.ORCHESTRATOR,
-            bearer_token=bearer_token,
-            timeout=max(10.0, settings.worker_idle_interval + 5.0),
-        )
-        lifecycle_session = RemoteOrchestratorSessionClient(
-            settings.session_base_url,
-            bearer_token=bearer_token,
-        )
-        runtime_wake_client = (
-            HttpWorkerWakeClient(settings.runtime_base_url)
-            if settings.worker_wake_enabled
+    token = settings.workload_token_value(ServiceIdentity.ORCHESTRATOR.value)
+    bearer_token = token or secrets.token_urlsafe(32)
+    feed_session = RemoteSessionEventStore(
+        settings.session_base_url,
+        service_identity=ServiceIdentity.ORCHESTRATOR,
+        bearer_token=bearer_token,
+        timeout=max(10.0, settings.worker_idle_interval + 5.0),
+    )
+    lifecycle_session = RemoteOrchestratorSessionClient(
+        settings.session_base_url,
+        bearer_token=bearer_token,
+    )
+    runtime_wake_client = (
+        HttpWorkerWakeClient(settings.runtime_base_url)
+        if settings.worker_wake_enabled
+        else None
+    )
+    worker_id = f"orchestrator-{secrets.token_hex(8)}"
+    claim_wait = (
+        settings.worker_idle_interval if settings.worker_wake_enabled else 0.0
+    )
+    feed = RunnableFeedConsumer(
+        feed_session,
+        store,
+        worker_id=worker_id,
+        wait_seconds=claim_wait,
+    )
+    orchestrator = ManagedOrchestrator(
+        orchestrator_id=worker_id,
+        control_store=store,
+        session=lifecycle_session,
+        provisioner=RegisteredRuntimeProvisioner(store),
+        lease_ttl=timedelta(seconds=settings.orchestrator_lease_ttl_seconds),
+        runtime_wake=(
+            (lambda: runtime_wake_client.wake())
+            if runtime_wake_client is not None
             else None
-        )
-        worker_id = f"orchestrator-{secrets.token_hex(8)}"
-        claim_wait = (
-            settings.worker_idle_interval if settings.worker_wake_enabled else 0.0
-        )
-        feed = RunnableFeedConsumer(
-            feed_session,
-            store,
-            worker_id=worker_id,
-            wait_seconds=claim_wait,
-        )
-        orchestrator = ManagedOrchestrator(
-            orchestrator_id=worker_id,
-            control_store=store,
-            session=lifecycle_session,
-            provisioner=RegisteredRuntimeProvisioner(store),
-            lease_ttl=timedelta(seconds=settings.orchestrator_lease_ttl_seconds),
-            runtime_wake=(
-                (lambda: runtime_wake_client.wake())
-                if runtime_wake_client is not None
-                else None
-            ),
-            register_selected_runtime=False,
-        )
+        ),
+        register_selected_runtime=False,
+    )
 
-        async def production_tick() -> int:
-            ingested = await feed.run_once()
-            scheduled = await orchestrator.schedule_once()
-            recovered = 0
-            # Keep recover off the create→schedule hot path; run it when idle.
-            if ingested == 0 and scheduled is None:
-                recovered = await orchestrator.recover()
-                if recovered:
-                    scheduled = await orchestrator.schedule_once()
-            return ingested + recovered + int(scheduled is not None)
+    async def schedule_tick() -> int:
+        ingested = await feed.run_once()
+        scheduled = await orchestrator.schedule_once()
+        recovered = 0
+        # Keep recover off the create→schedule hot path; run it when idle.
+        if ingested == 0 and scheduled is None:
+            recovered = await orchestrator.recover()
+            if recovered:
+                scheduled = await orchestrator.schedule_once()
+        return ingested + recovered + int(scheduled is not None)
 
-        tick = production_tick
-        closeables += (feed_session, lifecycle_session)
-        if runtime_wake_client is not None:
-            closeables += (runtime_wake_client,)
+    tick = schedule_tick
+    closeables += (feed_session, lifecycle_session)
+    if runtime_wake_client is not None:
+        closeables += (runtime_wake_client,)
     app = _base_service_app(
         spec,
         settings,
@@ -1058,55 +1023,42 @@ def _orchestrator_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
 
 def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
     closeables: tuple[Any, ...] = ()
-    policy: PolicyEngine | RemotePolicyClient
+    policy: RemotePolicyClient
     credential_proxy: RemoteCredentialProxy | None = None
-    artifacts: ArtifactStore | RemoteArtifactWriter
+    artifacts: RemoteArtifactWriter
     invocation_store: PostgresInvocationStore | None = None
     tool_registry_store: PostgresToolRegistryStore | None = None
     capability_catalog_store: (
         InMemoryCapabilityCatalogStore | PostgresCapabilityCatalogStore
     ) = InMemoryCapabilityCatalogStore()
     remote_clients: list[Any] = []
-    if _uses_remote_capability_plane(settings):
-        hands_token = _service_bearer_token(settings, ServiceIdentity.ACTION_HANDS)
-        policy = RemotePolicyClient(settings.policy_base_url, bearer_token=hands_token)
-        credential_proxy = RemoteCredentialProxy(
-            settings.credential_proxy_base_url, bearer_token=hands_token
+    hands_token = _service_bearer_token(settings, ServiceIdentity.ACTION_HANDS)
+    policy = RemotePolicyClient(settings.policy_base_url, bearer_token=hands_token)
+    credential_proxy = RemoteCredentialProxy(
+        settings.credential_proxy_base_url, bearer_token=hands_token
+    )
+    remote_clients.extend((policy, credential_proxy))
+    artifacts = RemoteArtifactWriter(
+        settings.artifact_base_url,
+        bearer_token=_service_bearer_token(settings, ServiceIdentity.ACTION_HANDS),
+    )
+    if settings.sql_storage_enabled:
+        invocation_store = PostgresInvocationStore(settings.resolved_database_url)
+        tool_registry_store = PostgresToolRegistryStore(settings.resolved_database_url)
+        capability_catalog_store = PostgresCapabilityCatalogStore(
+            settings.resolved_database_url
         )
-        remote_clients.extend((policy, credential_proxy))
-    else:
-        policy = PolicyEngine(version="s3-v1")
-    if settings.deployment_profile == "production":
-        artifacts = RemoteArtifactWriter(
-            settings.artifact_base_url,
-            bearer_token=_service_bearer_token(
-                settings, ServiceIdentity.ACTION_HANDS
-            ),
-        )
-        if settings.sql_storage_enabled:
-            invocation_store = PostgresInvocationStore(settings.resolved_database_url)
-            tool_registry_store = PostgresToolRegistryStore(
-                settings.resolved_database_url
-            )
-            capability_catalog_store = PostgresCapabilityCatalogStore(
-                settings.resolved_database_url
-            )
-        closeables = (
-            *remote_clients,
-            artifacts,
-            *((invocation_store,) if invocation_store is not None else ()),
-            *((tool_registry_store,) if tool_registry_store is not None else ()),
-            *(
-                (capability_catalog_store,)
-                if isinstance(capability_catalog_store, PostgresCapabilityCatalogStore)
-                else ()
-            ),
-        )
-    else:
-        artifacts = ArtifactStore(
-            InMemoryObjectStorage(), signing_key=b"auraclaw-s3-artifact-key"
-        )
-        closeables = tuple(remote_clients)
+    closeables = (
+        *remote_clients,
+        artifacts,
+        *((invocation_store,) if invocation_store is not None else ()),
+        *((tool_registry_store,) if tool_registry_store is not None else ()),
+        *(
+            (capability_catalog_store,)
+            if isinstance(capability_catalog_store, PostgresCapabilityCatalogStore)
+            else ()
+        ),
+    )
     app = _base_service_app(
         spec,
         settings,
@@ -1124,17 +1076,6 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         if settings.model_skill_signing_key is not None
         else None
     )
-    if (
-        settings.deployment_profile == "production"
-        and (
-            settings.model_skill_source_configured
-            or settings.resolved_price_insight_source != "disabled"
-        )
-        and configured_signing_key is None
-    ):
-        raise ValueError(
-            "Production Skill publication requires AURACLAW_MODEL_SKILL_SIGNING_KEY"
-        )
     model_skill_signer = HmacSkillSignatureVerifier(
         {
             "ct-model": (
@@ -1181,11 +1122,6 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
     )
     price_insight_source: PriceInsightSource | None = None
     resolved_price_source = settings.resolved_price_insight_source
-    if (
-        settings.deployment_profile == "production"
-        and resolved_price_source == "fixture"
-    ):
-        raise ValueError("Price Insight fixture source is development-only")
     if resolved_price_source == "fixture":
         price_insight_source = JsonPriceInsightSource(
             PRICE_INSIGHT_SKILL_DIR / "tests" / "golden-data.json"
@@ -1326,38 +1262,17 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
     token = (
         settings.runtime_workload_token.get_secret_value()
         if settings.runtime_workload_token is not None
-        else (
-            "development-runtime-token"
-            if settings.deployment_profile == "development"
-            else secrets.token_urlsafe(32)
-        )
+        else secrets.token_urlsafe(32)
     )
-    authenticator: HandsWorkloadAuthenticator
-    if settings.deployment_profile == "development":
-        authenticator = StaticHandsAuthenticator(
-            {
-                token: HandsTrustedContext(
-                    tenant_id="development",
-                    root_session_id="development",
-                    session_id="development",
-                    run_id="development",
-                    runtime_id="development-runtime",
-                    lease_id="development-lease",
-                    fencing_token=1,
-                    deadline=datetime.now(UTC) + timedelta(hours=24),
-                )
-            }
-        )
-    else:
-        key = _development_lease_key(settings)
-        authenticator = SignedLeaseHandsAuthenticator(
-            {token: "*"},
-            verifier=LeaseAssertionVerifier(
-                {"development": key},
-                ledger=InMemoryFencingTokenLedger(),
-                audience="runtime",
-            ),
-        )
+    key = _lease_signing_key(settings)
+    authenticator: HandsWorkloadAuthenticator = SignedLeaseHandsAuthenticator(
+        {token: "*"},
+        verifier=LeaseAssertionVerifier(
+            {"development": key},
+            ledger=InMemoryFencingTokenLedger(),
+            audience="runtime",
+        ),
+    )
     hands_gateway = HandsGateway(
         registry=registry,
         gateway=gateway,
@@ -1500,11 +1415,7 @@ def _credential_proxy_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         else None
     )
     vault: InMemoryVault | HashiCorpVault
-    if (
-        settings.deployment_profile == "production"
-        and settings.credential_vault_addr
-        and settings.credential_vault_token is not None
-    ):
+    if settings.credential_vault_addr and settings.credential_vault_token is not None:
         vault = HashiCorpVault(
             settings.credential_vault_addr,
             token=settings.credential_vault_token.get_secret_value(),
@@ -1513,11 +1424,11 @@ def _credential_proxy_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
     else:
         vault = InMemoryVault(settings.debug_vault_secrets)
     policy: RemotePolicyClient | None = None
-    if settings.deployment_profile == "production":
-        token = settings.workload_token_value(ServiceIdentity.CREDENTIAL_PROXY.value)
+    token = settings.workload_token_value(ServiceIdentity.CREDENTIAL_PROXY.value)
+    if token:
         policy = RemotePolicyClient(
             settings.policy_base_url,
-            bearer_token=token or secrets.token_urlsafe(32),
+            bearer_token=token,
             service_identity=ServiceIdentity.CREDENTIAL_PROXY,
         )
     mcp_adapters = {
@@ -1601,22 +1512,14 @@ def _artifact_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         if settings.sql_storage_enabled
         else None
     )
-    verifier = (
-        SeaweedFSObjectVerifier(presigner)
-        if settings.deployment_profile == "production"
-        else None
-    )
-    multipart = (
-        SeaweedFSMultipartClient(presigner)
-        if settings.deployment_profile == "production"
-        else None
-    )
+    verifier = SeaweedFSObjectVerifier(presigner) if settings.seaweedfs_enabled else None
+    multipart = SeaweedFSMultipartClient(presigner) if settings.seaweedfs_enabled else None
     policy: RemotePolicyClient | None = None
-    if settings.deployment_profile == "production":
-        token = settings.workload_token_value(ServiceIdentity.ARTIFACT_SERVICE.value)
+    token = settings.workload_token_value(ServiceIdentity.ARTIFACT_SERVICE.value)
+    if token:
         policy = RemotePolicyClient(
             settings.policy_base_url,
-            bearer_token=token or secrets.token_urlsafe(32),
+            bearer_token=token,
             service_identity=ServiceIdentity.ARTIFACT_SERVICE,
         )
     closeables: tuple[Any, ...] = (
@@ -1783,28 +1686,23 @@ def _projection_app(
         settings.resolved_database_url, schema="projection"
     )
     closeables: tuple[Any, ...] = ()
-    remote_session: RemoteSessionEventStore | None = None
-    if settings.deployment_profile == "production":
-        token = settings.workload_token_value(ServiceIdentity.PROJECTION_WORKER.value)
-        remote_session = RemoteSessionEventStore(
-            settings.session_base_url,
-            service_identity=ServiceIdentity.PROJECTION_WORKER,
-            bearer_token=token or secrets.token_urlsafe(32),
-            timeout=max(10.0, settings.worker_idle_interval + 5.0),
-        )
-        claim_wait = (
-            settings.worker_idle_interval if settings.worker_wake_enabled else 0.0
-        )
-        source = RemoteSessionOutboxSource(
-            remote_session,
-            worker_id="projection-worker",
-            wait_seconds=claim_wait,
-        )
-        relay = OutboxRelay(source, projector)
-        closeables = (remote_session, projector, admin_store)
-    else:
-        relay = OutboxRelay(providers.get_event_store(), projector)
-        closeables = (projector, admin_store)
+    token = settings.workload_token_value(ServiceIdentity.PROJECTION_WORKER.value)
+    remote_session = RemoteSessionEventStore(
+        settings.session_base_url,
+        service_identity=ServiceIdentity.PROJECTION_WORKER,
+        bearer_token=token or secrets.token_urlsafe(32),
+        timeout=max(10.0, settings.worker_idle_interval + 5.0),
+    )
+    claim_wait = (
+        settings.worker_idle_interval if settings.worker_wake_enabled else 0.0
+    )
+    source = RemoteSessionOutboxSource(
+        remote_session,
+        worker_id="projection-worker",
+        wait_seconds=claim_wait,
+    )
+    relay = OutboxRelay(source, projector)
+    closeables = (remote_session, projector, admin_store)
     app = _base_service_app(
         spec,
         settings,
@@ -1865,13 +1763,12 @@ def _model_gateway_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         if settings.sql_storage_enabled
         else None
     )
-    if settings.deployment_profile == "production":
-        token = settings.workload_token_value(ServiceIdentity.MODEL_GATEWAY.value)
-        policy = RemotePolicyClient(
-            settings.policy_base_url,
-            bearer_token=token or secrets.token_urlsafe(32),
-            service_identity=ServiceIdentity.MODEL_GATEWAY,
-        )
+    token = settings.workload_token_value(ServiceIdentity.MODEL_GATEWAY.value)
+    policy = RemotePolicyClient(
+        settings.policy_base_url,
+        bearer_token=token or secrets.token_urlsafe(32),
+        service_identity=ServiceIdentity.MODEL_GATEWAY,
+    )
     model = (
         providers.get_model_gateway()
         if settings.model_gateway_configured
@@ -1909,7 +1806,7 @@ def _model_gateway_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
 
 def _runtime_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
     token = settings.workload_token_value(ServiceIdentity.AGENT_RUNTIME.value)
-    bearer_token = token or "development-runtime-token"
+    bearer_token = token or secrets.token_urlsafe(32)
     runtime_id, node_id = _runtime_instance_identity(settings)
     control = RemoteRuntimeControlClient(
         settings.control_base_url,
