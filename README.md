@@ -131,13 +131,23 @@ Session 只接收 `artifact_ref`。
 发布带证据的三态决策，不能覆盖 Worker Artifact。Join 生成的 Root Result 保存 Child Result、
 Review Evidence 和 Artifact lineage。
 
+## 配置文件
+
+仓库只提交三份环境模板，真实密钥文件被 gitignore：
+
+| 模板 | 复制为 | 用途 |
+|------|--------|------|
+| `.env.example` | — | 变量目录。不要直接当运行配置。 |
+| `.env.debug.example` | `.env.debug` | 本地 12 入口 debug，内存存储，开箱即用。 |
+| `.env.production.example` | `.env.production` | Compose 生产发布。填镜像 digest、库密码、模型、Vault、SeaweedFS。 |
+
 ## 本地启动
 
-`auraclaw serve` 会按生产拓扑拉起全部 12 个独立入口（端口 8000–8011），装配与生产相同，差异只来自 `.env` 里的资源：
+`auraclaw serve` 会按生产拓扑拉起全部 12 个独立入口（端口 8000–8011），装配与生产相同，差异只来自环境配置：
 
 ```bash
 uv sync --extra dev
-cp .env.debug.example .env.debug   # 或使用已有 .env
+cp .env.debug.example .env.debug
 uv run auraclaw serve
 ```
 
@@ -158,7 +168,7 @@ auraclaw delivery run
 
 ### Model Skill 预览闭环
 
-`action-hands` 使用 `.env` 的 `MYSQL_DB_*` 在一致性只读快照中加载 `ct_model_*`，把每个模型版本
+`action-hands` 使用环境里的 `MYSQL_DB_*` 在一致性只读快照中加载 `ct_model_*`，把每个模型版本
 编译成签名 Skill Package，并通过 `skill://ct-model/...` MCP Resource 提供给 Runtime。启动时先
 完成一次全量对账，此后按配置间隔继续扫描；不再符合读取条件的版本会从 MCP Resource 撤销。
 当前草稿会映射为 `1.0.0-draft.<version_id>`，只用于配置解释，不执行权威计算或业务回写。
@@ -215,32 +225,11 @@ Artifact 和 Admin 写路径不再共享跨域 Store。Action Hands 以 MCP Serv
 Invocation Store、Policy、Credential Proxy 和 Artifact Service 执行；Runtime 只持有 MCP Client。
 SeaweedFS 管理密钥只注入 Artifact Service，Vault Token 只注入 Credential Proxy，Runtime 位于
 无 platform egress 的内部 Docker network。本地 `auraclaw serve` 与生产 Compose 使用同一组
-12 个入口；环境差异只来自各自 `.env` 提供的 PostgreSQL/内存、Kafka/内存、模型端点和 CORS
-等资源。
+12 个入口；环境差异只来自 `.env.debug` / `.env.production` 提供的存储、事件总线、模型端点和 CORS
+等资源。CLI 与 VS Code debug 都读取 `.env.debug`（可用 `AURACLAW_ENV_FILE` 覆盖）。
 
-每套部署使用自己的 gitignored 配置文件，例如 `.env.development` 与 `.env.production`，无需
-在文件内容中加入环境标签。启动时由文件名选择资源集合：
-
-```bash
-uv run uvicorn auraclaw.main:app --reload --env-file .env.development
-uv run uvicorn auraclaw.main:app --env-file .env.production
-```
-
-生产资源文件示例：
-
-```dotenv
-AURACLAW_MODEL_PROVIDER=openai_compatible
-AURACLAW_MODEL_API_KEY=replace-with-secret
-AURACLAW_MODEL_BASE_URL=https://models.example/v1
-AURACLAW_MODEL_NAME=example-model
-AURACLAW_MODEL_TIMEOUT_SECONDS=120
-# Optional: AURACLAW_MODEL_THINKING_ENABLED=false  # GLM/TokenHub thinking.type=disabled
-AURACLAW_RUNTIME_EVENT_BACKEND=kafka
-KAFKA_HOST=localhost
-KAFKA_PORT=9092
-DB_NAME=auraclaw
-AURACLAW_CORS_ALLOW_ORIGINS=https://console.example.com
-```
+生产发布复制 `.env.production.example` 为 gitignored 的 `.env.production`，填入不可变镜像和密钥后再跑
+`scripts/materialize_compose_secrets.py` 与 `scripts/compose_preflight.py`。
 
 Harness 的 delta 经 Runtime Event Producer SDK 排序、校验和脱敏后进入 Kafka，再由
 Streaming Ingestor 写入 Replay Bus 供 SSE 消费；Kafka 不可用只会令 `/health/ready` 降级，

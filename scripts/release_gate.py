@@ -6,7 +6,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
 SCAN_ROOTS = (ROOT / "src", ROOT / "migrations", ROOT / "deploy")
-SCAN_FILES = (ROOT / "compose.production.yml", ROOT / ".env.example")
+SCAN_FILES = (
+    ROOT / "compose.production.yml",
+    ROOT / ".env.example",
+    ROOT / ".env.debug.example",
+    ROOT / ".env.production.example",
+)
 SECRET_PATTERNS = {
     "private key": re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
     "OpenAI-style token": re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"),

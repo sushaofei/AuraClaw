@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from auraclaw.config import load_secret_files
+from auraclaw.config import Settings, load_secret_files
 from auraclaw.infrastructure.persistence.migration_runner import (
     MigrationError,
     discover_migrations,
@@ -197,8 +197,50 @@ def test_committed_files_do_not_contain_environment_secret_values() -> None:
         for name in secret_names
         if (value := os.environ.get(name)) and len(value) >= 12
     }
-    committed = COMPOSE.read_text() + (ROOT / ".env.example").read_text()
+    committed = "".join(
+        path.read_text()
+        for path in (
+            COMPOSE,
+            ROOT / ".env.example",
+            ROOT / ".env.debug.example",
+            ROOT / ".env.production.example",
+        )
+    )
     assert all(value not in committed for value in local_values)
+
+
+def test_env_templates_are_ready_to_copy() -> None:
+    import importlib.util
+
+    from dotenv import dotenv_values
+
+    spec = importlib.util.spec_from_file_location(
+        "compose_preflight", ROOT / "scripts/compose_preflight.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    debug = Settings(_env_file=ROOT / ".env.debug.example")
+    assert debug.storage_backend == "memory"
+    assert debug.runtime_event_backend == "memory"
+    assert debug.artifact_backend == "local"
+    assert debug.insecure_identity_headers_enabled
+    assert debug.lease_signing_key is not None
+    assert debug.workload_token_value("task-api") == "local-task-api"
+
+    production = dotenv_values(ROOT / ".env.production.example")
+    missing = [name for name in module.REQUIRED if not production.get(name)]
+    assert missing == []
+    assert production["AURACLAW_DEPLOYMENT_PROFILE"] == "production"
+    assert production["AURACLAW_ALLOW_INSECURE_IDENTITY_HEADERS"] == "false"
+    tokens = [
+        production[name] or ""
+        for name in module.REQUIRED
+        if name.endswith("_WORKLOAD_TOKEN")
+    ]
+    assert all(len(token) >= 32 for token in tokens)
+    assert len(set(tokens)) == len(tokens)
 
 
 def test_production_preflight_accepts_isolated_roles_and_unique_tokens(

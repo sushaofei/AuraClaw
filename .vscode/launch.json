@@ -10,14 +10,6 @@
       "cwd": "${workspaceFolder}",
       "python": "${workspaceFolder}/.venv/bin/python",
       "envFile": "${workspaceFolder}/.env.debug",
-      "env": {
-        "AURACLAW_DEPLOYMENT_PROFILE": "development",
-        "AURACLAW_STORAGE_BACKEND": "memory",
-        "AURACLAW_LOG_LEVEL": "DEBUG",
-        "AURACLAW_HOST": "127.0.0.1",
-        "AURACLAW_RUNTIME_EVENT_BACKEND": "memory",
-        "AURACLAW_ARTIFACT_BACKEND": "local"
-      },
       "console": "integratedTerminal",
       "justMyCode": false,
       "presentation": { "group": "auraclaw", "order": 1 }
@@ -31,14 +23,6 @@
       "cwd": "${workspaceFolder}",
       "python": "${workspaceFolder}/.venv/bin/python",
       "envFile": "${workspaceFolder}/.env.debug",
-      "env": {
-        "AURACLAW_DEPLOYMENT_PROFILE": "development",
-        "AURACLAW_STORAGE_BACKEND": "memory",
-        "AURACLAW_LOG_LEVEL": "DEBUG",
-        "AURACLAW_HOST": "127.0.0.1",
-        "AURACLAW_RUNTIME_EVENT_BACKEND": "memory",
-        "AURACLAW_ARTIFACT_BACKEND": "local"
-      },
       "console": "integratedTerminal",
       "justMyCode": false,
       "presentation": { "group": "auraclaw", "order": 2 }
@@ -52,14 +36,6 @@
       "cwd": "${workspaceFolder}",
       "python": "${workspaceFolder}/.venv/bin/python",
       "envFile": "${workspaceFolder}/.env.debug",
-      "env": {
-        "AURACLAW_DEPLOYMENT_PROFILE": "development",
-        "AURACLAW_STORAGE_BACKEND": "memory",
-        "AURACLAW_LOG_LEVEL": "DEBUG",
-        "AURACLAW_HOST": "127.0.0.1",
-        "AURACLAW_RUNTIME_EVENT_BACKEND": "memory",
-        "AURACLAW_ARTIFACT_BACKEND": "local"
-      },
       "console": "integratedTerminal",
       "justMyCode": false,
       "presentation": { "group": "auraclaw", "order": 3 }
@@ -73,14 +49,6 @@
       "cwd": "${workspaceFolder}",
       "python": "${workspaceFolder}/.venv/bin/python",
       "envFile": "${workspaceFolder}/.env.debug",
-      "env": {
-        "AURACLAW_DEPLOYMENT_PROFILE": "development",
-        "AURACLAW_STORAGE_BACKEND": "memory",
-        "AURACLAW_LOG_LEVEL": "DEBUG",
-        "AURACLAW_HOST": "127.0.0.1",
-        "AURACLAW_RUNTIME_EVENT_BACKEND": "memory",
-        "AURACLAW_ARTIFACT_BACKEND": "local"
-      },
       "console": "integratedTerminal",
       "justMyCode": false,
       "presentation": { "group": "auraclaw", "order": 4 }
@@ -94,14 +62,6 @@
       "cwd": "${workspaceFolder}",
       "python": "${workspaceFolder}/.venv/bin/python",
       "envFile": "${workspaceFolder}/.env.debug",
-      "env": {
-        "AURACLAW_DEPLOYMENT_PROFILE": "development",
-        "AURACLAW_STORAGE_BACKEND": "memory",
-        "AURACLAW_LOG_LEVEL": "DEBUG",
-        "AURACLAW_HOST": "127.0.0.1",
-        "AURACLAW_RUNTIME_EVENT_BACKEND": "memory",
-        "AURACLAW_ARTIFACT_BACKEND": "local"
-      },
       "console": "integratedTerminal",
       "justMyCode": false,
       "presentation": { "group": "auraclaw", "order": 5 }
@@ -115,14 +75,6 @@
       "cwd": "${workspaceFolder}",
       "python": "${workspaceFolder}/.venv/bin/python",
       "envFile": "${workspaceFolder}/.env.debug",
-      "env": {
-        "AURACLAW_DEPLOYMENT_PROFILE": "development",
-        "AURACLAW_STORAGE_BACKEND": "memory",
-        "AURACLAW_LOG_LEVEL": "DEBUG",
-        "AURACLAW_HOST": "127.0.0.1",
-        "AURACLAW_RUNTIME_EVENT_BACKEND": "memory",
-        "AURACLAW_ARTIFACT_BACKEND": "local"
-      },
       "console": "integratedTerminal",
       "justMyCode": false,
       "presentation": { "group": "auraclaw", "order": 6 }
@@ -136,14 +88,6 @@
       "cwd": "${workspaceFolder}",
       "python": "${workspaceFolder}/.venv/bin/python",
       "envFile": "${workspaceFolder}/.env.debug",
-      "env": {
-        "AURACLAW_DEPLOYMENT_PROFILE": "development",
-        "AURACLAW_STORAGE_BACKEND": "memory",
-        "AURACLAW_LOG_LEVEL": "DEBUG",
-        "AURACLAW_HOST": "127.0.0.1",
-        "AURACLAW_RUNTIME_EVENT_BACKEND": "memory",
-        "AURACLAW_ARTIFACT_BACKEND": "local"
-      },
       "console": "integratedTerminal",
       "justMyCode": false,
       "presentation": { "group": "auraclaw", "order": 7 }
@@ -157,14 +101,6 @@
       "cwd": "${workspaceFolder}",
       "python": "${workspaceFolder}/.venv/bin/python",
       "envFile": "${workspaceFolder}/.env.debug",
-      "env": {
-        "AURACLAW_DEPLOYMENT_PROFILE": "development",
-        "AURACLAW_STORAGE_BACKEND": "memory",
-        "AURACLAW_LOG_LEVEL": "DEBUG",
-        "AURACLAW_HOST": "127.0.0.1",
-        "AURACLAW_RUNTIME_EVENT_BACKEND": "memory",
-        "AURACLAW_ARTIFACT_BACKEND": "local"
-      },
       "console": "integratedTerminal",
       "justMyCode": false,
       "presentation": { "group": "auraclaw", "order": 8 }
@@ -178,14 +114,6 @@
       "cwd": "${workspaceFolder}",
       "python": "${workspaceFolder}/.venv/bin/python",
       "envFile": "${workspaceFolder}/.env.debug",
-      "env": {
-        "AURACLAW_DEPLOYMENT_PROFILE": "development",
-        "AURACLAW_STORAGE_BACKEND": "memory",
-        "AURACLAW_LOG_LEVEL": "DEBUG",
-        "AURACLAW_HOST": "127.0.0.1",
-        "AURACLAW_RUNTIME_EVENT_BACKEND": "memory",
-        "AURACLAW_ARTIFACT_BACKEND": "local"
-      },
       "console": "integratedTerminal",
       "justMyCode": false,
       "presentation": { "group": "auraclaw", "order": 9 }
@@ -199,14 +127,6 @@
       "cwd": "${workspaceFolder}",
       "python": "${workspaceFolder}/.venv/bin/python",
       "envFile": "${workspaceFolder}/.env.debug",
-      "env": {
-        "AURACLAW_DEPLOYMENT_PROFILE": "development",
-        "AURACLAW_STORAGE_BACKEND": "memory",
-        "AURACLAW_LOG_LEVEL": "DEBUG",
-        "AURACLAW_HOST": "127.0.0.1",
-        "AURACLAW_RUNTIME_EVENT_BACKEND": "memory",
-        "AURACLAW_ARTIFACT_BACKEND": "local"
-      },
       "console": "integratedTerminal",
       "justMyCode": false,
       "presentation": { "group": "auraclaw", "order": 10 }
@@ -220,14 +140,6 @@
       "cwd": "${workspaceFolder}",
       "python": "${workspaceFolder}/.venv/bin/python",
       "envFile": "${workspaceFolder}/.env.debug",
-      "env": {
-        "AURACLAW_DEPLOYMENT_PROFILE": "development",
-        "AURACLAW_STORAGE_BACKEND": "memory",
-        "AURACLAW_LOG_LEVEL": "DEBUG",
-        "AURACLAW_HOST": "127.0.0.1",
-        "AURACLAW_RUNTIME_EVENT_BACKEND": "memory",
-        "AURACLAW_ARTIFACT_BACKEND": "local"
-      },
       "console": "integratedTerminal",
       "justMyCode": false,
       "presentation": { "group": "auraclaw", "order": 11 }
@@ -241,14 +153,6 @@
       "cwd": "${workspaceFolder}",
       "python": "${workspaceFolder}/.venv/bin/python",
       "envFile": "${workspaceFolder}/.env.debug",
-      "env": {
-        "AURACLAW_DEPLOYMENT_PROFILE": "development",
-        "AURACLAW_STORAGE_BACKEND": "memory",
-        "AURACLAW_LOG_LEVEL": "DEBUG",
-        "AURACLAW_HOST": "127.0.0.1",
-        "AURACLAW_RUNTIME_EVENT_BACKEND": "memory",
-        "AURACLAW_ARTIFACT_BACKEND": "local"
-      },
       "console": "integratedTerminal",
       "justMyCode": false,
       "presentation": { "group": "auraclaw", "order": 12 }
@@ -261,7 +165,7 @@
       "args": ["policy", "run", "--host", "127.0.0.1", "--port", "8007"],
       "cwd": "${workspaceFolder}",
       "python": "${workspaceFolder}/.venv/bin/python",
-      "envFile": "${workspaceFolder}/.env.hands-debug",
+      "envFile": "${workspaceFolder}/.env.debug",
       "console": "integratedTerminal",
       "justMyCode": false,
       "presentation": { "hidden": true, "group": "auraclaw", "order": 20 }
@@ -274,7 +178,7 @@
       "args": ["credential-proxy", "run", "--host", "127.0.0.1", "--port", "8008"],
       "cwd": "${workspaceFolder}",
       "python": "${workspaceFolder}/.venv/bin/python",
-      "envFile": "${workspaceFolder}/.env.hands-debug",
+      "envFile": "${workspaceFolder}/.env.debug",
       "console": "integratedTerminal",
       "justMyCode": false,
       "presentation": { "hidden": true, "group": "auraclaw", "order": 21 }
@@ -287,7 +191,7 @@
       "args": ["hands", "run", "--host", "127.0.0.1", "--port", "8006"],
       "cwd": "${workspaceFolder}",
       "python": "${workspaceFolder}/.venv/bin/python",
-      "envFile": "${workspaceFolder}/.env.hands-debug",
+      "envFile": "${workspaceFolder}/.env.debug",
       "preLaunchTask": "wait-for-policy-and-credential-proxy",
       "console": "integratedTerminal",
       "justMyCode": false,

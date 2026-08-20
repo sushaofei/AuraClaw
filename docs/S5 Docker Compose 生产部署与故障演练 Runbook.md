@@ -21,7 +21,7 @@ Docker Compose 不提供 Kubernetes HPA、PDB 或 NetworkPolicy。本方案以�
 - Compose `migrate` 默认目录为 `/app/migrations/mysql`（目标 `0016`）。PostgreSQL
   部署需设置 `AURACLAW_MIGRATIONS_DIRECTORY=/app/migrations`；
 - Kafka/Replay Router、SeaweedFS、Vault 和模型出口可从 `auraclaw-platform` 网络访问；
-- 部署机存在被 `.gitignore` 排除的 `.env.production`，变量名参考 `.env.example`；
+- 部署机存在被 `.gitignore` 排除的 `.env.production`，从 `.env.production.example` 复制后填真实密钥；
 - Secret 不写入 Compose、镜像、命令参数或日志。
 - 蓝绿窗口按两套完整集群预留 CPU、内存、数据库连接和外部配额；容量不足时不得开始切流。
 
