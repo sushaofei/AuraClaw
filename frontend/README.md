@@ -51,9 +51,9 @@ uv run auraclaw serve            # 12 个生产入口，端口 8000–8011
 `/auraclaw-api` 只在设置了 `AURACLAW_DEV_API_TARGET`（或 `npm run dev:remote`）时由开发服务器代理到后端。
 该页面从 Canonical Timeline 读取 Capability/Skill/Tool 证据，不直接访问 MySQL。
 
-后端始终使用统一 Runtime Worker、Model Gateway 与 Runtime Event 发布链；本地和部署环境
-只通过各自 `.env.development` / `.env.production` 文件选择资源，文件内容不含环境标签。
-已部署外部 Runtime 时设置 `AURACLAW_RUNTIME_ENABLED=false`。
+后端始终使用统一 Runtime Worker、Model Gateway 与 Runtime Event 发布链；本地用 `.env.debug`，
+部署用 `.env.production`，只换资源不换执行逻辑。已部署外部 Runtime 时设置
+`AURACLAW_RUNTIME_ENABLED=false`。
 
 ## 构建与测试
 

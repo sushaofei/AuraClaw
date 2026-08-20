@@ -57,6 +57,18 @@ def load_secret_files(environ: dict[str, str] | None = None) -> None:
         selected[variable] = value
 
 
+def _resolve_settings_env_file() -> str | None:
+    if os.environ.get("AURACLAW_DISABLE_ENV_FILE") == "1":
+        return None
+    configured = os.environ.get("AURACLAW_ENV_FILE")
+    if configured:
+        return configured
+    for candidate in (".env.debug", ".env"):
+        if Path(candidate).is_file():
+            return candidate
+    return None
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env", env_prefix="AURACLAW_", extra="ignore"
@@ -512,4 +524,4 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     load_secret_files()
-    return Settings()
+    return Settings(_env_file=_resolve_settings_env_file())

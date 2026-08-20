@@ -8,6 +8,7 @@
 | 路径 | 用途 |
 |------|------|
 | `compose.production.yml` | 生产 Compose 模板 |
+| `.env.production.example` | 生产 env 模板（复制为 gitignored `.env.production`） |
 | `.env.production` | 部署环境变量（0600，勿提交） |
 | `.runtime/compose-secrets/` | Compose secrets 文件（0700/0600） |
 | `deploy/nginx.conf` | Ingress 配置 |

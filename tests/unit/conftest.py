@@ -27,6 +27,7 @@ def _clear_ambient_settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in list(os.environ):
         if name.startswith(_AMBIENT_PREFIXES) or name.endswith("_DATABASE_URL"):
             monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("AURACLAW_DISABLE_ENV_FILE", "1")
     get_settings.cache_clear()
     for value in vars(providers).values():
         cache_clear = getattr(value, "cache_clear", None)
