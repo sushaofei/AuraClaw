@@ -8,7 +8,12 @@ from datetime import timedelta
 from typing import Protocol
 
 from auraclaw.contracts.events import CanonicalEvent
-from auraclaw.control.ports import ControlStateStore, RunnableItem, RuntimeBudget
+from auraclaw.control.ports import (
+    DEFAULT_RUNTIME_MAX_STEPS,
+    ControlStateStore,
+    RunnableItem,
+    RuntimeBudget,
+)
 from auraclaw.session.ports import ClaimedOutboxRecord
 
 logger = logging.getLogger(__name__)
@@ -141,7 +146,7 @@ class RunnableFeedConsumer:
         budget = RuntimeBudget()
         if isinstance(configured, dict):
             budget = RuntimeBudget(
-                max_steps=int(configured.get("max_steps", 16)),
+                max_steps=int(configured.get("max_steps", DEFAULT_RUNTIME_MAX_STEPS)),
                 max_output_tokens=int(configured.get("max_output_tokens", 8192)),
                 max_cost=(
                     float(configured["max_cost"])
@@ -181,7 +186,7 @@ class RunnableFeedConsumer:
                 configured = event.payload.get("budget")
                 if isinstance(configured, dict):
                     budget = RuntimeBudget(
-                        max_steps=int(configured.get("max_steps", 16)),
+                        max_steps=int(configured.get("max_steps", DEFAULT_RUNTIME_MAX_STEPS)),
                         max_output_tokens=int(configured.get("max_output_tokens", 8192)),
                         max_cost=(
                             float(configured["max_cost"])

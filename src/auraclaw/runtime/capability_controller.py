@@ -282,7 +282,7 @@ class RuntimeCapabilityController:
             requested = [
                 str(value)
                 for value in call.arguments.get("capability_ids", ())
-                if str(value) in candidates
+                if str(value)
             ][: self._max_loaded]
             result = await self._client.execute(
                 assignment,
@@ -300,6 +300,12 @@ class RuntimeCapabilityController:
                 payload.get("capabilities", ()),
                 allowed_ids=set(requested),
             )
+            hydrated = {
+                str(item["capability_id"]): dict(item)
+                for item in payload.get("capabilities", ())
+                if isinstance(item, dict) and item.get("capability_id")
+            }
+            current["candidates"] = {**candidates, **hydrated}
             current["load_count"] = load_count + 1
             return CapabilityExecution(result=result, state=current)
 

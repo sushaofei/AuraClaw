@@ -12,6 +12,7 @@ from auraclaw.config import Settings
 from auraclaw.contracts.capabilities import (
     CapabilityStatus,
     CapabilityTrustLevel,
+    McpAuthStrategy,
     McpOAuthConfiguration,
     McpServerDefinition,
 )
@@ -372,6 +373,92 @@ def test_mcp_egress_rejects_private_dns_and_redirects() -> None:
         )
         with pytest.raises(CredentialAccessError, match="redirects"):
             await redirect(_request(), "client-secret")
+
+    asyncio.run(scenario())
+
+
+def test_mcp_egress_allows_loopback_http_when_private_host_allowlisted() -> None:
+    async def scenario() -> None:
+        class LoopbackSender:
+            def __init__(self) -> None:
+                self.calls: list[dict[str, object]] = []
+
+            async def send(self, **request: object) -> McpEgressResponse:
+                self.calls.append(request)
+                return McpEgressResponse(
+                    status_code=200,
+                    headers={"content-type": "application/json"},
+                    content=b'{"jsonrpc":"2.0","id":1,"result":{"ok":true}}',
+                )
+
+        sender = LoopbackSender()
+        adapter = ManagedMcpEgressAdapter(
+            McpServerDefinition(
+                server_id="java-mcp",
+                tenant_id="development",
+                title="Java Agent Runtime MCP Gateway",
+                endpoint="http://127.0.0.1:48080/rpc-api/agent-runtime/mcp",
+                credential_ref="vault/java-mcp#client_secret",
+                trust_level=CapabilityTrustLevel.TENANT_VERIFIED,
+                allowed_tool_prefixes=("",),
+                allowed_private_hosts=("127.0.0.1",),
+                status=CapabilityStatus.ACTIVE,
+                enabled=True,
+            ),
+            resolver=_Resolver(("127.0.0.1",)),
+            sender=sender,
+        )
+        await adapter(
+            {
+                "server_id": "java-mcp",
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "agent.runtime.ping",
+                    "arguments": {},
+                    "_meta": {
+                        MCP_PROTOCOL_VERSION_META_KEY: MCP_PROTOCOL_VERSION,
+                        MCP_CLIENT_CAPABILITIES_META_KEY: {},
+                    },
+                },
+            },
+            "local-java-mcp-debug",
+        )
+        assert sender.calls
+        assert (
+            sender.calls[0]["url"]
+            == "http://127.0.0.1:48080/rpc-api/agent-runtime/mcp"
+        )
+        assert sender.calls[0]["approved_ip"] == "127.0.0.1"
+
+    asyncio.run(scenario())
+
+
+def test_mcp_egress_rejects_public_http_even_when_host_allowlisted() -> None:
+    async def scenario() -> None:
+        sender = _Sender()
+        server = McpServerDefinition(
+            server_id="github-mcp",
+            tenant_id="tenant-a",
+            title="Public HTTP MCP",
+            endpoint="http://mcp.example.com/mcp",
+            credential_ref="vault/github-mcp#client_secret",
+            auth_strategy=McpAuthStrategy.WORKLOAD_TRUSTED_CONTEXT,
+            allowed_tool_prefixes=("github.",),
+            allowed_private_hosts=("mcp.example.com",),
+            status=CapabilityStatus.ACTIVE,
+            enabled=True,
+        )
+        adapter = ManagedMcpEgressAdapter(
+            server,
+            resolver=_Resolver(("93.184.216.34",)),
+            sender=sender,
+        )
+
+        with pytest.raises(CredentialAccessError, match="requires HTTPS"):
+            await adapter(_request(), "client-secret")
+        assert sender.calls == []
 
     asyncio.run(scenario())
 

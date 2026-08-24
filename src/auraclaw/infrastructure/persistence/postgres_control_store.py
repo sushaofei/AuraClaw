@@ -10,6 +10,7 @@ from auraclaw.contracts.errors import (
     LeaseConflictError,
 )
 from auraclaw.control.ports import (
+    DEFAULT_RUNTIME_MAX_STEPS,
     ClaimedAssignment,
     ClaimedRunnable,
     RunnableItem,
@@ -977,7 +978,7 @@ class PostgresControlStateStore(_LazyPool):
     def _budget(data: Any) -> RuntimeBudget:
         values = dict(data or {})
         return RuntimeBudget(
-            max_steps=int(values.get("max_steps", 16)),
+            max_steps=int(values.get("max_steps", DEFAULT_RUNTIME_MAX_STEPS)),
             max_output_tokens=int(values.get("max_output_tokens", 8192)),
             max_cost=float(values["max_cost"]) if values.get("max_cost") is not None else None,
         )

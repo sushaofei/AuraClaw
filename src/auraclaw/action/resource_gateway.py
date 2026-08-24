@@ -37,7 +37,9 @@ class DefaultResourceContentScanner:
             "application/json",
             "application/xml",
             "application/yaml",
-        }:
+        } or (
+            media_type.startswith("application/") and media_type.endswith("+json")
+        ):
             if b"\x00" in content:
                 raise SchemaValidationError("text Resource contains null bytes")
             text = content.decode("utf-8", errors="replace")
@@ -66,6 +68,7 @@ class ManagedResourceGateway:
         allowed_media_types: tuple[str, ...] = (
             "text/*",
             "application/json",
+            "application/schema+json",
             "application/xml",
             "application/yaml",
             "application/octet-stream",
@@ -258,10 +261,17 @@ def _content_bytes(content: HandsResourceContent) -> bytes:
 
 
 def _media_type_allowed(media_type: str, allowed: tuple[str, ...]) -> bool:
+    normalized = media_type.split(";", 1)[0].strip().lower()
+    structured_json = (
+        normalized.startswith("application/") and normalized.endswith("+json")
+    )
     return any(
-        candidate == media_type
-        or candidate.endswith("/*")
-        and media_type.startswith(candidate.removesuffix("*"))
+        candidate.lower() == normalized
+        or (
+            candidate.endswith("/*")
+            and normalized.startswith(candidate.removesuffix("*").lower())
+        )
+        or (candidate.lower() == "application/json" and structured_json)
         for candidate in allowed
     )
 

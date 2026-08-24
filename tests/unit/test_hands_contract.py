@@ -88,7 +88,12 @@ class _DenyPolicy(PolicyEngine):
         return PolicyDecision.DENY
 
 
-def _assignment(*, tenant_id: str = "tenant-a", runtime_id: str = "runtime-a") -> RuntimeAssignment:
+def _assignment(
+    *,
+    tenant_id: str = "tenant-a",
+    runtime_id: str = "runtime-a",
+    user_id: str | None = "user-101",
+) -> RuntimeAssignment:
     return RuntimeAssignment(
         tenant_id=tenant_id,
         root_session_id="session-root",
@@ -100,6 +105,7 @@ def _assignment(*, tenant_id: str = "tenant-a", runtime_id: str = "runtime-a") -
         role="worker",
         resource_profile={},
         deadline=datetime.now(UTC) + timedelta(minutes=1),
+        user_id=user_id,
     )
 
 
@@ -113,6 +119,7 @@ def _trusted(assignment: RuntimeAssignment) -> HandsTrustedContext:
         lease_id=assignment.lease_id,
         fencing_token=assignment.fencing_token,
         deadline=assignment.deadline,
+        user_id=assignment.user_id,
     )
 
 
@@ -254,6 +261,7 @@ def test_hands_list_call_resource_prompt_and_idempotency(kind: str) -> None:
             )
             assert first.status == "success"
             assert recorder.invocations[0].tenant_id == "tenant-a"
+            assert recorder.invocations[0].user_id == "user-101"
             repeated = await client.call_tool(
                 assignment,
                 HandsToolCall(

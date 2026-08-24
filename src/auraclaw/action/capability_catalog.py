@@ -23,7 +23,8 @@ from auraclaw.contracts.tools import (
 CAPABILITY_SEARCH_TOOL_NAME = "auraclaw.capabilities.search"
 CAPABILITY_LOAD_TOOL_NAME = "auraclaw.capabilities.load"
 SKILL_RESOLVE_TOOL_NAME = "auraclaw.skills.resolve"
-_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_.-]+")
+_LATIN_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_.-]+")
+_CJK_RUN_PATTERN = re.compile(r"[\u3400-\u9FFF\uF900-\uFAFF]+")
 
 
 class SkillCatalogSource(Protocol):
@@ -265,8 +266,8 @@ class CapabilityLoadExecutor:
         del capability
         loaded: list[dict[str, Any]] = []
         raw_ids = tuple(invocation.arguments.get("capability_ids", ()))
-        if len(raw_ids) > 8:
-            raise ValueError("Capability load limit is 8")
+        if len(raw_ids) > 24:
+            raise ValueError("Capability load limit is 24")
         for raw_id in raw_ids:
             capability_id = str(raw_id)
             descriptor = await self.catalog.get(
@@ -481,7 +482,26 @@ def _optional(value: object) -> str | None:
 
 
 def _tokens(value: str) -> tuple[str, ...]:
-    return tuple(token.casefold() for token in _TOKEN_PATTERN.findall(value))
+    tokens: list[str] = []
+    seen: set[str] = set()
+
+    def add(token: str) -> None:
+        folded = token.casefold().strip()
+        if not folded or folded in seen:
+            return
+        seen.add(folded)
+        tokens.append(folded)
+
+    for token in _LATIN_TOKEN_PATTERN.findall(value):
+        add(token)
+        for part in re.split(r"[_.-]+", token):
+            add(part)
+    for run in _CJK_RUN_PATTERN.findall(value):
+        add(run)
+        if len(run) >= 2:
+            for index in range(len(run) - 1):
+                add(run[index : index + 2])
+    return tuple(tokens)
 
 
 def _score(
@@ -492,7 +512,8 @@ def _score(
         return 0
     name = capability.canonical_name.casefold()
     title = capability.title.casefold()
-    tags = {tag.casefold() for tag in capability.tags}
+    tags = tuple(tag.casefold() for tag in capability.tags)
+    tag_haystack = " ".join(tags)
     description = capability.description.casefold()
     score = 0
     for token in query_tokens:
@@ -500,7 +521,7 @@ def _score(
             score += 8
         if token in title:
             score += 5
-        if token in tags:
+        if token in tags or token in tag_haystack:
             score += 3
         if token in description:
             score += 1

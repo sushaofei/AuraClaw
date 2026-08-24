@@ -149,6 +149,7 @@ class HandsGateway:
             actor_id=trusted.runtime_id,
             approval_id=call.approval_id,
             credential_ref=call.credential_ref,
+            user_id=trusted.user_id,
         )
         result = await self._gateway.execute(invocation)
         return _tool_result(result)

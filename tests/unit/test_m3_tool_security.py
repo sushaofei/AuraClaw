@@ -12,6 +12,7 @@ from auraclaw.contracts.errors import (
     ApprovalValidationError,
     ArtifactAccessError,
     CredentialAccessError,
+    PolicyDeniedError,
     SandboxViolationError,
     SchemaValidationError,
 )
@@ -145,6 +146,31 @@ def _gateway(
         ),
         artifacts,
     )
+
+
+def test_tool_gateway_surfaces_controlled_boundary_reason() -> None:
+    class DenyingHands:
+        async def execute(self, invocation: ToolInvocation, capability: ToolCapability) -> object:
+            del invocation, capability
+            raise PolicyDeniedError("chaintower MCP call is missing trusted user context")
+
+    async def scenario() -> None:
+        artifacts = ArtifactStore(
+            InMemoryObjectStorage(), signing_key=b"m3-test-signing-key"
+        )
+        gateway = ToolGateway(
+            registry=ToolRegistry((_capability(ToolPermission.READ_ONLY),)),
+            policy=PolicyEngine(),
+            approvals=InMemoryApprovalProjection(),
+            hands=DenyingHands(),
+            artifacts=artifacts,
+        )
+        result = await gateway.execute(_invocation())
+        assert result.status.value == "denied"
+        assert result.error_code == "policy_denied"
+        assert result.summary == "chaintower MCP call is missing trusted user context"
+
+    asyncio.run(scenario())
 
 
 def test_schema_validation_happens_before_hands_execution() -> None:

@@ -433,6 +433,11 @@ var getOrderTool = SyncToolSpecification.builder()
 | `allowed_tool_prefixes` | 对账和出站都会过滤；`order.create` 能进，`admin.delete` 会被丢掉 |
 | `enabled` + `oauth` + `credential_ref` | 缺一不可，否则远端 Transport 无法构造 |
 
+本地联调若 Java MCP 仍发布旧工具名，可在 Server 的 `metadata.tool_name_aliases` 中配置
+“远端名 → AuraClaw Skill 标准名”。Connector 只在 MCP 边界做名称转换；若远端 schema
+要求单一 `input` 参数，也会在同一边界补齐包装。生产配置应优先让 Java 直接发布标准名，
+不要把别名规则写进 Skill 或模型。
+
 Credential Registry 中对应引用必须满足：
 
 - `provider` == `server_id`（`order-mcp`）

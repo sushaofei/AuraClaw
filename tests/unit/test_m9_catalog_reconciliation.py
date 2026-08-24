@@ -17,6 +17,7 @@ from auraclaw.contracts.capabilities import (
     CapabilityKind,
     CapabilityStatus,
     CapabilityTrustLevel,
+    McpAuthStrategy,
     McpOAuthConfiguration,
     McpServerDefinition,
 )
@@ -31,6 +32,7 @@ from auraclaw.infrastructure.connectors.mcp.connector import ManagedMcpConnector
 from auraclaw.infrastructure.connectors.mcp.wire import (
     MCP_AURACLAW_INVOCATION_ID_META_KEY,
     MCP_AURACLAW_TENANT_ID_META_KEY,
+    MCP_AURACLAW_USER_ID_META_KEY,
     MCP_LEGACY_PROTOCOL_VERSION,
 )
 
@@ -229,7 +231,11 @@ class _Cache:
         return 1
 
 
-def _invocation(capability: ToolCapability) -> ToolInvocation:
+def _invocation(
+    capability: ToolCapability,
+    *,
+    user_id: str | None = None,
+) -> ToolInvocation:
     return ToolInvocation(
         tool_invocation_id="tool-1",
         tenant_id="tenant-a",
@@ -244,6 +250,7 @@ def _invocation(capability: ToolCapability) -> ToolInvocation:
         deadline=None,
         fencing_token=1,
         actor_id="runtime-1",
+        user_id=user_id,
     )
 
 
@@ -393,3 +400,242 @@ def test_legacy_connector_uses_initialize_and_preserves_invocation_id() -> None:
         }
 
     asyncio.run(scenario())
+
+
+def test_connector_applies_configured_java_tool_alias_and_input_wrapper() -> None:
+    async def scenario() -> None:
+        server = _server(
+            protocol_revision=MCP_LEGACY_PROTOCOL_VERSION,
+        ).model_copy(
+            update={
+                "server_id": "java-mcp",
+                "metadata": {
+                    "tool_name_aliases": {
+                        "price_insight.dataset.profile": "procurement.price.dataset.profile",
+                    }
+                },
+            }
+        )
+        credentials = _RemoteCredentials()
+        connector = ManagedMcpConnector(
+            server,
+            credentials=credentials,
+            policy=_AllowPolicy(),
+        )
+
+        # The fake server exposes the Java naming/schema shape for this one tool.
+        original_invoke = credentials.invoke
+
+        async def invoke(**arguments: object) -> dict[str, object]:
+            request = arguments["request"]
+            assert isinstance(request, dict)
+            if request["method"] == "tools/list":
+                request = dict(request)
+                request["result"] = None
+                return {
+                    "jsonrpc": "2.0",
+                    "id": request["id"],
+                    "result": {
+                        "tools": [
+                            {
+                                "name": "price_insight.dataset.profile",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "input": {"type": "object"}
+                                    },
+                                    "required": ["input"],
+                                },
+                            }
+                        ]
+                    },
+                }
+            if request["method"] == "tools/call":
+                params = request["params"]
+                assert isinstance(params, dict)
+                assert params["name"] == "price_insight.dataset.profile"
+                assert params["arguments"] == {"input": {"filter": {"anchor": "market"}}}
+            return await original_invoke(**arguments)
+
+        credentials.invoke = invoke  # type: ignore[method-assign]
+        snapshot = await connector.snapshot(_hands_trusted())
+        assert snapshot.tools[0].name == "procurement.price.dataset.profile"
+        result = await connector.call_tool(
+            _hands_trusted(),
+            name="procurement.price.dataset.profile",
+            arguments={"filter": {"anchor": "market"}},
+            invocation_id="java-profile-1",
+        )
+        assert result.status == "success"
+
+    asyncio.run(scenario())
+
+
+def test_remote_price_insight_tools_get_search_tags_and_semver() -> None:
+    from auraclaw.action.catalog_reconciler import (
+        _capability_semver,
+        _normalize_tools,
+        _tool_search_tags,
+    )
+    from auraclaw.contracts.hands import HandsToolDescriptor
+
+    assert _capability_semver("1") == "1.0.0"
+    server = _server().model_copy(
+        update={
+            "server_id": "java-mcp",
+            "tenant_id": "1",
+            "allowed_tool_prefixes": ("",),
+            "metadata": {
+                "search_tags": ["价格洞察"],
+                "tool_name_aliases": {
+                    "price_insight.dataset.profile": (
+                        "procurement.price.dataset.profile"
+                    )
+                },
+            },
+        }
+    )
+    tags = _tool_search_tags(server, "procurement.price.dataset.profile")
+    assert "价格洞察" in tags
+    assert "price_insight.dataset.profile" in tags
+    descriptors = _normalize_tools(
+        server,
+        (
+            HandsToolDescriptor(
+                name="procurement.price.dataset.profile",
+                version="1",
+                description="Profile a price dataset",
+                read_only=True,
+            ),
+        ),
+    )
+    assert descriptors[0].version == "1.0.0"
+    assert "价格洞察" in descriptors[0].tags
+
+
+def test_connector_tool_executor_forwards_trusted_user_id() -> None:
+    async def scenario() -> None:
+        store = InMemoryCapabilityCatalogStore()
+        catalog = CapabilityCatalog(store)
+        server = McpServerDefinition(
+            server_id="java-mcp",
+            tenant_id="tenant-a",
+            title="Java MCP",
+            endpoint="https://java-mcp.example.com/mcp",
+            protocol_revision=MCP_LEGACY_PROTOCOL_VERSION,
+            credential_ref="vault/java-mcp#client_secret",
+            auth_strategy=McpAuthStrategy.WORKLOAD_TRUSTED_CONTEXT,
+            trust_level=CapabilityTrustLevel.TENANT_VERIFIED,
+            allowed_tool_prefixes=("github.",),
+            status=CapabilityStatus.ACTIVE,
+            enabled=True,
+        )
+        await catalog.register_server(server)
+        credentials = _RemoteCredentials()
+        connector = ManagedMcpConnector(
+            server,
+            credentials=credentials,
+            policy=_AllowPolicy(),
+        )
+        tools = ToolRegistry()
+        router = RoutedHandsExecutor(_UnexpectedHands(), {})
+        reconciler = CapabilityCatalogReconciler(
+            catalog=catalog,
+            store=store,
+            connectors={server.server_id: connector},
+            tool_registry=tools,
+            hands_router=router,
+        )
+        result = await reconciler.reconcile_server(server)
+        assert result.status == CapabilityStatus.ACTIVE
+        capability = tools.get("github.issue.get", "2.1.0")
+        with pytest.raises(PolicyDeniedError, match="trusted user"):
+            await router.execute(_invocation(capability), capability)
+        assert await router.execute(
+            _invocation(capability, user_id="101"),
+            capability,
+        ) == {"number": 21, "state": "open"}
+        call_request = next(
+            call["request"]
+            for call in reversed(credentials.calls)
+            if call["request"]["method"] == "tools/call"  # type: ignore[index]
+        )
+        assert call_request["_auraclaw_identity"]["user_id"] == "101"  # type: ignore[index]
+        assert call_request["params"]["_meta"][  # type: ignore[index]
+            MCP_AURACLAW_USER_ID_META_KEY
+        ] == "101"
+
+    asyncio.run(scenario())
+
+
+def test_mcp_business_status_is_not_treated_as_tool_result_status() -> None:
+    async def scenario() -> None:
+        server = _server()
+        credentials = _RemoteCredentials()
+        original = credentials.invoke
+
+        async def invoke(**arguments: object) -> dict[str, object]:
+            request = arguments["request"]
+            assert isinstance(request, dict)
+            if request["method"] == "tools/call":
+                return {
+                    "jsonrpc": "2.0",
+                    "id": request["id"],
+                    "result": {
+                        "structuredContent": {
+                            "status": "PASS",
+                            "findings": [],
+                            "source_revision": "rev-1",
+                        }
+                    },
+                }
+            return await original(**arguments)
+
+        credentials.invoke = invoke  # type: ignore[method-assign]
+        connector = ManagedMcpConnector(
+            server,
+            credentials=credentials,
+            policy=_AllowPolicy(),
+        )
+        result = await connector.call_tool(
+            _hands_trusted(),
+            name="github.issue.get",
+            arguments={"number": 21},
+            invocation_id="quality-pass-1",
+        )
+        assert result.status == "success"
+        assert result.content == {
+            "status": "PASS",
+            "findings": [],
+            "source_revision": "rev-1",
+        }
+
+    asyncio.run(scenario())
+
+
+def test_trusted_remote_tool_annotations_use_safe_defaults_when_missing() -> None:
+    from datetime import UTC, datetime
+
+    from auraclaw.action.catalog_reconciler import _tool_capability
+    from auraclaw.contracts.capabilities import CapabilityDescriptor
+
+    descriptor = CapabilityDescriptor(
+        capability_id="cap-tool-1",
+        kind=CapabilityKind.TOOL,
+        server_id="remote-mcp",
+        canonical_name="remote.tool",
+        version="1.0.0",
+        content_digest="digest-1",
+        title="Remote tool",
+        updated_at=datetime.now(UTC),
+        metadata={"source": {}},
+    )
+
+    capability = _tool_capability(
+        descriptor,
+        "remote-mcp",
+        trust_annotations=True,
+    )
+
+    assert capability.permission.value == "write-with-approval"
+    assert capability.risk_level.value == "high"

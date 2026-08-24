@@ -25,6 +25,7 @@ _SECRET_FILE_VARIABLES = {
     "AURACLAW_ARTIFACT_SERVICE_WORKLOAD_TOKEN",
     "AURACLAW_POLICY_WORKLOAD_TOKEN",
     "AURACLAW_DELIVERY_WORKLOAD_TOKEN",
+    "AURACLAW_STREAMING_GATEWAY_WORKLOAD_TOKEN",
     "AURACLAW_CHAINTOWER_WORKLOAD_TOKEN",
     "AURACLAW_AGENT_CONTEXT_SIGNING_KEYS_JSON",
     "AURACLAW_LEASE_SIGNING_KEY",
@@ -89,6 +90,8 @@ class Settings(BaseSettings):
     artifact_port: int = 8009
     streaming_port: int = 8010
     delivery_port: int = 8011
+    ingress_port: int = 8080
+    ingress_enabled: bool = True
     lease_signing_key: SecretStr | None = None
     allow_insecure_identity_headers: bool | None = None
     chaintower_workload_token: SecretStr | None = None
@@ -108,6 +111,7 @@ class Settings(BaseSettings):
     artifact_service_workload_token: SecretStr | None = None
     policy_workload_token: SecretStr | None = None
     delivery_workload_token: SecretStr | None = None
+    streaming_gateway_workload_token: SecretStr | None = None
     session_base_url: str = "http://127.0.0.1:8001"
     projection_base_url: str = "http://127.0.0.1:8002"
     control_base_url: str = "http://127.0.0.1:8003"
@@ -122,6 +126,7 @@ class Settings(BaseSettings):
     java_api_servers_json: str = "[]"
     debug_vault_secrets_json: str = "{}"
     mcp_reconcile_interval_seconds: float = Field(default=60.0, ge=5.0, le=3600.0)
+    mcp_trust_remote_tool_annotations: bool = False
     model_skill_source_enabled: bool = True
     model_skill_source_tenant_id: int = Field(default=1, ge=0)
     model_skill_target_tenant_id: str = Field(default="development", min_length=1)
@@ -496,6 +501,7 @@ class Settings(BaseSettings):
             "artifact-service": self.artifact_service_workload_token,
             "policy": self.policy_workload_token,
             "delivery-worker": self.delivery_workload_token,
+            "streaming-gateway": self.streaming_gateway_workload_token,
         }
         token = tokens.get(service_name)
         return token.get_secret_value() if token is not None else None

@@ -140,6 +140,7 @@ services:
       AURACLAW_RUNTIME_WORKLOAD_TOKEN_FILE: /run/secrets/runtime_workload_token
       AURACLAW_POLICY_WORKLOAD_TOKEN_FILE: /run/secrets/policy_workload_token
       AURACLAW_DELIVERY_WORKLOAD_TOKEN_FILE: /run/secrets/delivery_workload_token
+      AURACLAW_STREAMING_GATEWAY_WORKLOAD_TOKEN_FILE: /run/secrets/streaming_gateway_workload_token
     secrets:
       - session_database_url
       - lease_signing_key
@@ -149,6 +150,7 @@ services:
       - runtime_workload_token
       - policy_workload_token
       - delivery_workload_token
+      - streaming_gateway_workload_token
     command: ["session", "run", "--host", "0.0.0.0", "--port", "8001"]
     expose: ["8001"]
     healthcheck: *healthcheck
@@ -451,7 +453,10 @@ services:
       AURACLAW_RUNTIME_EVENT_BACKEND: ${AURACLAW_RUNTIME_EVENT_BACKEND:-kafka}
       KAFKA_HOST: ${KAFKA_HOST:-host.docker.internal}
       KAFKA_PORT: ${KAFKA_PORT:-9092}
-    secrets: [streaming_database_url]
+      AURACLAW_STREAMING_GATEWAY_WORKLOAD_TOKEN_FILE: /run/secrets/streaming_gateway_workload_token
+    secrets:
+      - streaming_database_url
+      - streaming_gateway_workload_token
     command: ["streaming", "run", "--host", "0.0.0.0", "--port", "8010"]
     expose: ["8010"]
     healthcheck: *healthcheck
@@ -560,6 +565,7 @@ secrets:
   credential_proxy_workload_token: {file: "${AURACLAW_SECRET_DIR:-.runtime/compose-secrets}/credential_proxy_workload_token"}
   artifact_service_workload_token: {file: "${AURACLAW_SECRET_DIR:-.runtime/compose-secrets}/artifact_service_workload_token"}
   delivery_workload_token: {file: "${AURACLAW_SECRET_DIR:-.runtime/compose-secrets}/delivery_workload_token"}
+  streaming_gateway_workload_token: {file: "${AURACLAW_SECRET_DIR:-.runtime/compose-secrets}/streaming_gateway_workload_token"}
   lease_signing_key: {file: "${AURACLAW_SECRET_DIR:-.runtime/compose-secrets}/lease_signing_key"}
   model_api_key: {file: "${AURACLAW_SECRET_DIR:-.runtime/compose-secrets}/model_api_key"}
   vault_token: {file: "${AURACLAW_SECRET_DIR:-.runtime/compose-secrets}/vault_token"}

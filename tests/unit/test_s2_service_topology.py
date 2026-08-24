@@ -4,10 +4,11 @@ import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from auraclaw.composition.api import create_app
-from auraclaw.composition.cli import build_parser, main
+from auraclaw.composition.cli import _serve_topology, build_parser, main
 from auraclaw.composition.services import (
     SERVICE_BY_COMMAND,
     create_service_app,
@@ -53,6 +54,8 @@ def test_cli_defines_all_twelve_production_entrypoints() -> None:
     assert SERVICE_BY_COMMAND == expected
     settings = _settings()
     assert len({service_spec(command, settings).port for command in expected}) == 12
+    assert settings.ingress_port == 8080
+    assert settings.ingress_enabled is True
 
     for command in expected:
         argv = (
@@ -80,6 +83,16 @@ def test_serve_starts_all_twelve_production_entrypoints() -> None:
     )
     assert started == list(SERVICE_BY_COMMAND)
     assert uvicorn_calls == []
+
+
+def test_serve_rejects_process_local_runtime_event_bus() -> None:
+    settings = _settings(
+        storage_backend="memory",
+        runtime_event_backend="memory",
+    )
+
+    with pytest.raises(ValueError, match="shared SQL storage or Kafka"):
+        _serve_topology(settings, host="127.0.0.1")
 
 
 def test_projection_watch_interval_reaches_worker_lifecycle() -> None:

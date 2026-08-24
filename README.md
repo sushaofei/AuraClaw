@@ -138,12 +138,16 @@ Review Evidence 和 Artifact lineage。
 | 模板 | 复制为 | 用途 |
 |------|--------|------|
 | `.env.example` | — | 变量目录。不要直接当运行配置。 |
-| `.env.debug.example` | `.env.debug` | 本地 12 入口 debug，内存存储，开箱即用。 |
+| `.env.debug.example` | `.env.debug` | 本地 12 入口 debug；业务状态用内存，跨进程 SSE 用本机 Kafka。 |
 | `.env.production.example` | `.env.production` | Compose 生产发布。填镜像 digest、库密码、模型、Vault、SeaweedFS。 |
 
 ## 本地启动
 
-`auraclaw serve` 会按生产拓扑拉起全部 12 个独立入口（端口 8000–8011），装配与生产相同，差异只来自环境配置：
+`auraclaw serve` 会按生产拓扑拉起全部 12 个独立入口（端口 8000–8011），并额外在
+`:8080` 提供本地 Ingress：`/v1/streams/*` 去 Streaming Gateway `:8010`，其余去
+Task API `:8000`。Java 智问代理应指向 `http://127.0.0.1:8080`，不要直连 8000。
+装配与生产相同，差异只来自环境配置。多进程 SSE 必须使用共享 SQL 或 Kafka；纯内存
+事件后端会在启动前明确拒绝，避免出现服务存活但流中没有 Runtime Event 的假成功：
 
 ```bash
 uv sync --extra dev

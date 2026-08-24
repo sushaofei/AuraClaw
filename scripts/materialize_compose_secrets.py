@@ -30,6 +30,7 @@ SECRET_VARIABLES = {
     "credential_proxy_workload_token": "AURACLAW_CREDENTIAL_PROXY_WORKLOAD_TOKEN",
     "artifact_service_workload_token": "AURACLAW_ARTIFACT_SERVICE_WORKLOAD_TOKEN",
     "delivery_workload_token": "AURACLAW_DELIVERY_WORKLOAD_TOKEN",
+    "streaming_gateway_workload_token": "AURACLAW_STREAMING_GATEWAY_WORKLOAD_TOKEN",
     "lease_signing_key": "AURACLAW_LEASE_SIGNING_KEY",
     "model_api_key": "AURACLAW_MODEL_API_KEY",
     "vault_token": "AURACLAW_CREDENTIAL_VAULT_TOKEN",
