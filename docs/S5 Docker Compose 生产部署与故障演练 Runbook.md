@@ -21,7 +21,7 @@ Docker Compose 不提供 Kubernetes HPA、PDB 或 NetworkPolicy。本方案以�
 - Compose `migrate` 默认目录为 `/app/migrations/mysql`（目标 `0016`）。PostgreSQL
   部署需设置 `AURACLAW_MIGRATIONS_DIRECTORY=/app/migrations`；
 - Kafka/Replay Router、SeaweedFS、Vault 和模型出口可从 `auraclaw-platform` 网络访问；
-- 部署机存在被 `.gitignore` 排除的 `.env.production`，从 `.env.production.example` 复制后填真实密钥；
+- 部署机存在被 `.gitignore` 排除的 `.env.prod`，从 `.env.prod.example` 复制后填真实密钥；
 - Secret 不写入 Compose、镜像、命令参数或日志。
 - 蓝绿窗口按两套完整集群预留 CPU、内存、数据库连接和外部配额；容量不足时不得开始切流。
 
@@ -41,18 +41,18 @@ docker network inspect auraclaw-platform >/dev/null 2>&1 ||
 
 ```bash
 uv run python scripts/materialize_compose_secrets.py \
-  --env-file .env.production --output-dir .runtime/compose-secrets
+  --env-file .env.prod --output-dir .runtime/compose-secrets
 
-uv run python scripts/compose_preflight.py --env-file .env.production
+uv run python scripts/compose_preflight.py --env-file .env.prod
 
-docker compose --env-file .env.production \
+docker compose --env-file .env.prod \
   -f compose.production.yml --profile migrate config --quiet
 
-docker compose --env-file .env.production \
+docker compose --env-file .env.prod \
   -f compose.production.yml run --rm migrate migrate status \
   --directory /app/migrations/mysql
 
-docker compose --env-file .env.production \
+docker compose --env-file .env.prod \
   -f compose.production.yml run --rm migrate migrate up \
   --target 0016 --directory /app/migrations/mysql
 ```
@@ -62,13 +62,13 @@ docker compose --env-file .env.production \
 均为 expand 迁移。滚动窗口内不得删除 N-1 仍读取的列、事件字段或内部 API；contract 迁移
 只能在旧版本实例归零且兼容窗口结束后，以后续显式迁移执行。
 
-Secret 生成目录必须与 `.env.production` 的 `AURACLAW_SECRET_DIR` 一致；目录权限为 `0700`，
+Secret 生成目录必须与 `.env.prod` 的 `AURACLAW_SECRET_DIR` 一致；目录权限为 `0700`，
 29 个文件权限为 `0600`，文件内容不会输出。既有数据库如果已由旧流程完整执行到目标版本、但
 尚无 migration ledger，先确认 `status` 全部显示 pending，再且仅再执行一次：
 
 ```bash
 # MySQL（默认）
-docker compose --env-file .env.production -f compose.production.yml \
+docker compose --env-file .env.prod -f compose.production.yml \
   --profile migrate run --rm migrate migrate baseline \
   --target 0016 --confirm-existing-schema --directory /app/migrations/mysql
 
@@ -81,13 +81,13 @@ docker compose --env-file .env.production -f compose.production.yml \
 ## 4. 首次部署
 
 ```bash
-docker compose --env-file .env.production \
+docker compose --env-file .env.prod \
   -f compose.production.yml pull
 
-docker compose --env-file .env.production \
+docker compose --env-file .env.prod \
   -f compose.production.yml up -d --wait --remove-orphans
 
-docker compose --env-file .env.production \
+docker compose --env-file .env.prod \
   -f compose.production.yml ps
 
 curl --fail http://127.0.0.1:8080/health/ready
@@ -112,7 +112,7 @@ AURACLAW_INTERNAL_NETWORK=auraclaw-green \
 AURACLAW_EDGE_NETWORK=auraclaw-green-edge \
 AURACLAW_PLATFORM_NETWORK=auraclaw-platform-green \
 AURACLAW_INGRESS_PORT=18080 \
-docker compose -p auraclaw-green --env-file .env.production \
+docker compose -p auraclaw-green --env-file .env.prod \
   -f compose.production.yml up -d --wait
 
 curl --fail http://127.0.0.1:18080/health/ready
@@ -123,7 +123,7 @@ Model/MCP、Canonical Result、SSE 和 Delivery 均完成。上游负载均衡�
 最长请求时限和 60 秒优雅退出窗口，再停止 blue：
 
 ```bash
-docker compose -p auraclaw-blue --env-file .env.production \
+docker compose -p auraclaw-blue --env-file .env.prod \
   -f compose.production.yml down
 ```
 
@@ -139,7 +139,7 @@ migration。确认恢复后再停止 green。
 先检查数据库连接预算、Kafka partition 数和外部配额，再显式覆盖副本数：
 
 ```bash
-docker compose --env-file .env.production -f compose.production.yml \
+docker compose --env-file .env.prod -f compose.production.yml \
   up -d --scale agent-runtime=6 --scale orchestrator=4 --scale delivery-worker=4
 ```
 
@@ -168,9 +168,9 @@ multipart finalize/gc 是否排空；Hands 本地 workspace 是每个容器的�
 示例（选择一个副本，不要一次停止整个 owner service）：
 
 ```bash
-docker kill "$(docker compose --env-file .env.production \
+docker kill "$(docker compose --env-file .env.prod \
   -f compose.production.yml ps -q agent-runtime | head -n 1)"
-docker compose --env-file .env.production -f compose.production.yml up -d agent-runtime
+docker compose --env-file .env.prod -f compose.production.yml up -d agent-runtime
 ```
 
 故障恢复后执行 `auraclaw operations status`，并按需使用 projection rebuild、projection/

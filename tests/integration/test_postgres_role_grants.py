@@ -10,7 +10,7 @@ from auraclaw.config import get_settings
 from auraclaw.infrastructure.persistence.postgres_common import asyncpg_url
 
 ROOT = Path(__file__).resolve().parents[2]
-DOTENV = dotenv_values(ROOT / ".env")
+DOTENV = dotenv_values(ROOT / ".env.dev")
 SETTINGS = get_settings()
 
 ROLE_TARGETS = {

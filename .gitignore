@@ -35,9 +35,9 @@ logs/
 # Secrets
 .env
 .env.*
-!.env.example
-!.env.debug.example
-!.env.production.example
+!.env.dev.example
+!.env.test.example
+!.env.prod.example
 debug/java-mcp-servers.json
 .host.env
 .eng.debug

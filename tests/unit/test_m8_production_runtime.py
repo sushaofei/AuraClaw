@@ -189,7 +189,7 @@ def test_named_env_files_select_resources_without_environment_label(
         monkeypatch.delenv(name, raising=False)
 
     development = tmp_path / ".env.development"
-    production = tmp_path / ".env.production"
+    production = tmp_path / ".env.prod"
     development.write_text(
         "DB_NAME=auraclaw_development\nAURACLAW_STORAGE_BACKEND=memory\n"
     )

@@ -30,7 +30,7 @@
 | `src/auraclaw/infrastructure/credentials/mcp_egress.py` | 出站校验尊重 `allowed_private_hosts`，允许 127.0.0.1 私网/回环 | 真正发 JSON-RPC 的是 Credential Proxy，必须在这里放行 |
 | `src/auraclaw/infrastructure/persistence/postgres_capability_catalog.py` | 持久化/读回 `allowed_private_hosts` | 与合同字段对齐，避免配置丢失 |
 | `src/auraclaw/infrastructure/connectors/mcp/wire.py` | 协议/元数据相关补充（含 Java 协议修订、userId meta） | 对齐 Java Gateway MCP 协议与可信用户头 |
-| `src/auraclaw/config.py` | 读取 MCP egress 配置 | 让 `.env.debug` 能指向 `debug/java-mcp-servers.json` |
+| `src/auraclaw/config.py` | 读取 MCP egress 配置 | 让 `.env.dev` 能指向 `debug/java-mcp-servers.json` |
 | `tests/unit/test_m9_mcp_egress.py` | 回环 HTTP + allowlist 用例 | 防止再次把本机 MCP 挡掉 |
 | `tests/unit/test_hands_mcp_debug.py` | Hands 调 MCP 的 debug 路径用例 | 覆盖本地 Java MCP 装配 |
 
@@ -187,7 +187,7 @@
 | 文件 | 改动 | 原因 |
 |---|---|---|
 | `src/auraclaw/composition/cli.py` | `auraclaw serve` 要求共享 SQL 或 Kafka Runtime Event 后端 | 多进程内存 Replay Bus 彼此隔离，Streaming Gateway 收不到 Runtime 进程的 SSE 事件 |
-| `.env.debug.example` | 本地多进程示例改用 Kafka Runtime Event 后端 | 默认配置直接满足跨进程 SSE 条件 |
+| `.env.dev.example` | 本地多进程示例改用 Kafka Runtime Event 后端 | 默认配置直接满足跨进程 SSE 条件 |
 | `src/auraclaw/infrastructure/credentials/mcp_egress.py` | HTTP MCP 只允许解析到显式白名单中的私网/回环地址；公网地址仍强制 HTTPS | 防止把公网主机放入 private allowlist 后降级为明文 HTTP |
 | `src/auraclaw/action/catalog_reconciler.py` | 可信远端工具注解缺失时回退到 `write-with-approval` + `high` | 避免可选字段为 `None` 时枚举构造失败，并保持保守安全默认值 |
 | `.gitignore` | 忽略 `.host.env` 和误拼写的 `.eng.debug` | 防止本机地址或配置被误提交 |
@@ -235,7 +235,7 @@ src/auraclaw/skills/procurement-price-insight/manifest.json
 
 这些文件 **不要提交**（含地址/密钥占位）：
 
-- `.env.debug`：项目默认自动读取该文件，也可用 `AURACLAW_ENV_FILE` 显式指定。关键项包括共享 SQL 或 Kafka Runtime Event 后端、MCP 配置文件、租户、`AURACLAW_PRICE_INSIGHT_SOURCE=disabled`（数据在 Java 不在本地 MySQL）、模型名。
+- `.env.dev`：项目默认自动读取该文件，也可用 `AURACLAW_ENV_FILE` 显式指定。关键项包括共享 SQL 或 Kafka Runtime Event 后端、MCP 配置文件、租户、`AURACLAW_PRICE_INSIGHT_SOURCE=disabled`（数据在 Java 不在本地 MySQL）、模型名。
 - `debug/java-mcp-servers.json`：endpoint 为 Gateway `48080` 的 `/rpc-api/agent-runtime/mcp`；`auth_strategy=workload_trusted_context`；`tenant_id=1`；`allowed_private_hosts=["127.0.0.1"]`；`tool_name_aliases` 把 `price_insight.*` 映射成 `procurement.price.*`；`search_tags` 含「价格洞察」。
 - `.vscode/launch.json` / `tasks.json` / `settings.json`：Windows 本机调试入口，不是业务逻辑。
 

@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """Probe the OpenAI-compatible model configured for AuraClaw.
 
-Reads AURACLAW_MODEL_* from .env (or AURACLAW_ENV_FILE / env vars),
+Reads AURACLAW_MODEL_* from .env.dev (or AURACLAW_ENV_FILE / env vars),
 then POSTs to /chat/completions. Compatible with Python 3.7+.
 
 Examples:
   python3 scripts/test_model.py
   python3 scripts/test_model.py --stream
   python3 scripts/test_model.py --prompt "用一句话介绍你自己"
-  python3 scripts/test_model.py --env-file /path/to/.env
+  python3 scripts/test_model.py --env-file /path/to/.env.dev
 """
 
 import argparse
@@ -39,6 +39,35 @@ def _load_env_file(path):
             value = value.strip().strip("'").strip('"')
             values[key] = value
     return values
+
+
+def _apply_local_dev_proxy(env_file):
+    """Apply NO_PROXY only when probing with local `.env.dev`.
+
+    Server `.env.test` / `.env.prod` must not clear or set proxy variables.
+    """
+    if os.path.basename(env_file or "") != ".env.dev":
+        return
+    file_env = _load_env_file(env_file)
+    for key in ("NO_PROXY", "no_proxy"):
+        value = file_env.get(key) or os.environ.get(key)
+        if value:
+            os.environ[key] = value
+    if os.environ.get("AURACLAW_MODEL_USE_PROXY", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    ):
+        return
+    for key in (
+        "http_proxy",
+        "https_proxy",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "all_proxy",
+    ):
+        os.environ.pop(key, None)
 
 
 def _chat_completions_url(base_url):
@@ -165,12 +194,12 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="Test AuraClaw configured LLM endpoint")
     default_env = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        ".env",
+        ".env.dev",
     )
     parser.add_argument(
         "--env-file",
         default=os.environ.get("AURACLAW_ENV_FILE", default_env),
-        help="env file with AURACLAW_MODEL_* (default: ../.env)",
+        help="env file with AURACLAW_MODEL_* (default: ../.env.dev)",
     )
     parser.add_argument("--base-url", default=None, help="override AURACLAW_MODEL_BASE_URL")
     parser.add_argument("--api-key", default=None, help="override AURACLAW_MODEL_API_KEY")
@@ -189,18 +218,8 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     file_env = _load_env_file(args.env_file)
-
-    # Private model endpoints should not go through local HTTP proxies.
-    for key in ("NO_PROXY", "no_proxy"):
-        value = os.environ.get(key) or file_env.get(key)
-        if value:
-            os.environ[key] = value
-    for key in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "all_proxy"):
-        # Keep proxies unset for this process when talking to configured private hosts.
-        # Callers can still override by exporting AURACLAW_MODEL_USE_PROXY=1.
-        if os.environ.get("AURACLAW_MODEL_USE_PROXY", "").strip().lower() in ("1", "true", "yes"):
-            break
-        os.environ.pop(key, None)
+    # Proxy bypass is local `.env.dev` only; test/prod env files are left alone.
+    _apply_local_dev_proxy(args.env_file)
 
     def pick(key, override=None, default=None):
         if override is not None:

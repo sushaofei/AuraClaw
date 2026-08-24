@@ -37,4 +37,4 @@ uv run mypy src/auraclaw
 Every development stage must have a checklist in `docs/开发阶段校验清单.md`. A stage is complete
 only after all applicable functional, architecture, test, security, documentation and migration
 items are checked. Then commit the complete stage as one intentional Git commit and push the
-current branch to `origin`. Never stage `.env`, `.history`, virtual environments, caches or secrets.
+current branch to `origin`. Never stage `.env.dev`, `.env.test`, `.env.prod`, `.history`, virtual environments, caches or secrets.

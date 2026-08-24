@@ -9,7 +9,7 @@ from auraclaw.config import get_settings
 from auraclaw.infrastructure.credentials.vault import HashiCorpVault
 
 ROOT = Path(__file__).resolve().parents[2]
-DOTENV = dotenv_values(ROOT / ".env")
+DOTENV = dotenv_values(ROOT / ".env.dev")
 SETTINGS = get_settings()
 
 

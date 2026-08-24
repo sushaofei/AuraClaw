@@ -64,15 +64,74 @@ def _resolve_settings_env_file() -> str | None:
     configured = os.environ.get("AURACLAW_ENV_FILE")
     if configured:
         return configured
-    for candidate in (".env.debug", ".env"):
+    for candidate in (".env.dev",):
         if Path(candidate).is_file():
             return candidate
     return None
 
 
+def _is_local_dev_env_file(path: str | Path | None) -> bool:
+    """True only for local developer env files (not server .env.test / .env.prod)."""
+    if path is None:
+        return False
+    return Path(path).name == ".env.dev"
+
+
+def _parse_dotenv_values(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    if not path.is_file():
+        return values
+    for raw in path.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip().strip("'").strip('"')
+    return values
+
+
+def apply_local_dev_proxy_env(env_file: str | Path | None = None) -> None:
+    """Apply NO_PROXY / clear HTTP(S)_PROXY for local `.env.dev` only.
+
+    Corporate HTTP proxies on developer machines break access to private Kafka /
+    MySQL / SeaweedFS / Vault hosts. Server test and production Compose do not
+    need this — they run without local proxy interference.
+    """
+    path = Path(env_file) if env_file is not None else None
+    if path is None:
+        resolved = _resolve_settings_env_file()
+        path = Path(resolved) if resolved else None
+    if not _is_local_dev_env_file(path):
+        return
+    assert path is not None
+    file_values = _parse_dotenv_values(path)
+    for key in ("NO_PROXY", "no_proxy"):
+        # Prefer .env.dev so private middleware hosts are always covered, even when
+        # the shell already exports a generic NO_PROXY (e.g. 127.0.0.1,localhost).
+        value = file_values.get(key) or os.environ.get(key)
+        if value:
+            os.environ[key] = value
+    if os.environ.get("AURACLAW_MODEL_USE_PROXY", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        return
+    for key in (
+        "http_proxy",
+        "https_proxy",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "all_proxy",
+    ):
+        os.environ.pop(key, None)
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env", env_prefix="AURACLAW_", extra="ignore"
+        env_file=".env.dev", env_prefix="AURACLAW_", extra="ignore"
     )
 
     host: str = "127.0.0.1"
@@ -530,4 +589,6 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     load_secret_files()
-    return Settings(_env_file=_resolve_settings_env_file())
+    env_file = _resolve_settings_env_file()
+    apply_local_dev_proxy_env(env_file)
+    return Settings(_env_file=env_file)

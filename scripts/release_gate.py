@@ -8,9 +8,9 @@ ROOT = Path(__file__).parents[1]
 SCAN_ROOTS = (ROOT / "src", ROOT / "migrations", ROOT / "deploy")
 SCAN_FILES = (
     ROOT / "compose.production.yml",
-    ROOT / ".env.example",
-    ROOT / ".env.debug.example",
-    ROOT / ".env.production.example",
+    ROOT / ".env.dev.example",
+    ROOT / ".env.test.example",
+    ROOT / ".env.prod.example",
 )
 SECRET_PATTERNS = {
     "private key": re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),

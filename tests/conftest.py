@@ -1,4 +1,4 @@
-"""Keep tests from picking up repo-root .env.debug / .env."""
+"""Keep tests from picking up repo-root .env.dev."""
 
 from __future__ import annotations
 

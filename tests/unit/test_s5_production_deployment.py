@@ -36,7 +36,7 @@ def _render_compose() -> dict[str, object]:
             "docker",
             "compose",
             "--env-file",
-            str(ROOT / ".env.example"),
+            str(ROOT / ".env.prod.example"),
             "-f",
             str(COMPOSE),
             "--profile",
@@ -203,9 +203,9 @@ def test_committed_files_do_not_contain_environment_secret_values() -> None:
         path.read_text()
         for path in (
             COMPOSE,
-            ROOT / ".env.example",
-            ROOT / ".env.debug.example",
-            ROOT / ".env.production.example",
+            ROOT / ".env.dev.example",
+            ROOT / ".env.test.example",
+            ROOT / ".env.prod.example",
         )
     )
     assert all(value not in committed for value in local_values)
@@ -223,21 +223,51 @@ def test_env_templates_are_ready_to_copy() -> None:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
 
-    debug = Settings(_env_file=ROOT / ".env.debug.example")
-    assert debug.storage_backend == "memory"
-    assert debug.runtime_event_backend == "kafka"
-    assert debug.kafka_host == "127.0.0.1"
-    assert debug.artifact_backend == "local"
-    assert debug.insecure_identity_headers_enabled
-    assert debug.lease_signing_key is not None
-    assert debug.workload_token_value("task-api") == "local-task-api"
-    assert debug.workload_token_value("streaming-gateway") == "local-streaming-gateway"
+    debug_settings = Settings(_env_file=ROOT / ".env.dev.example")
+    assert debug_settings.storage_backend == "mysql"
+    assert debug_settings.runtime_event_backend == "kafka"
+    assert debug_settings.kafka_host == "10.244.16.132"
+    assert debug_settings.artifact_backend == "seaweedfs"
+    assert debug_settings.insecure_identity_headers_enabled
+    assert debug_settings.deployment_profile == "development"
+    assert debug_settings.lease_signing_key is not None
 
-    production = dotenv_values(ROOT / ".env.production.example")
-    missing = [name for name in module.REQUIRED if not production.get(name)]
-    assert missing == []
-    assert production["AURACLAW_DEPLOYMENT_PROFILE"] == "production"
-    assert production["AURACLAW_ALLOW_INSECURE_IDENTITY_HEADERS"] == "false"
+    debug = dotenv_values(ROOT / ".env.dev.example")
+    test = dotenv_values(ROOT / ".env.test.example")
+    production = dotenv_values(ROOT / ".env.prod.example")
+    for label, values in (("test", test), ("production", production)):
+        missing = [name for name in module.REQUIRED if not values.get(name)]
+        assert missing == [], f"{label} missing {missing}"
+        assert values["AURACLAW_DEPLOYMENT_PROFILE"] == "production"
+        assert values["AURACLAW_ALLOW_INSECURE_IDENTITY_HEADERS"] == "false"
+
+    local_only = {
+        "AURACLAW_DEPLOYMENT_PROFILE",
+        "AURACLAW_HOST",
+        "AURACLAW_ALLOW_INSECURE_IDENTITY_HEADERS",
+        "AURACLAW_MODEL_API_KEY",
+        "AURACLAW_MODEL_BASE_URL",
+        "AURACLAW_MODEL_NAME",
+        "AURACLAW_CREDENTIAL_VAULT_ADDR",
+        "AURACLAW_MIGRATIONS_DIRECTORY",
+        "AURACLAW_PORT",
+        "AURACLAW_RUNTIME_ID",
+        "AURACLAW_RUNTIME_ROLE",
+        "AURACLAW_RUNTIME_NODE_ID",
+        "AURACLAW_RUNTIME_CAPACITY",
+        # Local-dev HTTP proxy bypass only; never present on test/prod.
+        "NO_PROXY",
+        "no_proxy",
+    }
+    assert "NO_PROXY" in debug
+    assert "NO_PROXY" not in test
+    assert "NO_PROXY" not in production
+    shared_keys = set(test) & set(debug) - local_only
+    mismatches = [
+        key for key in sorted(shared_keys) if test[key] != debug.get(key)
+    ]
+    assert mismatches == []
+
     tokens = [
         production[name] or ""
         for name in module.REQUIRED
@@ -299,7 +329,7 @@ def test_production_preflight_accepts_isolated_roles_and_unique_tokens(
         f"AURACLAW_{name}_WORKLOAD_TOKEN={index:02d}-" + "t" * 40
         for index, name in enumerate(tokens)
     )
-    env_file = tmp_path / ".env.production"
+    env_file = tmp_path / ".env.prod"
     secret_dir = tmp_path / "secrets"
     lines.append(f"AURACLAW_SECRET_DIR={secret_dir}")
     env_file.write_text("\n".join(lines))
