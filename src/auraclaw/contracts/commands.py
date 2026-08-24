@@ -12,3 +12,4 @@ class CommandContext:
     expected_version: int
     operation: str = "append"
     causation_id: str | None = None
+    dept_id: str | None = None

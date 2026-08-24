@@ -20,6 +20,7 @@ from auraclaw.contracts.hands import (
 from auraclaw.contracts.tools import ToolResultStatus
 from auraclaw.infrastructure.connectors.mcp.transport import ManagedRemoteMcpTransport
 from auraclaw.infrastructure.connectors.mcp.wire import (
+    MCP_AURACLAW_DEPT_ID_META_KEY,
     MCP_AURACLAW_INVOCATION_ID_META_KEY,
     MCP_AURACLAW_TENANT_ID_META_KEY,
     MCP_AURACLAW_USER_ID_META_KEY,
@@ -236,6 +237,8 @@ class ManagedMcpConnector:
         }
         if trusted.user_id:
             request_meta[MCP_AURACLAW_USER_ID_META_KEY] = trusted.user_id
+        if trusted.dept_id:
+            request_meta[MCP_AURACLAW_DEPT_ID_META_KEY] = trusted.dept_id
         if self._server.protocol_revision == MCP_PROTOCOL_VERSION:
             request_meta.update(_modern_meta())
         remote_name = self._remote_tool_names.get(name, name)
@@ -352,8 +355,14 @@ class ManagedMcpConnector:
         params: dict[str, Any],
     ) -> dict[str, Any]:
         request_params = dict(params)
+        identity_meta = _identity_meta(trusted)
         if self._server.protocol_revision == MCP_PROTOCOL_VERSION:
-            request_params["_meta"] = _modern_meta()
+            request_params["_meta"] = {**identity_meta, **_modern_meta()}
+        elif identity_meta:
+            request_params["_meta"] = {
+                **dict(request_params.get("_meta") or {}),
+                **identity_meta,
+            }
         response = await self._transport.send(
             McpJsonRpcRequest(
                 id=f"mcp:{method}:{uuid4().hex}",
@@ -399,7 +408,17 @@ def _mcp_trusted(trusted: HandsTrustedContext) -> McpTrustedContext:
         deadline=trusted.deadline,
         lease_assertion=trusted.lease_assertion,
         user_id=trusted.user_id,
+        dept_id=trusted.dept_id,
     )
+
+
+def _identity_meta(trusted: McpTrustedContext) -> dict[str, Any]:
+    meta: dict[str, Any] = {MCP_AURACLAW_TENANT_ID_META_KEY: trusted.tenant_id}
+    if trusted.user_id:
+        meta[MCP_AURACLAW_USER_ID_META_KEY] = trusted.user_id
+    if trusted.dept_id:
+        meta[MCP_AURACLAW_DEPT_ID_META_KEY] = trusted.dept_id
+    return meta
 
 
 def _tool_descriptor(

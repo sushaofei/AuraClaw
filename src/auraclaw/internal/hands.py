@@ -34,6 +34,7 @@ class InProcessHandsClient:
             deadline=assignment.deadline,
             lease_assertion=assignment.lease_assertion,
             user_id=assignment.user_id,
+            dept_id=assignment.dept_id,
         )
 
     async def list_tools(

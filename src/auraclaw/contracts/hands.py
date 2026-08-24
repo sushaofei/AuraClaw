@@ -36,6 +36,7 @@ class HandsTrustedContext(ContractModel):
     deadline: datetime | None = None
     lease_assertion: LeaseAssertion | None = None
     user_id: str | None = None
+    dept_id: str | None = None
 
 
 class HandsError(ContractModel):

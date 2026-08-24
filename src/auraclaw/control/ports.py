@@ -36,6 +36,7 @@ class RuntimeAssignment:
     lease_expires_at: datetime | None = None
     lease_assertion: LeaseAssertion | None = None
     user_id: str | None = None
+    dept_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -59,6 +60,7 @@ class RunnableItem:
     deadline: datetime | None = None
     budget: RuntimeBudget = field(default_factory=RuntimeBudget)
     user_id: str | None = None
+    dept_id: str | None = None
 
 
 @dataclass(frozen=True)

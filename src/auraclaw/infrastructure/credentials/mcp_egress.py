@@ -273,11 +273,14 @@ class ManagedMcpEgressAdapter:
         ):
             tenant_id = identity.get("tenant_id")
             user_id = identity.get("user_id")
+            dept_id = identity.get("dept_id")
             session_id = identity.get("session_id")
             if tenant_id:
                 headers["X-CT-Tenant-ID"] = str(tenant_id)
             if user_id:
                 headers["X-CT-User-ID"] = str(user_id)
+            if dept_id:
+                headers["X-CT-Dept-ID"] = str(dept_id)
             if session_id:
                 headers["X-CT-Session-ID"] = str(session_id)
         jsonrpc_body = json.dumps(

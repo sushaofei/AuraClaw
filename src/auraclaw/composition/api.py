@@ -120,6 +120,7 @@ def create_app(*, profile: ApiProfile) -> FastAPI:
                 "X-Actor-ID",
                 "X-Correlation-ID",
                 "X-CT-Agent-Context",
+                "X-Dept-ID",
                 "X-Expected-Revision",
                 "X-Expected-Version",
                 "X-Tenant-ID",

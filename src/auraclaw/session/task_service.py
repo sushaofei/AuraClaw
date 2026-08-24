@@ -46,7 +46,7 @@ class TaskService:
         session_id = f"ses_{uuid4().hex}"
         run_id = f"run_{uuid4().hex}"
         session = SessionAggregate.empty(session_id, context.tenant_id)
-        session.create(goal=goal, run_id=run_id)
+        session.create(goal=goal, run_id=run_id, dept_id=context.dept_id)
         response = {
             "session_id": session_id,
             "run_id": run_id,

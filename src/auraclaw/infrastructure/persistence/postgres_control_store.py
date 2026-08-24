@@ -31,21 +31,33 @@ from auraclaw.infrastructure.persistence.postgres_common import (
 )
 
 _USER_ID_PROFILE_KEY = "_auraclaw_user_id"
+_DEPT_ID_PROFILE_KEY = "_auraclaw_dept_id"
 
 
-def _profile_with_user_id(profile: dict[str, Any], user_id: str | None) -> dict[str, Any]:
+def _profile_with_identity(
+    profile: dict[str, Any], user_id: str | None, dept_id: str | None = None
+) -> dict[str, Any]:
     encoded = dict(profile)
     if user_id:
         encoded[_USER_ID_PROFILE_KEY] = user_id
     else:
         encoded.pop(_USER_ID_PROFILE_KEY, None)
+    if dept_id:
+        encoded[_DEPT_ID_PROFILE_KEY] = dept_id
+    else:
+        encoded.pop(_DEPT_ID_PROFILE_KEY, None)
     return encoded
 
 
-def _split_user_id(profile: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
+def _split_identity(profile: dict[str, Any]) -> tuple[dict[str, Any], str | None, str | None]:
     decoded = dict(profile)
     user_id = decoded.pop(_USER_ID_PROFILE_KEY, None)
-    return decoded, None if user_id is None else str(user_id)
+    dept_id = decoded.pop(_DEPT_ID_PROFILE_KEY, None)
+    return (
+        decoded,
+        None if user_id is None else str(user_id),
+        None if dept_id is None else str(dept_id),
+    )
 
 
 class PostgresControlStateStore(_LazyPool):
@@ -68,7 +80,7 @@ class PostgresControlStateStore(_LazyPool):
             item.run_id,
             item.source_version,
             item.priority,
-            _json(_profile_with_user_id(item.required_capability, item.user_id)),
+            _json(_profile_with_identity(item.required_capability, item.user_id, item.dept_id)),
             item.queue_partition,
             item.role,
             item.deadline,
@@ -396,8 +408,10 @@ class PostgresControlStateStore(_LazyPool):
                     assignment.fencing_token,
                     assignment.role,
                     _json(
-                        _profile_with_user_id(
-                            assignment.resource_profile, assignment.user_id
+                        _profile_with_identity(
+                            assignment.resource_profile,
+                            assignment.user_id,
+                            assignment.dept_id,
                         )
                     ),
                 )
@@ -430,8 +444,10 @@ class PostgresControlStateStore(_LazyPool):
                     assignment.fencing_token,
                     assignment.role,
                     _json(
-                        _profile_with_user_id(
-                            assignment.resource_profile, assignment.user_id
+                        _profile_with_identity(
+                            assignment.resource_profile,
+                            assignment.user_id,
+                            assignment.dept_id,
                         )
                     ),
                 )
@@ -453,7 +469,7 @@ class PostgresControlStateStore(_LazyPool):
             "SELECT budget FROM control.runnable_item WHERE task_id=$1", task_id
         )
         budget = self._budget(_decode_json(budget_row) if budget_row is not None else {})
-        profile, user_id = _split_user_id(dict(_decode_json(row["resource_profile"])))
+        profile, user_id, dept_id = _split_identity(dict(_decode_json(row["resource_profile"])))
         return RuntimeAssignment(
             tenant_id=str(row["tenant_id"]),
             root_session_id=str(row["root_session_id"]),
@@ -467,6 +483,7 @@ class PostgresControlStateStore(_LazyPool):
             deadline=row["deadline"],
             budget=budget,
             user_id=user_id,
+            dept_id=dept_id,
         )
 
     async def select_runtime(self, item: RunnableItem) -> RuntimeInstance | None:
@@ -957,7 +974,8 @@ class PostgresControlStateStore(_LazyPool):
 
     @classmethod
     def _item_from_row(cls, row: Any) -> RunnableItem:
-        capability, user_id = _split_user_id(dict(_decode_json(row["required_capability"])))
+        capability_payload = dict(_decode_json(row["required_capability"]))
+        capability, user_id, dept_id = _split_identity(capability_payload)
         return RunnableItem(
             task_id=str(row["task_id"]),
             tenant_id=str(row["tenant_id"]),
@@ -972,6 +990,7 @@ class PostgresControlStateStore(_LazyPool):
             deadline=row["deadline"],
             budget=cls._budget(_decode_json(row["budget"])),
             user_id=user_id,
+            dept_id=dept_id,
         )
 
     @staticmethod

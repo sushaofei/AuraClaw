@@ -82,6 +82,7 @@ class DevelopmentHeaderIdentityVerifier:
             user=TrustedUserContext(
                 tenant_id=tenant_id,
                 user_id=user_id,
+                dept_id=request.declared_dept_id,
                 session_id=request.bound_session_id,
                 scopes=("agent.task.invoke",),
             ),
@@ -260,6 +261,14 @@ class SignedAgentContextVerifier:
         ):
             raise identity_error(
                 "declared user does not match signed agent context",
+                reason=IdentityErrorReason.TENANT_SESSION_MISMATCH,
+            )
+        if (
+            request.declared_dept_id is not None
+            and request.declared_dept_id != user.dept_id
+        ):
+            raise identity_error(
+                "declared department does not match signed agent context",
                 reason=IdentityErrorReason.TENANT_SESSION_MISMATCH,
             )
         if (

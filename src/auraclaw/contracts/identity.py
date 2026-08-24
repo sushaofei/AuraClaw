@@ -118,6 +118,7 @@ class IdentityVerificationRequest(ContractModel):
     assertion: str | None = None
     declared_tenant_id: str | None = None
     declared_user_id: str | None = None
+    declared_dept_id: str | None = None
     bound_session_id: str | None = None
     command_id: str | None = None
     correlation_id: str | None = None
