@@ -38,4 +38,9 @@ logs/
 !.env.prod.example
 debug/java-mcp-servers.json
 .host.env
+.chaintower
 .eng.debug
+
+# Tool caches
+.import_linter_cache/
+.claude/
