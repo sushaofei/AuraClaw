@@ -1,4 +1,4 @@
-# chaintower 身份联调任务（Issue #44 关联）
+# chaintower 身份联调任务（Issue #44 / #46 关联）
 
 AuraClaw 仓库内已冻结 ADR-003：chaintower 是用户身份权威，MCP Server 是业务权限最终裁决者。
 chaintower 不在本 GitHub 仓库中，请在其项目管理系统创建关联任务并回链本 Issue。
@@ -24,8 +24,8 @@ X-Correlation-ID: <id>
 1. 入口从已登录用户构造 Agent Context，不接受前端 tenant/user。
 2. 提供签发/轮换/撤销短期 Assertion 的系统服务。
 3. MCP Server 验证 AuraClaw/Hands workload 与 per-request trusted context
-   （`Authorization` + `X-CT-Tenant-ID` / `X-CT-User-ID` / `X-CT-Session-ID`，以及
-   `_meta.io.auraclaw/tenantId|userId`）。
+   （`Authorization` + `X-CT-Tenant-ID` / `X-CT-User-ID` / `X-CT-Dept-ID` / `X-CT-Session-ID`，以及
+   `_meta.io.auraclaw/tenantId|userId|deptId`）。部门以 AuraClaw Root Session 快照透传为准。
 4. Tool/Resource/Prompt 执行前恢复 LoginUser、tenant、dept 和数据权限。
 5. 请求 DTO 中兼容 tenant/user 字段不得作为授权来源。
 6. 用户禁用、Grant 撤销、租户变化、权限版本失效时 fail closed。

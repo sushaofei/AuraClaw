@@ -326,7 +326,10 @@ async def test_child_runnable_inherits_root_user_instead_of_coordinator_actor() 
         run_id="run-owner-root",
         context=root_context,
         events=(
-            NewEvent(type="session.created", payload={"role": "root"}),
+            NewEvent(
+                type="session.created",
+                payload={"role": "root", "dept_id": "88"},
+            ),
             NewEvent(type="run.requested", payload={"run_id": "run-owner-root"}),
         ),
         command_result={},
@@ -377,3 +380,4 @@ async def test_child_runnable_inherits_root_user_instead_of_coordinator_actor() 
     assert len(claimed) == 1
     assert claimed[0].item.session_id == "session-owner-child"
     assert claimed[0].item.user_id == "owner-user"
+    assert claimed[0].item.dept_id == "88"

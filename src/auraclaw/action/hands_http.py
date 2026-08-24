@@ -120,6 +120,7 @@ class SignedLeaseHandsAuthenticator:
             deadline=assertion.expires_at,
             lease_assertion=assertion,
             user_id=assertion.user_id,
+            dept_id=assertion.dept_id,
         )
 
 

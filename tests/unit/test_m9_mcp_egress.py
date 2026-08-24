@@ -48,6 +48,7 @@ class _Sender:
         self.calls: list[dict[str, object]] = []
         self.redirect = False
         self.sse = False
+        self.require_oauth_bearer = True
 
     async def send(self, **request: object) -> McpEgressResponse:
         self.calls.append(request)
@@ -87,7 +88,8 @@ class _Sender:
                 ),
             )
         authorization = str(request["headers"])  # type: ignore[index]
-        assert "Bearer remote-access-token" in authorization
+        if self.require_oauth_bearer:
+            assert "Bearer remote-access-token" in authorization
         if self.sse:
             return McpEgressResponse(
                 status_code=200,
@@ -524,6 +526,67 @@ def test_hands_remote_transport_rejects_mismatched_response_id() -> None:
                 McpJsonRpcRequest(id="expected", method="tools/list"),
                 trusted_context=_trusted(),
             )
+
+    asyncio.run(scenario())
+
+
+def test_mcp_egress_sends_department_snapshot_headers() -> None:
+    async def scenario() -> None:
+        sender = _Sender()
+        sender.require_oauth_bearer = False
+        server = McpServerDefinition(
+            server_id="github-mcp",
+            tenant_id="tenant-a",
+            title="ChainTower MCP",
+            endpoint="https://mcp.example/v1/mcp",
+            credential_ref="vault/chaintower-mcp#workload",
+            auth_strategy=McpAuthStrategy.WORKLOAD_TRUSTED_CONTEXT,
+            trust_level=CapabilityTrustLevel.TENANT_VERIFIED,
+            allowed_tool_prefixes=("github.",),
+            status=CapabilityStatus.ACTIVE,
+            enabled=True,
+        )
+        adapter = ManagedMcpEgressAdapter(
+            server,
+            resolver=_Resolver(),
+            sender=sender,
+        )
+        await adapter(
+            {
+                **_request(),
+                "_auraclaw_identity": {
+                    "tenant_id": "1",
+                    "user_id": "101",
+                    "dept_id": "9",
+                    "session_id": "ses-1",
+                },
+            },
+            "w" * 48,
+        )
+        headers = sender.calls[-1]["headers"]
+        assert isinstance(headers, dict)
+        assert headers["X-CT-Tenant-ID"] == "1"
+        assert headers["X-CT-User-ID"] == "101"
+        assert headers["X-CT-Dept-ID"] == "9"
+        assert headers["X-CT-Session-ID"] == "ses-1"
+
+        await adapter(
+            {
+                **_request(),
+                "id": 2,
+                "_auraclaw_identity": {
+                    "tenant_id": "1",
+                    "user_id": "101",
+                    "dept_id": None,
+                    "session_id": "ses-1",
+                },
+            },
+            "w" * 48,
+        )
+        missing = sender.calls[-1]["headers"]
+        assert isinstance(missing, dict)
+        assert "X-CT-Dept-ID" not in missing
+        assert missing["X-CT-User-ID"] == "101"
 
     asyncio.run(scenario())
 

@@ -75,6 +75,7 @@ class ManagedRemoteMcpTransport:
         if isinstance(arguments, dict):
             declared_tenant = arguments.get("tenant_id")
             declared_user = arguments.get("user_id")
+            declared_dept = arguments.get("dept_id")
             if (
                 declared_tenant is not None
                 and str(declared_tenant) != trusted_context.tenant_id
@@ -86,10 +87,17 @@ class ManagedRemoteMcpTransport:
                 and str(declared_user) != trusted_context.user_id
             ):
                 raise PolicyDeniedError("tool argument user_id is not an authorization source")
+            if (
+                declared_dept is not None
+                and trusted_context.dept_id is not None
+                and str(declared_dept) != trusted_context.dept_id
+            ):
+                raise PolicyDeniedError("tool argument dept_id is not an authorization source")
         request_payload = request.model_dump(mode="json")
         identity = {
             "tenant_id": trusted_context.tenant_id,
             "user_id": trusted_context.user_id,
+            "dept_id": trusted_context.dept_id,
             "session_id": trusted_context.session_id,
             "run_id": trusted_context.run_id,
         }

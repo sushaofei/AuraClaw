@@ -16,6 +16,22 @@ def test_create_session_emits_fact_and_run_request() -> None:
     assert session.run_id == "run_1"
 
 
+def test_create_session_freezes_department_snapshot() -> None:
+    session = SessionAggregate.empty("ses_1", "tenant_1")
+    session.create(goal="price insight", run_id="run_1", dept_id="9")
+
+    events = session.release_pending_events()
+    assert events[0].payload["dept_id"] == "9"
+    assert events[1].payload["dept_id"] == "9"
+    assert session.dept_id == "9"
+    session.apply("run.completed", {"result_summary": "done"})
+    session.request_run("run_2")
+    assert session.release_pending_events()[0].payload["dept_id"] == "9"
+    session.apply("session.paused", {})
+    session.resume("run_3")
+    assert session.release_pending_events()[0].payload["dept_id"] == "9"
+
+
 def test_terminal_session_cannot_be_cancelled_twice() -> None:
     session = SessionAggregate.empty("ses_1", "tenant_1")
     session.create(goal="build a report", run_id="run_1")

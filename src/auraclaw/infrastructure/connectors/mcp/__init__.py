@@ -1,6 +1,7 @@
 from auraclaw.infrastructure.connectors.mcp.connector import ManagedMcpConnector
 from auraclaw.infrastructure.connectors.mcp.transport import ManagedRemoteMcpTransport
 from auraclaw.infrastructure.connectors.mcp.wire import (
+    MCP_AURACLAW_DEPT_ID_META_KEY,
     MCP_AURACLAW_INVOCATION_ID_META_KEY,
     MCP_CLIENT_CAPABILITIES_META_KEY,
     MCP_CLIENT_INFO_META_KEY,
@@ -21,6 +22,7 @@ __all__ = [
     "MCP_SUPPORTED_PROTOCOL_VERSIONS",
     "MCP_PROTOCOL_VERSION_META_KEY",
     "MCP_AURACLAW_INVOCATION_ID_META_KEY",
+    "MCP_AURACLAW_DEPT_ID_META_KEY",
     "MCP_CLIENT_INFO_META_KEY",
     "MCP_CLIENT_CAPABILITIES_META_KEY",
     "McpJsonRpcRequest",

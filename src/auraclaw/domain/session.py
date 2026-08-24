@@ -33,6 +33,7 @@ class SessionAggregate:
     dependency_ids: list[str] = field(default_factory=list)
     output_contract: dict[str, Any] = field(default_factory=dict)
     owner: str | None = None
+    dept_id: str | None = None
     _pending: list[NewEvent] = field(default_factory=list, repr=False)
 
     @classmethod
@@ -85,6 +86,7 @@ class SessionAggregate:
             dependency_ids=list(state.get("dependency_ids", [])),
             output_contract=dict(state.get("output_contract", {})),
             owner=state.get("owner"),
+            dept_id=None if state.get("dept_id") is None else str(state.get("dept_id")),
         )
         return aggregate
 
@@ -118,28 +120,33 @@ class SessionAggregate:
             "dependency_ids": list(self.dependency_ids),
             "output_contract": dict(self.output_contract),
             "owner": self.owner,
+            "dept_id": self.dept_id,
         }
 
-    def create(self, *, goal: str, run_id: str) -> None:
+    def create(self, *, goal: str, run_id: str, dept_id: str | None = None) -> None:
         if self.version or self.status is not None:
             raise InvalidTransitionError("Session already exists")
+        self.dept_id = dept_id
+        created_payload: dict[str, Any] = {
+            "goal": goal,
+            "role": "root",
+            "root_session_id": self.session_id,
+            "parent_session_id": None,
+        }
+        if dept_id:
+            created_payload["dept_id"] = dept_id
         self._raise(
             NewEvent(
                 type="session.created",
                 visibility=Visibility.USER,
-                payload={
-                    "goal": goal,
-                    "role": "root",
-                    "root_session_id": self.session_id,
-                    "parent_session_id": None,
-                },
+                payload=created_payload,
             )
         )
         self._raise(
             NewEvent(
                 type="run.requested",
                 visibility=Visibility.USER,
-                payload={"run_id": run_id},
+                payload=self._run_payload(run_id),
             )
         )
 
@@ -181,7 +188,7 @@ class SessionAggregate:
             NewEvent(
                 type="run.requested",
                 visibility=Visibility.USER,
-                payload={"run_id": run_id},
+                payload=self._run_payload(run_id),
             )
         )
 
@@ -216,7 +223,7 @@ class SessionAggregate:
             NewEvent(
                 type="session.resumed",
                 visibility=Visibility.USER,
-                payload={"run_id": run_id},
+                payload=self._run_payload(run_id),
             )
         )
 
@@ -270,6 +277,7 @@ class SessionAggregate:
             self.root_session_id = str(payload["root_session_id"])
             self.parent_session_id = payload.get("parent_session_id")
             self.role = str(payload.get("role", "root"))
+            self.dept_id = _optional_str(payload.get("dept_id"))
             self.status = SessionStatus.CREATED
         elif event_type == "child.created":
             self.goal = str(payload["goal"])
@@ -278,6 +286,8 @@ class SessionAggregate:
             self.role = str(payload["role"])
             self.dependency_ids = list(payload.get("dependency_ids", []))
             self.output_contract = dict(payload.get("output_contract", {}))
+            if payload.get("dept_id") is not None:
+                self.dept_id = _optional_str(payload.get("dept_id"))
             self.status = (
                 SessionStatus.PENDING if self.dependency_ids else SessionStatus.RUNNABLE
             )
@@ -358,6 +368,12 @@ class SessionAggregate:
         elif event_type == "session.closed":
             self.status = SessionStatus.CLOSED
 
+    def _run_payload(self, run_id: str) -> dict[str, Any]:
+        payload: dict[str, Any] = {"run_id": run_id}
+        if self.dept_id:
+            payload["dept_id"] = self.dept_id
+        return payload
+
     def _raise(self, event: NewEvent) -> None:
         self.apply(event.type, event.payload)
         self._pending.append(event)
@@ -365,3 +381,10 @@ class SessionAggregate:
     def _require_existing(self) -> None:
         if self.status is None:
             raise InvalidTransitionError("Session does not exist")
+
+
+def _optional_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None

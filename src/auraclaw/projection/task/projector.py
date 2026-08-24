@@ -159,6 +159,8 @@ class InMemoryTaskProjection:
                 role=payload.get("role", "root"),
                 parent_session_id=payload.get("parent_session_id"),
                 status=SessionStatus.CREATED.value,
+                user_id=event.actor.id if event.actor.type == "user" else view.get("user_id"),
+                dept_id=payload.get("dept_id", view.get("dept_id")),
             )
         elif event.type == "child.created":
             dependencies = list(payload.get("dependency_ids", []))
