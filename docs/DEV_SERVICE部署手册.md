@@ -12,7 +12,7 @@
 ./scripts/dev_service_deploy.sh
 ```
 
-等价于：上传代码 → 在 131 上 `docker build -t auraclaw:dev` → `compose.production.yml up`。
+等价于：上传代码 → 在 131 上 `docker build -t auraclaw:dev` → `compose.test.yml up`。
 
 常用参数：
 
@@ -75,7 +75,7 @@ timeout 3 bash -c 'echo >/dev/tcp/10.244.16.132/9092' && echo ok || echo fail
 ./scripts/dev_service_deploy.sh --skip-sync --skip-build
 ```
 
-服务器上应保留 `compose.kafka-fix.yml`（Kafka 若仍 advertise `localhost:9092`）。
+Kafka `advertised.listeners` 已修复为真实可达地址；`compose.test.yml` 现直接连接 broker，不再使用任何 localhost 代理包装。
 
 rsync 若曾报 `cannot delete ... Users/tong/...`，可在 131 删掉误传目录：
 
@@ -99,4 +99,4 @@ DEV_SERVICE 与生产共用 12 服务拓扑。缩短「创建任务 → 首 Toke
 | `AURACLAW_ORCHESTRATOR_WORKER_INTERVAL` | `0.1` | wake 关闭时的 Orchestrator 轮询 |
 | `AURACLAW_RUNTIME_POLL_INTERVAL` | `0.05` | agent-runtime claim 轮询 |
 
-性能结论请在多服务拓扑（本机 `compose.services.yml` 或 DEV_SERVICE）验证，不要以 `auraclaw serve` 合一体为依据。详见 #42。
+性能结论请在多服务拓扑（本机 `compose.test.yml` 或 DEV_SERVICE）验证，不要以 `auraclaw serve` 合一体为依据。详见 #42。

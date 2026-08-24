@@ -92,7 +92,6 @@ if [[ "${DO_SYNC}" -eq 1 ]]; then
     --exclude '.git/' \
     --exclude '.venv/' \
     --exclude 'node_modules/' \
-    --exclude 'frontend/node_modules/' \
     --exclude '.runtime/' \
     --exclude '.env.dev' \
     --exclude '.env.test' \
@@ -131,10 +130,13 @@ else
   echo "==> skip build"
 fi
 
-# Optional overlay files stay on the server if present.
+COMPOSE_FILE="compose.prod.yml"
+if [[ "${COMPOSE_ENV_FILE}" == ".env.test" ]]; then
+  COMPOSE_FILE="compose.test.yml"
+fi
+# Optional hotfix overlay files stay on the server if present.
 # Keep $(...) literal so the remote shell expands them (same as remote_compose.sh).
-COMPOSE_CMD="docker compose --env-file ${COMPOSE_ENV_FILE} -f compose.production.yml"
-COMPOSE_CMD+=' $(test -f compose.kafka-fix.yml && echo -f compose.kafka-fix.yml)'
+COMPOSE_CMD="docker compose --env-file ${COMPOSE_ENV_FILE} -f ${COMPOSE_FILE}"
 COMPOSE_CMD+=' $(test -f compose.hotfix-errors.yml && echo -f compose.hotfix-errors.yml)'
 
 if [[ "${DO_MIGRATE}" -eq 1 ]]; then

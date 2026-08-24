@@ -1,19 +1,4 @@
 {
   "version": "2.0.0",
-  "tasks": [
-    {
-      "label": "wait-for-policy-and-credential-proxy",
-      "type": "shell",
-      "command": "${workspaceFolder}/.venv/bin/python",
-      "args": [
-        "-c",
-        "import time, urllib.error, urllib.request\nurls = ('http://127.0.0.1:8007/health/live', 'http://127.0.0.1:8008/health/live')\nfor url in urls:\n    for _ in range(50):\n        try:\n            urllib.request.urlopen(url, timeout=1)\n            break\n        except (urllib.error.URLError, TimeoutError, OSError):\n            time.sleep(0.2)\n    else:\n        raise SystemExit(f'timeout waiting for {url}')\n"
-      ],
-      "problemMatcher": [],
-      "presentation": {
-        "reveal": "silent",
-        "panel": "shared"
-      }
-    }
-  ]
+  "tasks": []
 }

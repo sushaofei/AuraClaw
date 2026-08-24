@@ -1,7 +1,11 @@
-name: auraclaw
+# Server test Compose (DEV_SERVICE). Same 12-service topology as prod, with
+# replicas=1, auraclaw:dev image, host.docker.internal, and Kafka localhost proxy.
+name: auraclaw-test
 
 x-auraclaw-service: &auraclaw-service
-  image: ${AURACLAW_IMAGE:-ghcr.io/example/auraclaw:replace-with-immutable-sha}
+  image: ${AURACLAW_IMAGE:-auraclaw:dev}
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
   user: "10001:10001"
   read_only: true
   init: true
@@ -118,7 +122,7 @@ services:
       auraclaw.service-identity: task-api
       auraclaw.database-role: auraclaw_task_query_ro
     deploy:
-      replicas: 3
+      replicas: 1
       update_config: *update-policy
       rollback_config: *rollback-policy
       restart_policy: {condition: on-failure, delay: 5s, max_attempts: 5, window: 60s}
@@ -158,7 +162,7 @@ services:
       auraclaw.service-identity: session
       auraclaw.database-role: auraclaw_session
     deploy:
-      replicas: 3
+      replicas: 1
       update_config: *update-policy
       rollback_config: *rollback-policy
       restart_policy: {condition: on-failure, delay: 5s, max_attempts: 5, window: 60s}
@@ -186,7 +190,7 @@ services:
       auraclaw.service-identity: projection-worker
       auraclaw.database-role: auraclaw_projection
     deploy:
-      replicas: 2
+      replicas: 1
       update_config: *update-policy
       rollback_config: *rollback-policy
       restart_policy: {condition: on-failure, delay: 5s, max_attempts: 5, window: 60s}
@@ -219,7 +223,7 @@ services:
       auraclaw.service-identity: orchestrator
       auraclaw.database-role: auraclaw_control
     deploy:
-      replicas: 3
+      replicas: 1
       update_config: *update-policy
       rollback_config: *rollback-policy
       restart_policy: {condition: on-failure, delay: 5s, max_attempts: 5, window: 60s}
@@ -247,7 +251,7 @@ services:
       auraclaw.service-identity: agent-runtime
       auraclaw.database-role: none
     deploy:
-      replicas: 3
+      replicas: 1
       update_config: *update-policy
       rollback_config: *rollback-policy
       restart_policy: {condition: on-failure, delay: 5s, max_attempts: 5, window: 60s}
@@ -281,7 +285,7 @@ services:
       auraclaw.service-identity: model-gateway
       auraclaw.database-role: auraclaw_model
     deploy:
-      replicas: 2
+      replicas: 1
       update_config: *update-policy
       rollback_config: *rollback-policy
       restart_policy: {condition: on-failure, delay: 5s, max_attempts: 5, window: 60s}
@@ -315,7 +319,7 @@ services:
       auraclaw.service-identity: action-hands
       auraclaw.database-role: auraclaw_hands
     deploy:
-      replicas: 2
+      replicas: 1
       update_config: *update-policy
       rollback_config: *rollback-policy
       restart_policy: {condition: on-failure, delay: 5s, max_attempts: 5, window: 60s}
@@ -355,7 +359,7 @@ services:
       auraclaw.service-identity: policy
       auraclaw.database-role: auraclaw_policy
     deploy:
-      replicas: 2
+      replicas: 1
       update_config: *update-policy
       rollback_config: *rollback-policy
       restart_policy: {condition: on-failure, delay: 5s, max_attempts: 5, window: 60s}
@@ -392,7 +396,7 @@ services:
       auraclaw.service-identity: credential-proxy
       auraclaw.database-role: auraclaw_credential
     deploy:
-      replicas: 2
+      replicas: 1
       update_config: *update-policy
       rollback_config: *rollback-policy
       restart_policy: {condition: on-failure, delay: 5s, max_attempts: 5, window: 60s}
@@ -435,7 +439,7 @@ services:
       auraclaw.service-identity: artifact-service
       auraclaw.database-role: auraclaw_artifact
     deploy:
-      replicas: 2
+      replicas: 1
       update_config: *update-policy
       rollback_config: *rollback-policy
       restart_policy: {condition: on-failure, delay: 5s, max_attempts: 5, window: 60s}
@@ -464,7 +468,7 @@ services:
       auraclaw.service-identity: streaming-gateway
       auraclaw.database-role: auraclaw_streaming
     deploy:
-      replicas: 3
+      replicas: 1
       update_config: *update-policy
       rollback_config: *rollback-policy
       restart_policy: {condition: on-failure, delay: 5s, max_attempts: 5, window: 60s}
@@ -492,7 +496,7 @@ services:
       auraclaw.service-identity: delivery-worker
       auraclaw.database-role: auraclaw_delivery
     deploy:
-      replicas: 2
+      replicas: 1
       update_config: *update-policy
       rollback_config: *rollback-policy
       restart_policy: {condition: on-failure, delay: 5s, max_attempts: 5, window: 60s}

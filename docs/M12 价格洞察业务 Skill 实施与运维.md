@@ -1,5 +1,9 @@
 # M12 价格洞察业务 Skill 实施与运维
 
+> **架构变更（2026-08）**：AuraClaw 已移除本地 DWD MySQL/JSON 直连、内置 `procurement.price.*`
+> Tool 与 `ModelSkillPublisher` MySQL 编译路径。业务 Tool/Resource/Skill 仅经 MCP egress 提供。
+> 下文保留历史实施记录，供对照远端 MCP 能力设计；新集成请以 [MCP 开发手册](MCP%20开发手册.md) 为准。
+
 ## 1. 交付目标
 
 M12 以“全场景中心 → 成本 → 价格管理控制塔 → 价格洞察智能体”为首个业务样板，
@@ -48,10 +52,9 @@ M12 以“全场景中心 → 成本 → 价格管理控制塔 → 价格洞察�
 - `contracts/price_insight.py`：筛选、DWD 行、数据集和快照契约；
 - `action/price_insight.py`：确定性 KPI、范围画像、质量门禁、单指标计算与证据下钻；
 - `infrastructure/price_insight.py`：黄金数据和固定 SQL 的租户隔离只读适配器；
-- `skills/procurement-price-insight/`：场景编排 Skill、业务规则、输出契约和黄金样本；
-- `skills/procurement-price-data-validation/`：可复用的数据范围和质量子 Skill；
-- `skills/procurement-price-metrics/`：可复用的八项价格指标和证据子 Skill；
-- `composition/business_skills.py`：平台签名、Resource 与 Capability 描述符；
+- `config/price-insight/golden-data.json`：本地验收黄金样本；
+- Skill 包不再固化在仓库内；Action Hands 通过 MCP Resource（`skill://`）发现、下载并发布到本地 Registry。
+- Model Skill 仍可从 MySQL `ct_model_*` 编译发布；远端 MCP Server 也可直接暴露签名 Skill 包。
 - `runtime/capability_controller.py`：所有 Skill 共用的依赖自动装载。
 - `config/model-skills/procurement-price-insight.json`：可审计的 ct_model 配置发布事实；
 - `scripts/configure_price_insight_model_skill.py`：显式 validate/plan/apply 的配置引导工具。
@@ -177,7 +180,7 @@ AURACLAW_DEVELOPMENT_MODEL_MODE=provider|price-insight-scripted
 `auto` 在 development 使用黄金数据，在 production 关闭。生产启用 `mysql` 时必须提供完整
 只读连接配置；密码可通过 `AURACLAW_PRICE_INSIGHT_MYSQL_PASSWORD_FILE` 注入。
 
-### 本地真实 DWD 与前端联调
+### 本地真实 DWD 联调
 
 本机 MySQL 可重复应用 DDL 并写入隔离的黄金验证行：
 
@@ -186,11 +189,9 @@ PYTHONPATH=src uv run python scripts/seed_price_insight_mysql.py \
   --tenant-id development
 ```
 
-本地 `.env` 设置 `AURACLAW_PRICE_INSIGHT_SOURCE=mysql` 和完整的
-`AURACLAW_PRICE_INSIGHT_MYSQL_*` 后，执行 VS Code 的
-`AuraClaw: Debug local frontend + backend`，访问
-`http://localhost:3000/price-insight`。该页面通过标准 `/v1/tasks` 创建任务，并从
-Canonical Timeline 展示 Capability Search/Load、父子 Skill Activate、数据质量、
+本地 `.env.dev` 设置 `AURACLAW_PRICE_INSIGHT_SOURCE=mysql` 和完整的
+`AURACLAW_PRICE_INSIGHT_MYSQL_*` 后，通过 `POST /v1/tasks` 创建价格洞察任务。
+Canonical Timeline 会记录 Capability Search/Load、父子 Skill Activate、数据质量、
 八项 KPI 和 `mysql-price-insight:*` 数据修订证据。
 
 当外部模型端点不可用、只需做确定性框架回归时，可在 development 设置
@@ -220,10 +221,6 @@ uv run ruff check .
 uv run mypy src/auraclaw
 uv run pytest
 uv run lint-imports
-npm --prefix frontend run lint
-npm --prefix frontend run build
-python /Users/tong/.codex/skills/.system/skill-creator/scripts/quick_validate.py \
-  src/auraclaw/skills/procurement-price-insight
 ```
 
 回滚时先设置 `AURACLAW_PRICE_INSIGHT_SOURCE=disabled` 并重启 Action Hands，业务 Skill、

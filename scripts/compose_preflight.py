@@ -11,7 +11,6 @@ from urllib.parse import urlsplit
 from dotenv import dotenv_values
 
 ROOT = Path(__file__).parents[1]
-COMPOSE = ROOT / "compose.production.yml"
 DATABASE_ROLES = {
     "TASK_QUERY_DATABASE_URL": "auraclaw_task_query_ro",
     "SESSION_DATABASE_URL": "auraclaw_session",
@@ -67,13 +66,31 @@ def _dsn_username(value: str) -> str | None:
     return urlsplit(normalized).username
 
 
+def _compose_file_for_env(env_path: Path) -> Path:
+    name = env_path.name
+    if name in {".env.test", ".env.test.example"} or name.endswith(".test"):
+        return ROOT / "compose.test.yml"
+    return ROOT / "compose.prod.yml"
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description="validate AuraClaw production Compose inputs")
+    parser = argparse.ArgumentParser(description="validate AuraClaw Compose inputs")
     parser.add_argument("--env-file", default=".env.prod")
+    parser.add_argument(
+        "--compose-file",
+        default=None,
+        help="Compose file (default: compose.test.yml for .env.test, else compose.prod.yml)",
+    )
     args = parser.parse_args()
     env_path = Path(args.env_file)
+    compose_path = (
+        Path(args.compose_file) if args.compose_file else _compose_file_for_env(env_path)
+    )
     if not env_path.is_file():
         print(f"preflight failed: env file not found: {env_path}")
+        return 1
+    if not compose_path.is_file():
+        print(f"preflight failed: compose file not found: {compose_path}")
         return 1
     file_values = dotenv_values(env_path)
     values = {
@@ -136,7 +153,7 @@ def main() -> int:
             "--env-file",
             str(env_path),
             "-f",
-            str(COMPOSE),
+            str(compose_path),
             "--profile",
             "migrate",
             "config",
@@ -148,11 +165,11 @@ def main() -> int:
     if completed.returncode:
         failures.append("docker compose config validation failed")
     if failures:
-        print("production Compose preflight failed")
+        print("Compose preflight failed")
         for failure in failures:
             print(f"- {failure}")
         return 1
-    print("production Compose preflight passed")
+    print("Compose preflight passed")
     return 0
 
 

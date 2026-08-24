@@ -1,13 +1,14 @@
 # AuraClaw 远程部署目录说明
 
-本目录用于 `compose.production.yml` 生产部署。详细步骤见仓库内
+本目录用于 `compose.prod.yml` 与 `compose.test.yml` 部署。详细步骤见仓库内
 `docs/S5 Docker Compose 生产部署与故障演练 Runbook.md`。
 
 ## 目录内容
 
 | 路径 | 用途 |
 |------|------|
-| `compose.production.yml` | Compose 模板（测试 / 生产共用） |
+| `compose.test.yml` | 服务器测试 Compose 模板 |
+| `compose.prod.yml` | 生产 Compose 模板 |
 | `.env.test.example` | 服务器测试 env 模板（复制为 gitignored `.env.test`） |
 | `.env.prod.example` | 生产 env 模板（当前与 test 一致；复制为 `.env.prod`） |
 | `.env.test` / `.env.prod` | 部署环境变量（0600，勿提交） |
@@ -46,11 +47,11 @@ python3 scripts/compose_preflight.py --env-file .env.test
 
 # 迁移
 docker compose --env-file .env.test \
-  -f compose.production.yml --profile migrate run --rm migrate
+  -f compose.test.yml --profile migrate run --rm migrate
 
 # 启动（测试环境；生产将 .env.test 换为 .env.prod）
 docker compose --env-file .env.test \
-  -f compose.production.yml up -d --wait --remove-orphans
+  -f compose.test.yml up -d --wait --remove-orphans
 
 curl --fail http://127.0.0.1:8080/health/ready
 ```

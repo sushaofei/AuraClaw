@@ -74,7 +74,7 @@
 |---|---|---|
 | `src/auraclaw/infrastructure/connectors/mcp/connector.py` | `tool_name_aliases`：发现时对内暴露 `procurement.price.*`，`tools/call` 再还原成 Java 的 `price_insight.*` | 能力目录、Skill `required_tools`、模型调用使用同一套 canonical name |
 | `src/auraclaw/infrastructure/connectors/mcp/connector.py` | 若远程 Schema 根参数是必填 `input`，调用时自动把业务参数包进 `{"input": ...}` | 满足 Java MCP 输入校验，Skill 不必改成 Java 形状 |
-| `debug/java-mcp-servers.json` | 配置上述 aliases（见附录） | Hands 注册本机 Java MCP 时带上映射表 |
+| `debug/java-mcp-servers.json` | 通过 `metadata.tool_name_aliases` / `metadata.search_tags` 配置别名与检索标签（见附录） | Hands 注册本机 Java MCP 时带上映射表与中文检索标签 |
 | `tests/unit/test_m9_catalog_reconciliation.py` | 别名解析 + `input` 包装 | 回归「对内规范名、对外 Java 名和入参」 |
 
 ---
@@ -89,9 +89,8 @@
 |---|---|---|
 | `src/auraclaw/action/capability_catalog.py` | 搜索分词增加 CJK 整词 + 二字 gram；原先只吃 `[A-Za-z0-9_.-]+` | 「价格洞察」必须能命中目录 |
 | `src/auraclaw/action/catalog_reconciler.py` | `_capability_semver`：`"1"` → `"1.0.0"`；`_tool_search_tags`：别名、中文标签、`procurement.price.*` | Java 工具 version=`1` 无法入库；中文/别名搜不到 `price_insight.*` |
-| `src/auraclaw/composition/business_skills.py` | `price_insight_publication_tenants`；文档资源挂 `auraclaw-price-insight-docs` | 即使本地价格洞察源是 `disabled`（数据在 Java），仍要把 Skill/文档发布给租户 `"1"` |
-| `src/auraclaw/composition/services.py` | 按上述租户发布 Skill；开发态 Hands 用内存 `ArtifactStore` | SeaweedFS `:8333` 没跑，远程 put 会失败，Skill 激活读不到包 |
-| `src/auraclaw/skills/procurement-price-insight/manifest.json` | `applies_when` 含「价格洞察」 | Skill 检索条件与用户说法对齐 |
+| `src/auraclaw/composition/services.py` | 开发态 Hands 使用内存 `ArtifactStore` 并装配 MCP reconciler | SeaweedFS `:8333` 没跑时，Skill 激活仍能读取本地产物 |
+| `tests/fixtures/skills/procurement-price-insight/manifest.json` | `applies_when` 含「价格洞察」 | Skill 检索条件与用户说法对齐 |
 | `tests/unit/test_m9_capability_catalog.py` | 中文查询不含年份也能命中 | 回归「只搜到 2024」的 bug |
 | `tests/unit/test_m9_catalog_reconciliation.py` | 别名、semver、search_tags | 回归 Java 工具名映射与入库 |
 
@@ -204,7 +203,6 @@ src/auraclaw/action/catalog_reconciler.py          # 标签/semver；MCP user_id
 src/auraclaw/action/hands.py                       # 租约 user_id → ToolInvocation
 src/auraclaw/action/resource_gateway.py            # schema+json 白名单
 src/auraclaw/action/tool_gateway.py                # 拒绝原因回传模型
-src/auraclaw/composition/business_skills.py        # 关闭本地源仍发布 Skill 给租户 1
 src/auraclaw/composition/cli.py                    # serve 拓扑 + Ingress
 src/auraclaw/composition/local_ingress.py          # 本地 8080 入口（新增）
 src/auraclaw/composition/services.py               # Hands/MCP/Skill/内存产物装配
@@ -224,7 +222,7 @@ src/auraclaw/infrastructure/persistence/postgres_capability_catalog.py
 src/auraclaw/infrastructure/persistence/postgres_control_store.py
 src/auraclaw/internal/tool_client.py               # 开发态带 user_id
 src/auraclaw/runtime/capability_controller.py      # follow-up 可按 id load
-src/auraclaw/skills/procurement-price-insight/manifest.json
+tests/fixtures/skills/procurement-price-insight/manifest.json
 ```
 
 对应单测主要在：`test_m9_mcp_egress.py`、`test_hands_mcp_debug.py`、`test_local_ingress.py`、`test_s2_service_topology.py`、`test_m9_capability_catalog.py`、`test_m9_catalog_reconciliation.py`、`test_m9_resource_gateway.py`、`test_hands_contract.py`、`test_m3_tool_security.py`、`test_m11_capability_agent_loop.py`。
@@ -235,8 +233,8 @@ src/auraclaw/skills/procurement-price-insight/manifest.json
 
 这些文件 **不要提交**（含地址/密钥占位）：
 
-- `.env.dev`：项目默认自动读取该文件，也可用 `AURACLAW_ENV_FILE` 显式指定。关键项包括共享 SQL 或 Kafka Runtime Event 后端、MCP 配置文件、租户、`AURACLAW_PRICE_INSIGHT_SOURCE=disabled`（数据在 Java 不在本地 MySQL）、模型名。
-- `debug/java-mcp-servers.json`：endpoint 为 Gateway `48080` 的 `/rpc-api/agent-runtime/mcp`；`auth_strategy=workload_trusted_context`；`tenant_id=1`；`allowed_private_hosts=["127.0.0.1"]`；`tool_name_aliases` 把 `price_insight.*` 映射成 `procurement.price.*`；`search_tags` 含「价格洞察」。
+- `.env.dev`：项目默认自动读取该文件，也可用 `AURACLAW_ENV_FILE` 显式指定。关键项包括共享 SQL 或 Kafka Runtime Event 后端、`AURACLAW_MCP_EGRESS_SERVERS_FILE=debug/java-mcp-servers.json`、`AURACLAW_DEBUG_VAULT_SECRETS_JSON`、模型名。
+- `debug/java-mcp-servers.json`：本地静态 MCP egress 清单；当前 schema 使用 `metadata.tool_name_aliases` 配别名、`metadata.search_tags` 配中文检索标签。示例见 `debug/java-mcp-servers.example.json`。本机联调常见配置是 `endpoint=http://127.0.0.1:48080/rpc-api/agent-runtime/mcp`、`auth_strategy=workload_trusted_context`、`tenant_id=development`、`allowed_private_hosts=["127.0.0.1"]`。
 - `.vscode/launch.json` / `tasks.json` / `settings.json`：Windows 本机调试入口，不是业务逻辑。
 
 Java 侧需要：`chaintower.agent-chat.python.base-url = http://127.0.0.1:8080`（不要写 8000）。本地联调可关 MCP RSA（`crypto.enabled=false`）；生产必须恢复加密与受控私钥。

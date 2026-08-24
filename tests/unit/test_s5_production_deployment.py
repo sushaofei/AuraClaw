@@ -13,7 +13,7 @@ from auraclaw.infrastructure.persistence.migration_runner import (
 )
 
 ROOT = Path(__file__).resolve().parents[2]
-COMPOSE = ROOT / "compose.production.yml"
+COMPOSE = ROOT / "compose.prod.yml"
 APPLICATION_SERVICES = {
     "task-api",
     "session",
@@ -267,6 +267,8 @@ def test_env_templates_are_ready_to_copy() -> None:
         key for key in sorted(shared_keys) if test[key] != debug.get(key)
     ]
     assert mismatches == []
+    assert debug["AURACLAW_RUNTIME_WORKLOAD_TOKEN"] == test["AURACLAW_RUNTIME_WORKLOAD_TOKEN"]
+    assert debug["AURACLAW_RUNTIME_WORKLOAD_TOKEN"] == production["AURACLAW_RUNTIME_WORKLOAD_TOKEN"]
 
     tokens = [
         production[name] or ""
@@ -361,4 +363,4 @@ def test_production_preflight_accepts_isolated_roles_and_unique_tokens(
         text=True,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert result.stdout.strip() == "production Compose preflight passed"
+    assert result.stdout.strip() == "Compose preflight passed"

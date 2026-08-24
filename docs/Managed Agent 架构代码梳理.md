@@ -1,7 +1,7 @@
 # Managed Agent 架构代码梳理
 
 > 依据 [Managed Agent 系统架构图](./Managed%20Agent%20系统架构图.png) 与 `docs/Managed Agent 系统架构/`，对当前 `src/auraclaw/` 代码做组件级映射。  
-> 分析范围：纯 Python Managed Agent 后端（FastAPI）；前端工作台仅作 API Client 引用。  
+> 分析范围：纯 Python Managed Agent 后端（FastAPI）。  
 > 梳理日期：2026-07-22（Issue #8 模块边界重构已完成；[Issue #12](https://github.com/sushaofei/AuraClaw/issues/12)
 > S0 已冻结 12 服务生产目标，当前代码仍是模块化单体）。
 
@@ -599,7 +599,7 @@ S3 再移除跨边界 direct Store 装配。
 | **M4** | Collaboration DAG / 角色 | `test_m4_collaboration.py`、`test_postgres_m4.py` |
 | **M5** | Streaming / Kafka / Delivery | `test_m5_streaming_delivery.py`、`test_postgres_m5.py`、`test_kafka_m5.py` |
 | **M6** | Observability / Ops / 可靠性 | `test_m6_reliability_observability.py`、`test_postgres_m6.py` |
-| **M7** | 前端工作台 + 开发 Runtime 联调 | `test_m7_development_runtime.py`（CORS、端到端 Streaming+Result）、`frontend/` 协议与冒烟测试；后端 49+ 项回归 |
+| **M7** | 开发 Runtime 联调 | `test_m7_development_runtime.py`（CORS、端到端 Streaming+Result）；后端 49+ 项回归 |
 
 阶段门禁见 `docs/开发阶段校验清单.md`（M1–M7 均已勾选完成）。M7.1 协议测试页、M7.2 本地 CORS + 开发 Runtime、M7.3 真实 Streaming 修复详见 `docs/M7 测试报告.md`。
 
@@ -658,8 +658,6 @@ src/auraclaw/
     └── adapters/           # unified runtime_worker
 ```
 
-**API Client（前端）**：`frontend/` 为独立 SPA，经公开 HTTP/SSE 调用后端；提供「智能问答」Streaming 页与「创建任务」Query/Result 页，默认 API `http://127.0.0.1:8000`。详见 `frontend/README.md`。
-
 ---
 
 ## 10. 相对架构图的主要缺口
@@ -676,7 +674,7 @@ S4 已完成 Runnable Feed、Orchestrator 竞争恢复、Runtime 无黏性 check
 Delivery 顺序消费、共享 Streaming cursor、Artifact multipart/scan/GC、Hands Invocation、Model
 幂等/配额、Policy bundle 和 Credential 撤销/usage 状态。
 
-1. **生产部署**：`compose.production.yml` 已提供副本、资源限额、服务身份、DB role、内部网络、
+1. **生产部署**：`compose.prod.yml` 已提供副本、资源限额、服务身份、DB role、内部网络、
    Secret mount 与 migration job；普通 Compose 不虚构 HPA/PDB/NetworkPolicy，零停机使用两套
    Compose project 蓝绿切换。
 2. **Artifact 治理**：Retention/GC 已落地；Legal Hold 与外部 DLP/AV 平台集成作为后续增强。
@@ -699,4 +697,3 @@ Delivery 顺序消费、共享 Streaming cursor、Artifact multipart/scan/GC、H
 - [AGENTS.md](../AGENTS.md)
 - [M7 测试报告](./M7%20测试报告.md)
 - [S5 Docker Compose 生产部署与故障演练 Runbook](./S5%20Docker%20Compose%20生产部署与故障演练%20Runbook.md)
-- [frontend/README.md](../frontend/README.md)

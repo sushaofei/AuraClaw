@@ -1,13 +1,6 @@
-from datetime import timedelta
 from functools import lru_cache
 
-from auraclaw.composition.adapters.runtime_worker import RuntimeWorker
-from auraclaw.composition.development_capabilities import (
-    build_development_capability_client,
-)
-from auraclaw.composition.development_model import DevelopmentPriceInsightModel
 from auraclaw.config import get_settings
-from auraclaw.control.orchestrator import LocalRuntimeProvisioner, ManagedOrchestrator
 from auraclaw.gateways.query.reader import TaskQueryService
 from auraclaw.gateways.streaming.gateway import StreamingGateway
 from auraclaw.gateways.task.admission import AllowAllAdmissionController
@@ -25,9 +18,7 @@ from auraclaw.infrastructure.observability.stores import (
     InMemoryObservabilityStore,
     PostgresObservabilityStore,
 )
-from auraclaw.infrastructure.persistence.memory_control_store import InMemoryControlStateStore
 from auraclaw.infrastructure.persistence.memory_event_store import InMemoryEventStore
-from auraclaw.infrastructure.persistence.postgres_control_store import PostgresControlStateStore
 from auraclaw.infrastructure.persistence.postgres_event_store import PostgresEventStore
 from auraclaw.infrastructure.projection.postgres_approval_store import (
     PostgresApprovalProjection,
@@ -41,9 +32,6 @@ from auraclaw.projection.approval.projector import CompositeProjection, InMemory
 from auraclaw.projection.collaboration.projector import InMemoryCollaborationProjection
 from auraclaw.projection.relay import OutboxRelay
 from auraclaw.projection.task.projector import InMemoryTaskProjection
-from auraclaw.runtime.capability_controller import RuntimeCapabilityController
-from auraclaw.runtime.clients import FencedSessionClient, FencedToolClient, IdempotentToolClient
-from auraclaw.runtime.harness import AgentHarness
 from auraclaw.runtime.model_gateway import ModelGateway, StaticCredentialResolver
 from auraclaw.runtime.ports import ModelClient
 from auraclaw.session.task_service import TaskService
@@ -53,7 +41,6 @@ Projection = InMemoryTaskProjection | PostgresTaskProjection
 ApprovalProjection = InMemoryApprovalProjection | PostgresApprovalProjection
 CollaborationProjection = InMemoryCollaborationProjection | PostgresCollaborationProjection
 ObservabilityStore = InMemoryObservabilityStore | PostgresObservabilityStore
-ControlStore = InMemoryControlStateStore | PostgresControlStateStore
 RuntimeReplayStore = ReplayRuntimeEventBus | PostgresRuntimeEventStore
 
 
@@ -192,8 +179,6 @@ def get_streaming_gateway() -> StreamingGateway:
 @lru_cache
 def get_model_gateway() -> ModelClient:
     settings = get_settings()
-    if settings.development_model_mode == "price-insight-scripted":
-        return DevelopmentPriceInsightModel()
     if not settings.model_gateway_configured:
         raise RuntimeError("AURACLAW_MODEL_API_KEY, BASE_URL and NAME must be configured")
     assert settings.model_api_key is not None
@@ -210,59 +195,6 @@ def get_model_gateway() -> ModelClient:
         (adapter,),
         StaticCredentialResolver({settings.model_provider: settings.model_api_key}),
         default_provider=settings.model_provider,
-    )
-
-
-@lru_cache
-def get_control_store() -> ControlStore:
-    settings = get_settings()
-    if settings.sql_storage_enabled:
-        return PostgresControlStateStore(settings.resolved_database_url)
-    return InMemoryControlStateStore()
-
-
-def build_runtime_worker() -> RuntimeWorker:
-    settings = get_settings()
-    event_store = get_event_store()
-    projection = get_task_projection()
-    control = get_control_store()
-    session = FencedSessionClient(event_store, control)
-    relay = OutboxRelay(
-        event_store,
-        CompositeProjection(
-            projection,
-            get_approval_projection(),
-            get_collaboration_projection(),
-            ObservabilityProjector(get_observability_service()),
-        ),
-    )
-    orchestrator = ManagedOrchestrator(
-        orchestrator_id="runtime-orchestrator",
-        control_store=control,
-        session=session,
-        provisioner=LocalRuntimeProvisioner("local"),
-        lease_ttl=timedelta(seconds=max(30.0, settings.model_timeout_seconds / 2)),
-    )
-    capability_client = build_development_capability_client(settings)
-    harness = AgentHarness(
-        control_store=control,
-        session=session,
-        model=get_model_gateway(),
-        tools=FencedToolClient(IdempotentToolClient(), control),
-        runtime_events=get_runtime_event_publisher(),
-        capability_controller=(
-            RuntimeCapabilityController(capability_client)
-            if capability_client is not None
-            else None
-        ),
-    )
-    return RuntimeWorker(
-        event_store=event_store,
-        reader=projection,
-        relay=relay,
-        orchestrator=orchestrator,
-        harness=harness,
-        poll_interval=settings.runtime_poll_interval,
     )
 
 
