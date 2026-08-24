@@ -10,6 +10,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 HOST_ENV="${ROOT}/.host.env"
 IMAGE_TAG="${AURACLAW_DEV_IMAGE:-auraclaw:dev}"
+COMPOSE_ENV_FILE="${AURACLAW_COMPOSE_ENV_FILE:-.env.test}"
 DO_SYNC=1
 DO_BUILD=1
 DO_UP=1
@@ -29,7 +30,7 @@ Usage: ./scripts/dev_service_deploy.sh [options]
   -h, --help    show this help
 
 Reads host/user from .host.env (DEV_SERVICE_* preferred, else AURACLAW_HOST*).
-Does not overwrite remote .env.production or .runtime/compose-secrets.
+Uses remote .env.test (server test). Does not overwrite .env.test or .runtime/compose-secrets.
 EOF
 }
 
@@ -93,8 +94,9 @@ if [[ "${DO_SYNC}" -eq 1 ]]; then
     --exclude 'node_modules/' \
     --exclude 'frontend/node_modules/' \
     --exclude '.runtime/' \
-    --exclude '.env' \
-    --exclude '.env.production' \
+    --exclude '.env.dev' \
+    --exclude '.env.test' \
+    --exclude '.env.prod' \
     --exclude '.host.env' \
     --exclude '.chaintower' \
     --exclude '.DS_Store' \
@@ -108,13 +110,15 @@ else
   echo "==> skip rsync"
 fi
 
-remote "test -f .env.production" || {
-  echo "remote missing .env.production — create it on ${HOST} first" >&2
+echo "==> compose env ${COMPOSE_ENV_FILE}"
+
+remote "test -f ${COMPOSE_ENV_FILE}" || {
+  echo "remote missing ${COMPOSE_ENV_FILE} — cp .env.test.example ${COMPOSE_ENV_FILE} on ${HOST} first" >&2
   exit 1
 }
 
-if ! remote "grep -E '^AURACLAW_IMAGE=${IMAGE_TAG}\$' .env.production >/dev/null || grep -E '^AURACLAW_IMAGE=\"${IMAGE_TAG}\"\$' .env.production >/dev/null"; then
-  echo "warning: .env.production AURACLAW_IMAGE is not ${IMAGE_TAG}" >&2
+if ! remote "grep -E '^AURACLAW_IMAGE=${IMAGE_TAG}\$' ${COMPOSE_ENV_FILE} >/dev/null || grep -E '^AURACLAW_IMAGE=\"${IMAGE_TAG}\"\$' ${COMPOSE_ENV_FILE} >/dev/null"; then
+  echo "warning: ${COMPOSE_ENV_FILE} AURACLAW_IMAGE is not ${IMAGE_TAG}" >&2
   echo "         set AURACLAW_IMAGE=${IMAGE_TAG} on the server or this deploy may run an old image" >&2
 fi
 
@@ -129,7 +133,7 @@ fi
 
 # Optional overlay files stay on the server if present.
 # Keep $(...) literal so the remote shell expands them (same as remote_compose.sh).
-COMPOSE_CMD='docker compose --env-file .env.production -f compose.production.yml'
+COMPOSE_CMD="docker compose --env-file ${COMPOSE_ENV_FILE} -f compose.production.yml"
 COMPOSE_CMD+=' $(test -f compose.kafka-fix.yml && echo -f compose.kafka-fix.yml)'
 COMPOSE_CMD+=' $(test -f compose.hotfix-errors.yml && echo -f compose.hotfix-errors.yml)'
 

@@ -133,13 +133,15 @@ Review Evidence 和 Artifact lineage。
 
 ## 配置文件
 
-仓库只提交三份环境模板，真实密钥文件被 gitignore：
+仓库提交三份环境模板，真实密钥文件被 gitignore：
 
 | 模板 | 复制为 | 用途 |
 |------|--------|------|
-| `.env.example` | — | 变量目录。不要直接当运行配置。 |
-| `.env.debug.example` | `.env.debug` | 本地 12 入口 debug；业务状态用内存，跨进程 SSE 用本机 Kafka。 |
-| `.env.production.example` | `.env.production` | Compose 生产发布。填镜像 digest、库密码、模型、Vault、SeaweedFS。 |
+| `.env.dev.example` | `.env.dev` | 本地开发：`uv run auraclaw serve` / VS Code，非 Docker。 |
+| `.env.test.example` | `.env.test` | 服务器测试：`docker compose` 部署（如 DEV_SERVICE `10.244.16.131`）。 |
+| `.env.prod.example` | `.env.prod` | 服务器生产：Compose 发布（当前与 test 一致）。 |
+
+`.env.dev` 与 `.env.test` 除大模型 `AURACLAW_MODEL_API_KEY` / `AURACLAW_MODEL_BASE_URL` 及本地运行拓扑（`HOST`、12 入口 URL、`NO_PROXY` 等）外保持一致。`NO_PROXY` 仅用于本机开发绕过 HTTP 代理，测试 / 生产 Compose 不要配置。
 
 ## 本地启动
 
@@ -151,7 +153,7 @@ Task API `:8000`。Java 智问代理应指向 `http://127.0.0.1:8080`，不要�
 
 ```bash
 uv sync --extra dev
-cp .env.debug.example .env.debug
+cp .env.dev.example .env.dev
 uv run auraclaw serve
 ```
 
@@ -203,7 +205,7 @@ docker compose -f compose.services.yml up --build
 docker compose -f compose.services.yml --profile ingress up --build
 ```
 
-Compose 不启动 SeaweedFS，而是使用 `.env` 中已部署的外部 S3 endpoint。若 SeaweedFS、
+Compose 不启动 SeaweedFS，而是使用 `.env.test` / `.env.prod` 中已部署的外部 S3 endpoint。若 SeaweedFS、
 PostgreSQL 或 Kafka 运行在 Docker Host，请把相应 host 配置为 `host.docker.internal`；生产环境
 使用服务 DNS、Secret/Workload 注入，不在 Compose 文件中写入密钥。Ingress 将
 `/v1/streams/*` 路由到 `streaming-gateway:8010`，其余路径路由到 `task-api:8000`。
@@ -213,12 +215,12 @@ PostgreSQL 或 Kafka 运行在 Docker Host，请把相应 host 配置为 `host.d
 ```bash
 docker network create auraclaw-platform # 已存在时跳过
 uv run python scripts/materialize_compose_secrets.py \
-  --env-file .env.production --output-dir .runtime/compose-secrets
-uv run python scripts/compose_preflight.py --env-file .env.production
-docker compose --env-file .env.production -f compose.production.yml \
+  --env-file .env.prod --output-dir .runtime/compose-secrets
+uv run python scripts/compose_preflight.py --env-file .env.prod
+docker compose --env-file .env.prod -f compose.production.yml \
   --profile migrate run --rm migrate migrate up \
   --target 0016 --directory /app/migrations
-docker compose --env-file .env.production -f compose.production.yml up -d --wait
+docker compose --env-file .env.prod -f compose.production.yml up -d --wait
 ```
 
 副本、资源、Secret 文件挂载、蓝绿发布、回滚、扩缩容与 kill test 见
@@ -229,10 +231,11 @@ Artifact 和 Admin 写路径不再共享跨域 Store。Action Hands 以 MCP Serv
 Invocation Store、Policy、Credential Proxy 和 Artifact Service 执行；Runtime 只持有 MCP Client。
 SeaweedFS 管理密钥只注入 Artifact Service，Vault Token 只注入 Credential Proxy，Runtime 位于
 无 platform egress 的内部 Docker network。本地 `auraclaw serve` 与生产 Compose 使用同一组
-12 个入口；环境差异只来自 `.env.debug` / `.env.production` 提供的存储、事件总线、模型端点和 CORS
-等资源。CLI 与 VS Code debug 都读取 `.env.debug`（可用 `AURACLAW_ENV_FILE` 覆盖）。
+12 个入口；环境差异只来自 `.env.dev` / `.env.test` / `.env.prod` 提供的存储、事件总线、模型端点和 CORS
+等资源。CLI 与 VS Code debug 都读取 `.env.dev`（可用 `AURACLAW_ENV_FILE` 覆盖）。服务器测试 / 生产通过
+Docker Compose 读取 `.env.test` / `.env.prod`。
 
-生产发布复制 `.env.production.example` 为 gitignored 的 `.env.production`，填入不可变镜像和密钥后再跑
+生产发布复制 `.env.prod.example` 为 gitignored 的 `.env.prod`，填入不可变镜像和密钥后再跑
 `scripts/materialize_compose_secrets.py` 与 `scripts/compose_preflight.py`。
 
 Harness 的 delta 经 Runtime Event Producer SDK 排序、校验和脱敏后进入 Kafka，再由
@@ -388,7 +391,7 @@ uv run python scripts/release_gate.py
 PostgreSQL 集成测试使用独立测试库：
 
 ```bash
-# 使用当前 .env 的 DB_NAME
+# 使用当前 .env.dev 的 DB_NAME
 uv run pytest tests/integration/test_postgres_m1.py
 ```
 

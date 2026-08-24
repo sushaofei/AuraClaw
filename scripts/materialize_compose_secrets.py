@@ -45,7 +45,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="materialize ignored 0600 files for Docker Compose secrets"
     )
-    parser.add_argument("--env-file", default=".env")
+    parser.add_argument("--env-file", default=".env.prod")
     parser.add_argument("--output-dir", default=".runtime/compose-secrets")
     args = parser.parse_args()
     env_file = Path(args.env_file)

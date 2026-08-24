@@ -9,7 +9,7 @@
       "args": ["api", "run", "--host", "127.0.0.1", "--port", "8000"],
       "cwd": "${workspaceFolder}",
       "python": "${workspaceFolder}/.venv/bin/python",
-      "envFile": "${workspaceFolder}/.env.debug",
+      "envFile": "${workspaceFolder}/.env.dev",
       "console": "integratedTerminal",
       "justMyCode": false,
       "presentation": { "group": "auraclaw", "order": 1 }
@@ -22,7 +22,7 @@
       "args": ["session", "run", "--host", "127.0.0.1", "--port", "8001"],
       "cwd": "${workspaceFolder}",
       "python": "${workspaceFolder}/.venv/bin/python",
-      "envFile": "${workspaceFolder}/.env.debug",
+      "envFile": "${workspaceFolder}/.env.dev",
       "console": "integratedTerminal",
       "justMyCode": false,
       "presentation": { "group": "auraclaw", "order": 2 }
@@ -35,7 +35,7 @@
       "args": ["projection", "relay", "--watch", "--host", "127.0.0.1", "--port", "8002"],
       "cwd": "${workspaceFolder}",
       "python": "${workspaceFolder}/.venv/bin/python",
-      "envFile": "${workspaceFolder}/.env.debug",
+      "envFile": "${workspaceFolder}/.env.dev",
       "console": "integratedTerminal",
       "justMyCode": false,
       "presentation": { "group": "auraclaw", "order": 3 }
@@ -48,7 +48,7 @@
       "args": ["orchestrator", "run", "--host", "127.0.0.1", "--port", "8003"],
       "cwd": "${workspaceFolder}",
       "python": "${workspaceFolder}/.venv/bin/python",
-      "envFile": "${workspaceFolder}/.env.debug",
+      "envFile": "${workspaceFolder}/.env.dev",
       "console": "integratedTerminal",
       "justMyCode": false,
       "presentation": { "group": "auraclaw", "order": 4 }
@@ -61,7 +61,7 @@
       "args": ["runtime", "run", "--host", "127.0.0.1", "--port", "8004"],
       "cwd": "${workspaceFolder}",
       "python": "${workspaceFolder}/.venv/bin/python",
-      "envFile": "${workspaceFolder}/.env.debug",
+      "envFile": "${workspaceFolder}/.env.dev",
       "console": "integratedTerminal",
       "justMyCode": false,
       "presentation": { "group": "auraclaw", "order": 5 }
@@ -74,7 +74,7 @@
       "args": ["model-gateway", "run", "--host", "127.0.0.1", "--port", "8005"],
       "cwd": "${workspaceFolder}",
       "python": "${workspaceFolder}/.venv/bin/python",
-      "envFile": "${workspaceFolder}/.env.debug",
+      "envFile": "${workspaceFolder}/.env.dev",
       "console": "integratedTerminal",
       "justMyCode": false,
       "presentation": { "group": "auraclaw", "order": 6 }
@@ -87,7 +87,7 @@
       "args": ["hands", "run", "--host", "127.0.0.1", "--port", "8006"],
       "cwd": "${workspaceFolder}",
       "python": "${workspaceFolder}/.venv/bin/python",
-      "envFile": "${workspaceFolder}/.env.debug",
+      "envFile": "${workspaceFolder}/.env.dev",
       "console": "integratedTerminal",
       "justMyCode": false,
       "presentation": { "group": "auraclaw", "order": 7 }
@@ -100,7 +100,7 @@
       "args": ["policy", "run", "--host", "127.0.0.1", "--port", "8007"],
       "cwd": "${workspaceFolder}",
       "python": "${workspaceFolder}/.venv/bin/python",
-      "envFile": "${workspaceFolder}/.env.debug",
+      "envFile": "${workspaceFolder}/.env.dev",
       "console": "integratedTerminal",
       "justMyCode": false,
       "presentation": { "group": "auraclaw", "order": 8 }
@@ -113,7 +113,7 @@
       "args": ["credential-proxy", "run", "--host", "127.0.0.1", "--port", "8008"],
       "cwd": "${workspaceFolder}",
       "python": "${workspaceFolder}/.venv/bin/python",
-      "envFile": "${workspaceFolder}/.env.debug",
+      "envFile": "${workspaceFolder}/.env.dev",
       "console": "integratedTerminal",
       "justMyCode": false,
       "presentation": { "group": "auraclaw", "order": 9 }
@@ -126,7 +126,7 @@
       "args": ["artifact", "run", "--host", "127.0.0.1", "--port", "8009"],
       "cwd": "${workspaceFolder}",
       "python": "${workspaceFolder}/.venv/bin/python",
-      "envFile": "${workspaceFolder}/.env.debug",
+      "envFile": "${workspaceFolder}/.env.dev",
       "console": "integratedTerminal",
       "justMyCode": false,
       "presentation": { "group": "auraclaw", "order": 10 }
@@ -139,7 +139,7 @@
       "args": ["streaming", "run", "--host", "127.0.0.1", "--port", "8010"],
       "cwd": "${workspaceFolder}",
       "python": "${workspaceFolder}/.venv/bin/python",
-      "envFile": "${workspaceFolder}/.env.debug",
+      "envFile": "${workspaceFolder}/.env.dev",
       "console": "integratedTerminal",
       "justMyCode": false,
       "presentation": { "group": "auraclaw", "order": 11 }
@@ -152,7 +152,7 @@
       "args": ["delivery", "run", "--host", "127.0.0.1", "--port", "8011"],
       "cwd": "${workspaceFolder}",
       "python": "${workspaceFolder}/.venv/bin/python",
-      "envFile": "${workspaceFolder}/.env.debug",
+      "envFile": "${workspaceFolder}/.env.dev",
       "console": "integratedTerminal",
       "justMyCode": false,
       "presentation": { "group": "auraclaw", "order": 12 }
@@ -165,7 +165,7 @@
       "args": ["policy", "run", "--host", "127.0.0.1", "--port", "8007"],
       "cwd": "${workspaceFolder}",
       "python": "${workspaceFolder}/.venv/bin/python",
-      "envFile": "${workspaceFolder}/.env.debug",
+      "envFile": "${workspaceFolder}/.env.dev",
       "console": "integratedTerminal",
       "justMyCode": false,
       "presentation": { "hidden": true, "group": "auraclaw", "order": 20 }
@@ -178,7 +178,7 @@
       "args": ["credential-proxy", "run", "--host", "127.0.0.1", "--port", "8008"],
       "cwd": "${workspaceFolder}",
       "python": "${workspaceFolder}/.venv/bin/python",
-      "envFile": "${workspaceFolder}/.env.debug",
+      "envFile": "${workspaceFolder}/.env.dev",
       "console": "integratedTerminal",
       "justMyCode": false,
       "presentation": { "hidden": true, "group": "auraclaw", "order": 21 }
@@ -191,7 +191,7 @@
       "args": ["hands", "run", "--host", "127.0.0.1", "--port", "8006"],
       "cwd": "${workspaceFolder}",
       "python": "${workspaceFolder}/.venv/bin/python",
-      "envFile": "${workspaceFolder}/.env.debug",
+      "envFile": "${workspaceFolder}/.env.dev",
       "preLaunchTask": "wait-for-policy-and-credential-proxy",
       "console": "integratedTerminal",
       "justMyCode": false,

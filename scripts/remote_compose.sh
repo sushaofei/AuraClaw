@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Run docker compose on the remote AuraClaw host from .host.env.
+# Default env file: .env.test (server test). Override: AURACLAW_COMPOSE_ENV_FILE=.env.prod
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 HOST_ENV="${ROOT}/.host.env"
+COMPOSE_ENV_FILE="${AURACLAW_COMPOSE_ENV_FILE:-.env.test}"
 if [[ ! -f "${HOST_ENV}" ]]; then
   echo "missing ${HOST_ENV}" >&2
   exit 1
@@ -22,7 +24,7 @@ fi
 ACTION="${1:-ps}"
 shift || true
 
-COMPOSE_PREFIX='docker compose --env-file .env.production -f compose.production.yml'
+COMPOSE_PREFIX="docker compose --env-file ${COMPOSE_ENV_FILE} -f compose.production.yml"
 COMPOSE_PREFIX+=' $(test -f compose.kafka-fix.yml && echo -f compose.kafka-fix.yml)'
 COMPOSE_PREFIX+=' $(test -f compose.hotfix-errors.yml && echo -f compose.hotfix-errors.yml)'
 

@@ -36,13 +36,13 @@
 
 1. 本机有 `.host.env`，且能 SSH 免密到 `jcroot@10.244.16.131`
 2. 服务器已有目录 `/home/jcroot/workspace/AuraClaw`
-3. 服务器上配置 **`.env.production`**（不要从本机覆盖），至少：
+3. 服务器上配置 **`.env.test`**（不要从本机覆盖），至少：
 
 ```dotenv
 AURACLAW_IMAGE=auraclaw:dev
 KAFKA_HOST=10.244.16.132
 SEAWEEDFS_HOST=10.244.16.132
-# 其余 DSN / token / 模型 key 用服务器现网值
+# 其余 DSN / token / 模型 key 用服务器现网值（cp .env.test.example .env.test）
 ```
 
 4. 确认脚本可执行：`chmod +x scripts/dev_service_deploy.sh`
@@ -53,7 +53,7 @@ SEAWEEDFS_HOST=10.244.16.132
 
 | 会做 | 不会做 |
 |------|--------|
-| rsync 代码到 131 | 覆盖远程 `.env.production` |
+| rsync 代码到 131 | 覆盖远程 `.env.test` |
 | `docker build -t auraclaw:dev` | 覆盖 `.runtime/compose-secrets/` |
 | `compose up -d --wait` | 上传 `.host.env` / 本机密码 |
 | 检查 `http://131:8080/health/ready` | 默认跑 migrate（需加 `--migrate`） |

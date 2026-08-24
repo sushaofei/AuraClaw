@@ -48,15 +48,14 @@ AURACLAW_DEV_API_TARGET=http://127.0.0.1:8080 npm run dev
 uv run auraclaw serve            # 12 个生产入口 8000–8011，本地 Ingress 8080
 ```
 
-多进程后端需要共享 SQL 或 Kafka 承载 Runtime Event；默认 `.env.debug.example` 使用本机
+多进程后端需要共享 SQL 或 Kafka 承载 Runtime Event；默认 `.env.dev.example` 使用本机
 Kafka，纯内存事件后端会被启动检查拒绝。
 
 `/auraclaw-api` 只在设置了 `AURACLAW_DEV_API_TARGET`（或 `npm run dev:remote`）时由开发服务器代理到后端。
 该页面从 Canonical Timeline 读取 Capability/Skill/Tool 证据，不直接访问 MySQL。
 
-后端始终使用统一 Runtime Worker、Model Gateway 与 Runtime Event 发布链；本地用 `.env.debug`，
-部署用 `.env.production`，只换资源不换执行逻辑。已部署外部 Runtime 时设置
-`AURACLAW_RUNTIME_ENABLED=false`。
+后端始终使用统一 Runtime Worker、Model Gateway 与 Runtime Event 发布链；本地用 `.env.dev`，
+服务器测试 / 生产 Compose 分别用 `.env.test` / `.env.prod`，只换资源不换执行逻辑。
 
 ## 构建与测试
 

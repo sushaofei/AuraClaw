@@ -7,9 +7,10 @@
 
 | 路径 | 用途 |
 |------|------|
-| `compose.production.yml` | 生产 Compose 模板 |
-| `.env.production.example` | 生产 env 模板（复制为 gitignored `.env.production`） |
-| `.env.production` | 部署环境变量（0600，勿提交） |
+| `compose.production.yml` | Compose 模板（测试 / 生产共用） |
+| `.env.test.example` | 服务器测试 env 模板（复制为 gitignored `.env.test`） |
+| `.env.prod.example` | 生产 env 模板（当前与 test 一致；复制为 `.env.prod`） |
+| `.env.test` / `.env.prod` | 部署环境变量（0600，勿提交） |
 | `.runtime/compose-secrets/` | Compose secrets 文件（0700/0600） |
 | `deploy/nginx.conf` | Ingress 配置 |
 | `deploy/mysql/roles.sql` | MySQL 角色授权 |
@@ -39,16 +40,16 @@ docker image inspect auraclaw:s5 >/dev/null
 ```bash
 # 如需重新物化 secrets（需本机 Python + python-dotenv）
 python3 scripts/materialize_compose_secrets.py \
-  --env-file .env.production --output-dir .runtime/compose-secrets
+  --env-file .env.test --output-dir .runtime/compose-secrets
 
-python3 scripts/compose_preflight.py --env-file .env.production
+python3 scripts/compose_preflight.py --env-file .env.test
 
 # 迁移
-docker compose --env-file .env.production \
+docker compose --env-file .env.test \
   -f compose.production.yml --profile migrate run --rm migrate
 
-# 启动
-docker compose --env-file .env.production \
+# 启动（测试环境；生产将 .env.test 换为 .env.prod）
+docker compose --env-file .env.test \
   -f compose.production.yml up -d --wait --remove-orphans
 
 curl --fail http://127.0.0.1:8080/health/ready

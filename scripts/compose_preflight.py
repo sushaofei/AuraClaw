@@ -69,7 +69,7 @@ def _dsn_username(value: str) -> str | None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="validate AuraClaw production Compose inputs")
-    parser.add_argument("--env-file", default=".env.production")
+    parser.add_argument("--env-file", default=".env.prod")
     args = parser.parse_args()
     env_path = Path(args.env_file)
     if not env_path.is_file():
