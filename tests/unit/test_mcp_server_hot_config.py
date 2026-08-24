@@ -241,42 +241,6 @@ def test_failed_enable_keeps_previous_active_revision() -> None:
     asyncio.run(scenario())
 
 
-def test_bootstrap_does_not_overwrite_existing_server() -> None:
-    async def scenario() -> None:
-        from auraclaw.contracts.capabilities import (
-            CapabilityStatus,
-            McpServerDefinition,
-        )
-
-        service = McpServerRegistryService(InMemoryMcpServerRegistryStore())
-        await service.create(_write(_config()))
-        imported = await service.bootstrap_from_definitions(
-            (
-                McpServerDefinition(
-                    server_id="local-order-mcp",
-                    tenant_id="tenant-a",
-                    title="ENV OVERRIDE",
-                    endpoint="http://127.0.0.1:9/mcp",
-                    allowed_private_hosts=("127.0.0.1",),
-                    auth_strategy=McpAuthStrategy.NONE,
-                    network_mode=McpNetworkMode.LOOPBACK,
-                    status=CapabilityStatus.ACTIVE,
-                    enabled=True,
-                ),
-            )
-        )
-        assert imported == ()
-        record = await service.get_server(
-            tenant_id="tenant-a",
-            server_id="local-order-mcp",
-            actor_id="admin-1",
-        )
-        assert record.latest_config is not None
-        assert record.latest_config.title == "Local Order MCP"
-
-    asyncio.run(scenario())
-
-
 def test_connection_manager_hot_swaps_and_restore() -> None:
     async def scenario() -> None:
         _FakeConnector.snapshots = 0

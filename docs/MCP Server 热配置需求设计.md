@@ -270,9 +270,7 @@ Admin API
 - 远端暂时不可用不会丢失配置。Server 显示 `degraded/unavailable`，后台按退避策略恢复。
 - Readiness 不应因某个可选 MCP Server 不可用而让整个 Action Hands 或 Credential Proxy 退出服务；
   应通过 Server 状态和告警暴露局部故障。
-- 首次升级时，将 `AURACLAW_MCP_EGRESS_SERVERS_JSON` / file 中的条目作为 bootstrap source 幂等导入。
-  仅当 `server_id` 尚不存在时创建 revision 1；数据库已有记录时绝不被环境变量覆盖。
-- 完成迁移后，环境变量只保留一版兼容期并标记 deprecated；最终删除运行时静态装配路径。
+- 环境变量静态清单（`AURACLAW_MCP_EGRESS_SERVERS_JSON` / FILE）已删除；登记只走 Admin API。
 - `storage_backend=memory` 仅用于测试，明确不提供跨重启保证；所有可部署 profile 必须使用 SQL Registry。
 
 ## 9. 状态、失败与可观测性
@@ -315,7 +313,7 @@ mcp_connector_drain_seconds
 - 更新已启用 Server 时，新配置验证成功后接管新请求；验证失败时旧 Server 仍可调用。
 - 禁用后新发现和新调用在目标 5 秒内失效，已开始调用不产生重复副作用。
 - Action Hands 与 Credential Proxy 分别重启、共同重启后，已启用 Server 能从数据库自动恢复。
-- 环境变量导入只发生一次，重启不会覆盖管理员后续修改。
+- 已启用 Server 在 Action Hands / Credential Proxy 重启后从 Registry 恢复，不依赖环境变量。
 - 操作幂等、revision 冲突、跨 tenant 访问和软删除均有自动化测试。
 
 ### 10.2 本地连接

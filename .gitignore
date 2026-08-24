@@ -36,7 +36,6 @@ logs/
 !.env.dev.example
 !.env.test.example
 !.env.prod.example
-debug/java-mcp-servers.json
 .host.env
 .chaintower
 .eng.debug

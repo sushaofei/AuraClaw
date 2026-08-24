@@ -23,35 +23,33 @@ Canonical Session Event；目录、缓存、通知和步骤进度都可丢弃并
 
 ## 2. 远端 Server 配置
 
-远端 Server 使用 `AURACLAW_MCP_EGRESS_SERVERS_JSON` 配置。配置只能包含非密信息和
-`credential_ref`，不能包含 client secret 或 access token：
+远端 Server 用热配置 Admin API（`POST /v1/admin/mcp-servers`，再 `:test` / `:enable`）登记。
+配置只能包含非密信息和 `credential_ref`，不能包含 client secret 或 access token。Action Hands
+与 Credential Proxy 从 Registry 恢复已启用 revision，不再读取环境变量静态清单。
 
 ```json
-[
-  {
-    "server_id": "github-mcp",
-    "tenant_id": "tenant-a",
-    "title": "GitHub MCP",
-    "endpoint": "https://mcp.example/v1/mcp",
-    "protocol_revision": "2026-07-28",
-    "credential_ref": "vault/github-mcp#client_secret",
-    "oauth": {
-      "protected_resource_metadata_url": "https://mcp.example/.well-known/oauth-protected-resource",
-      "authorization_server_metadata_url": "https://auth.example/.well-known/oauth-authorization-server",
-      "issuer": "https://auth.example",
-      "token_endpoint": "https://auth.example/oauth/token",
-      "client_id": "auraclaw-hands",
-      "resource": "https://mcp.example/v1/mcp",
-      "scopes": ["tools.read"]
-    },
-    "trust_level": "tenant_verified",
-    "allowed_tool_prefixes": ["github."],
-    "allowed_resource_schemes": ["github"],
-    "allowed_prompt_prefixes": ["github."],
-    "status": "active",
-    "enabled": true
-  }
-]
+{
+  "server_id": "github-mcp",
+  "tenant_id": "tenant-a",
+  "title": "GitHub MCP",
+  "endpoint": "https://mcp.example/v1/mcp",
+  "protocol_revision": "2026-07-28",
+  "network_mode": "public",
+  "credential_ref": "vault/github-mcp#client_secret",
+  "oauth": {
+    "protected_resource_metadata_url": "https://mcp.example/.well-known/oauth-protected-resource",
+    "authorization_server_metadata_url": "https://auth.example/.well-known/oauth-authorization-server",
+    "issuer": "https://auth.example",
+    "token_endpoint": "https://auth.example/oauth/token",
+    "client_id": "auraclaw-hands",
+    "resource": "https://mcp.example/v1/mcp",
+    "scopes": ["tools.read"]
+  },
+  "trust_level": "tenant_verified",
+  "allowed_tool_prefixes": ["github."],
+  "allowed_resource_schemes": ["github"],
+  "allowed_prompt_prefixes": ["github."]
+}
 ```
 
 OAuth `client_credentials` 是**可选 Connector 策略**，不是 AuraClaw 用户身份系统。
@@ -67,9 +65,26 @@ OAuth `client_credentials` 是**可选 Connector 策略**，不是 AuraClaw 用�
   "credential_ref": "vault/chaintower-mcp#workload",
   "auth_strategy": "workload_trusted_context",
   "trust_level": "tenant_verified",
-  "allowed_tool_prefixes": ["order."],
-  "status": "active",
-  "enabled": true
+  "allowed_tool_prefixes": ["order."]
+}
+```
+
+AuraMCP 扩展面同样走 `workload_trusted_context`，前缀锁定 `auramcp.` / `auramcp://`。
+见 [AuraMCP 接入](./AuraMCP%20接入.md)。
+
+```json
+{
+  "server_id": "auramcp",
+  "title": "AuraMCP extensions",
+  "endpoint": "https://auramcp.internal/mcp",
+  "protocol_revision": "2026-07-28",
+  "network_mode": "public",
+  "credential_ref": "vault/auramcp#workload",
+  "auth_strategy": "workload_trusted_context",
+  "trust_level": "platform",
+  "allowed_tool_prefixes": ["auramcp."],
+  "allowed_resource_schemes": ["auramcp"],
+  "allowed_prompt_prefixes": ["auramcp."]
 }
 ```
 

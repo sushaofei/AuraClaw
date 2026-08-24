@@ -276,55 +276,6 @@ def validate_mcp_network_endpoint(
         raise ValueError("private MCP endpoints require allowed_cidrs")
 
 
-def config_from_legacy_definition(server: McpServerDefinition) -> McpServerConfig:
-    """Map a bootstrap env definition into an immutable registry config."""
-    hostname = (urlsplit(server.endpoint).hostname or "").lower()
-    network_mode = server.network_mode
-    if network_mode is None:
-        if hostname in {"localhost", "127.0.0.1", "::1"} or hostname in {
-            item.lower() for item in server.allowed_private_hosts
-        }:
-            network_mode = (
-                McpNetworkMode.LOOPBACK
-                if hostname in {"localhost", "127.0.0.1", "::1"}
-                else McpNetworkMode.PRIVATE
-            )
-        else:
-            network_mode = McpNetworkMode.PUBLIC
-    auth = server.auth_strategy or (
-        McpAuthStrategy.OAUTH_CLIENT_CREDENTIALS
-        if server.oauth is not None
-        else McpAuthStrategy.WORKLOAD_TRUSTED_CONTEXT
-    )
-    allowed_cidrs = server.allowed_cidrs
-    if network_mode is McpNetworkMode.PRIVATE and not allowed_cidrs:
-        # Bootstrap fallback: allow common private ranges when migrating legacy allowlists.
-        allowed_cidrs = ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8")
-    return McpServerConfig(
-        server_id=server.server_id,
-        tenant_id=server.tenant_id,
-        title=server.title,
-        endpoint=server.endpoint,
-        network_mode=network_mode,
-        protocol_revision=server.protocol_revision,
-        auth_strategy=auth,
-        credential_ref=(
-            None if auth is McpAuthStrategy.NONE else server.credential_ref
-        ),
-        oauth=server.oauth,
-        allowed_tool_prefixes=server.allowed_tool_prefixes,
-        allowed_resource_schemes=server.allowed_resource_schemes,
-        allowed_prompt_prefixes=server.allowed_prompt_prefixes,
-        allowed_cidrs=allowed_cidrs,
-        trust_level=server.trust_level,
-        metadata={
-            key: value
-            for key, value in server.metadata.items()
-            if not str(key).startswith("_auraclaw_")
-        },
-    )
-
-
 def _observed_to_capability_status(
     observed: McpObservedState,
     desired: McpDesiredState,

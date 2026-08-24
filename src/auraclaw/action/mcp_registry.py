@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from typing import Protocol
 from uuid import uuid4
 
-from auraclaw.contracts.capabilities import McpAuthStrategy, McpNetworkMode, McpServerDefinition
+from auraclaw.contracts.capabilities import McpAuthStrategy, McpNetworkMode
 from auraclaw.contracts.errors import (
     AuraClawError,
     AuthorizationError,
@@ -26,7 +26,6 @@ from auraclaw.contracts.mcp_registry import (
     McpServerRevisionRecord,
     McpServerRuntimeRecord,
     McpServerWriteCommand,
-    config_from_legacy_definition,
 )
 
 PLATFORM_TENANT = "platform"
@@ -406,40 +405,6 @@ class McpServerRegistryService:
         return await self._lifecycle(
             server_id, command, McpRegistryOperationKind.RETIRE
         )
-
-    async def bootstrap_from_definitions(
-        self, servers: tuple[McpServerDefinition, ...]
-    ) -> tuple[str, ...]:
-        imported: list[str] = []
-        for server in servers:
-            if await self._store.get_server(server.server_id) is not None:
-                continue
-            config = config_from_legacy_definition(server)
-            command = McpServerWriteCommand(
-                command_id=f"bootstrap:{server.server_id}",
-                tenant_id=server.tenant_id or PLATFORM_TENANT,
-                actor_id="bootstrap",
-                correlation_id="bootstrap",
-                causation_id="bootstrap",
-                expected_revision=0,
-                config=config,
-            )
-            await self.create(command)
-            if server.enabled:
-                await self.enable(
-                    server.server_id,
-                    McpServerLifecycleCommand(
-                        command_id=f"bootstrap-enable:{server.server_id}",
-                        tenant_id=command.tenant_id,
-                        actor_id="bootstrap",
-                        correlation_id="bootstrap",
-                        causation_id="bootstrap",
-                        expected_revision=1,
-                        target_revision=1,
-                    ),
-                )
-            imported.append(server.server_id)
-        return tuple(imported)
 
     async def active_snapshot(self) -> tuple[McpActiveSnapshotEntry, ...]:
         return await self._store.list_active_snapshot()

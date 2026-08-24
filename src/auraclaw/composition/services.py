@@ -4,7 +4,7 @@ import asyncio
 import logging
 import secrets
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -124,7 +124,6 @@ from auraclaw.infrastructure.connectors.http.connector import (
 )
 from auraclaw.infrastructure.connectors.http.egress import ManagedJavaApiEgressAdapter
 from auraclaw.infrastructure.connectors.mcp.connector import ManagedMcpConnector
-from auraclaw.infrastructure.credentials.mcp_egress import ManagedMcpEgressAdapter
 from auraclaw.infrastructure.credentials.mcp_egress_manager import McpEgressManager
 from auraclaw.infrastructure.credentials.proxy import CredentialProxy, InMemoryVault
 from auraclaw.infrastructure.credentials.vault import HashiCorpVault
@@ -262,7 +261,7 @@ async def _hands_mcp_snapshot(
             McpRegistrySnapshotResponse,
         )
     except Exception:
-        logger.warning("MCP registry snapshot is unavailable; using local adapters")
+        logger.warning("MCP registry snapshot is unavailable; retrying on the next tick")
         return None
     finally:
         await client.aclose()
@@ -490,39 +489,13 @@ def _lease_key_configured(settings: Settings) -> bool:
 def _seed_managed_connector_credentials(
     proxy: CredentialProxy,
     settings: Settings,
-    *,
-    mcp_adapters: Mapping[str, Any] | None = None,
 ) -> None:
     expires_at = datetime.now(UTC) + timedelta(days=365)
-    adapters = dict(mcp_adapters or {})
     debug_tenants = (
         ("local", "development", "1")
         if settings.deployment_profile == "development"
         else ()
     )
-    for mcp_server in settings.mcp_egress_servers:
-        if mcp_server.credential_ref is None:
-            continue
-        adapter = adapters.get(f"mcp:{mcp_server.server_id}")
-        account_scope = (
-            adapter.credential_scope
-            if adapter is not None
-            else (
-                mcp_server.oauth.resource
-                if mcp_server.oauth is not None
-                else mcp_server.endpoint
-            )
-        )
-        reference = CredentialReference(
-            credential_ref=mcp_server.credential_ref,
-            provider=mcp_server.server_id,
-            account_scope=account_scope,
-            allowed_operations=("mcp.invoke",),
-            expires_at=expires_at,
-        )
-        tenants = {mcp_server.tenant_id or "platform", *debug_tenants}
-        for tenant_id in tenants:
-            proxy.register_reference(tenant_id, reference)
     for java_server in settings.java_api_servers:
         if java_server.credential_ref is None:
             continue
@@ -1221,7 +1194,6 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
     async def initialize_registry() -> None:
         if tool_registry_store is not None:
             await tool_registry_store.load_into(registry)
-        await mcp_registry.bootstrap_from_definitions(settings.mcp_egress_servers)
         if credential_proxy is not None and isinstance(policy, RemotePolicyClient):
             def _mcp_connector(server: object) -> ManagedMcpConnector:
                 from auraclaw.contracts.capabilities import McpServerDefinition
@@ -1518,17 +1490,13 @@ def _credential_proxy_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         adapters=adapters,
         policy=policy,
     )
+    _seed_managed_connector_credentials(proxy, settings)
 
     async def restore_mcp_egress() -> None:
         snapshot = await _hands_mcp_snapshot(settings)
-        if snapshot is not None:
-            await mcp_egress.restore(snapshot)
+        if snapshot is None:
             return
-        for server in settings.mcp_egress_servers:
-            if not server.enabled:
-                continue
-            adapters[f"mcp:{server.server_id}"] = ManagedMcpEgressAdapter(server)
-        _seed_managed_connector_credentials(proxy, settings, mcp_adapters=adapters)
+        await mcp_egress.restore(snapshot)
 
     async def reconcile_mcp_egress() -> int:
         snapshot = await _hands_mcp_snapshot(settings)

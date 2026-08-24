@@ -44,7 +44,7 @@ class McpEgressManager:
         adapter = ManagedMcpEgressAdapter(definition)
         self._adapters[f"mcp:{entry.server_id}"] = adapter
         self._generations[entry.server_id] = entry.revision
-        await self._ensure_reference(definition)
+        await self._ensure_reference(definition, adapter.credential_scope)
 
     async def revoke(self, server_id: str) -> None:
         self._adapters.pop(f"mcp:{server_id}", None)
@@ -66,7 +66,9 @@ class McpEgressManager:
     def loaded_revision(self, server_id: str) -> int | None:
         return self._generations.get(server_id)
 
-    async def _ensure_reference(self, definition: McpServerDefinition) -> None:
+    async def _ensure_reference(
+        self, definition: McpServerDefinition, account_scope: str
+    ) -> None:
         if definition.resolved_auth_strategy is McpAuthStrategy.NONE:
             credential_ref = none_credential_ref(definition.server_id)
         elif definition.credential_ref is None:
@@ -76,11 +78,7 @@ class McpEgressManager:
         reference = CredentialReference(
             credential_ref=credential_ref,
             provider=definition.server_id,
-            account_scope=(
-                definition.oauth.resource
-                if definition.oauth is not None
-                else definition.endpoint
-            ),
+            account_scope=account_scope,
             allowed_operations=("mcp.invoke",),
             expires_at=datetime.now(UTC) + timedelta(days=365),
         )
