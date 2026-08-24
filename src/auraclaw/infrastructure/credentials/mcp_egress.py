@@ -113,7 +113,7 @@ class HttpxPinnedMcpSender:
     ) -> McpEgressResponse:
         parsed = urlsplit(url)
         ip_host = f"[{approved_ip}]" if ":" in approved_ip else approved_ip
-        port = parsed.port or 443
+        port = parsed.port or _default_port(parsed.scheme)
         pinned_url = urlunsplit(
             (
                 parsed.scheme,
@@ -129,7 +129,8 @@ class HttpxPinnedMcpSender:
             headers={**headers, "Host": _authority(parsed)},
             content=content,
         )
-        request.extensions["sni_hostname"] = server_hostname.encode()
+        if parsed.scheme == "https":
+            request.extensions["sni_hostname"] = server_hostname.encode()
         response = await self._client.send(request, follow_redirects=False)
         return McpEgressResponse(
             status_code=response.status_code,
@@ -159,7 +160,6 @@ class ManagedMcpEgressAdapter:
             raise ValueError("MCP egress server must be enabled")
         if server.credential_ref is None:
             raise ValueError("MCP egress server requires a credential_ref")
-        _validate_https_url(server.endpoint)
         if server.resolved_auth_strategy is McpAuthStrategy.OAUTH_CLIENT_CREDENTIALS:
             if server.oauth is None:
                 raise ValueError("MCP egress server requires managed OAuth configuration")
@@ -413,8 +413,15 @@ class ManagedMcpEgressAdapter:
         host = parsed.hostname
         if host is None:
             raise CredentialAccessError("MCP egress URL has no host")
-        addresses = await self._resolver.resolve(host, parsed.port or 443)
-        approved = _approved_addresses(addresses)
+        addresses = await self._resolver.resolve(
+            host, parsed.port or _default_port(parsed.scheme)
+        )
+        approved = _approved_addresses(
+            addresses,
+            hostname=host,
+            allowed_private_hosts=self._server.allowed_private_hosts,
+            allow_global=parsed.scheme == "https",
+        )
         if not approved:
             raise CredentialAccessError("MCP egress DNS has no public address")
         response = await self._sender.send(
@@ -456,16 +463,29 @@ def _validate_https_url(value: str) -> None:
         raise ValueError("MCP egress URL must be an absolute HTTPS URL without userinfo")
 
 
-def _approved_addresses(addresses: tuple[str, ...]) -> tuple[str, ...]:
+def _approved_addresses(
+    addresses: tuple[str, ...],
+    *,
+    hostname: str,
+    allowed_private_hosts: tuple[str, ...],
+    allow_global: bool,
+) -> tuple[str, ...]:
+    allow_private = hostname.lower() in {item.lower() for item in allowed_private_hosts}
     approved: list[str] = []
     for value in addresses:
         try:
             address = ipaddress.ip_address(value)
         except ValueError as exc:
             raise CredentialAccessError("MCP DNS returned an invalid address") from exc
-        if not address.is_global:
-            raise CredentialAccessError("MCP DNS resolved to a non-public address")
-        approved.append(address.compressed)
+        if address.is_global and allow_global:
+            approved.append(address.compressed)
+            continue
+        if address.is_global:
+            raise CredentialAccessError("public MCP egress requires HTTPS")
+        if allow_private and (address.is_private or address.is_loopback):
+            approved.append(address.compressed)
+            continue
+        raise CredentialAccessError("MCP DNS resolved to a non-public address")
     return tuple(sorted(set(approved)))
 
 
@@ -564,6 +584,10 @@ def _request_target_name(method: str, params: dict[str, Any]) -> str | None:
     }.get(method)
     value = params.get(key) if key is not None else None
     return str(value) if value is not None else None
+
+
+def _default_port(scheme: str) -> int:
+    return 80 if scheme == "http" else 443
 
 
 def _origin(value: str) -> str:

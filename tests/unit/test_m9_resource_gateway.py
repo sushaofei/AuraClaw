@@ -200,3 +200,32 @@ def test_resource_gateway_policy_fails_closed() -> None:
             await gateway.read(_trusted(), uri)
 
     asyncio.run(scenario())
+
+
+def test_resource_gateway_allows_json_schema_media_type() -> None:
+    async def scenario() -> None:
+        uri = "repo://business-skills/price-insight/output-contract/1.0.0"
+        registry = HandsResourceRegistry(
+            resources=(
+                RegisteredResource(
+                    descriptor=HandsResourceDescriptor(
+                        uri=uri,
+                        name="价格洞察输出契约",
+                        mime_type="application/schema+json",
+                    ),
+                    contents=(
+                        HandsResourceContent(
+                            uri=uri,
+                            mime_type="application/schema+json",
+                            text='{"type":"object"}',
+                        ),
+                    ),
+                ),
+            )
+        )
+        gateway = ManagedResourceGateway(registry, artifacts=_artifacts())
+        contents = await gateway.read(_trusted(), uri)
+        assert contents[0].mime_type == "application/schema+json"
+        assert contents[0].inline is True
+
+    asyncio.run(scenario())

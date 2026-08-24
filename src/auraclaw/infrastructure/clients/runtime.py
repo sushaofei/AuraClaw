@@ -31,7 +31,12 @@ from auraclaw.contracts.internal import (
     ValidateLeaseRequest,
     ValidateLeaseResponse,
 )
-from auraclaw.control.ports import RuntimeAssignment, RuntimeBudget, RuntimeCheckpoint
+from auraclaw.control.ports import (
+    DEFAULT_RUNTIME_MAX_STEPS,
+    RuntimeAssignment,
+    RuntimeBudget,
+    RuntimeCheckpoint,
+)
 from auraclaw.infrastructure.clients.session import canonical_event_from_dict
 from auraclaw.internal.http import HttpContractClient
 
@@ -350,7 +355,7 @@ class RemoteRuntimeControlClient:
                 resource_profile=dict(record.resource_profile),
                 deadline=record.deadline,
                 budget=RuntimeBudget(
-                    max_steps=int(budget.get("max_steps", 16)),
+                    max_steps=int(budget.get("max_steps", DEFAULT_RUNTIME_MAX_STEPS)),
                     max_output_tokens=int(budget.get("max_output_tokens", 8192)),
                     max_cost=(
                         float(budget["max_cost"])

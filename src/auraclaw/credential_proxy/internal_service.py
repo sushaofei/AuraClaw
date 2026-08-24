@@ -18,6 +18,13 @@ from auraclaw.infrastructure.credentials.proxy import CredentialProxy
 
 CredentialTargetAdapter = Callable[[dict[str, Any], str], Awaitable[Any] | Any]
 
+# Hands evaluates a remote-invoke policy action; Credential Proxy records a
+# narrower egress operation. Validation must use the decision that Hands stored.
+_POLICY_ACTION_BY_OPERATION = {
+    "mcp.invoke": "mcp.remote.invoke",
+    "http.invoke": "java-api.remote.invoke",
+}
+
 
 class PolicyDecisionValidator(Protocol):
     async def validate_decision(
@@ -53,7 +60,7 @@ class CredentialProxyInternalService:
         if self._policy is not None and not await self._policy.validate_decision(
             tenant_id=request.context.tenant_id,
             decision_id=request.policy_decision_id,
-            action=request.operation,
+            action=_POLICY_ACTION_BY_OPERATION.get(request.operation, request.operation),
             resource=request.target,
         ):
             raise CredentialAccessError("policy decision is invalid or expired")

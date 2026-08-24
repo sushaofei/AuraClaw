@@ -17,6 +17,7 @@ from auraclaw.contracts.hands import (
     HandsToolResult,
     HandsTrustedContext,
 )
+from auraclaw.contracts.tools import ToolResultStatus
 from auraclaw.infrastructure.connectors.mcp.transport import ManagedRemoteMcpTransport
 from auraclaw.infrastructure.connectors.mcp.wire import (
     MCP_AURACLAW_INVOCATION_ID_META_KEY,
@@ -24,12 +25,14 @@ from auraclaw.infrastructure.connectors.mcp.wire import (
     MCP_AURACLAW_USER_ID_META_KEY,
     MCP_CLIENT_CAPABILITIES_META_KEY,
     MCP_CLIENT_INFO_META_KEY,
-    MCP_LEGACY_PROTOCOL_VERSION,
+    MCP_INITIALIZE_PROTOCOL_VERSIONS,
     MCP_PROTOCOL_VERSION,
     MCP_PROTOCOL_VERSION_META_KEY,
     McpJsonRpcRequest,
     McpTrustedContext,
 )
+
+_TOOL_RESULT_STATUSES = {status.value for status in ToolResultStatus}
 
 
 class ManagedMcpConnector:
@@ -52,6 +55,11 @@ class ManagedMcpConnector:
         )
         self._max_pages = max_pages
         self._max_items = max_items
+        # Some already-deployed MCP servers use a legacy public name while the
+        # AuraClaw Skill contract uses its canonical name.  Keep this mapping
+        # explicit in the server definition and translate only at this boundary.
+        self._remote_tool_names: dict[str, str] = {}
+        self._tool_argument_wrappers: set[str] = set()
 
     @property
     def connector_id(self) -> str:
@@ -76,12 +84,12 @@ class ManagedMcpConnector:
             extra["capabilities"] = capabilities
             if isinstance(discovery.get("serverInfo"), dict):
                 extra["server_info"] = dict(discovery["serverInfo"])
-        elif self._server.protocol_revision == MCP_LEGACY_PROTOCOL_VERSION:
+        elif self._server.protocol_revision in MCP_INITIALIZE_PROTOCOL_VERSIONS:
             discovery = await self._send(
                 mcp_trusted,
                 "initialize",
                 {
-                    "protocolVersion": MCP_LEGACY_PROTOCOL_VERSION,
+                    "protocolVersion": self._server.protocol_revision,
                     "capabilities": {},
                     "clientInfo": {
                         "name": "auraclaw-capability-reconciler",
@@ -89,7 +97,7 @@ class ManagedMcpConnector:
                     },
                 },
             )
-            if discovery.get("protocolVersion") != MCP_LEGACY_PROTOCOL_VERSION:
+            if discovery.get("protocolVersion") != self._server.protocol_revision:
                 raise ValueError("remote MCP protocol version is incompatible")
             capabilities = discovery.get("capabilities", {})
             if not isinstance(capabilities, dict):
@@ -101,14 +109,16 @@ class ManagedMcpConnector:
             raise ValueError("remote MCP protocol version is not supported")
         capabilities = extra["capabilities"]
         standard_capability_gating = (
-            self._server.protocol_revision == MCP_LEGACY_PROTOCOL_VERSION
+            self._server.protocol_revision in MCP_INITIALIZE_PROTOCOL_VERSIONS
+        )
+        raw_tools = (
+            await self._list_all(mcp_trusted, "tools/list", "tools")
+            if not standard_capability_gating or "tools" in capabilities
+            else []
         )
         tools = (
-            tuple(
-                _tool_descriptor(item)
-                for item in await self._list_all(mcp_trusted, "tools/list", "tools")
-            )
-            if not standard_capability_gating or "tools" in capabilities
+            tuple(self._tool_descriptor(item) for item in raw_tools)
+            if raw_tools
             else ()
         )
         resources = (
@@ -141,7 +151,7 @@ class ManagedMcpConnector:
         )
         extra["listed_resource_uris"] = [item.uri for item in resources if item.uri]
         if (
-            self._server.protocol_revision == MCP_LEGACY_PROTOCOL_VERSION
+            self._server.protocol_revision in MCP_INITIALIZE_PROTOCOL_VERSIONS
             and extra.get("capabilities", {}).get("resources", {}).get("subscribe")
             is True
         ):
@@ -228,9 +238,15 @@ class ManagedMcpConnector:
             request_meta[MCP_AURACLAW_USER_ID_META_KEY] = trusted.user_id
         if self._server.protocol_revision == MCP_PROTOCOL_VERSION:
             request_meta.update(_modern_meta())
+        remote_name = self._remote_tool_names.get(name, name)
+        remote_arguments = (
+            {"input": dict(arguments)}
+            if name in self._tool_argument_wrappers and "input" not in arguments
+            else dict(arguments)
+        )
         params: dict[str, Any] = {
-            "name": name,
-            "arguments": arguments,
+            "name": remote_name,
+            "arguments": remote_arguments,
             "_meta": request_meta,
         }
         response = await self._transport.send(
@@ -254,13 +270,16 @@ class ManagedMcpConnector:
             )
         structured = result.get("structuredContent")
         if isinstance(structured, dict):
-            if "status" in structured:
+            status = structured.get("status")
+            if isinstance(status, str) and status in _TOOL_RESULT_STATUSES:
+                content = structured.get("content")
                 return HandsToolResult(
-                    status=str(structured.get("status", "success")),
-                    content=structured.get("content")
-                    if isinstance(structured.get("content"), (str, dict))
-                    or structured.get("content") is None
-                    else dict(structured),
+                    status=status,
+                    content=(
+                        content
+                        if isinstance(content, (str, dict)) or content is None
+                        else dict(structured)
+                    ),
                     summary=str(structured.get("summary", "")),
                     metadata=dict(structured.get("metadata") or {}),
                     error_code=(
@@ -274,6 +293,27 @@ class ManagedMcpConnector:
                 )
             return HandsToolResult(status="success", content=structured, summary="")
         return HandsToolResult(status="success", content=result, summary="")
+
+    def _tool_descriptor(self, item: dict[str, Any]) -> HandsToolDescriptor:
+        remote_name = str(item.get("name", ""))
+        aliases = self._server.metadata.get("tool_name_aliases", {})
+        canonical_name = (
+            str(aliases[remote_name])
+            if isinstance(aliases, dict) and isinstance(aliases.get(remote_name), str)
+            else remote_name
+        )
+        if canonical_name != remote_name:
+            self._remote_tool_names[canonical_name] = remote_name
+        schema = item.get("inputSchema")
+        if (
+            canonical_name
+            and isinstance(schema, dict)
+            and isinstance(schema.get("properties"), dict)
+            and isinstance(schema["properties"].get("input"), dict)
+            and schema.get("required") == ["input"]
+        ):
+            self._tool_argument_wrappers.add(canonical_name)
+        return _tool_descriptor(item, name=canonical_name)
 
     async def aclose(self) -> None:
         return None
@@ -362,7 +402,11 @@ def _mcp_trusted(trusted: HandsTrustedContext) -> McpTrustedContext:
     )
 
 
-def _tool_descriptor(item: dict[str, Any]) -> HandsToolDescriptor:
+def _tool_descriptor(
+    item: dict[str, Any],
+    *,
+    name: str | None = None,
+) -> HandsToolDescriptor:
     meta = item.get("_meta", {})
     auraclaw = meta.get("auraclaw", {}) if isinstance(meta, dict) else {}
     version = "1"
@@ -377,7 +421,7 @@ def _tool_descriptor(item: dict[str, Any]) -> HandsToolDescriptor:
     input_schema = item.get("inputSchema", {"type": "object"})
     output_schema = item.get("outputSchema", {"type": "object"})
     return HandsToolDescriptor(
-        name=str(item.get("name", "")),
+        name=str(item.get("name", "") if name is None else name),
         version=version,
         description=str(item.get("description", "")),
         input_schema=dict(input_schema) if isinstance(input_schema, dict) else {},

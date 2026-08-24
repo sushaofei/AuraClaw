@@ -4,7 +4,7 @@ import asyncio
 import logging
 import secrets
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -60,6 +60,7 @@ from auraclaw.admin.internal_service import OwnerAdminService
 from auraclaw.api.dependencies import (
     get_collaboration_projection,
     get_observability_service,
+    get_streaming_gateway,
     get_task_command_gateway,
     get_task_projection,
     get_task_query_service,
@@ -71,8 +72,10 @@ from auraclaw.artifact.internal_service import (
 from auraclaw.composition import providers
 from auraclaw.composition.api import create_app
 from auraclaw.composition.business_skills import (
+    PRICE_INSIGHT_DOCS_SERVER_ID,
     PRICE_INSIGHT_SERVER_ID,
     PRICE_INSIGHT_SKILL_DIR,
+    price_insight_publication_tenants,
     price_insight_resource_descriptors,
     price_insight_resources,
     signed_price_insight_dependency_packages,
@@ -97,11 +100,13 @@ from auraclaw.control.runnable_feed import RunnableFeedConsumer
 from auraclaw.credential_proxy.internal_service import CredentialProxyInternalService
 from auraclaw.delivery.worker import ResultDeliveryWorker
 from auraclaw.gateways.query.reader import TaskQueryService
+from auraclaw.gateways.streaming.gateway import StreamingGateway
 from auraclaw.gateways.task.commands import TaskCommandGateway
 from auraclaw.infrastructure.artifacts.seaweedfs import (
     SeaweedFSMultipartClient,
     SeaweedFSS3Presigner,
 )
+from auraclaw.infrastructure.artifacts.store import ArtifactStore, InMemoryObjectStorage
 from auraclaw.infrastructure.clients.artifact import RemoteArtifactWriter
 from auraclaw.infrastructure.clients.credential import RemoteCredentialProxy
 from auraclaw.infrastructure.clients.model import RemoteModelClient
@@ -119,6 +124,7 @@ from auraclaw.infrastructure.clients.session import (
     RemoteSessionDeliveryOutboxSource,
     RemoteSessionEventStore,
     RemoteSessionOutboxSource,
+    RemoteTaskProjection,
 )
 from auraclaw.infrastructure.clients.worker_wake import (
     HttpWorkerWakeClient,
@@ -213,7 +219,6 @@ from auraclaw.projection.ports import (
     TaskReader,
 )
 from auraclaw.projection.relay import OutboxRelay
-from auraclaw.projection.task.projector import InMemoryTaskProjection
 from auraclaw.runtime.capability_controller import RuntimeCapabilityController
 from auraclaw.runtime.hands_adapter import HandsRuntimeAdapter
 from auraclaw.runtime.hands_client import HttpHandsClient
@@ -439,39 +444,52 @@ def _lease_key_configured(settings: Settings) -> bool:
 def _seed_managed_connector_credentials(
     proxy: CredentialProxy,
     settings: Settings,
+    *,
+    mcp_adapters: Mapping[str, Any] | None = None,
 ) -> None:
     expires_at = datetime.now(UTC) + timedelta(days=365)
+    adapters = dict(mcp_adapters or {})
+    debug_tenants = (
+        ("local", "development", "1")
+        if settings.deployment_profile == "development"
+        else ()
+    )
     for mcp_server in settings.mcp_egress_servers:
         if mcp_server.credential_ref is None:
             continue
+        adapter = adapters.get(f"mcp:{mcp_server.server_id}")
         account_scope = (
-            mcp_server.oauth.resource
-            if mcp_server.oauth is not None
-            else mcp_server.endpoint
+            adapter.credential_scope
+            if adapter is not None
+            else (
+                mcp_server.oauth.resource
+                if mcp_server.oauth is not None
+                else mcp_server.endpoint
+            )
         )
-        proxy.register_reference(
-            mcp_server.tenant_id or "platform",
-            CredentialReference(
-                credential_ref=mcp_server.credential_ref,
-                provider=mcp_server.server_id,
-                account_scope=account_scope,
-                allowed_operations=("mcp.invoke",),
-                expires_at=expires_at,
-            ),
+        reference = CredentialReference(
+            credential_ref=mcp_server.credential_ref,
+            provider=mcp_server.server_id,
+            account_scope=account_scope,
+            allowed_operations=("mcp.invoke",),
+            expires_at=expires_at,
         )
+        tenants = {mcp_server.tenant_id or "platform", *debug_tenants}
+        for tenant_id in tenants:
+            proxy.register_reference(tenant_id, reference)
     for java_server in settings.java_api_servers:
         if java_server.credential_ref is None:
             continue
-        proxy.register_reference(
-            java_server.tenant_id or "platform",
-            CredentialReference(
-                credential_ref=java_server.credential_ref,
-                provider=java_server.server_id,
-                account_scope=java_server.base_url,
-                allowed_operations=("http.invoke",),
-                expires_at=expires_at,
-            ),
+        reference = CredentialReference(
+            credential_ref=java_server.credential_ref,
+            provider=java_server.server_id,
+            account_scope=java_server.base_url,
+            allowed_operations=("http.invoke",),
+            expires_at=expires_at,
         )
+        tenants = {java_server.tenant_id or "platform", *debug_tenants}
+        for tenant_id in tenants:
+            proxy.register_reference(tenant_id, reference)
 
 
 def _task_api_app(settings: Settings) -> FastAPI:
@@ -505,7 +523,8 @@ def _task_api_app(settings: Settings) -> FastAPI:
             settings.resolved_database_url
         )
     else:
-        task_projection = InMemoryTaskProjection()
+        # Session owns the memory store in the multi-process debug topology.
+        task_projection = RemoteTaskProjection(remote_session)
         approval_projection = InMemoryApprovalProjection()
         collaboration_projection = InMemoryCollaborationProjection()
     task_service = TaskService(
@@ -545,6 +564,35 @@ def _task_api_app(settings: Settings) -> FastAPI:
     app.state.config_ready = config_ready
     app.state.storage_label = "projection-read-only"
     app.state.session_access = "http"
+    return app
+
+
+def _streaming_app(settings: Settings) -> FastAPI:
+    app = create_app(profile="streaming-gateway")
+    token = settings.workload_token_value(ServiceIdentity.STREAMING_GATEWAY.value)
+    remote_session: RemoteSessionEventStore | None = None
+    projection: TaskReader
+    if settings.sql_storage_enabled:
+        projection = PostgresTaskProjection(settings.resolved_database_url)
+    else:
+        # Session owns the memory store in the multi-process debug topology.
+        remote_session = RemoteSessionEventStore(
+            settings.session_base_url,
+            service_identity=ServiceIdentity.STREAMING_GATEWAY,
+            bearer_token=token or secrets.token_urlsafe(32),
+        )
+        projection = RemoteTaskProjection(remote_session)
+    gateway = StreamingGateway(
+        reader=projection,
+        bus=providers.get_runtime_replay_bus(),
+    )
+    app.dependency_overrides[get_streaming_gateway] = lambda: gateway
+    app.state.closeables = (
+        *((projection,) if settings.sql_storage_enabled else ()),
+        *((remote_session,) if remote_session is not None else ()),
+    )
+    app.state.storage_label = "projection-read-only"
+    app.state.session_access = "http" if remote_session is not None else "database"
     return app
 
 
@@ -613,6 +661,7 @@ def _readiness(name: str, settings: Settings) -> tuple[bool, dict[str, str]]:
             ServiceIdentity.AGENT_RUNTIME,
             ServiceIdentity.POLICY,
             ServiceIdentity.DELIVERY_WORKER,
+            ServiceIdentity.STREAMING_GATEWAY,
         )
         identity_ready = _has_workload_tokens(settings, required_identities)
         dependencies["workload_identities"] = "ready" if identity_ready else "missing"
@@ -916,6 +965,7 @@ def _session_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
             ServiceIdentity.AGENT_RUNTIME,
             ServiceIdentity.POLICY,
             ServiceIdentity.DELIVERY_WORKER,
+            ServiceIdentity.STREAMING_GATEWAY,
         ),
     )
     contract_app = create_contract_app(
@@ -1086,8 +1136,16 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
             ),
         }
     )
+    skill_artifacts: ArtifactStore | RemoteArtifactWriter = artifacts
+    if settings.deployment_profile == "development":
+        skill_artifacts = ArtifactStore(
+            InMemoryObjectStorage(),
+            signing_key=(
+                configured_signing_key or b"auraclaw-development-platform-skill-key"
+            ),
+        )
     skill_registry = SkillPackageRegistry(
-        artifacts=artifacts,
+        artifacts=skill_artifacts,
         signature_verifier=model_skill_signer,
         resources=resources,
     )
@@ -1143,10 +1201,18 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
             password=mysql_password.get_secret_value(),
             database=settings.price_insight_mysql_database,
         )
-    if price_insight_source is not None:
-        for resource in price_insight_resources(
+    skill_tenants = price_insight_publication_tenants(
+        source_tenant_id=(
             settings.price_insight_target_tenant_id
-        ):
+            if price_insight_source is not None
+            else None
+        ),
+        mcp_tenant_ids=tuple(
+            server.tenant_id for server in settings.mcp_egress_servers
+        ),
+    )
+    if skill_tenants:
+        for resource in price_insight_resources(tenant_ids=skill_tenants):
             resources.register_resource(resource)
     price_tools = price_insight_tools() if price_insight_source is not None else ()
     registry = ToolRegistry(
@@ -1182,6 +1248,36 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
                         policy=policy,
                     )
                 )
+        if skill_tenants:
+            await capability_catalog.register_server(
+                McpServerDefinition(
+                    server_id=PRICE_INSIGHT_DOCS_SERVER_ID,
+                    tenant_id=None,
+                    title="AuraClaw Procurement Price Insight Docs",
+                    endpoint="https://price-insight.internal/docs",
+                    trust_level=CapabilityTrustLevel.PLATFORM,
+                    allowed_resource_schemes=("repo",),
+                    status=CapabilityStatus.ACTIVE,
+                    enabled=True,
+                )
+            )
+            await capability_catalog.replace_server_capabilities(
+                PRICE_INSIGHT_DOCS_SERVER_ID,
+                price_insight_resource_descriptors(
+                    None,
+                    server_id=PRICE_INSIGHT_DOCS_SERVER_ID,
+                ),
+            )
+            for tenant_id in skill_tenants:
+                for package in signed_price_insight_dependency_packages(
+                    model_skill_signer
+                ):
+                    await skill_registry.publish(tenant_id, package)
+                if model_skill_publisher is None:
+                    await skill_registry.publish(
+                        tenant_id,
+                        signed_price_insight_package(model_skill_signer),
+                    )
         if price_insight_source is not None:
             tenant_id = settings.price_insight_target_tenant_id
             await capability_catalog.register_server(
@@ -1202,23 +1298,11 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
             )
             await capability_catalog.replace_server_capabilities(
                 PRICE_INSIGHT_SERVER_ID,
-                (
-                    *price_insight_tool_descriptors(
-                        server_id=PRICE_INSIGHT_SERVER_ID,
-                        tenant_id=tenant_id,
-                    ),
-                    *price_insight_resource_descriptors(tenant_id),
+                price_insight_tool_descriptors(
+                    server_id=PRICE_INSIGHT_SERVER_ID,
+                    tenant_id=tenant_id,
                 ),
             )
-            for package in signed_price_insight_dependency_packages(
-                model_skill_signer
-            ):
-                await skill_registry.publish(tenant_id, package)
-            if model_skill_publisher is None:
-                await skill_registry.publish(
-                    tenant_id,
-                    signed_price_insight_package(model_skill_signer),
-                )
         if model_skill_publisher is not None:
             await model_skill_publisher.reconcile()
 
@@ -1308,6 +1392,7 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
             resource_cache=resource_gateway,
             tool_registry=registry,
             hands_router=routed_hands,
+            trust_remote_tool_annotations=settings.mcp_trust_remote_tool_annotations,
         )
         app.state.catalog_reconciler = reconciler
 
@@ -1317,7 +1402,13 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
                 setter = getattr(connector, "set_notification_handler", None)
                 if setter is not None:
                     setter(reconciler.handle_notification)
-            await reconciler.reconcile_all()
+            expected = len(app.state.capability_connectors)
+            for attempt in range(20):
+                active = await reconciler.reconcile_all()
+                if expected == 0 or active >= expected:
+                    break
+                if attempt < 19:
+                    await asyncio.sleep(0.5)
 
         app.state.initialize = initialize_remote_catalog
         periodic_jobs.append(
@@ -1455,7 +1546,7 @@ def _credential_proxy_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         ),
     )
     proxy = CredentialProxy(vault, registry=registry)
-    _seed_managed_connector_credentials(proxy, settings)
+    _seed_managed_connector_credentials(proxy, settings, mcp_adapters=mcp_adapters)
     service = CredentialProxyInternalService(
         proxy,
         adapters={
@@ -1874,7 +1965,7 @@ def create_service_app(
     if spec.name == "task-api":
         return _task_api_app(selected)
     if spec.name == "streaming-gateway":
-        return create_app(profile="streaming-gateway")
+        return _streaming_app(selected)
     if spec.name == "session":
         return _session_app(spec, selected)
     if spec.name == "action-hands":

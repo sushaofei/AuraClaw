@@ -39,3 +39,5 @@ logs/
 !.env.debug.example
 !.env.production.example
 debug/java-mcp-servers.json
+.host.env
+.eng.debug

@@ -44,9 +44,12 @@ Tenant / Actor 默认 `local` / `local-user`，点「检查连接」即可。
 http://localhost:3000/price-insight 。也可分别启动：
 
 ```bash
-AURACLAW_DEV_API_TARGET=http://127.0.0.1:8000 npm run dev
-uv run auraclaw serve            # 12 个生产入口，端口 8000–8011
+AURACLAW_DEV_API_TARGET=http://127.0.0.1:8080 npm run dev
+uv run auraclaw serve            # 12 个生产入口 8000–8011，本地 Ingress 8080
 ```
+
+多进程后端需要共享 SQL 或 Kafka 承载 Runtime Event；默认 `.env.debug.example` 使用本机
+Kafka，纯内存事件后端会被启动检查拒绝。
 
 `/auraclaw-api` 只在设置了 `AURACLAW_DEV_API_TARGET`（或 `npm run dev:remote`）时由开发服务器代理到后端。
 该页面从 Canonical Timeline 读取 Capability/Skill/Tool 证据，不直接访问 MySQL。

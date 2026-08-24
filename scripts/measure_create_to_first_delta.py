@@ -16,9 +16,9 @@ import argparse
 import json
 import sys
 import time
-import uuid
 import urllib.error
 import urllib.request
+import uuid
 from typing import Any
 
 

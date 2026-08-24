@@ -72,6 +72,7 @@ class ConnectorToolExecutor:
                 lease_id=f"tool:{invocation.tool_invocation_id}",
                 fencing_token=invocation.fencing_token,
                 deadline=invocation.deadline,
+                user_id=invocation.user_id,
             ),
             name=invocation.tool_name,
             arguments=invocation.arguments,
@@ -92,6 +93,7 @@ class CapabilityCatalogReconciler:
         resource_cache: ResourceCacheInvalidator | None = None,
         tool_registry: ToolRegistry | None = None,
         hands_router: RoutedHandsExecutor | None = None,
+        trust_remote_tool_annotations: bool = False,
         quarantine_after_failures: int = 3,
         max_pages: int = 100,
         max_items: int = 10_000,
@@ -103,6 +105,7 @@ class CapabilityCatalogReconciler:
         self._resource_cache = resource_cache
         self._tool_registry = tool_registry
         self._hands_router = hands_router
+        self._trust_remote_tool_annotations = trust_remote_tool_annotations
         self._quarantine_after_failures = quarantine_after_failures
         self._max_items = max_items
         self._failures: dict[str, int] = {}
@@ -262,7 +265,11 @@ class CapabilityCatalogReconciler:
             return
         owner = connector.connector_id
         capabilities = tuple(
-            _tool_capability(descriptor, owner)
+            _tool_capability(
+                descriptor,
+                owner,
+                trust_annotations=self._trust_remote_tool_annotations,
+            )
             for descriptor in snapshot
             if descriptor.kind == CapabilityKind.TOOL
         )
@@ -331,7 +338,8 @@ def _normalize_tools(
                 description=tool.description,
                 permission="read-only" if tool.read_only else "write-with-approval",
                 risk_level=tool.risk_level or "medium",
-                version=tool.version if _semver(tool.version) else "0.0.0",
+                version=_capability_semver(tool.version),
+                tags=_tool_search_tags(server, tool.name),
             )
         )
     return tuple(normalized)
@@ -408,6 +416,7 @@ def _descriptor(
     permission: str,
     risk_level: str,
     version: str,
+    tags: tuple[str, ...] = (),
 ) -> CapabilityDescriptor:
     if not _NAME.fullmatch(canonical_name):
         raise ValueError("remote capability name is invalid")
@@ -422,6 +431,7 @@ def _descriptor(
         content_digest=digest,
         title=_text(title, 256),
         description=_text(description, 4096),
+        tags=tags,
         tenant_id=server.tenant_id,
         trust_level=server.trust_level,
         classification="internal",
@@ -434,7 +444,12 @@ def _descriptor(
     )
 
 
-def _tool_capability(descriptor: CapabilityDescriptor, owner: str) -> ToolCapability:
+def _tool_capability(
+    descriptor: CapabilityDescriptor,
+    owner: str,
+    *,
+    trust_annotations: bool = False,
+) -> ToolCapability:
     source = descriptor.metadata.get("source", {})
     if not isinstance(source, dict):
         source = {}
@@ -442,14 +457,21 @@ def _tool_capability(descriptor: CapabilityDescriptor, owner: str) -> ToolCapabi
     output_schema = source.get("outputSchema", {"type": "object"})
     if not isinstance(input_schema, dict) or not isinstance(output_schema, dict):
         raise ValueError("remote MCP Tool schemas are invalid")
+    permission = ToolPermission.WRITE_WITH_APPROVAL
+    risk_level = RiskLevel.HIGH
+    if trust_annotations:
+        permission = ToolPermission(
+            descriptor.permission or ToolPermission.WRITE_WITH_APPROVAL
+        )
+        risk_level = RiskLevel(descriptor.risk_level or RiskLevel.HIGH)
     return ToolCapability(
         name=descriptor.canonical_name,
         version=descriptor.version,
         description=descriptor.description,
         input_schema=input_schema,
         output_schema=output_schema,
-        permission=ToolPermission.WRITE_WITH_APPROVAL,
-        risk_level=RiskLevel.HIGH,
+        permission=permission,
+        risk_level=risk_level,
         runtime_location="remote-mcp",
         owner=owner,
     )
@@ -463,6 +485,44 @@ def _text(value: object, limit: int) -> str:
 
 def _semver(value: str) -> bool:
     return bool(re.fullmatch(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?", value))
+
+
+def _capability_semver(value: str) -> str:
+    raw = str(value).strip()
+    if _semver(raw):
+        return raw
+    if re.fullmatch(r"\d+", raw):
+        return f"{raw}.0.0"
+    if re.fullmatch(r"\d+\.\d+", raw):
+        return f"{raw}.0"
+    return "1.0.0"
+
+
+_PRICE_INSIGHT_SEARCH_TAGS = ("价格洞察", "采购价格", "price_insight")
+
+
+def _tool_search_tags(server: McpServerDefinition, canonical_name: str) -> tuple[str, ...]:
+    tags: list[str] = []
+    configured = server.metadata.get("search_tags", ())
+    if isinstance(configured, (list, tuple)):
+        tags.extend(str(item) for item in configured if str(item).strip())
+    aliases = server.metadata.get("tool_name_aliases", {})
+    if isinstance(aliases, dict):
+        for remote_name, mapped in aliases.items():
+            if str(mapped) != canonical_name:
+                continue
+            tags.append(str(remote_name))
+            tags.extend(
+                part for part in re.split(r"[_.-]+", str(remote_name)) if part
+            )
+    lowered = canonical_name.casefold()
+    if any(
+        marker in lowered
+        for marker in ("price_insight", "price-insight", "procurement.price")
+    ):
+        tags.extend(_PRICE_INSIGHT_SEARCH_TAGS)
+    tags.extend(part for part in re.split(r"[_.-]+", canonical_name) if part)
+    return tuple(dict.fromkeys(tag for tag in tags if tag))
 
 
 def _prefix_allowed(value: str, prefixes: tuple[str, ...]) -> bool:
@@ -493,7 +553,7 @@ def _validate_depth(value: Any, *, depth: int) -> None:
 
 
 def _executor_payload(result: HandsToolResult) -> dict[str, object]:
-    if result.status != "success":
+    if result.status in {"error", "denied", "timeout", "cancelled"}:
         raise RuntimeError(result.summary or "remote connector Tool returned an error")
     if isinstance(result.content, dict):
         return dict(result.content)

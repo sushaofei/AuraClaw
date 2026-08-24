@@ -2,7 +2,7 @@
   "name": "procurement.price-insight.generate",
   "version": "3.0.0",
   "description": "组合数据校验与原子指标子 Skill，生成采购价格洞察。",
-  "applies_when": ["采购价格", "行业均价", "历史价差", "区域价差", "价格影响"],
+  "applies_when": ["价格洞察", "采购价格", "行业均价", "历史价差", "区域价差", "价格影响"],
   "not_when": ["要求修改采购订单", "要求直接执行调价"],
   "publisher": "platform",
   "signature": "hmac-sha256:0000000000000000000000000000000000000000000000000000000000000000",

@@ -25,6 +25,7 @@ from auraclaw.contracts.internal import (
 from auraclaw.contracts.state import Visibility
 from auraclaw.internal.http import HttpContractClient
 from auraclaw.projection.relay import OutboxItem
+from auraclaw.projection.task.projector import InMemoryTaskProjection
 from auraclaw.session.ports import (
     AppendResult,
     ClaimedOutboxRecord,
@@ -182,6 +183,7 @@ class RemoteSessionEventStore:
         del snapshot
         # Session owns snapshots. Callers rebuild aggregates from the versioned feed.
 
+
     async def claim_outbox(
         self,
         destination: str,
@@ -251,6 +253,23 @@ class RemoteSessionEventStore:
             OutboxDispositionResponse,
         )
         return response.accepted
+
+
+class RemoteTaskProjection:
+    """Rebuild the Task view from Session events for multi-process memory debug."""
+
+    def __init__(self, session: RemoteSessionEventStore) -> None:
+        self._session = session
+
+    async def get_task(
+        self, tenant_id: str, session_id: str
+    ) -> dict[str, object] | None:
+        events = await self._session.load(tenant_id, session_id)
+        if not events:
+            return None
+        projection = InMemoryTaskProjection()
+        await projection.project(events)
+        return await projection.get_task(tenant_id, session_id)
 
 
 @dataclass

@@ -54,6 +54,15 @@ class PostgresCapabilityCatalogStore(LazyPool):
                         if server.oauth is not None
                         else {}
                     ),
+                    **(
+                        {
+                            "_auraclaw_allowed_private_hosts": list(
+                                server.allowed_private_hosts
+                            )
+                        }
+                        if server.allowed_private_hosts
+                        else {}
+                    ),
                 }
             ),
         )
@@ -173,6 +182,7 @@ class PostgresCapabilityCatalogStore(LazyPool):
 def _server(row: object) -> McpServerDefinition:
     metadata = dict(json_loads(row["metadata"]))  # type: ignore[index]
     oauth_payload = metadata.pop("_auraclaw_oauth", None)
+    allowed_private_hosts = metadata.pop("_auraclaw_allowed_private_hosts", ())
     return McpServerDefinition(
         server_id=str(row["server_id"]),  # type: ignore[index]
         tenant_id=row["tenant_id"],  # type: ignore[index]
@@ -195,6 +205,7 @@ def _server(row: object) -> McpServerDefinition:
         allowed_prompt_prefixes=tuple(
             json_loads(row["allowed_prompt_prefixes"])  # type: ignore[index]
         ),
+        allowed_private_hosts=tuple(allowed_private_hosts or ()),
         status=CapabilityStatus(str(row["status"])),  # type: ignore[index]
         enabled=bool(row["enabled"]),  # type: ignore[index]
         metadata=metadata,

@@ -131,6 +131,8 @@ def test_production_compose_mounts_least_privilege_secrets() -> None:
         for service in APPLICATION_SERVICES - {"artifact-service"}
     )
     assert "runtime_workload_token" in secret_sources("agent-runtime")
+    assert "streaming_gateway_workload_token" in secret_sources("session")
+    assert "streaming_gateway_workload_token" in secret_sources("streaming-gateway")
     assert not any(
         item.endswith("database_url") for item in secret_sources("agent-runtime")
     )
@@ -223,11 +225,13 @@ def test_env_templates_are_ready_to_copy() -> None:
 
     debug = Settings(_env_file=ROOT / ".env.debug.example")
     assert debug.storage_backend == "memory"
-    assert debug.runtime_event_backend == "memory"
+    assert debug.runtime_event_backend == "kafka"
+    assert debug.kafka_host == "127.0.0.1"
     assert debug.artifact_backend == "local"
     assert debug.insecure_identity_headers_enabled
     assert debug.lease_signing_key is not None
     assert debug.workload_token_value("task-api") == "local-task-api"
+    assert debug.workload_token_value("streaming-gateway") == "local-streaming-gateway"
 
     production = dotenv_values(ROOT / ".env.production.example")
     missing = [name for name in module.REQUIRED if not production.get(name)]
@@ -270,6 +274,7 @@ def test_production_preflight_accepts_isolated_roles_and_unique_tokens(
         "ARTIFACT_SERVICE",
         "POLICY",
         "DELIVERY",
+        "STREAMING_GATEWAY",
     )
     lines = [
         "AURACLAW_IMAGE=registry.example/auraclaw:sha-0123456789",

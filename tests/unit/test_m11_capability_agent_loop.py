@@ -638,6 +638,18 @@ def test_real_mcp_search_and_load_hydrates_authoritative_tool_schema() -> None:
         )
         assert executed.result["content"] == {"number": 31, "state": "open"}
 
+        followup = await controller.execute(
+            _assignment(),
+            ToolCall(
+                tool_invocation_id="load-followup",
+                name="auraclaw.capabilities.load",
+                arguments={"capability_ids": ["cap-github-issue-get"]},
+            ),
+            controller.empty_state(),
+        )
+        assert "cap-github-issue-get" in followup.state["loaded"]
+        assert "cap-github-issue-get" in followup.state["candidates"]
+
     asyncio.run(scenario())
 
 

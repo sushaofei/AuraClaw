@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from enum import StrEnum
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 from pydantic import Field, model_validator
 
@@ -49,7 +50,7 @@ class McpServerDefinition(ContractModel):
     server_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.-]+$")
     tenant_id: str | None = None
     title: str = Field(min_length=1, max_length=256)
-    endpoint: str = Field(min_length=1, pattern=r"^https://")
+    endpoint: str = Field(min_length=1, pattern=r"^https?://")
     protocol_revision: str = "2026-07-28"
     credential_ref: str | None = None
     oauth: McpOAuthConfiguration | None = None
@@ -58,14 +59,20 @@ class McpServerDefinition(ContractModel):
     allowed_tool_prefixes: tuple[str, ...] = ()
     allowed_resource_schemes: tuple[str, ...] = ()
     allowed_prompt_prefixes: tuple[str, ...] = ()
+    allowed_private_hosts: tuple[str, ...] = ()
     status: CapabilityStatus = CapabilityStatus.QUARANTINED
     enabled: bool = False
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def validate_remote_auth(self) -> McpServerDefinition:
-        if self.protocol_revision not in {"2026-07-28", "2025-11-25"}:
+        if self.protocol_revision not in {
+            "2026-07-28",
+            "2025-11-25",
+            "2025-06-18",
+        }:
             raise ValueError("MCP server protocol revision is not supported")
+        _validate_mcp_endpoint(self.endpoint, self.allowed_private_hosts)
         if self.oauth is not None and self.credential_ref is None:
             raise ValueError("OAuth MCP server requires a credential_ref")
         if (
@@ -83,6 +90,8 @@ class McpServerDefinition(ContractModel):
                 "workload trusted-context MCP server requires a credential_ref"
             )
         if "_auraclaw_oauth" in self.metadata:
+            raise ValueError("MCP server metadata uses a reserved key")
+        if "_auraclaw_allowed_private_hosts" in self.metadata:
             raise ValueError("MCP server metadata uses a reserved key")
         return self
 
@@ -198,3 +207,19 @@ class CapabilityDescriptor(ContractModel):
             "server_id": self.server_id,
             "source_revision": self.source_revision,
         }
+
+
+def _validate_mcp_endpoint(endpoint: str, allowed_private_hosts: tuple[str, ...]) -> None:
+    parsed = urlsplit(endpoint)
+    hostname = (parsed.hostname or "").lower()
+    allowlisted = hostname in {item.lower() for item in allowed_private_hosts}
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.fragment
+    ):
+        raise ValueError("MCP endpoint must be an absolute URL without userinfo")
+    if parsed.scheme == "http" and not allowlisted:
+        raise ValueError("HTTP MCP endpoints require an allowlisted private host")

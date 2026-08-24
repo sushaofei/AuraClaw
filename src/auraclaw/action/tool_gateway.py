@@ -404,7 +404,7 @@ class ToolGateway:
         except (CredentialAccessError, PolicyDeniedError, SandboxViolationError) as exc:
             return ToolResult(
                 status=ToolResultStatus.DENIED,
-                summary="controlled execution boundary denied the tool call",
+                summary=exc.message or "controlled execution boundary denied the tool call",
                 error_code=exc.code,
                 side_effect_status="not_started",
             )
