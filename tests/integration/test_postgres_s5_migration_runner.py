@@ -12,6 +12,7 @@ import pytest
 from auraclaw.infrastructure.persistence.migration_runner import (
     MigrationError,
     PostgresMigrationRunner,
+    discover_migrations,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -48,7 +49,8 @@ def test_migration_runner_is_locked_idempotent_and_detects_drift(tmp_path: Path)
             PostgresMigrationRunner(database_url, migration_dir).apply(),
             PostgresMigrationRunner(database_url, migration_dir).apply(),
         )
-        assert sorted((len(first), len(second))) == [0, 16]
+        expected = len(discover_migrations(migration_dir))
+        assert sorted((len(first), len(second))) == [0, expected]
         runner = PostgresMigrationRunner(database_url, migration_dir)
         assert await runner.apply() == ()
         assert {item.state for item in await runner.status()} == {"applied"}

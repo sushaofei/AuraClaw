@@ -393,7 +393,15 @@ var getOrderTool = SyncToolSpecification.builder()
 
 ### 5.2 AuraClaw 侧：登记 Server
 
-配置入口：`AURACLAW_MCP_EGRESS_SERVERS_JSON`，解析为 `McpServerDefinition`（`src/auraclaw/config.py`）。配置里 **只能有非密信息 + `credential_ref`**。
+配置入口：优先使用 Task API 的热配置 Admin API（`/v1/admin/mcp-servers`）。配置以不可变
+revision 写入 Hands Registry，Action Hands 与 Credential Proxy **无需重启**即可加载。
+
+`AURACLAW_MCP_EGRESS_SERVERS_JSON` / file 只作为**一次性 bootstrap**：仅当 `server_id`
+尚不存在时导入 revision 1，之后不得覆盖数据库中的管理员修改。配置里 **只能有非密信息 +
+`credential_ref`**；本地开发可用 `network_mode=loopback` + `auth_strategy=none`。
+
+`loopback` 地址是相对 **Credential Proxy 所在网络命名空间** 而言。容器内的 `127.0.0.1`
+不是开发者宿主机；跨网络命名空间应使用私网服务名或受管宿主机别名。
 
 ```json
 [

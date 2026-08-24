@@ -110,7 +110,7 @@ def create_app(*, profile: ApiProfile) -> FastAPI:
         app.add_middleware(
             CORSMiddleware,
             allow_origins=settings.allowed_cors_origins,
-            allow_methods=["GET", "POST", "OPTIONS"],
+            allow_methods=["GET", "POST", "PUT", "OPTIONS"],
             allow_headers=[
                 "Authorization",
                 "Content-Type",
@@ -120,6 +120,7 @@ def create_app(*, profile: ApiProfile) -> FastAPI:
                 "X-Actor-ID",
                 "X-Correlation-ID",
                 "X-CT-Agent-Context",
+                "X-Expected-Revision",
                 "X-Expected-Version",
                 "X-Tenant-ID",
             ],

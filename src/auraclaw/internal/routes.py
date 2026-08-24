@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from auraclaw.action.mcp_internal_service import McpRegistryInternalService
 from auraclaw.admin.internal_service import OwnerAdminService
 from auraclaw.artifact.internal_service import ArtifactInternalService
 from auraclaw.contracts.internal import (
@@ -25,6 +26,10 @@ from auraclaw.contracts.internal import (
     CredentialResourceRequest,
     CredentialResourceResponse,
     LoadCheckpointRequest,
+    McpRegistryAdminRequest,
+    McpRegistryAdminResponse,
+    McpRegistrySnapshotRequest,
+    McpRegistrySnapshotResponse,
     ModelCancelRequest,
     ModelCancelResponse,
     ModelGenerateRequest,
@@ -167,6 +172,19 @@ def credential_routes(
         ),
         "/internal/v1/credentials/resource": contract_route(
             CredentialResourceRequest, CredentialResourceResponse, service.resource
+        ),
+    }
+
+
+def mcp_registry_routes(
+    service: McpRegistryInternalService,
+) -> dict[str, ContractRoute]:
+    return {
+        "/command": contract_route(
+            McpRegistryAdminRequest, McpRegistryAdminResponse, service.command
+        ),
+        "/snapshot": contract_route(
+            McpRegistrySnapshotRequest, McpRegistrySnapshotResponse, service.snapshot
         ),
     }
 

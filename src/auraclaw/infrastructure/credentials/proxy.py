@@ -118,29 +118,33 @@ class CredentialProxy:
         policy_decision_id: str | None = None,
         usage_id: str | None = None,
     ) -> Any:
-        if self._registry is not None:
-            reference = await self._registry.get_reference(tenant_id, credential_ref)
-        else:
-            reference = self._references.get((tenant_id, credential_ref))
-        if reference is None:
-            raise CredentialAccessError("credential reference is not valid for tenant")
-        if datetime.now(UTC) >= reference.expires_at:
-            raise CredentialAccessError("credential reference has expired")
-        if operation not in reference.allowed_operations:
-            raise CredentialAccessError("credential operation is outside allowed scope")
         if adapter is None:
             raise CredentialAccessError("credential target adapter is not registered")
+        secret_required = getattr(adapter, "secret_required", True)
         expected_provider = getattr(adapter, "credential_provider", None)
         expected_scope = getattr(adapter, "credential_scope", None)
-        if (
-            expected_provider is not None
-            and reference.provider != expected_provider
-        ):
-            raise CredentialAccessError("credential provider does not match target")
-        if expected_scope is not None and reference.account_scope != expected_scope:
-            raise CredentialAccessError("credential scope does not match target")
-        secret = await self._vault.resolve(credential_ref)
-        self._redactor.register(secret)
+        if secret_required:
+            if self._registry is not None:
+                reference = await self._registry.get_reference(tenant_id, credential_ref)
+            else:
+                reference = self._references.get((tenant_id, credential_ref))
+            if reference is None:
+                raise CredentialAccessError("credential reference is not valid for tenant")
+            if datetime.now(UTC) >= reference.expires_at:
+                raise CredentialAccessError("credential reference has expired")
+            if operation not in reference.allowed_operations:
+                raise CredentialAccessError("credential operation is outside allowed scope")
+            if (
+                expected_provider is not None
+                and reference.provider != expected_provider
+            ):
+                raise CredentialAccessError("credential provider does not match target")
+            if expected_scope is not None and reference.account_scope != expected_scope:
+                raise CredentialAccessError("credential scope does not match target")
+            secret = await self._vault.resolve(credential_ref)
+            self._redactor.register(secret)
+        else:
+            secret = ""
         audit = {
             "usage_id": usage_id or "",
             "tenant_id": tenant_id,
