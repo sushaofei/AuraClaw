@@ -41,7 +41,7 @@ AuraClaw 已完成 M1–M7 功能竖切，逻辑组件与架构图基本对齐�
 - **不**在本阶段实现 OpenAI/Anthropic Adapter、S3 Artifact、企业 Vault。
 - **不**新增 `auraclaw runtime run`、`auraclaw delivery run` 或生产 Worker 生命周期；另开 feature issue 实现。
 - **不**引入额外抽象层（如全量 Repository / UseCase 框架）。
-- **不**修改 frontend 协议与公开 HTTP API 路径（`/v1/*` 保持不变）。
+- **不**修改公开 HTTP API 路径（`/v1/*` 保持不变）。
 
 ---
 

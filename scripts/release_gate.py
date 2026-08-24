@@ -7,7 +7,8 @@ from pathlib import Path
 ROOT = Path(__file__).parents[1]
 SCAN_ROOTS = (ROOT / "src", ROOT / "migrations", ROOT / "deploy")
 SCAN_FILES = (
-    ROOT / "compose.production.yml",
+    ROOT / "compose.prod.yml",
+    ROOT / "compose.test.yml",
     ROOT / ".env.dev.example",
     ROOT / ".env.test.example",
     ROOT / ".env.prod.example",
@@ -22,7 +23,8 @@ REQUIRED = (
     ROOT / "migrations/0007_m6_observability_reliability.down.sql",
     ROOT / "docs/M6 测试报告.md",
     ROOT / "docs/M6 运维与灰度发布 Runbook.md",
-    ROOT / "compose.production.yml",
+    ROOT / "compose.prod.yml",
+    ROOT / "compose.test.yml",
     ROOT / "docs/S5 Docker Compose 生产部署与故障演练 Runbook.md",
     ROOT / "docs/S5 测试报告.md",
 )

@@ -45,10 +45,6 @@ _MCP_SERVER = {
 
 def _settings(**values: object) -> Settings:
     defaults: dict[str, object] = {
-        "model_skill_mysql_host": None,
-        "model_skill_mysql_user": None,
-        "model_skill_mysql_password": None,
-        "model_skill_mysql_database": None,
         "storage_backend": "memory",
         "artifact_backend": "local",
     }
@@ -257,86 +253,5 @@ def test_credential_proxy_accepts_mcp_invoke_for_remote_policy_decision() -> Non
         )
         assert response.status == "completed"
         await policy_validator.aclose()
-
-    asyncio.run(scenario())
-
-
-def test_price_insight_publication_tenants_include_java_mcp() -> None:
-    from auraclaw.composition.business_skills import price_insight_publication_tenants
-
-    assert price_insight_publication_tenants(
-        source_tenant_id=None,
-        mcp_tenant_ids=("1",),
-    ) == ("1",)
-    assert price_insight_publication_tenants(
-        source_tenant_id="development",
-        mcp_tenant_ids=("1", None),
-    ) == ("development", "1")
-
-
-def test_chinese_search_finds_price_insight_skill_for_java_tenant() -> None:
-    async def scenario() -> None:
-        from auraclaw.action.capability_catalog import (
-            CapabilityCatalog,
-            CapabilitySearchExecutor,
-            InMemoryCapabilityCatalogStore,
-            capability_search_tool,
-        )
-        from auraclaw.action.skill_packages import (
-            HmacSkillSignatureVerifier,
-            SkillPackageRegistry,
-        )
-        from auraclaw.composition.business_skills import (
-            signed_price_insight_dependency_packages,
-            signed_price_insight_package,
-        )
-        from auraclaw.contracts.tools import ToolInvocation
-        from auraclaw.infrastructure.artifacts.store import (
-            ArtifactStore,
-            InMemoryObjectStorage,
-        )
-
-        tenant_id = "1"
-        artifacts = ArtifactStore(
-            InMemoryObjectStorage(),
-            signing_key=b"java-mcp-price-insight-artifact-key",
-        )
-        signer = HmacSkillSignatureVerifier(
-            {"platform": b"auraclaw-development-platform-skill-key"}
-        )
-        skills = SkillPackageRegistry(
-            artifacts=artifacts,
-            signature_verifier=signer,
-        )
-        for package in signed_price_insight_dependency_packages(signer):
-            await skills.publish(tenant_id, package)
-        await skills.publish(tenant_id, signed_price_insight_package(signer))
-        result = await CapabilitySearchExecutor(
-            CapabilityCatalog(InMemoryCapabilityCatalogStore()),
-            skills=skills,
-        ).execute(
-            ToolInvocation(
-                tool_invocation_id="search-java-skill",
-                tenant_id=tenant_id,
-                root_session_id="session-root",
-                session_id="session-child",
-                run_id="run-1",
-                tool_name="auraclaw.capabilities.search",
-                tool_version="1",
-                arguments={
-                    "query": "价格洞察 2024",
-                    "kinds": ["skill"],
-                    "limit": 10,
-                },
-                expected_side_effect="read",
-                idempotency_key="search-java-skill",
-                deadline=None,
-                fencing_token=1,
-                actor_id="runtime-1",
-            ),
-            capability_search_tool(),
-        )
-        names = [item["canonical_name"] for item in result["capabilities"]]
-        assert "procurement.price-insight.generate" in names
 
     asyncio.run(scenario())

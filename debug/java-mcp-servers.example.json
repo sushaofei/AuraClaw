@@ -2,24 +2,31 @@
   {
     "server_id": "java-mcp",
     "tenant_id": "development",
-    "title": "Java MCP Server",
-    "endpoint": "https://java-mcp.example.com/mcp",
-    "protocol_revision": "2026-07-28",
+    "title": "Local Java MCP Gateway",
+    "endpoint": "http://127.0.0.1:48080/rpc-api/agent-runtime/mcp",
+    "protocol_revision": "2025-06-18",
     "credential_ref": "vault/java-mcp#client_secret",
-    "oauth": {
-      "protected_resource_metadata_url": "https://java-mcp.example.com/.well-known/oauth-protected-resource",
-      "authorization_server_metadata_url": "https://auth.example.com/.well-known/oauth-authorization-server",
-      "issuer": "https://auth.example.com",
-      "token_endpoint": "https://auth.example.com/oauth/token",
-      "client_id": "auraclaw-hands",
-      "resource": "https://java-mcp.example.com/mcp",
-      "scopes": ["tools.read"]
-    },
+    "auth_strategy": "workload_trusted_context",
     "trust_level": "tenant_verified",
-    "allowed_tool_prefixes": ["order."],
-    "allowed_resource_schemes": ["order"],
-    "allowed_prompt_prefixes": ["order."],
+    "allowed_tool_prefixes": [
+      "procurement.price.",
+      "price_insight."
+    ],
+    "allowed_private_hosts": [
+      "127.0.0.1"
+    ],
     "status": "active",
-    "enabled": true
+    "enabled": true,
+    "metadata": {
+      "tool_name_aliases": {
+        "price_insight.dataset.profile": "procurement.price.dataset.profile",
+        "price_insight.metric.comparability": "procurement.price.metric.comparability"
+      },
+      "search_tags": [
+        "价格洞察",
+        "采购价格",
+        "price_insight"
+      ]
+    }
   }
 ]

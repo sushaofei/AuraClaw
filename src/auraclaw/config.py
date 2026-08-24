@@ -30,10 +30,8 @@ _SECRET_FILE_VARIABLES = {
     "AURACLAW_AGENT_CONTEXT_SIGNING_KEYS_JSON",
     "AURACLAW_LEASE_SIGNING_KEY",
     "AURACLAW_MODEL_API_KEY",
-    "AURACLAW_MODEL_SKILL_SIGNING_KEY",
-    "AURACLAW_PRICE_INSIGHT_MYSQL_PASSWORD",
+    "AURACLAW_SKILL_SIGNING_KEY",
     "AURACLAW_CREDENTIAL_VAULT_TOKEN",
-    "MYSQL_DB_PWD",
     "SEAWEEDFS_ACCESS_KEY",
     "SEAWEEDFS_SECRET_KEY",
 }
@@ -186,38 +184,7 @@ class Settings(BaseSettings):
     debug_vault_secrets_json: str = "{}"
     mcp_reconcile_interval_seconds: float = Field(default=60.0, ge=5.0, le=3600.0)
     mcp_trust_remote_tool_annotations: bool = False
-    model_skill_source_enabled: bool = True
-    model_skill_source_tenant_id: int = Field(default=1, ge=0)
-    model_skill_target_tenant_id: str = Field(default="development", min_length=1)
-    model_skill_include_drafts: bool = True
-    model_skill_reconcile_interval_seconds: float = Field(
-        default=60.0,
-        ge=5.0,
-        le=3600.0,
-    )
-    model_skill_signing_key: SecretStr | None = None
-    model_skill_mysql_host: str | None = Field(
-        default=None, validation_alias="MYSQL_DB_HOST"
-    )
-    model_skill_mysql_port: int = Field(
-        default=3306, ge=1, le=65535, validation_alias="MYSQL_DB_PORT"
-    )
-    model_skill_mysql_user: str | None = Field(
-        default=None, validation_alias="MYSQL_DB_USER"
-    )
-    model_skill_mysql_password: SecretStr | None = Field(
-        default=None, validation_alias="MYSQL_DB_PWD"
-    )
-    model_skill_mysql_database: str | None = Field(
-        default=None, validation_alias="MYSQL_DB_NAME"
-    )
-    price_insight_source: Literal["auto", "disabled", "fixture", "mysql"] = "auto"
-    price_insight_target_tenant_id: str = Field(default="development", min_length=1)
-    price_insight_mysql_host: str | None = None
-    price_insight_mysql_port: int = Field(default=3306, ge=1, le=65535)
-    price_insight_mysql_user: str | None = None
-    price_insight_mysql_password: SecretStr | None = None
-    price_insight_mysql_database: str | None = None
+    skill_signing_key: SecretStr | None = None
     credential_vault_addr: str | None = None
     credential_vault_token: SecretStr | None = None
     credential_vault_mount: str = "secret"
@@ -275,10 +242,9 @@ class Settings(BaseSettings):
     runtime_event_retention_events: int = 1_000
     stream_connection_queue_size: int = 128
     cors_allow_origins: str = ""
-    runtime_enabled: bool = True
     runtime_poll_interval: float = 0.05
     # Shared production-topology worker ticks (Outbox → Feed / Projection).
-    # Keep identical semantics across compose.services and compose.production.
+    # Keep identical semantics across compose.test and compose.prod.
     # With worker_wake_enabled, idle uses worker_idle_interval; busy ticks drain
     # immediately after Session outbox HTTP wake.
     worker_wake_enabled: bool = True
@@ -294,7 +260,6 @@ class Settings(BaseSettings):
     model_base_url: str | None = None
     model_name: str | None = None
     model_provider: str = "openai_compatible"
-    development_model_mode: Literal["provider", "price-insight-scripted"] = "provider"
     model_timeout_seconds: float = 120.0
     model_tenant_token_limit_per_hour: int = Field(default=1_000_000, ge=1)
     # None omits the field; True/False maps to OpenAI-compatible thinking.type enabled/disabled.
@@ -485,37 +450,6 @@ class Settings(BaseSettings):
     @property
     def model_gateway_configured(self) -> bool:
         return bool(self.model_api_key and self.model_base_url and self.model_name)
-
-    @property
-    def model_skill_source_configured(self) -> bool:
-        return bool(
-            self.model_skill_source_enabled
-            and self.model_skill_mysql_host
-            and self.model_skill_mysql_user
-            and self.model_skill_mysql_password is not None
-            and self.model_skill_mysql_password.get_secret_value()
-            and self.model_skill_mysql_database
-        )
-
-    @property
-    def resolved_price_insight_source(
-        self,
-    ) -> Literal["disabled", "fixture", "mysql"]:
-        if self.price_insight_source != "auto":
-            return self.price_insight_source
-        if self.price_insight_mysql_configured:
-            return "mysql"
-        return "disabled"
-
-    @property
-    def price_insight_mysql_configured(self) -> bool:
-        return bool(
-            self.price_insight_mysql_host
-            and self.price_insight_mysql_user
-            and self.price_insight_mysql_password is not None
-            and self.price_insight_mysql_password.get_secret_value()
-            and self.price_insight_mysql_database
-        )
 
     @property
     def insecure_identity_headers_enabled(self) -> bool:

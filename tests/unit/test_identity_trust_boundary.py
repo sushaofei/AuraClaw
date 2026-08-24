@@ -125,9 +125,8 @@ def test_verified_envelope_repr_and_dump_omit_raw_assertion() -> None:
 
 def test_explicit_insecure_headers_accept_tenant_actor_headers() -> None:
     get_settings().storage_backend = "memory"
-    get_settings().runtime_enabled = False
     get_settings().allow_insecure_identity_headers = True
-    with TestClient(create_app()) as client:
+    with TestClient(create_app(profile="task-api")) as client:
         created = client.post(
             "/v1/tasks",
             headers={"Idempotency-Key": "id-char-1", "X-Tenant-ID": "tenant-dev"},
@@ -150,9 +149,8 @@ def test_explicit_insecure_headers_accept_tenant_actor_headers() -> None:
 
 def test_tenant_actor_headers_require_explicit_flag() -> None:
     get_settings().storage_backend = "memory"
-    get_settings().runtime_enabled = False
     get_settings().allow_insecure_identity_headers = False
-    with TestClient(create_app()) as client:
+    with TestClient(create_app(profile="task-api")) as client:
         created = client.post(
             "/v1/tasks",
             headers={"Idempotency-Key": "id-char-required", "X-Tenant-ID": "tenant-dev"},
@@ -377,8 +375,7 @@ def test_production_task_api_requires_signed_context() -> None:
     from pydantic import SecretStr
 
     get_settings().storage_backend = "memory"
-    get_settings().runtime_enabled = False
-    app = create_app()
+    app = create_app(profile="task-api")
     app.state.identity_verifier = build_identity_verifier(
         Settings(
             _env_file=None,

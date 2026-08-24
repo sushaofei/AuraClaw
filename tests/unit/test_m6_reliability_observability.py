@@ -174,7 +174,7 @@ def test_http_trace_context_is_returned_and_tenant_timeline_is_authorized(
     get_task_service.cache_clear()
     get_observability_store.cache_clear()
     get_observability_service.cache_clear()
-    app = create_app()
+    app = create_app(profile="task-api")
     with TestClient(app) as client:
         created = client.post(
             "/v1/tasks",

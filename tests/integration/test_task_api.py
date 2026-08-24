@@ -19,7 +19,6 @@ from auraclaw.projection.approval.projector import CompositeProjection
 def setup_function() -> None:
     get_settings().storage_backend = "memory"
     get_settings().runtime_event_backend = "memory"
-    get_settings().runtime_enabled = False
     get_settings().allow_insecure_identity_headers = True
     get_task_service.cache_clear()
     get_event_store.cache_clear()
@@ -28,7 +27,7 @@ def setup_function() -> None:
 
 
 def test_cancelled_run_leaves_root_session_ready_and_session_can_be_closed() -> None:
-    with TestClient(create_app()) as client:
+    with TestClient(create_app(profile="task-api")) as client:
         created = client.post(
             "/v1/tasks",
             headers={"Idempotency-Key": "cmd-create-1", "X-Tenant-ID": "tenant-1"},
@@ -90,7 +89,7 @@ def test_cancelled_run_leaves_root_session_ready_and_session_can_be_closed() -> 
 
 
 def test_create_is_idempotent() -> None:
-    with TestClient(create_app()) as client:
+    with TestClient(create_app(profile="task-api")) as client:
         headers = {"Idempotency-Key": "stable-key", "X-Tenant-ID": "tenant-1"}
         first = client.post("/v1/tasks", headers=headers, json={"goal": "one"})
         second = client.post("/v1/tasks", headers=headers, json={"goal": "one"})
@@ -101,7 +100,7 @@ def test_create_is_idempotent() -> None:
 
 
 def test_tenant_cannot_read_another_tenants_task() -> None:
-    with TestClient(create_app()) as client:
+    with TestClient(create_app(profile="task-api")) as client:
         created = client.post(
             "/v1/tasks",
             headers={"Idempotency-Key": "tenant-bound", "X-Tenant-ID": "tenant-1"},
@@ -114,7 +113,7 @@ def test_tenant_cannot_read_another_tenants_task() -> None:
 
 
 def test_append_message_is_idempotent_and_honors_min_version() -> None:
-    with TestClient(create_app()) as client:
+    with TestClient(create_app(profile="task-api")) as client:
         created = client.post(
             "/v1/tasks",
             headers={"Idempotency-Key": "create-message-task", "X-Tenant-ID": "tenant-1"},
@@ -148,7 +147,7 @@ def test_append_message_is_idempotent_and_honors_min_version() -> None:
 
 
 def test_human_approval_response_enters_through_task_gateway() -> None:
-    with TestClient(create_app()) as client:
+    with TestClient(create_app(profile="task-api")) as client:
         created = client.post(
             "/v1/tasks",
             headers={"Idempotency-Key": "approval-task", "X-Tenant-ID": "tenant-approval"},

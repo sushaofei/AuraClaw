@@ -4,6 +4,7 @@ import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime
+from typing import Literal
 from uuid import uuid4
 
 from fastapi import FastAPI, Request
@@ -42,65 +43,7 @@ from auraclaw.contracts.errors import AuraClawError
 from auraclaw.contracts.observability import TraceContext
 from auraclaw.infrastructure.observability.stores import StructuredLogger
 
-
-@asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    app.state.service_name = "combined"
-    settings = get_settings()
-    producer = providers.get_runtime_event_producer()
-    ingestor = providers.get_streaming_ingestor()
-    runtime_worker = None
-    runtime_worker_task: asyncio.Task[None] | None = None
-    app.state.runtime_worker_ready = False
-    app.state.model_gateway_ready = settings.model_gateway_configured
-    app.state.runtime_event_producer_ready = not settings.kafka_enabled
-    app.state.runtime_event_ingestor_ready = not settings.kafka_enabled
-    if settings.kafka_enabled:
-        start = getattr(producer, "start", None)
-        if start is not None:
-            try:
-                await asyncio.wait_for(start(), timeout=10)
-                app.state.runtime_event_producer_ready = True
-            except Exception:
-                # Runtime events are best-effort; Canonical writes remain available.
-                app.state.runtime_event_producer_ready = False
-    if ingestor is not None:
-        try:
-            await asyncio.wait_for(ingestor.start(), timeout=10)
-            app.state.runtime_event_ingestor_ready = True
-        except Exception:
-            # Streaming is best-effort; Canonical Session APIs must remain available.
-            app.state.runtime_event_ingestor_ready = False
-    app.state.runtime_event_bus_ready = bool(
-        app.state.runtime_event_producer_ready
-        and app.state.runtime_event_ingestor_ready
-    )
-    if settings.runtime_enabled and settings.model_gateway_configured:
-        runtime_worker = providers.build_runtime_worker()
-        runtime_worker_task = asyncio.create_task(runtime_worker.run())
-        app.state.runtime_worker_ready = True
-        logging.getLogger(__name__).info(
-            "runtime worker started (storage=%s, runtime_events=%s, model_provider=%s)",
-            settings.storage_label,
-            "kafka" if settings.kafka_enabled else "memory",
-            settings.model_provider,
-        )
-    yield
-    if runtime_worker is not None and runtime_worker_task is not None:
-        await runtime_worker.stop()
-        with suppress(Exception):
-            await asyncio.wait_for(runtime_worker_task, timeout=10)
-    if ingestor is not None:
-        with suppress(Exception):
-            await asyncio.wait_for(ingestor.close(), timeout=10)
-    close = getattr(producer, "close", None)
-    if close is not None:
-        with suppress(Exception):
-            await asyncio.wait_for(close(), timeout=10)
-    await providers.get_runtime_replay_bus().close()
-    close_identity = getattr(app.state.identity_verifier, "close", None)
-    if close_identity is not None:
-        await close_identity()
+ApiProfile = Literal["task-api", "streaming-gateway"]
 
 
 @asynccontextmanager
@@ -140,15 +83,12 @@ async def streaming_lifespan(app: FastAPI) -> AsyncIterator[None]:
             await close_identity()
 
 
-def create_app(*, profile: str = "development") -> FastAPI:
+def create_app(*, profile: ApiProfile) -> FastAPI:
     settings = get_settings()
     selected_lifespan = {
-        "development": lifespan,
         "task-api": task_api_lifespan,
         "streaming-gateway": streaming_lifespan,
-    }.get(profile)
-    if selected_lifespan is None:
-        raise ValueError(f"unsupported API composition profile: {profile}")
+    }[profile]
     app = FastAPI(
         title=f"AuraClaw {profile}",
         version=__version__,
@@ -186,10 +126,10 @@ def create_app(*, profile: str = "development") -> FastAPI:
             expose_headers=["ETag", "Retry-After", "traceparent"],
         )
     app.include_router(health_router)
-    if profile in {"development", "task-api"}:
+    if profile == "task-api":
         app.include_router(task_router)
         app.include_router(operations_router)
-    if profile in {"development", "streaming-gateway"}:
+    else:
         app.include_router(stream_router)
     structured_logger = StructuredLogger()
 
@@ -257,6 +197,3 @@ def create_app(*, profile: str = "development") -> FastAPI:
         )
 
     return app
-
-
-app = create_app()

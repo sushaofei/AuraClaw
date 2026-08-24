@@ -1,16 +1,13 @@
 import asyncio
 import json
-import time
 from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
-from fastapi.testclient import TestClient
 
-from auraclaw.composition import providers
 from auraclaw.composition.services import RemoteRuntimeWorker
-from auraclaw.config import Settings, get_settings
+from auraclaw.config import Settings
 from auraclaw.contracts.errors import (
     ModelAuthenticationError,
     ModelProviderError,
@@ -18,20 +15,7 @@ from auraclaw.contracts.errors import (
     ModelTimeoutError,
 )
 from auraclaw.infrastructure.model import OpenAICompatibleProvider
-from auraclaw.main import create_app
-from auraclaw.runtime.ports import ModelRequest, ModelResponse
-
-
-class StreamingModelClient:
-    async def generate(self, request: ModelRequest) -> ModelResponse:
-        return ModelResponse(
-            model_call_id=request.model_call_id,
-            provider="openai_compatible",
-            model="test-model",
-            completed_output="production answer",
-            deltas=("production ", "answer"),
-            usage={"input_tokens": 2, "output_tokens": 2, "total_tokens": 4},
-        )
+from auraclaw.runtime.ports import ModelRequest
 
 
 def test_remote_runtime_records_canonical_failure_before_acking_assignment() -> None:
@@ -126,28 +110,6 @@ def test_remote_runtime_does_not_ack_when_canonical_failure_cannot_be_written() 
         assert control.finished is False
 
     asyncio.run(scenario())
-
-
-def _clear_dependencies() -> None:
-    for dependency in (
-        providers.get_event_store,
-        providers.get_task_projection,
-        providers.get_approval_projection,
-        providers.get_collaboration_projection,
-        providers.get_task_service,
-        providers.get_runtime_replay_bus,
-        providers.get_runtime_event_producer,
-        providers.get_runtime_event_publisher,
-        providers.get_streaming_ingestor,
-        providers.get_streaming_gateway,
-        providers.get_model_gateway,
-        providers.get_control_store,
-        providers.get_observability_store,
-        providers.get_observability_service,
-    ):
-        cache_clear = getattr(dependency, "cache_clear", None)
-        if cache_clear is not None:
-            cache_clear()
 
 
 def test_settings_only_accept_provider_neutral_model_names(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -435,70 +397,3 @@ def test_openai_compatible_provider_maps_timeout() -> None:
         await client.aclose()
 
     asyncio.run(scenario())
-
-
-def test_unified_worker_completes_task_and_publishes_stream(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    settings = get_settings()
-    previous = {
-        "storage_backend": settings.storage_backend,
-        "runtime_event_backend": settings.runtime_event_backend,
-        "runtime_enabled": settings.runtime_enabled,
-        "runtime_poll_interval": settings.runtime_poll_interval,
-        "model_api_key": settings.model_api_key,
-        "model_base_url": settings.model_base_url,
-        "model_name": settings.model_name,
-    }
-    settings.storage_backend = "memory"
-    settings.runtime_event_backend = "memory"
-    settings.runtime_enabled = True
-    settings.runtime_poll_interval = 0.01
-    settings.model_api_key = "production-secret"
-    settings.model_base_url = "https://models.example/v1"
-    settings.model_name = "test-model"
-    _clear_dependencies()
-    monkeypatch.setattr(providers, "get_model_gateway", lambda: StreamingModelClient())
-    try:
-        with TestClient(create_app()) as client:
-            health = client.get("/health/ready").json()
-            assert health["status"] == "ready"
-            assert health["model_gateway_ready"] is True
-            assert health["runtime_worker"] == "running"
-            assert health["runtime_event_producer_ready"] is True
-            assert health["runtime_event_ingestor_ready"] is True
-
-            created = client.post(
-                "/v1/tasks",
-                headers={"Idempotency-Key": "m8-production", "X-Tenant-ID": "tenant-m8"},
-                json={"goal": "exercise production runtime"},
-            )
-            assert created.status_code == 202
-            session_id = created.json()["session_id"]
-            deadline = time.monotonic() + 2
-            task: dict[str, Any] = {}
-            while time.monotonic() < deadline:
-                task = client.get(
-                    f"/v1/tasks/{session_id}", headers={"X-Tenant-ID": "tenant-m8"}
-                ).json()
-                if task.get("run_status") == "completed":
-                    break
-                time.sleep(0.01)
-            assert task["run_status"] == "completed"
-            result = client.get(
-                f"/v1/tasks/{session_id}/result",
-                headers={"X-Tenant-ID": "tenant-m8"},
-            )
-            assert result.json()["result_summary"] == "production answer"
-            events = asyncio.run(
-                providers.get_runtime_replay_bus().events("tenant-m8", session_id)
-            )
-            assert [event.payload["delta"] for event in events] == [
-                "production ",
-                "answer",
-            ]
-            assert "production-secret" not in repr(events)
-    finally:
-        for key, value in previous.items():
-            setattr(settings, key, value)
-        _clear_dependencies()

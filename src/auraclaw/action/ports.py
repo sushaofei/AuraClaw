@@ -13,8 +13,6 @@ from auraclaw.contracts.hands import (
     HandsToolResult,
     HandsTrustedContext,
 )
-from auraclaw.contracts.model_skills import ModelSkillSnapshot
-from auraclaw.contracts.price_insight import PriceInsightDataset, PriceInsightFilter
 from auraclaw.contracts.tools import (
     ApprovalRecord,
     ArtifactRef,
@@ -198,16 +196,3 @@ class ResourcePolicyEvaluator(Protocol):
         correlation_id: str,
         attributes: dict[str, object],
     ) -> PolicyEvaluation: ...
-
-
-class ModelSkillSource(Protocol):
-    async def load_snapshots(self) -> tuple[ModelSkillSnapshot, ...]: ...
-
-
-class PriceInsightSource(Protocol):
-    async def load_dataset(
-        self,
-        *,
-        tenant_id: str,
-        filters: PriceInsightFilter,
-    ) -> PriceInsightDataset: ...

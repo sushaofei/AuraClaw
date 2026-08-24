@@ -28,7 +28,6 @@ from auraclaw.session.internal_service import SessionInternalService
 def setup_function() -> None:
     get_settings().storage_backend = "memory"
     get_settings().runtime_event_backend = "memory"
-    get_settings().runtime_enabled = False
     get_task_service.cache_clear()
     get_event_store.cache_clear()
     get_task_projection.cache_clear()
@@ -228,7 +227,7 @@ def test_session_feed_pushes_limit_to_store() -> None:
 
 
 def test_transcript_api_returns_messages_without_timeline_noise() -> None:
-    with TestClient(create_app()) as client:
+    with TestClient(create_app(profile="task-api")) as client:
         created = client.post(
             "/v1/tasks",
             headers={"Idempotency-Key": "cmd-transcript-1", "X-Tenant-ID": "tenant-1"},

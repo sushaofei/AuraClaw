@@ -1,5 +1,5 @@
-"""Stable ASGI import path backed by the API composition root."""
+"""Stable import path for public API composition helpers."""
 
-from auraclaw.composition.api import app, create_app, lifespan
+from auraclaw.composition.api import create_app
 
-__all__ = ["app", "create_app", "lifespan"]
+__all__ = ["create_app"]

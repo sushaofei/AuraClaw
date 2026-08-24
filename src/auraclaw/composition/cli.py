@@ -164,8 +164,8 @@ def build_parser() -> argparse.ArgumentParser:
     serve = subcommands.add_parser(
         "serve",
         help=(
-            "run all 12 production service entrypoints plus a local ingress that "
-            "splits /v1/streams/ to Streaming Gateway"
+            "run the production-isomorphic 12-process topology plus a local ingress "
+            "that splits /v1/streams/ to Streaming Gateway"
         ),
     )
     serve.add_argument("--host")
@@ -193,7 +193,10 @@ def build_parser() -> argparse.ArgumentParser:
     for command in SERVICE_BY_COMMAND:
         if command == "projection":
             continue
-        service = subcommands.add_parser(command)
+        service = subcommands.add_parser(
+            command,
+            help="production process entrypoint (compose / auraclaw serve)",
+        )
         service.add_argument("action", choices=("run",))
         service.add_argument("--host")
         service.add_argument("--port", type=int)
@@ -305,6 +308,11 @@ def main(
     if args.command == "projection":
         if args.action == "relay" and args.watch:
             settings = get_settings()
+            if settings.deployment_profile != "production":
+                raise SystemExit(
+                    "Projection worker watch mode is reserved for production "
+                    "compose. Use `auraclaw serve` for local development."
+                )
             spec = service_spec("projection", settings)
             interval = (
                 args.interval
@@ -362,6 +370,11 @@ def main(
         return
     if args.command in SERVICE_BY_COMMAND and args.command != "projection":
         settings = get_settings()
+        if settings.deployment_profile != "production":
+            raise SystemExit(
+                "Single-process service entrypoints are reserved for production "
+                "compose. Use `auraclaw serve` for local development."
+            )
         spec = service_spec(args.command, settings)
         uvicorn_runner(
             create_service_app(args.command, settings),

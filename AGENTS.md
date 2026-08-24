@@ -9,7 +9,7 @@ AuraClaw is a pure Python Managed Agent backend. The architecture source of trut
 
 ```bash
 uv sync --extra dev
-uv run uvicorn auraclaw.main:app --reload
+uv run auraclaw serve
 uv run pytest
 uv run ruff check .
 uv run mypy src/auraclaw

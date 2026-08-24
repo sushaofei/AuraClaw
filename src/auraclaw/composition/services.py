@@ -38,23 +38,13 @@ from auraclaw.action.hands_http import (
     create_hands_http_app,
 )
 from auraclaw.action.mcp_primitives import HandsResourceRegistry
-from auraclaw.action.model_skill_compiler import (
-    ModelSkillCompiler,
-    ModelSkillPublisher,
-)
-from auraclaw.action.ports import PriceInsightSource
-from auraclaw.action.price_insight import (
-    PriceInsightService,
-    PriceInsightToolExecutor,
-    price_insight_tool_descriptors,
-    price_insight_tools,
-)
 from auraclaw.action.resource_gateway import ManagedResourceGateway
 from auraclaw.action.skill_packages import (
     HmacSkillSignatureVerifier,
     SkillPackageRegistry,
     SkillResolver,
 )
+from auraclaw.action.skill_reconciler import SkillPackageReconciler
 from auraclaw.action.tool_gateway import ToolGateway, ToolRegistry
 from auraclaw.admin.internal_service import OwnerAdminService
 from auraclaw.api.dependencies import (
@@ -71,23 +61,8 @@ from auraclaw.artifact.internal_service import (
 )
 from auraclaw.composition import providers
 from auraclaw.composition.api import create_app
-from auraclaw.composition.business_skills import (
-    PRICE_INSIGHT_DOCS_SERVER_ID,
-    PRICE_INSIGHT_SERVER_ID,
-    PRICE_INSIGHT_SKILL_DIR,
-    price_insight_publication_tenants,
-    price_insight_resource_descriptors,
-    price_insight_resources,
-    signed_price_insight_dependency_packages,
-    signed_price_insight_package,
-)
 from auraclaw.composition.worker_wake import WorkerWakeGate
 from auraclaw.config import Settings, get_settings
-from auraclaw.contracts.capabilities import (
-    CapabilityStatus,
-    CapabilityTrustLevel,
-    McpServerDefinition,
-)
 from auraclaw.contracts.internal import ServiceIdentity
 from auraclaw.contracts.tools import CredentialReference
 from auraclaw.control.internal_service import ControlInternalService
@@ -147,7 +122,6 @@ from auraclaw.infrastructure.delivery import (
 from auraclaw.infrastructure.delivery.remote_sinks import CredentialProxyWebhookSink
 from auraclaw.infrastructure.delivery.sinks import ParentSessionResultSink
 from auraclaw.infrastructure.hands.local import LocalHandsService
-from auraclaw.infrastructure.model_sources.mysql import MySqlModelSkillSource
 from auraclaw.infrastructure.observability.stores import InMemoryObservabilityStore
 from auraclaw.infrastructure.persistence.memory_control_store import (
     InMemoryControlStateStore,
@@ -178,10 +152,6 @@ from auraclaw.infrastructure.persistence.postgres_policy_store import (
 )
 from auraclaw.infrastructure.persistence.postgres_tool_registry import (
     PostgresToolRegistryStore,
-)
-from auraclaw.infrastructure.price_insight import (
-    JsonPriceInsightSource,
-    MySqlPriceInsightSource,
 )
 from auraclaw.infrastructure.projection.postgres_approval_store import (
     PostgresApprovalProjection,
@@ -414,6 +384,10 @@ def _configured_identities(
         if token:
             configured[token] = identity
     return configured
+
+
+def _agent_runtime_token(settings: Settings) -> str | None:
+    return settings.workload_token_value(ServiceIdentity.AGENT_RUNTIME.value)
 
 
 def _service_bearer_token(settings: Settings, identity: ServiceIdentity) -> str:
@@ -1122,11 +1096,11 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         policy=policy if isinstance(policy, RemotePolicyClient) else None,
     )
     configured_signing_key = (
-        settings.model_skill_signing_key.get_secret_value().encode()
-        if settings.model_skill_signing_key is not None
+        settings.skill_signing_key.get_secret_value().encode()
+        if settings.skill_signing_key is not None
         else None
     )
-    model_skill_signer = HmacSkillSignatureVerifier(
+    skill_signer = HmacSkillSignatureVerifier(
         {
             "ct-model": (
                 configured_signing_key or b"auraclaw-development-model-skill-key"
@@ -1146,81 +1120,19 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         )
     skill_registry = SkillPackageRegistry(
         artifacts=skill_artifacts,
-        signature_verifier=model_skill_signer,
+        signature_verifier=skill_signer,
         resources=resources,
     )
-    model_skill_publisher: ModelSkillPublisher | None = None
-    if settings.model_skill_source_configured:
-        mysql_password = settings.model_skill_mysql_password
-        if (
-            settings.model_skill_mysql_host is None
-            or settings.model_skill_mysql_user is None
-            or mysql_password is None
-            or settings.model_skill_mysql_database is None
-        ):
-            raise ValueError("Model Skill MySQL source configuration is incomplete")
-        model_skill_publisher = ModelSkillPublisher(
-            MySqlModelSkillSource(
-                host=settings.model_skill_mysql_host,
-                port=settings.model_skill_mysql_port,
-                user=settings.model_skill_mysql_user,
-                password=mysql_password.get_secret_value(),
-                database=settings.model_skill_mysql_database,
-                tenant_id=settings.model_skill_source_tenant_id,
-                include_drafts=settings.model_skill_include_drafts,
-            ),
-            ModelSkillCompiler(model_skill_signer),
-            skill_registry,
-            target_tenant_id=settings.model_skill_target_tenant_id,
-        )
     skill_resolver = SkillResolver(
         skill_registry,
         capability_catalog_store,
         policy if isinstance(policy, RemotePolicyClient) else None,
     )
-    price_insight_source: PriceInsightSource | None = None
-    resolved_price_source = settings.resolved_price_insight_source
-    if resolved_price_source == "fixture":
-        price_insight_source = JsonPriceInsightSource(
-            PRICE_INSIGHT_SKILL_DIR / "tests" / "golden-data.json"
-        )
-    elif resolved_price_source == "mysql":
-        mysql_password = settings.price_insight_mysql_password
-        if (
-            not settings.price_insight_mysql_configured
-            or settings.price_insight_mysql_host is None
-            or settings.price_insight_mysql_user is None
-            or mysql_password is None
-            or settings.price_insight_mysql_database is None
-        ):
-            raise ValueError("Price Insight MySQL source configuration is incomplete")
-        price_insight_source = MySqlPriceInsightSource(
-            host=settings.price_insight_mysql_host,
-            port=settings.price_insight_mysql_port,
-            user=settings.price_insight_mysql_user,
-            password=mysql_password.get_secret_value(),
-            database=settings.price_insight_mysql_database,
-        )
-    skill_tenants = price_insight_publication_tenants(
-        source_tenant_id=(
-            settings.price_insight_target_tenant_id
-            if price_insight_source is not None
-            else None
-        ),
-        mcp_tenant_ids=tuple(
-            server.tenant_id for server in settings.mcp_egress_servers
-        ),
-    )
-    if skill_tenants:
-        for resource in price_insight_resources(tenant_ids=skill_tenants):
-            resources.register_resource(resource)
-    price_tools = price_insight_tools() if price_insight_source is not None else ()
     registry = ToolRegistry(
         (
             capability_search_tool(),
             capability_load_tool(),
             skill_resolve_tool(),
-            *price_tools,
         )
     )
 
@@ -1248,72 +1160,10 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
                         policy=policy,
                     )
                 )
-        if skill_tenants:
-            await capability_catalog.register_server(
-                McpServerDefinition(
-                    server_id=PRICE_INSIGHT_DOCS_SERVER_ID,
-                    tenant_id=None,
-                    title="AuraClaw Procurement Price Insight Docs",
-                    endpoint="https://price-insight.internal/docs",
-                    trust_level=CapabilityTrustLevel.PLATFORM,
-                    allowed_resource_schemes=("repo",),
-                    status=CapabilityStatus.ACTIVE,
-                    enabled=True,
-                )
-            )
-            await capability_catalog.replace_server_capabilities(
-                PRICE_INSIGHT_DOCS_SERVER_ID,
-                price_insight_resource_descriptors(
-                    None,
-                    server_id=PRICE_INSIGHT_DOCS_SERVER_ID,
-                ),
-            )
-            for tenant_id in skill_tenants:
-                for package in signed_price_insight_dependency_packages(
-                    model_skill_signer
-                ):
-                    await skill_registry.publish(tenant_id, package)
-                if model_skill_publisher is None:
-                    await skill_registry.publish(
-                        tenant_id,
-                        signed_price_insight_package(model_skill_signer),
-                    )
-        if price_insight_source is not None:
-            tenant_id = settings.price_insight_target_tenant_id
-            await capability_catalog.register_server(
-                McpServerDefinition(
-                    server_id=PRICE_INSIGHT_SERVER_ID,
-                    tenant_id=tenant_id,
-                    title="AuraClaw Procurement Price Insight",
-                    endpoint="https://price-insight.internal/mcp",
-                    trust_level=CapabilityTrustLevel.PLATFORM,
-                    allowed_tool_prefixes=(
-                        "procurement.price.",
-                        "procurement.price_insight.",
-                    ),
-                    allowed_resource_schemes=("repo",),
-                    status=CapabilityStatus.ACTIVE,
-                    enabled=True,
-                )
-            )
-            await capability_catalog.replace_server_capabilities(
-                PRICE_INSIGHT_SERVER_ID,
-                price_insight_tool_descriptors(
-                    server_id=PRICE_INSIGHT_SERVER_ID,
-                    tenant_id=tenant_id,
-                ),
-            )
-        if model_skill_publisher is not None:
-            await model_skill_publisher.reconcile()
 
     app.state.capability_connectors = {}
     app.state.catalog_reconciler = None
     app.state.initialize = initialize_registry
-    price_executor = (
-        PriceInsightToolExecutor(PriceInsightService(price_insight_source))
-        if price_insight_source is not None
-        else None
-    )
     routed_hands = RoutedHandsExecutor(
         LocalHandsService(workspace_root=Path.cwd()),
         {
@@ -1326,11 +1176,6 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
                 skills=skill_registry,
             ),
             SKILL_RESOLVE_TOOL_NAME: SkillResolveExecutor(skill_resolver),
-            **(
-                {tool.name: price_executor for tool in price_tools}
-                if price_executor is not None
-                else {}
-            ),
         },
     )
     gateway = ToolGateway(
@@ -1344,13 +1189,11 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         approval_controller=policy if isinstance(policy, RemotePolicyClient) else None,
     )
     token = (
-        settings.runtime_workload_token.get_secret_value()
-        if settings.runtime_workload_token is not None
-        else secrets.token_urlsafe(32)
+        _agent_runtime_token(settings) or ""
     )
     key = _lease_signing_key(settings)
     authenticator: HandsWorkloadAuthenticator = SignedLeaseHandsAuthenticator(
-        {token: "*"},
+        {token: "*"} if token else {},
         verifier=LeaseAssertionVerifier(
             {"development": key},
             ledger=InMemoryFencingTokenLedger(),
@@ -1370,20 +1213,7 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
     app.state.capability_catalog = capability_catalog
     app.state.resource_gateway = resource_gateway
     app.state.skill_registry = skill_registry
-    app.state.model_skill_publisher = model_skill_publisher
     periodic_jobs: list[tuple[str, float, Callable[[], Awaitable[int | None]]]] = []
-    if model_skill_publisher is not None:
-
-        async def reconcile_model_skills() -> int:
-            return len(await model_skill_publisher.reconcile())
-
-        periodic_jobs.append(
-            (
-                "model-skills",
-                settings.model_skill_reconcile_interval_seconds,
-                reconcile_model_skills,
-            )
-        )
     if credential_proxy is not None and isinstance(policy, RemotePolicyClient):
         reconciler = CapabilityCatalogReconciler(
             catalog=capability_catalog,
@@ -1394,7 +1224,13 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
             hands_router=routed_hands,
             trust_remote_tool_annotations=settings.mcp_trust_remote_tool_annotations,
         )
+        skill_reconciler = SkillPackageReconciler(
+            store=capability_catalog_store,
+            connectors=app.state.capability_connectors,
+            registry=skill_registry,
+        )
         app.state.catalog_reconciler = reconciler
+        app.state.skill_reconciler = skill_reconciler
 
         async def initialize_remote_catalog() -> None:
             await initialize_registry()
@@ -1405,17 +1241,23 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
             expected = len(app.state.capability_connectors)
             for attempt in range(20):
                 active = await reconciler.reconcile_all()
+                await skill_reconciler.reconcile_all()
                 if expected == 0 or active >= expected:
                     break
                 if attempt < 19:
                     await asyncio.sleep(0.5)
+
+        async def reconcile_catalog_and_skills() -> int:
+            active = await reconciler.reconcile_all()
+            await skill_reconciler.reconcile_all()
+            return active
 
         app.state.initialize = initialize_remote_catalog
         periodic_jobs.append(
             (
                 "capability-catalog",
                 settings.mcp_reconcile_interval_seconds,
-                reconciler.reconcile_all,
+                reconcile_catalog_and_skills,
             )
         )
     if periodic_jobs:
@@ -1896,8 +1738,8 @@ def _model_gateway_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
 
 
 def _runtime_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
-    token = settings.workload_token_value(ServiceIdentity.AGENT_RUNTIME.value)
-    bearer_token = token or secrets.token_urlsafe(32)
+    token = _agent_runtime_token(settings) or ""
+    bearer_token = token
     runtime_id, node_id = _runtime_instance_identity(settings)
     control = RemoteRuntimeControlClient(
         settings.control_base_url,

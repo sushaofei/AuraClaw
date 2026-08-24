@@ -2,7 +2,7 @@
 
 ## 1. 适用范围
 
-生产部署固定使用根目录的 `compose.production.yml`。`compose.services.yml` 继续用于本地多进程
+生产部署固定使用根目录的 `compose.prod.yml`。`compose.test.yml` 继续用于本地多进程
 开发，不作为生产模板。生产拓扑包含 12 个 AuraClaw 服务、一个一次性 migration job 和一个
 统一 Nginx ingress；除 ingress 外不发布宿主机端口。
 
@@ -46,14 +46,14 @@ uv run python scripts/materialize_compose_secrets.py \
 uv run python scripts/compose_preflight.py --env-file .env.prod
 
 docker compose --env-file .env.prod \
-  -f compose.production.yml --profile migrate config --quiet
+  -f compose.prod.yml --profile migrate config --quiet
 
 docker compose --env-file .env.prod \
-  -f compose.production.yml run --rm migrate migrate status \
+  -f compose.prod.yml run --rm migrate migrate status \
   --directory /app/migrations/mysql
 
 docker compose --env-file .env.prod \
-  -f compose.production.yml run --rm migrate migrate up \
+  -f compose.prod.yml run --rm migrate migrate up \
   --target 0016 --directory /app/migrations/mysql
 ```
 
@@ -68,7 +68,7 @@ Secret 生成目录必须与 `.env.prod` 的 `AURACLAW_SECRET_DIR` 一致；目�
 
 ```bash
 # MySQL（默认）
-docker compose --env-file .env.prod -f compose.production.yml \
+docker compose --env-file .env.prod -f compose.prod.yml \
   --profile migrate run --rm migrate migrate baseline \
   --target 0016 --confirm-existing-schema --directory /app/migrations/mysql
 
@@ -82,13 +82,13 @@ docker compose --env-file .env.prod -f compose.production.yml \
 
 ```bash
 docker compose --env-file .env.prod \
-  -f compose.production.yml pull
+  -f compose.prod.yml pull
 
 docker compose --env-file .env.prod \
-  -f compose.production.yml up -d --wait --remove-orphans
+  -f compose.prod.yml up -d --wait --remove-orphans
 
 docker compose --env-file .env.prod \
-  -f compose.production.yml ps
+  -f compose.prod.yml ps
 
 curl --fail http://127.0.0.1:8080/health/ready
 ```
@@ -113,7 +113,7 @@ AURACLAW_EDGE_NETWORK=auraclaw-green-edge \
 AURACLAW_PLATFORM_NETWORK=auraclaw-platform-green \
 AURACLAW_INGRESS_PORT=18080 \
 docker compose -p auraclaw-green --env-file .env.prod \
-  -f compose.production.yml up -d --wait
+  -f compose.prod.yml up -d --wait
 
 curl --fail http://127.0.0.1:18080/health/ready
 ```
@@ -124,7 +124,7 @@ Model/MCP、Canonical Result、SSE 和 Delivery 均完成。上游负载均衡�
 
 ```bash
 docker compose -p auraclaw-blue --env-file .env.prod \
-  -f compose.production.yml down
+  -f compose.prod.yml down
 ```
 
 若 canary、错误率、队列延迟或外部依赖指标异常，不切流并删除 green。若切流后异常，立即
@@ -139,7 +139,7 @@ migration。确认恢复后再停止 green。
 先检查数据库连接预算、Kafka partition 数和外部配额，再显式覆盖副本数：
 
 ```bash
-docker compose --env-file .env.prod -f compose.production.yml \
+docker compose --env-file .env.prod -f compose.prod.yml \
   up -d --scale agent-runtime=6 --scale orchestrator=4 --scale delivery-worker=4
 ```
 
@@ -169,8 +169,8 @@ multipart finalize/gc 是否排空；Hands 本地 workspace 是每个容器的�
 
 ```bash
 docker kill "$(docker compose --env-file .env.prod \
-  -f compose.production.yml ps -q agent-runtime | head -n 1)"
-docker compose --env-file .env.prod -f compose.production.yml up -d agent-runtime
+  -f compose.prod.yml ps -q agent-runtime | head -n 1)"
+docker compose --env-file .env.prod -f compose.prod.yml up -d agent-runtime
 ```
 
 故障恢复后执行 `auraclaw operations status`，并按需使用 projection rebuild、projection/

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Measure create-task → first SSE model.output.delta on a live AuraClaw stack.
 
-Intended for production-isomorphic topologies (compose.services / DEV_SERVICE),
+Intended for production-isomorphic topologies (compose.test / DEV_SERVICE),
 not `auraclaw serve`. Uses only the Python standard library.
 
 Example:
