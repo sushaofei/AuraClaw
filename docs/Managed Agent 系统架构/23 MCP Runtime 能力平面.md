@@ -6,6 +6,10 @@
 >
 > Capability Plane 与普通任务决策循环的接入由
 > [GitHub Issue #31](https://github.com/sushaofei/AuraClaw/issues/31) 跟踪。
+>
+> MCP Server 运行时配置、持久化 revision、重启恢复和本地/私网连接的增量设计见
+> [MCP Server 热配置需求设计](../MCP%20Server%20热配置需求设计.md)，实现由
+> [GitHub Issue #50](https://github.com/sushaofei/AuraClaw/issues/50) 跟踪。
 
 ## 1. 目标
 
@@ -282,8 +286,9 @@ Gateway 注册受信 Server 配置
  -> 发布可丢弃的 list_changed / cache invalidation
 ```
 
-Server 注册属于管理面写操作，只允许平台或 tenant 管理员通过版本化 Admin API 完成。Runtime 无权动态
-注册 URL、stdio command 或环境变量。
+Server 注册属于管理面写操作，只允许平台或 tenant 管理员通过版本化 Admin API 完成。配置以不可变
+revision 持久化，验证成功后由 Action Hands 与 Credential Proxy 热加载；进程重启从 Registry 恢复。
+Runtime 无权动态注册 URL、stdio command 或环境变量。
 
 ### 4.2 任务期发现
 

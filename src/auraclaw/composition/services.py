@@ -37,7 +37,13 @@ from auraclaw.action.hands_http import (
     SignedLeaseHandsAuthenticator,
     create_hands_http_app,
 )
+from auraclaw.action.mcp_connection_manager import McpConnectionManager
+from auraclaw.action.mcp_internal_service import McpRegistryInternalService
 from auraclaw.action.mcp_primitives import HandsResourceRegistry
+from auraclaw.action.mcp_registry import (
+    InMemoryMcpServerRegistryStore,
+    McpServerRegistryService,
+)
 from auraclaw.action.resource_gateway import ManagedResourceGateway
 from auraclaw.action.skill_packages import (
     HmacSkillSignatureVerifier,
@@ -55,6 +61,7 @@ from auraclaw.api.dependencies import (
     get_task_projection,
     get_task_query_service,
 )
+from auraclaw.api.routes.admin_mcp import create_mcp_admin_router
 from auraclaw.artifact.internal_service import (
     ArtifactInternalService,
     SeaweedFSObjectVerifier,
@@ -63,7 +70,13 @@ from auraclaw.composition import providers
 from auraclaw.composition.api import create_app
 from auraclaw.composition.worker_wake import WorkerWakeGate
 from auraclaw.config import Settings, get_settings
-from auraclaw.contracts.internal import ServiceIdentity
+from auraclaw.contracts.internal import (
+    InternalRequestContext,
+    McpRegistrySnapshotRequest,
+    McpRegistrySnapshotResponse,
+    ServiceIdentity,
+)
+from auraclaw.contracts.mcp_registry import McpActiveSnapshotEntry
 from auraclaw.contracts.tools import CredentialReference
 from auraclaw.control.internal_service import ControlInternalService
 from auraclaw.control.orchestrator import (
@@ -112,6 +125,7 @@ from auraclaw.infrastructure.connectors.http.connector import (
 from auraclaw.infrastructure.connectors.http.egress import ManagedJavaApiEgressAdapter
 from auraclaw.infrastructure.connectors.mcp.connector import ManagedMcpConnector
 from auraclaw.infrastructure.credentials.mcp_egress import ManagedMcpEgressAdapter
+from auraclaw.infrastructure.credentials.mcp_egress_manager import McpEgressManager
 from auraclaw.infrastructure.credentials.proxy import CredentialProxy, InMemoryVault
 from auraclaw.infrastructure.credentials.vault import HashiCorpVault
 from auraclaw.infrastructure.credentials.webhook import ManagedWebhookCredentialAdapter
@@ -144,6 +158,9 @@ from auraclaw.infrastructure.persistence.postgres_credential_registry import (
 from auraclaw.infrastructure.persistence.postgres_invocation_store import (
     PostgresInvocationStore,
 )
+from auraclaw.infrastructure.persistence.postgres_mcp_registry import (
+    PostgresMcpServerRegistryStore,
+)
 from auraclaw.infrastructure.persistence.postgres_model_store import (
     PostgresModelStateStore,
 )
@@ -162,12 +179,13 @@ from auraclaw.infrastructure.projection.postgres_collaboration_store import (
 from auraclaw.infrastructure.projection.postgres_task_store import (
     PostgresTaskProjection,
 )
-from auraclaw.internal.http import create_contract_app
+from auraclaw.internal.http import HttpContractClient, create_contract_app
 from auraclaw.internal.routes import (
     admin_routes,
     artifact_routes,
     control_routes,
     credential_routes,
+    mcp_registry_routes,
     model_routes,
     model_stream_routes,
     policy_routes,
@@ -197,6 +215,60 @@ from auraclaw.session.internal_service import SessionInternalService
 from auraclaw.session.task_service import TaskService
 
 logger = logging.getLogger(__name__)
+
+
+def _mcp_registry_service(settings: Settings) -> tuple[
+    McpServerRegistryService,
+    InMemoryMcpServerRegistryStore | PostgresMcpServerRegistryStore,
+]:
+    store: InMemoryMcpServerRegistryStore | PostgresMcpServerRegistryStore
+    if settings.sql_storage_enabled:
+        store = PostgresMcpServerRegistryStore(settings.resolved_database_url)
+    else:
+        store = InMemoryMcpServerRegistryStore()
+    allow_private_none = (
+        settings.mcp_allow_private_auth_none
+        if settings.mcp_allow_private_auth_none is not None
+        else settings.deployment_profile == "development"
+    )
+    return (
+        McpServerRegistryService(
+            store, allow_private_auth_none=allow_private_none
+        ),
+        store,
+    )
+
+
+async def _hands_mcp_snapshot(
+    settings: Settings,
+) -> tuple[McpActiveSnapshotEntry, ...] | None:
+    token = settings.workload_token_value(ServiceIdentity.CREDENTIAL_PROXY.value)
+    if not token:
+        return None
+    client = httpx.AsyncClient(base_url=settings.hands_url)
+    contract = HttpContractClient(client, bearer_token=token)
+    try:
+        response = await contract.call(
+            "/internal/v1/mcp-registry/snapshot",
+            McpRegistrySnapshotRequest(
+                context=InternalRequestContext(
+                    tenant_id="platform",
+                    service_identity=ServiceIdentity.CREDENTIAL_PROXY,
+                    request_id=secrets.token_hex(12),
+                    correlation_id="mcp-egress-restore",
+                    causation_id="mcp-egress-restore",
+                )
+            ),
+            McpRegistrySnapshotResponse,
+        )
+    except Exception:
+        logger.warning("MCP registry snapshot is unavailable; using local adapters")
+        return None
+    finally:
+        await client.aclose()
+    return tuple(
+        McpActiveSnapshotEntry.model_validate(item) for item in response.servers
+    )
 
 
 def _worker_idle_interval(settings: Settings, configured: float) -> float:
@@ -535,6 +607,10 @@ def _task_api_app(settings: Settings) -> FastAPI:
             else ()
         ),
     )
+    mcp_registry, mcp_store = _mcp_registry_service(settings)
+    app.include_router(create_mcp_admin_router(mcp_registry))
+    if isinstance(mcp_store, PostgresMcpServerRegistryStore):
+        app.state.closeables = (*app.state.closeables, mcp_store)
     app.state.config_ready = config_ready
     app.state.storage_label = "projection-read-only"
     app.state.session_access = "http"
@@ -1055,6 +1131,7 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
     capability_catalog_store: (
         InMemoryCapabilityCatalogStore | PostgresCapabilityCatalogStore
     ) = InMemoryCapabilityCatalogStore()
+    mcp_registry, mcp_registry_store = _mcp_registry_service(settings)
     remote_clients: list[Any] = []
     hands_token = _service_bearer_token(settings, ServiceIdentity.ACTION_HANDS)
     policy = RemotePolicyClient(settings.policy_base_url, bearer_token=hands_token)
@@ -1080,6 +1157,11 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         *(
             (capability_catalog_store,)
             if isinstance(capability_catalog_store, PostgresCapabilityCatalogStore)
+            else ()
+        ),
+        *(
+            (mcp_registry_store,)
+            if isinstance(mcp_registry_store, PostgresMcpServerRegistryStore)
             else ()
         ),
     )
@@ -1139,16 +1221,28 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
     async def initialize_registry() -> None:
         if tool_registry_store is not None:
             await tool_registry_store.load_into(registry)
-        for server in settings.mcp_egress_servers:
-            await capability_catalog.register_server(server)
-            if credential_proxy is not None and isinstance(policy, RemotePolicyClient):
-                app.state.capability_connectors[server.server_id] = (
-                    ManagedMcpConnector(
-                        server,
-                        credentials=credential_proxy,
-                        policy=policy,
-                    )
+        await mcp_registry.bootstrap_from_definitions(settings.mcp_egress_servers)
+        if credential_proxy is not None and isinstance(policy, RemotePolicyClient):
+            def _mcp_connector(server: object) -> ManagedMcpConnector:
+                from auraclaw.contracts.capabilities import McpServerDefinition
+
+                assert isinstance(server, McpServerDefinition)
+                return ManagedMcpConnector(
+                    server,
+                    credentials=credential_proxy,
+                    policy=policy,
                 )
+
+            manager = McpConnectionManager(
+                registry=mcp_registry,
+                connectors=app.state.capability_connectors,
+                factory=_mcp_connector,  # type: ignore[arg-type]
+                catalog=capability_catalog,
+                reconciler=app.state.catalog_reconciler,
+            )
+            mcp_registry.bind_runtime(manager)
+            app.state.mcp_connection_manager = manager
+            await manager.restore()
         for java_server in settings.java_api_servers:
             catalog_server = catalog_server_definition(java_server)
             await capability_catalog.register_server(catalog_server)
@@ -1252,12 +1346,25 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
             await skill_reconciler.reconcile_all()
             return active
 
+        async def reconcile_mcp_revisions() -> int:
+            manager = getattr(app.state, "mcp_connection_manager", None)
+            if manager is None:
+                return 0
+            return int(await manager.reconcile_loaded())
+
         app.state.initialize = initialize_remote_catalog
         periodic_jobs.append(
             (
                 "capability-catalog",
                 settings.mcp_reconcile_interval_seconds,
                 reconcile_catalog_and_skills,
+            )
+        )
+        periodic_jobs.append(
+            (
+                "mcp-revision",
+                settings.mcp_revision_reconcile_interval_seconds,
+                reconcile_mcp_revisions,
             )
         )
     if periodic_jobs:
@@ -1306,6 +1413,22 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         app.state.worker_interval = min(
             interval for _name, interval, _run in periodic_jobs
         )
+    mcp_identities = _configured_identities(
+        settings,
+        (
+            ServiceIdentity.TASK_API,
+            ServiceIdentity.CREDENTIAL_PROXY,
+            ServiceIdentity.ACTION_HANDS,
+        ),
+    )
+    app.mount(
+        "/internal/v1/mcp-registry",
+        create_contract_app(
+            "action-hands-mcp-registry",
+            mcp_registry_routes(McpRegistryInternalService(mcp_registry)),
+            workload_identities=mcp_identities or None,
+        ),
+    )
     app.mount("/", hands_http_app)
     return app
 
@@ -1364,10 +1487,6 @@ def _credential_proxy_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
             bearer_token=token,
             service_identity=ServiceIdentity.CREDENTIAL_PROXY,
         )
-    mcp_adapters = {
-        f"mcp:{server.server_id}": ManagedMcpEgressAdapter(server)
-        for server in settings.mcp_egress_servers
-    }
     java_api_adapters = {
         f"java-api:{server.server_id}": ManagedJavaApiEgressAdapter(server)
         for server in settings.java_api_servers
@@ -1376,7 +1495,6 @@ def _credential_proxy_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         *((registry,) if registry is not None else ()),
         *((vault,) if isinstance(vault, HashiCorpVault) else ()),
         *((policy,) if policy is not None else ()),
-        *mcp_adapters.values(),
         *java_api_adapters.values(),
     )
     app = _base_service_app(
@@ -1388,18 +1506,40 @@ def _credential_proxy_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         ),
     )
     proxy = CredentialProxy(vault, registry=registry)
-    _seed_managed_connector_credentials(proxy, settings, mcp_adapters=mcp_adapters)
+    adapters: dict[str, Any] = {
+        "webhook": ManagedWebhookCredentialAdapter(
+            allowed_hosts=settings.allowed_credential_egress_hosts
+        ),
+        **java_api_adapters,
+    }
+    mcp_egress = McpEgressManager(adapters=adapters, proxy=proxy)
     service = CredentialProxyInternalService(
         proxy,
-        adapters={
-            "webhook": ManagedWebhookCredentialAdapter(
-                allowed_hosts=settings.allowed_credential_egress_hosts
-            ),
-            **mcp_adapters,
-            **java_api_adapters,
-        },
+        adapters=adapters,
         policy=policy,
     )
+
+    async def restore_mcp_egress() -> None:
+        snapshot = await _hands_mcp_snapshot(settings)
+        if snapshot is not None:
+            await mcp_egress.restore(snapshot)
+            return
+        for server in settings.mcp_egress_servers:
+            if not server.enabled:
+                continue
+            adapters[f"mcp:{server.server_id}"] = ManagedMcpEgressAdapter(server)
+        _seed_managed_connector_credentials(proxy, settings, mcp_adapters=adapters)
+
+    async def reconcile_mcp_egress() -> int:
+        snapshot = await _hands_mcp_snapshot(settings)
+        if snapshot is None:
+            return 0
+        return await mcp_egress.reconcile(snapshot)
+
+    app.state.initialize = restore_mcp_egress
+    app.state.tick = reconcile_mcp_egress
+    app.state.worker = True
+    app.state.worker_interval = settings.mcp_revision_reconcile_interval_seconds
     contract_app = create_contract_app(
         "credential-proxy",
         credential_routes(service),

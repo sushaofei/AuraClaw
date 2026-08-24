@@ -34,6 +34,13 @@ class CapabilityStatus(StrEnum):
 class McpAuthStrategy(StrEnum):
     OAUTH_CLIENT_CREDENTIALS = "oauth_client_credentials"
     WORKLOAD_TRUSTED_CONTEXT = "workload_trusted_context"
+    NONE = "none"
+
+
+class McpNetworkMode(StrEnum):
+    PUBLIC = "public"
+    PRIVATE = "private"
+    LOOPBACK = "loopback"
 
 
 class McpOAuthConfiguration(ContractModel):
@@ -60,6 +67,9 @@ class McpServerDefinition(ContractModel):
     allowed_resource_schemes: tuple[str, ...] = ()
     allowed_prompt_prefixes: tuple[str, ...] = ()
     allowed_private_hosts: tuple[str, ...] = ()
+    network_mode: McpNetworkMode | None = None
+    allowed_cidrs: tuple[str, ...] = ()
+    config_revision: int | None = Field(default=None, ge=1)
     status: CapabilityStatus = CapabilityStatus.QUARANTINED
     enabled: bool = False
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -72,8 +82,17 @@ class McpServerDefinition(ContractModel):
             "2025-06-18",
         }:
             raise ValueError("MCP server protocol revision is not supported")
-        _validate_mcp_endpoint(self.endpoint, self.allowed_private_hosts)
-        if self.oauth is not None and self.credential_ref is None:
+        _validate_mcp_endpoint(
+            self.endpoint,
+            self.allowed_private_hosts,
+            network_mode=self.network_mode,
+        )
+        if self.auth_strategy is McpAuthStrategy.NONE:
+            if self.network_mode is McpNetworkMode.PUBLIC:
+                raise ValueError(
+                    "auth_strategy none is not allowed for public MCP servers"
+                )
+        elif self.oauth is not None and self.credential_ref is None:
             raise ValueError("OAuth MCP server requires a credential_ref")
         if (
             self.auth_strategy == McpAuthStrategy.OAUTH_CLIENT_CREDENTIALS
@@ -89,9 +108,13 @@ class McpServerDefinition(ContractModel):
             raise ValueError(
                 "workload trusted-context MCP server requires a credential_ref"
             )
-        if "_auraclaw_oauth" in self.metadata:
-            raise ValueError("MCP server metadata uses a reserved key")
-        if "_auraclaw_allowed_private_hosts" in self.metadata:
+        reserved = {
+            "_auraclaw_oauth",
+            "_auraclaw_allowed_private_hosts",
+            "_auraclaw_network_mode",
+            "_auraclaw_allowed_cidrs",
+        }
+        if reserved.intersection(self.metadata):
             raise ValueError("MCP server metadata uses a reserved key")
         return self
 
@@ -102,6 +125,17 @@ class McpServerDefinition(ContractModel):
         if self.oauth is not None:
             return McpAuthStrategy.OAUTH_CLIENT_CREDENTIALS
         return McpAuthStrategy.WORKLOAD_TRUSTED_CONTEXT
+
+    @property
+    def resolved_network_mode(self) -> McpNetworkMode:
+        if self.network_mode is not None:
+            return self.network_mode
+        hostname = (urlsplit(self.endpoint).hostname or "").lower()
+        if hostname in {item.lower() for item in self.allowed_private_hosts}:
+            if hostname in {"localhost", "127.0.0.1", "::1"}:
+                return McpNetworkMode.LOOPBACK
+            return McpNetworkMode.PRIVATE
+        return McpNetworkMode.PUBLIC
 
 
 class JavaApiArgumentBinding(ContractModel):
@@ -209,7 +243,12 @@ class CapabilityDescriptor(ContractModel):
         }
 
 
-def _validate_mcp_endpoint(endpoint: str, allowed_private_hosts: tuple[str, ...]) -> None:
+def _validate_mcp_endpoint(
+    endpoint: str,
+    allowed_private_hosts: tuple[str, ...],
+    *,
+    network_mode: McpNetworkMode | None = None,
+) -> None:
     parsed = urlsplit(endpoint)
     hostname = (parsed.hostname or "").lower()
     allowlisted = hostname in {item.lower() for item in allowed_private_hosts}
@@ -221,5 +260,9 @@ def _validate_mcp_endpoint(endpoint: str, allowed_private_hosts: tuple[str, ...]
         or parsed.fragment
     ):
         raise ValueError("MCP endpoint must be an absolute URL without userinfo")
-    if parsed.scheme == "http" and not allowlisted:
+    if network_mode is McpNetworkMode.PUBLIC and parsed.scheme != "https":
+        raise ValueError("public MCP endpoints require HTTPS")
+    if parsed.scheme == "http" and not allowlisted and network_mode is None:
         raise ValueError("HTTP MCP endpoints require an allowlisted private host")
+    if parsed.scheme == "http" and network_mode is McpNetworkMode.PUBLIC:
+        raise ValueError("public MCP endpoints require HTTPS")

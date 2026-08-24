@@ -48,7 +48,7 @@ class CredentialProxyInternalService:
         policy: PolicyDecisionValidator | None = None,
     ) -> None:
         self._proxy = proxy
-        self._adapters = dict(adapters or {})
+        self._adapters = adapters if adapters is not None else {}
         self._policy = policy
 
     async def invoke(self, request: CredentialInvokeRequest) -> CredentialInvokeResponse:

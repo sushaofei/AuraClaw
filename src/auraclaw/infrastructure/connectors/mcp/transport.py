@@ -30,17 +30,21 @@ class ManagedRemoteMcpTransport:
             not server.enabled
             or server.status
             not in {CapabilityStatus.ACTIVE, CapabilityStatus.DEGRADED}
-            or server.credential_ref is None
         ):
             raise ValueError("remote MCP server is not callable")
+        if server.resolved_auth_strategy is McpAuthStrategy.NONE:
+            credential_ref = server.credential_ref or f"mcp:none:{server.server_id}"
+        else:
+            if server.credential_ref is None:
+                raise ValueError("remote MCP server is not callable")
+            credential_ref = server.credential_ref
         if (
             server.resolved_auth_strategy is McpAuthStrategy.OAUTH_CLIENT_CREDENTIALS
             and server.oauth is None
         ):
             raise ValueError("remote MCP server is not callable")
         self._server = server
-        self._credential_ref = server.credential_ref
-        assert self._credential_ref is not None
+        self._credential_ref = credential_ref
         self._credentials = credentials
         self._policy = policy
         self._notification_handler: (
@@ -130,6 +134,7 @@ class ManagedRemoteMcpTransport:
             request={
                 **request_payload,
                 "server_id": self._server.server_id,
+                "config_revision": self._server.config_revision,
                 "_auraclaw_identity": identity,
             },
             policy_decision_id=evaluation.decision_id,

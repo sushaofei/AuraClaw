@@ -183,6 +183,10 @@ class Settings(BaseSettings):
     java_api_servers_json: str = "[]"
     debug_vault_secrets_json: str = "{}"
     mcp_reconcile_interval_seconds: float = Field(default=60.0, ge=5.0, le=3600.0)
+    mcp_revision_reconcile_interval_seconds: float = Field(
+        default=30.0, ge=5.0, le=3600.0
+    )
+    mcp_allow_private_auth_none: bool | None = None
     mcp_trust_remote_tool_annotations: bool = False
     skill_signing_key: SecretStr | None = None
     credential_vault_addr: str | None = None
