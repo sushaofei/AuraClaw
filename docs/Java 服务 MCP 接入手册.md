@@ -208,34 +208,31 @@ Java MCP Server 必须同时满足：
 
 ### 5.2 配置受管 Server
 
-通过 `AURACLAW_MCP_EGRESS_SERVERS_JSON` 配置非密信息：
+通过 `POST /v1/admin/mcp-servers` 登记非密信息，再 `:test` / `:enable`：
 
 ```json
-[
-  {
-    "server_id": "order-mcp",
-    "tenant_id": "tenant-a",
-    "title": "Order Service MCP",
-    "endpoint": "https://order-mcp.example.com/mcp",
-    "protocol_revision": "2026-07-28",
-    "credential_ref": "vault/order-mcp#client_secret",
-    "oauth": {
-      "protected_resource_metadata_url": "https://order-mcp.example.com/.well-known/oauth-protected-resource",
-      "authorization_server_metadata_url": "https://auth.example.com/.well-known/oauth-authorization-server",
-      "issuer": "https://auth.example.com",
-      "token_endpoint": "https://auth.example.com/oauth/token",
-      "client_id": "auraclaw-hands",
-      "resource": "https://order-mcp.example.com/mcp",
-      "scopes": ["order.read", "order.write"]
-    },
-    "trust_level": "tenant_verified",
-    "allowed_tool_prefixes": ["order."],
-    "allowed_resource_schemes": ["order"],
-    "allowed_prompt_prefixes": ["order."],
-    "status": "active",
-    "enabled": true
-  }
-]
+{
+  "server_id": "order-mcp",
+  "tenant_id": "tenant-a",
+  "title": "Order Service MCP",
+  "endpoint": "https://order-mcp.example.com/mcp",
+  "protocol_revision": "2026-07-28",
+  "network_mode": "public",
+  "credential_ref": "vault/order-mcp#client_secret",
+  "oauth": {
+    "protected_resource_metadata_url": "https://order-mcp.example.com/.well-known/oauth-protected-resource",
+    "authorization_server_metadata_url": "https://auth.example.com/.well-known/oauth-authorization-server",
+    "issuer": "https://auth.example.com",
+    "token_endpoint": "https://auth.example.com/oauth/token",
+    "client_id": "auraclaw-hands",
+    "resource": "https://order-mcp.example.com/mcp",
+    "scopes": ["order.read", "order.write"]
+  },
+  "trust_level": "tenant_verified",
+  "allowed_tool_prefixes": ["order."],
+  "allowed_resource_schemes": ["order"],
+  "allowed_prompt_prefixes": ["order."]
+}
 ```
 
 `credential_ref` 对应的目录记录必须满足：
@@ -246,14 +243,13 @@ Java MCP Server 必须同时满足：
 - 未过期且未撤销；
 - Vault 对应路径只保存 client secret，不放入 Server JSON。
 
-当前仓库没有完整的 MCP Server/Credential 自助管理 API。生产接入需要通过受控运维流程写入
-Vault 和 Credential Registry；不要把 SQL 或 Vault Token 写进部署脚本和文档。
+当前生产接入通过热配置 Admin API 写入 Registry；Secret 只放 Vault。不要把 SQL 或 Vault Token 写进部署脚本和文档。
 
 ### 5.3 启动后的自动流程
 
 Action Hands 启动后会：
 
-1. 读取 Server JSON 并写入 Capability Catalog Store。
+1. 从 MCP Registry 恢复已启用 Server 并写入 Capability Catalog Store。
 2. 通过 Credential Proxy 获取 OAuth Token。
 3. 对 2026 profile 调用 `server/discover`；只有显式 legacy profile 调用 `initialize`。
 4. 分页调用 `tools/list`、`resources/list`、`resources/templates/list` 和 `prompts/list`。

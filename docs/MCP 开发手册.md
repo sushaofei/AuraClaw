@@ -18,6 +18,7 @@
 | 你要做的事 | 正确做法 | 不要做 |
 |---|---|---|
 | 给 Agent 增加 AuraClaw **自己拥有** 的能力（如价格洞察） | 在 Hands 里注册 `ToolCapability` + `HandsExecutor` | 改内部 Hands HTTP 路由或 Runtime Client |
+| 给 Agent 增加 **扩展能力**（不属于内核，也不属于 chaintower 业务） | 在 AuraMCP 写 Extension；AuraClaw 只登记 `auramcp` MCP Server | Runtime / AuraX 直连 AuraMCP；把扩展写进 Hands 内核 |
 | 把 **已有 Java 服务** 交给 Agent 调用 | Java 暴露 MCP **或** 登记受管 Java API operation；AuraClaw 只登记 Connector | 在 `runtime/` 里直连 Java URL |
 | 本周必须打通 1～2 个内网接口，Java 还不能改 | 过渡：Credential Proxy adapter 出站，或 Java 旁挂独立 MCP Adapter | 按价格洞察模式把业务 HTTP Client 堆进 Hands |
 
@@ -28,7 +29,7 @@
 Agent Runtime  ──Hands HTTP/JSON──►  Action Hands Gateway /internal/v1/hands/*
                                       │
                                       ├─ 本地 Tool  → HandsExecutor（本进程）
-                                      ├─ 远端 MCP   → ManagedMcpConnector → Java POST /mcp
+                                      ├─ 远端 MCP   → ManagedMcpConnector → Java / AuraMCP POST /mcp
                                       └─ 远端 API   → ManagedJavaApiConnector → 已注册 REST operation
 ```
 
@@ -58,7 +59,7 @@ Runtime **只连** `AURACLAW_HANDS_URL`（默认 `http://127.0.0.1:8006`）。�
 2. 在 Java 进程或独立 Adapter 暴露 `POST /mcp`
 3. 实现 `server/discover`、`tools/list`、`tools/call`
 4. 准备 HTTPS、受管认证（chaintower：workload + trusted context；第三方：可选 OAuth）、名称前缀
-5. 交给 AuraClaw 运维登记 `AURACLAW_MCP_EGRESS_SERVERS_JSON` + Vault `credential_ref`
+5. 交给 AuraClaw 运维通过 `POST /v1/admin/mcp-servers` 热配置登记 + Vault `credential_ref`
 6. 用对账结果确认 Catalog / Registry 里出现了你的 Tool
 
 Java 开发 **不需要** 改 `HandsGateway`，也不需要在 Python 里为每个接口写 Executor。
@@ -393,42 +394,36 @@ var getOrderTool = SyncToolSpecification.builder()
 
 ### 5.2 AuraClaw 侧：登记 Server
 
-配置入口：优先使用 Task API 的热配置 Admin API（`/v1/admin/mcp-servers`）。配置以不可变
+配置入口：Task API 的热配置 Admin API（`/v1/admin/mcp-servers`）。配置以不可变
 revision 写入 Hands Registry，Action Hands 与 Credential Proxy **无需重启**即可加载。
-
-`AURACLAW_MCP_EGRESS_SERVERS_JSON` / file 只作为**一次性 bootstrap**：仅当 `server_id`
-尚不存在时导入 revision 1，之后不得覆盖数据库中的管理员修改。配置里 **只能有非密信息 +
-`credential_ref`**；本地开发可用 `network_mode=loopback` + `auth_strategy=none`。
+配置里 **只能有非密信息 + `credential_ref`**；本地开发可用 `network_mode=loopback`。
 
 `loopback` 地址是相对 **Credential Proxy 所在网络命名空间** 而言。容器内的 `127.0.0.1`
 不是开发者宿主机；跨网络命名空间应使用私网服务名或受管宿主机别名。
 
 ```json
-[
-  {
-    "server_id": "order-mcp",
-    "tenant_id": "tenant-a",
-    "title": "Order Service MCP",
-    "endpoint": "https://order.example/mcp",
-    "protocol_revision": "2026-07-28",
-    "credential_ref": "vault/order-mcp#client_secret",
-    "oauth": {
-      "protected_resource_metadata_url": "https://order.example/.well-known/oauth-protected-resource",
-      "authorization_server_metadata_url": "https://auth.example/.well-known/oauth-authorization-server",
-      "issuer": "https://auth.example",
-      "token_endpoint": "https://auth.example/oauth/token",
-      "client_id": "auraclaw-hands",
-      "resource": "https://order.example/mcp",
-      "scopes": ["tools.read"]
-    },
-    "trust_level": "tenant_verified",
-    "allowed_tool_prefixes": ["order."],
-    "allowed_resource_schemes": ["order"],
-    "allowed_prompt_prefixes": ["order."],
-    "status": "active",
-    "enabled": true
-  }
-]
+{
+  "server_id": "order-mcp",
+  "tenant_id": "tenant-a",
+  "title": "Order Service MCP",
+  "endpoint": "https://order.example/mcp",
+  "protocol_revision": "2026-07-28",
+  "network_mode": "public",
+  "credential_ref": "vault/order-mcp#client_secret",
+  "oauth": {
+    "protected_resource_metadata_url": "https://order.example/.well-known/oauth-protected-resource",
+    "authorization_server_metadata_url": "https://auth.example/.well-known/oauth-authorization-server",
+    "issuer": "https://auth.example",
+    "token_endpoint": "https://auth.example/oauth/token",
+    "client_id": "auraclaw-hands",
+    "resource": "https://order.example/mcp",
+    "scopes": ["tools.read"]
+  },
+  "trust_level": "tenant_verified",
+  "allowed_tool_prefixes": ["order."],
+  "allowed_resource_schemes": ["order"],
+  "allowed_prompt_prefixes": ["order."]
+}
 ```
 
 字段含义：
@@ -437,14 +432,38 @@ revision 写入 Hands Registry，Action Hands 与 Credential Proxy **无需重�
 |---|---|
 | `server_id` | Hands 与 Credential Proxy 共用的内部键 |
 | `endpoint` | Java MCP 的绝对 HTTPS URL；OAuth `resource` 的 origin 必须与它一致 |
-| `credential_ref` | Vault 中 client secret 的引用 |
+| `credential_ref` | Vault 中 client secret / workload 的引用 |
 | `allowed_tool_prefixes` | 对账和出站都会过滤；`order.create` 能进，`admin.delete` 会被丢掉 |
-| `enabled` + `oauth` + `credential_ref` | 缺一不可，否则远端 Transport 无法构造 |
+| `auth_strategy` + `credential_ref` | workload 路径必填 credential_ref；OAuth 路径还要 `oauth` |
 
 本地联调若 Java MCP 仍发布旧工具名，可在 Server 的 `metadata.tool_name_aliases` 中配置
-“远端名 → AuraClaw Skill 标准名”。Connector 只在 MCP 边界做名称转换；若远端 schema
-要求单一 `input` 参数，也会在同一边界补齐包装。生产配置应优先让 Java 直接发布标准名，
-不要把别名规则写进 Skill 或模型。
+“远端名 → AuraClaw Skill 标准名”，并用 `metadata.search_tags` 补中文检索。Connector 只在
+MCP 边界做名称转换；若远端 schema 要求单一 `input` 参数，也会在同一边界补齐包装。生产配置
+应优先让 Java 直接发布标准名，不要把别名规则写进 Skill 或模型。
+
+本机 loopback 示例（`POST /v1/admin/mcp-servers`）：
+
+```json
+{
+  "server_id": "java-mcp",
+  "tenant_id": "development",
+  "title": "Local Java MCP Gateway",
+  "endpoint": "http://127.0.0.1:48080/rpc-api/agent-runtime/mcp",
+  "protocol_revision": "2025-06-18",
+  "network_mode": "loopback",
+  "credential_ref": "vault/java-mcp#client_secret",
+  "auth_strategy": "workload_trusted_context",
+  "trust_level": "tenant_verified",
+  "allowed_tool_prefixes": ["procurement.price.", "price_insight."],
+  "metadata": {
+    "tool_name_aliases": {
+      "price_insight.dataset.profile": "procurement.price.dataset.profile",
+      "price_insight.metric.comparability": "procurement.price.metric.comparability"
+    },
+    "search_tags": ["价格洞察", "采购价格", "price_insight"]
+  }
+}
+```
 
 Credential Registry 中对应引用必须满足：
 
@@ -452,29 +471,11 @@ Credential Registry 中对应引用必须满足：
 - `account_scope` == OAuth `resource`
 - `allowed_operations` 包含 `mcp.invoke`
 
-### 5.3 启动时挂上 Transport，此时还没有 Java Tool 名字
+### 5.3 启动时从 Registry 恢复，此时还没有 Java Tool 名字
 
-Hands 初始化（`composition/services.py`）：
-
-```python
-for server in settings.mcp_egress_servers:
-    await capability_catalog.register_server(server)
-    app.state.remote_mcp_transports[server.server_id] = ManagedRemoteMcpTransport(
-        server, credentials=credential_proxy, policy=policy,
-    )
-```
-
-Credential Proxy 用同一份 JSON 再登记出站适配器：
-
-```python
-mcp_adapters = {
-    f"mcp:{server.server_id}": ManagedMcpEgressAdapter(server)
-    for server in settings.mcp_egress_servers
-}
-# "mcp:order-mcp" → 只会 POST 到该 Server 的 endpoint
-```
-
-此时 Catalog 里只有 Server 定义。`order.order.get` **还不在** Registry / Router 里。
+Hands 初始化从 MCP Registry 的 active snapshot 恢复已启用 Server，Credential Proxy
+通过 `/internal/v1/mcp-registry/snapshot` 装配同一批 Egress Adapter。此时 Catalog 里只有
+Server 定义。`order.order.get` **还不在** Registry / Router 里。
 
 远端对账还要求 Hands 能连 **Credential Proxy** 且 Policy 是 `RemotePolicyClient`。开发单进程默认不会跑这条路径。
 
@@ -596,7 +597,7 @@ AuraClaw 从不把 `order.order.get` 解析成 REST 路径。换一台 Java 服�
 
 ### 7.2 AuraClaw 侧
 
-- [ ] `AURACLAW_MCP_EGRESS_SERVERS_JSON` 能解析为 `McpServerDefinition`
+- [ ] `POST /v1/admin/mcp-servers` 创建后 `:test` / `:enable` 成功
 - [ ] Vault 与 Credential Registry 的 provider / scope / `mcp.invoke` 匹配
 - [ ] Hands 启动后 Catalog 中该 `server_id` 进入 `active`
 - [ ] 只出现 allowlist 内的 Tool
@@ -651,7 +652,7 @@ AuraClaw 从不把 `order.order.get` 解析成 REST 路径。换一台 Java 服�
 | OAuth / DNS pinning Egress | `src/auraclaw/infrastructure/credentials/mcp_egress.py` |
 | 本地业务范例 | `src/auraclaw/action/price_insight.py` |
 | 生产装配 | `src/auraclaw/composition/services.py` |
-| 配置 | `src/auraclaw/config.py`（`hands_url`、`mcp_egress_servers_json`、`java_api_servers_json`） |
+| 配置 | `src/auraclaw/config.py`（`hands_url`、`java_api_servers_json`） |
 | Hands 契约单测 | `tests/unit/test_hands_contract.py` |
 | Java API Connector 单测 | `tests/unit/test_java_api_connector.py` |
 | Egress 单测 | `tests/unit/test_m9_mcp_egress.py` |

@@ -87,7 +87,8 @@ api → application → domain → contracts
 深入设计见 [Managed Agent 系统架构总览](docs/Managed%20Agent%20系统架构/00%20Managed%20Agent%20系统架构总览.md)、
 [开发方案与实施计划](docs/Managed%20Agent%20开发方案与实施计划.md) 与
 [架构代码梳理](docs/Managed%20Agent%20架构代码梳理.md)。MCP 数据、工具和 Skill 接入见
-[M9 MCP Runtime 实施与运维](docs/M9%20MCP%20Runtime%20实施与运维.md)。
+[M9 MCP Runtime 实施与运维](docs/M9%20MCP%20Runtime%20实施与运维.md)。扩展能力登记 AuraMCP 见
+[AuraMCP 接入](docs/AuraMCP%20接入.md)。
 
 ## 架构概览
 

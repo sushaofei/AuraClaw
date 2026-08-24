@@ -10,7 +10,7 @@ from urllib.parse import quote
 from pydantic import Field, SecretStr, TypeAdapter, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from auraclaw.contracts.capabilities import JavaApiServerDefinition, McpServerDefinition
+from auraclaw.contracts.capabilities import JavaApiServerDefinition
 
 _SECRET_FILE_VARIABLES = {
     "AURACLAW_DATABASE_URL",
@@ -178,8 +178,6 @@ class Settings(BaseSettings):
     policy_base_url: str = "http://127.0.0.1:8007"
     credential_proxy_base_url: str = "http://127.0.0.1:8008"
     credential_egress_allowlist: str = ""
-    mcp_egress_servers_json: str = "[]"
-    mcp_egress_servers_file: str | None = None
     java_api_servers_json: str = "[]"
     debug_vault_secrets_json: str = "{}"
     mcp_reconcile_interval_seconds: float = Field(default=60.0, ge=5.0, le=3600.0)
@@ -421,17 +419,6 @@ class Settings(BaseSettings):
             for host in self.credential_egress_allowlist.split(",")
             if host.strip()
         )
-
-    @property
-    def mcp_egress_servers(self) -> tuple[McpServerDefinition, ...]:
-        raw = self.mcp_egress_servers_json
-        if self.mcp_egress_servers_file:
-            raw = Path(self.mcp_egress_servers_file).read_text(encoding="utf-8")
-        try:
-            payload = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise ValueError("MCP egress server configuration is invalid JSON") from exc
-        return TypeAdapter(tuple[McpServerDefinition, ...]).validate_python(payload)
 
     @property
     def debug_vault_secrets(self) -> dict[str, str]:

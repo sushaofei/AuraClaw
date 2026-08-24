@@ -30,7 +30,7 @@
 | `src/auraclaw/infrastructure/credentials/mcp_egress.py` | 出站校验尊重 `allowed_private_hosts`，允许 127.0.0.1 私网/回环 | 真正发 JSON-RPC 的是 Credential Proxy，必须在这里放行 |
 | `src/auraclaw/infrastructure/persistence/postgres_capability_catalog.py` | 持久化/读回 `allowed_private_hosts` | 与合同字段对齐，避免配置丢失 |
 | `src/auraclaw/infrastructure/connectors/mcp/wire.py` | 协议/元数据相关补充（含 Java 协议修订、userId meta） | 对齐 Java Gateway MCP 协议与可信用户头 |
-| `src/auraclaw/config.py` | 读取 MCP egress 配置 | 让 `.env.dev` 能指向 `debug/java-mcp-servers.json` |
+| `src/auraclaw/config.py` | 读取 debug vault 等开发配置 | 本机凭证不进 Server Registry |
 | `tests/unit/test_m9_mcp_egress.py` | 回环 HTTP + allowlist 用例 | 防止再次把本机 MCP 挡掉 |
 | `tests/unit/test_hands_mcp_debug.py` | Hands 调 MCP 的 debug 路径用例 | 覆盖本地 Java MCP 装配 |
 
@@ -74,7 +74,6 @@
 |---|---|---|
 | `src/auraclaw/infrastructure/connectors/mcp/connector.py` | `tool_name_aliases`：发现时对内暴露 `procurement.price.*`，`tools/call` 再还原成 Java 的 `price_insight.*` | 能力目录、Skill `required_tools`、模型调用使用同一套 canonical name |
 | `src/auraclaw/infrastructure/connectors/mcp/connector.py` | 若远程 Schema 根参数是必填 `input`，调用时自动把业务参数包进 `{"input": ...}` | 满足 Java MCP 输入校验，Skill 不必改成 Java 形状 |
-| `debug/java-mcp-servers.json` | 通过 `metadata.tool_name_aliases` / `metadata.search_tags` 配置别名与检索标签（见附录） | Hands 注册本机 Java MCP 时带上映射表与中文检索标签 |
 | `tests/unit/test_m9_catalog_reconciliation.py` | 别名解析 + `input` 包装 | 回归「对内规范名、对外 Java 名和入参」 |
 
 ---
@@ -233,8 +232,8 @@ tests/fixtures/skills/procurement-price-insight/manifest.json
 
 这些文件 **不要提交**（含地址/密钥占位）：
 
-- `.env.dev`：项目默认自动读取该文件，也可用 `AURACLAW_ENV_FILE` 显式指定。关键项包括共享 SQL 或 Kafka Runtime Event 后端、`AURACLAW_MCP_EGRESS_SERVERS_FILE=debug/java-mcp-servers.json`、`AURACLAW_DEBUG_VAULT_SECRETS_JSON`、模型名。
-- `debug/java-mcp-servers.json`：本地静态 MCP egress 清单；当前 schema 使用 `metadata.tool_name_aliases` 配别名、`metadata.search_tags` 配中文检索标签。示例见 `debug/java-mcp-servers.example.json`。本机联调常见配置是 `endpoint=http://127.0.0.1:48080/rpc-api/agent-runtime/mcp`、`auth_strategy=workload_trusted_context`、`tenant_id=development`、`allowed_private_hosts=["127.0.0.1"]`。
+- `.env.dev`：项目默认自动读取该文件，也可用 `AURACLAW_ENV_FILE` 显式指定。关键项包括共享 SQL 或 Kafka Runtime Event 后端、`AURACLAW_DEBUG_VAULT_SECRETS_JSON`、模型名。
+- Java / AuraMCP Server 用 `POST /v1/admin/mcp-servers` 热配置登记。本机 Java loopback body（含 `tool_name_aliases` / `search_tags`）见 [MCP 开发手册](./MCP%20开发手册.md) §5.2。
 - `.vscode/launch.json` / `tasks.json` / `settings.json`：Windows 本机调试入口，不是业务逻辑。
 
 Java 侧需要：`chaintower.agent-chat.python.base-url = http://127.0.0.1:8080`（不要写 8000）。本地联调可关 MCP RSA（`crypto.enabled=false`）；生产必须恢复加密与受控私钥。

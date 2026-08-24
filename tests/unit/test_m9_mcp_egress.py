@@ -1,14 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from datetime import UTC, datetime, timedelta
 from urllib.parse import parse_qs
 
 import pytest
 
 from auraclaw.action.ports import PolicyEvaluation
-from auraclaw.config import Settings
 from auraclaw.contracts.capabilities import (
     CapabilityStatus,
     CapabilityTrustLevel,
@@ -591,14 +589,8 @@ def test_mcp_egress_sends_department_snapshot_headers() -> None:
     asyncio.run(scenario())
 
 
-def test_mcp_egress_server_configuration_is_typed_and_secret_free() -> None:
+def test_mcp_server_configuration_is_typed_and_secret_free() -> None:
     server = _server()
-    settings = Settings(
-        mcp_egress_servers_json=json.dumps(
-            [server.model_dump(mode="json")]
-        )
-    )
-    assert settings.mcp_egress_servers == (server,)
-    serialized = settings.mcp_egress_servers_json
+    serialized = server.model_dump_json()
     assert "oauth-client-secret" not in serialized
     assert "vault/github-mcp#client_secret" in serialized
