@@ -34,6 +34,8 @@ _SECRET_FILE_VARIABLES = {
     "AURACLAW_CREDENTIAL_VAULT_TOKEN",
     "SEAWEEDFS_ACCESS_KEY",
     "SEAWEEDFS_SECRET_KEY",
+    "OBS_AK",
+    "OBS_SK",
 }
 
 
@@ -202,7 +204,7 @@ class Settings(BaseSettings):
     db_user: str | None = Field(default=None, validation_alias="DB_USER")
     db_password: str | None = Field(default=None, validation_alias="DB_PWD")
     db_name: str | None = Field(default=None, validation_alias="DB_NAME")
-    artifact_backend: Literal["auto", "local", "seaweedfs"] = "auto"
+    artifact_backend: Literal["auto", "local", "seaweedfs", "obs"] = "auto"
     artifact_root: Path = Path(".data/artifacts")
     seaweedfs_host: str | None = Field(default=None, validation_alias="SEAWEEDFS_HOST")
     seaweedfs_master_port: int = Field(
@@ -230,6 +232,15 @@ class Settings(BaseSettings):
     seaweedfs_path_style: bool = Field(
         default=True, validation_alias="SEAWEEDFS_PATH_STYLE"
     )
+    obs_endpoint: str | None = Field(default=None, validation_alias="OBS_ENDPOINT")
+    obs_bucket: str = Field(default="auraclaw-artifacts", validation_alias="OBS_BUCKET")
+    obs_ak: SecretStr | None = Field(default=None, validation_alias="OBS_AK")
+    obs_sk: SecretStr | None = Field(default=None, validation_alias="OBS_SK")
+    obs_region: str = Field(default="us-east-1", validation_alias="OBS_REGION")
+    obs_use_ssl: bool = Field(default=True, validation_alias="OBS_USE_SSL")
+    obs_path_style: bool = Field(default=False, validation_alias="OBS_PATH_STYLE")
+    obs_domain: str | None = Field(default=None, validation_alias="OBS_DOMAIN")
+    obs_tenant_id: str | None = Field(default=None, validation_alias="OBS_TENANT_ID")
     artifact_multipart_threshold: int = Field(
         default=16 * 1024 * 1024, ge=5 * 1024 * 1024
     )
@@ -282,25 +293,40 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_artifact_backend(self) -> Settings:
-        if self.artifact_backend != "seaweedfs":
+        if self.artifact_backend == "seaweedfs":
+            missing = []
+            if not self.seaweedfs_host:
+                missing.append("SEAWEEDFS_HOST")
+            if not self.seaweedfs_bucket.strip():
+                missing.append("SEAWEEDFS_BUCKET")
+            if (
+                self.seaweedfs_access_key is None
+                or not self.seaweedfs_access_key.get_secret_value()
+            ):
+                missing.append("SEAWEEDFS_ACCESS_KEY")
+            if (
+                self.seaweedfs_secret_key is None
+                or not self.seaweedfs_secret_key.get_secret_value()
+            ):
+                missing.append("SEAWEEDFS_SECRET_KEY")
+            if missing:
+                raise ValueError(f"SeaweedFS backend requires: {', '.join(missing)}")
+            return self
+        if self.artifact_backend != "obs":
             return self
         missing = []
-        if not self.seaweedfs_host:
-            missing.append("SEAWEEDFS_HOST")
-        if not self.seaweedfs_bucket.strip():
-            missing.append("SEAWEEDFS_BUCKET")
-        if (
-            self.seaweedfs_access_key is None
-            or not self.seaweedfs_access_key.get_secret_value()
-        ):
-            missing.append("SEAWEEDFS_ACCESS_KEY")
-        if (
-            self.seaweedfs_secret_key is None
-            or not self.seaweedfs_secret_key.get_secret_value()
-        ):
-            missing.append("SEAWEEDFS_SECRET_KEY")
+        if not self.obs_endpoint:
+            missing.append("OBS_ENDPOINT")
+        if not self.obs_bucket.strip():
+            missing.append("OBS_BUCKET")
+        if self.obs_ak is None or not self.obs_ak.get_secret_value():
+            missing.append("OBS_AK")
+        if self.obs_sk is None or not self.obs_sk.get_secret_value():
+            missing.append("OBS_SK")
+        if not self.obs_region.strip():
+            missing.append("OBS_REGION")
         if missing:
-            raise ValueError(f"SeaweedFS backend requires: {', '.join(missing)}")
+            raise ValueError(f"OBS backend requires: {', '.join(missing)}")
         return self
 
     @property
@@ -384,12 +410,30 @@ class Settings(BaseSettings):
         return f"{self.kafka_host or '127.0.0.1'}:{self.kafka_port}"
 
     @property
-    def seaweedfs_enabled(self) -> bool:
+    def resolved_artifact_backend(self) -> Literal["local", "seaweedfs", "obs"]:
         if self.artifact_backend == "local":
-            return False
+            return "local"
         if self.artifact_backend == "seaweedfs":
-            return True
-        return self.seaweedfs_host is not None
+            return "seaweedfs"
+        if self.artifact_backend == "obs":
+            return "obs"
+        if self.obs_endpoint:
+            return "obs"
+        if self.seaweedfs_host is not None:
+            return "seaweedfs"
+        return "local"
+
+    @property
+    def object_storage_enabled(self) -> bool:
+        return self.resolved_artifact_backend in {"seaweedfs", "obs"}
+
+    @property
+    def seaweedfs_enabled(self) -> bool:
+        return self.resolved_artifact_backend == "seaweedfs"
+
+    @property
+    def obs_enabled(self) -> bool:
+        return self.resolved_artifact_backend == "obs"
 
     @property
     def seaweedfs_master(self) -> str:
@@ -406,6 +450,14 @@ class Settings(BaseSettings):
         return (
             f"{scheme}://{self.seaweedfs_host or '127.0.0.1'}:{self.seaweedfs_s3_port}"
         )
+
+    @property
+    def obs_s3_endpoint(self) -> str:
+        scheme = "https" if self.obs_use_ssl else "http"
+        endpoint = (self.obs_endpoint or "127.0.0.1").strip().rstrip("/")
+        if endpoint.startswith("http://") or endpoint.startswith("https://"):
+            return endpoint
+        return f"{scheme}://{endpoint}"
 
     @property
     def allowed_cors_origins(self) -> list[str]:

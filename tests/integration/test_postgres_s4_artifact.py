@@ -8,17 +8,14 @@ import asyncpg
 import httpx
 import pytest
 
-from auraclaw.artifact.internal_service import ArtifactInternalService, SeaweedFSObjectVerifier
+from auraclaw.artifact.internal_service import ArtifactInternalService
+from auraclaw.composition.object_storage import build_object_storage
 from auraclaw.config import get_settings
 from auraclaw.contracts.internal import (
     ArtifactCreateUploadRequest,
     ArtifactFinalizeRequest,
     InternalRequestContext,
     ServiceIdentity,
-)
-from auraclaw.infrastructure.artifacts.seaweedfs import (
-    SeaweedFSMultipartClient,
-    SeaweedFSS3Presigner,
 )
 from auraclaw.infrastructure.persistence.postgres_artifact_repository import (
     PostgresArtifactRepository,
@@ -30,16 +27,18 @@ DATABASE_URL = asyncpg_url(SETTINGS.resolved_database_url) if SETTINGS.postgres_
 ROOT = Path(__file__).resolve().parents[2]
 MIGRATION = (ROOT / "migrations/0013_s4_artifact_lifecycle.sql").read_text()
 pytestmark = pytest.mark.skipif(
-    DATABASE_URL is None or not SETTINGS.seaweedfs_enabled,
-    reason="PostgreSQL and SeaweedFS are required",
+    DATABASE_URL is None or not SETTINGS.object_storage_enabled,
+    reason="PostgreSQL and object storage are required",
 )
 
 
 def test_artifact_multipart_scan_restart_and_gc() -> None:
     async def scenario() -> None:
         assert DATABASE_URL is not None
-        assert SETTINGS.seaweedfs_access_key is not None
-        assert SETTINGS.seaweedfs_secret_key is not None
+        assert SETTINGS.object_storage_enabled
+        storage = build_object_storage(SETTINGS)
+        assert storage.verifier is not None
+        assert storage.multipart is not None
         connection = await asyncpg.connect(DATABASE_URL)
         await connection.execute(MIGRATION)
         suffix = uuid4().hex
@@ -51,18 +50,11 @@ def test_artifact_multipart_scan_restart_and_gc() -> None:
             correlation_id=f"session-{suffix}",
             causation_id=f"run-{suffix}",
         )
-        presigner = SeaweedFSS3Presigner(
-            SETTINGS.seaweedfs_s3_endpoint,
-            access_key=SETTINGS.seaweedfs_access_key.get_secret_value(),
-            secret_key=SETTINGS.seaweedfs_secret_key.get_secret_value(),
-            bucket=SETTINGS.seaweedfs_bucket,
-            region=SETTINGS.seaweedfs_region,
-            path_style=SETTINGS.seaweedfs_path_style,
-        )
+        presigner = storage.presigner
         repository_a = PostgresArtifactRepository(DATABASE_URL)
         repository_b = PostgresArtifactRepository(DATABASE_URL)
-        multipart = SeaweedFSMultipartClient(presigner)
-        verifier = SeaweedFSObjectVerifier(presigner)
+        multipart = storage.multipart
+        verifier = storage.verifier
         service = ArtifactInternalService(
             presigner,
             repository=repository_a,

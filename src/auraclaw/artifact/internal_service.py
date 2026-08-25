@@ -1,13 +1,15 @@
 from __future__ import annotations
 
-import hashlib
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Literal, Protocol
+from typing import Protocol
 
-import httpx
-
+from auraclaw.artifact.ports import (
+    ObjectMultipartClient,
+    ObjectPresigner,
+    ObjectVerifier,
+)
 from auraclaw.contracts.errors import ArtifactAccessError, NotFoundError
 from auraclaw.contracts.internal import (
     ArtifactCreateUploadRequest,
@@ -17,10 +19,6 @@ from auraclaw.contracts.internal import (
     ArtifactFinalizeResponse,
     ArtifactUploadResponse,
     ServiceIdentity,
-)
-from auraclaw.infrastructure.artifacts.seaweedfs import (
-    SeaweedFSMultipartClient,
-    SeaweedFSS3Presigner,
 )
 
 
@@ -86,83 +84,15 @@ class ArtifactPolicyValidator(Protocol):
         resource: str,
     ) -> bool: ...
 
-class SeaweedFSObjectVerifier:
-    def __init__(
-        self,
-        presigner: SeaweedFSS3Presigner,
-        *,
-        client: httpx.AsyncClient | None = None,
-    ) -> None:
-        self._presigner = presigner
-        self._client = client or httpx.AsyncClient(timeout=5.0)
-
-    async def aclose(self) -> None:
-        await self._client.aclose()
-
-    async def verify(self, pending: PendingUpload) -> bool:
-        return await self.inspect(pending) == "clean"
-
-    async def inspect(
-        self, pending: PendingUpload
-    ) -> Literal["clean", "missing", "size_mismatch", "checksum_mismatch", "unavailable"]:
-        url, _ = self._presigner.presign("HEAD", pending.object_key)
-        try:
-            response = await self._client.head(url)
-        except httpx.HTTPError:
-            return "unavailable"
-        if response.status_code == 404:
-            return "missing"
-        if response.status_code != 200:
-            return "unavailable"
-        if int(response.headers.get("Content-Length", "-1")) != pending.expected_size:
-            return "size_mismatch"
-        get_url, _ = self._presigner.presign("GET", pending.object_key)
-        digest = hashlib.sha256()
-        size = 0
-        try:
-            async with self._client.stream("GET", get_url) as downloaded:
-                if downloaded.status_code != 200:
-                    return "missing" if downloaded.status_code == 404 else "unavailable"
-                async for chunk in downloaded.aiter_bytes():
-                    size += len(chunk)
-                    if size > pending.expected_size:
-                        return "size_mismatch"
-                    digest.update(chunk)
-        except httpx.HTTPError:
-            return "unavailable"
-        if size != pending.expected_size:
-            return "size_mismatch"
-        if digest.hexdigest().lower() != pending.expected_checksum.lower():
-            return "checksum_mismatch"
-        return "clean"
-
-    async def delete(self, pending: PendingUpload) -> bool:
-        url, _ = self._presigner.presign("DELETE", pending.object_key)
-        try:
-            response = await self._client.delete(url)
-        except httpx.HTTPError:
-            return False
-        return response.status_code in {200, 202, 204, 404}
-
-    async def readiness(self) -> tuple[bool, str]:
-        url, _ = self._presigner.presign("HEAD", "health/readiness-probe")
-        try:
-            response = await self._client.head(url)
-        except httpx.HTTPError as exc:
-            return False, type(exc).__name__
-        reachable = response.status_code in {200, 404}
-        return reachable, f"HTTP {response.status_code}"
-
-
 class ArtifactInternalService:
     def __init__(
         self,
-        presigner: SeaweedFSS3Presigner,
+        presigner: ObjectPresigner,
         *,
         repository: ArtifactMetadataRepository | None = None,
-        object_verifier: SeaweedFSObjectVerifier | None = None,
+        object_verifier: ObjectVerifier | None = None,
         policy: ArtifactPolicyValidator | None = None,
-        multipart: SeaweedFSMultipartClient | None = None,
+        multipart: ObjectMultipartClient | None = None,
         multipart_threshold: int = 16 * 1024 * 1024,
         multipart_part_size: int = 8 * 1024 * 1024,
     ) -> None:
