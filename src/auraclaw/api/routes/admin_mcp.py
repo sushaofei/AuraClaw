@@ -1,22 +1,58 @@
 from __future__ import annotations
 
-from typing import Annotated, Any
+from typing import Annotated, Any, Protocol
 
 from fastapi import APIRouter, Depends, Header, status
 
 from auraclaw.action.mcp_registry import McpServerRegistryService
 from auraclaw.api.dependencies import RequestIdentity, request_identity
+from auraclaw.contracts.capabilities import CapabilityDescriptor
 from auraclaw.contracts.mcp_registry import (
     McpServerConfig,
     McpServerLifecycleCommand,
+    McpServerOperationRecord,
     McpServerWriteCommand,
 )
 
 Identity = Annotated[RequestIdentity, Depends(request_identity)]
 
 
-def create_mcp_admin_router(registry: McpServerRegistryService) -> APIRouter:
+class McpServerLifecycleOps(Protocol):
+    async def test(
+        self, server_id: str, command: McpServerLifecycleCommand
+    ) -> McpServerOperationRecord: ...
+
+    async def enable(
+        self, server_id: str, command: McpServerLifecycleCommand
+    ) -> McpServerOperationRecord: ...
+
+    async def disable(
+        self, server_id: str, command: McpServerLifecycleCommand
+    ) -> McpServerOperationRecord: ...
+
+    async def reconcile(
+        self, server_id: str, command: McpServerLifecycleCommand
+    ) -> McpServerOperationRecord: ...
+
+    async def retire(
+        self, server_id: str, command: McpServerLifecycleCommand
+    ) -> McpServerOperationRecord: ...
+
+
+class McpServerToolCatalog(Protocol):
+    async def list_server_tools(
+        self, *, tenant_id: str, server_id: str
+    ) -> tuple[CapabilityDescriptor, ...]: ...
+
+
+def create_mcp_admin_router(
+    registry: McpServerRegistryService,
+    *,
+    lifecycle: McpServerLifecycleOps | None = None,
+    catalog: McpServerToolCatalog | None = None,
+) -> APIRouter:
     router = APIRouter(prefix="/v1/admin", tags=["mcp-admin"])
+    ops = lifecycle or registry
 
     def _write(
         identity: RequestIdentity,
@@ -79,6 +115,25 @@ def create_mcp_admin_router(registry: McpServerRegistryService) -> APIRouter:
         )
         return record.model_dump(mode="json")
 
+    @router.get("/mcp-servers/{server_id}/tools")
+    async def list_server_tools(server_id: str, identity: Identity) -> dict[str, Any]:
+        await registry.get_server(
+            tenant_id=identity.tenant_id,
+            server_id=server_id,
+            actor_id=identity.actor.id,
+        )
+        tools = (
+            ()
+            if catalog is None
+            else await catalog.list_server_tools(
+                tenant_id=identity.tenant_id, server_id=server_id
+            )
+        )
+        return {
+            "server_id": server_id,
+            "tools": [item.as_search_result() for item in tools],
+        }
+
     @router.put("/mcp-servers/{server_id}", status_code=status.HTTP_202_ACCEPTED)
     async def update_server(
         server_id: str,
@@ -123,7 +178,7 @@ def create_mcp_admin_router(registry: McpServerRegistryService) -> APIRouter:
             identity,
             command_id,
             expected_revision,
-            registry.test,
+            ops.test,
             target_revision,
         )
 
@@ -142,7 +197,7 @@ def create_mcp_admin_router(registry: McpServerRegistryService) -> APIRouter:
             identity,
             command_id,
             expected_revision,
-            registry.enable,
+            ops.enable,
             target_revision,
         )
 
@@ -156,7 +211,7 @@ def create_mcp_admin_router(registry: McpServerRegistryService) -> APIRouter:
         expected_revision: int = Header(alias="X-Expected-Revision"),
     ) -> dict[str, Any]:
         return await _run(
-            server_id, identity, command_id, expected_revision, registry.disable
+            server_id, identity, command_id, expected_revision, ops.disable
         )
 
     @router.post(
@@ -169,7 +224,7 @@ def create_mcp_admin_router(registry: McpServerRegistryService) -> APIRouter:
         expected_revision: int = Header(alias="X-Expected-Revision"),
     ) -> dict[str, Any]:
         return await _run(
-            server_id, identity, command_id, expected_revision, registry.reconcile
+            server_id, identity, command_id, expected_revision, ops.reconcile
         )
 
     @router.post(
@@ -182,7 +237,7 @@ def create_mcp_admin_router(registry: McpServerRegistryService) -> APIRouter:
         expected_revision: int = Header(alias="X-Expected-Revision"),
     ) -> dict[str, Any]:
         return await _run(
-            server_id, identity, command_id, expected_revision, registry.retire
+            server_id, identity, command_id, expected_revision, ops.retire
         )
 
     @router.get("/mcp-operations/{operation_id}")

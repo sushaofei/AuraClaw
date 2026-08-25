@@ -3,9 +3,9 @@ from __future__ import annotations
 import asyncio
 import re
 import warnings
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -33,7 +33,7 @@ _PG_CAST = re.compile(
 )
 _INTERVAL_LITERAL = re.compile(r"interval\s+'([^']+)'", re.IGNORECASE)
 _UPDATE_RETURNING = re.compile(
-    r"^\s*UPDATE\s+(\S+)(?:\s+(?!SET\b)\w+)?\s+SET\s+.+\s+WHERE\s+(.+?)\s+RETURNING\s+(.+?)\s*$",
+    r"^\s*UPDATE\s+(\S+)(?:\s+(?!SET\b)\w+)?\s+SET\s+(.+)\s+WHERE\s+(.+?)\s+RETURNING\s+(.+?)\s*$",
     re.IGNORECASE | re.DOTALL,
 )
 _DELETE_RETURNING = re.compile(
@@ -74,6 +74,74 @@ def _split_sql_csv(expr: str) -> list[str]:
             start = index + 1
     parts.append(expr[start:].strip())
     return [part for part in parts if part]
+
+
+def _split_sql_and(expr: str) -> list[str]:
+    """Split a WHERE clause on top-level AND."""
+    parts: list[str] = []
+    depth = 0
+    start = 0
+    index = 0
+    upper = expr.upper()
+    while index < len(expr):
+        char = expr[index]
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        elif (
+            depth == 0
+            and upper.startswith("AND", index)
+            and (index == 0 or not (expr[index - 1].isalnum() or expr[index - 1] == "_"))
+            and (
+                index + 3 >= len(expr)
+                or not (expr[index + 3].isalnum() or expr[index + 3] == "_")
+            )
+        ):
+            parts.append(expr[start:index].strip())
+            index += 3
+            start = index
+            continue
+        index += 1
+    parts.append(expr[start:].strip())
+    return [part for part in parts if part]
+
+
+def _sql_column_name(expr: str) -> str:
+    match = re.match(
+        r"`?([A-Za-z_][\w]*)`?(?:\s*\.\s*`?([A-Za-z_][\w]*)`?)?",
+        expr.strip(),
+    )
+    if match is None:
+        return ""
+    return (match.group(2) or match.group(1)).lower()
+
+
+def _set_assignment_columns(set_clause: str) -> set[str]:
+    columns: set[str] = set()
+    for part in _split_sql_csv(set_clause):
+        name, sep, _value = part.partition("=")
+        if not sep:
+            continue
+        column = _sql_column_name(name)
+        if column:
+            columns.add(column)
+    return columns
+
+
+def _where_after_update(set_clause: str, where: str) -> str:
+    """Drop WHERE predicates on columns that UPDATE just assigned.
+
+    MySQL has no RETURNING. After `SET latest_revision=$1 WHERE latest_revision=$5`,
+    a follow-up SELECT must not keep the stale revision predicate.
+    """
+    assigned = _set_assignment_columns(set_clause)
+    kept = [
+        predicate
+        for predicate in _split_sql_and(where)
+        if _sql_column_name(predicate) not in assigned
+    ]
+    return " AND ".join(kept) if kept else where
 
 
 def _placeholder_index(expr: str) -> int | None:
@@ -339,7 +407,21 @@ def _compile(query: str, args: Sequence[Any]) -> tuple[str, tuple[Any, ...]]:
     return _bind(_prepare_mysql_sql(expanded_sql), expanded_args)
 
 
+def _as_utc(value: Any) -> Any:
+    """MySQL DATETIME is naive UTC; attach tzinfo so callers can compare with aware now()."""
+    if isinstance(value, datetime) and value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value
+
+
 class MysqlRecord(dict[str, Any]):
+    def __init__(
+        self, mapping: Mapping[str, Any] | None = None, **kwargs: Any
+    ) -> None:
+        data = dict(mapping or {})
+        data.update(kwargs)
+        super().__init__({key: _as_utc(value) for key, value in data.items()})
+
     def __getitem__(self, key: str | int) -> Any:
         if isinstance(key, int):
             return list(self.values())[key]
@@ -382,18 +464,22 @@ class MysqlConnection:
         if "RETURNING" in upper and upper.startswith("UPDATE"):
             matched = _UPDATE_RETURNING.match(stripped)
             if matched is not None:
-                await self.execute(query, *args)
-                table, where, returning = matched.group(1), matched.group(2), matched.group(3)
+                result = await self.execute(query, *args)
+                count = int(str(result).rsplit(" ", 1)[-1])
+                if count == 0:
+                    return []
+                table, set_clause, where, returning = matched.groups()
+                followup_where = _where_after_update(set_clause, where)
                 ret = returning.strip()
                 if ret == "*" or ret.endswith(".*"):
-                    select = f"SELECT * FROM {table} WHERE {where}"
+                    select = f"SELECT * FROM {table} WHERE {followup_where}"
                 elif "." in ret:
                     cols = ", ".join(
                         part.strip().split(".")[-1] for part in ret.split(",")
                     )
-                    select = f"SELECT {cols} FROM {table} WHERE {where}"
+                    select = f"SELECT {cols} FROM {table} WHERE {followup_where}"
                 else:
-                    select = f"SELECT {ret} FROM {table} WHERE {where}"
+                    select = f"SELECT {ret} FROM {table} WHERE {followup_where}"
                 return await self.fetch(select, *args)
         if "RETURNING" in upper and upper.startswith("DELETE"):
             matched = _DELETE_RETURNING.match(stripped)

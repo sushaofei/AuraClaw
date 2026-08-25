@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, MutableMapping
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Protocol
 
 from auraclaw.action.capability_catalog import CapabilityCatalog
 from auraclaw.action.catalog_reconciler import CapabilityCatalogReconciler
@@ -20,6 +20,12 @@ from auraclaw.contracts.mcp_registry import (
 McpConnectorFactory = Callable[[McpServerDefinition], CapabilityConnector]
 
 
+class McpEgressLoader(Protocol):
+    async def apply(self, entry: McpActiveSnapshotEntry) -> None: ...
+
+    async def revoke(self, server_id: str) -> None: ...
+
+
 class McpConnectionManager:
     """Loads active MCP revisions into Action Hands without process restart."""
 
@@ -31,6 +37,7 @@ class McpConnectionManager:
         factory: McpConnectorFactory,
         catalog: CapabilityCatalog | None = None,
         reconciler: CapabilityCatalogReconciler | None = None,
+        egress: McpEgressLoader | None = None,
         drain_seconds: float = 5.0,
     ) -> None:
         self._registry = registry
@@ -38,6 +45,7 @@ class McpConnectionManager:
         self._factory = factory
         self._catalog = catalog
         self._reconciler = reconciler
+        self._egress = egress
         self._drain_seconds = drain_seconds
         self._generations: dict[str, int] = {}
         self._draining: list[CapabilityConnector] = []
@@ -48,12 +56,24 @@ class McpConnectionManager:
             await self.apply(entry, restore=True)
         return len(snapshot)
 
-    async def test(self, entry: McpActiveSnapshotEntry) -> None:
+    async def test(
+        self, entry: McpActiveSnapshotEntry, *, persist_egress: bool = False
+    ) -> None:
+        keep_egress = persist_egress or entry.server_id in self._generations
+        if self._egress is not None:
+            await self._egress.apply(entry)
         connector = self._factory(self._definition(entry, enabled=True))
         try:
             await connector.snapshot(_probe_context(entry))
+        except BaseException:
+            if self._egress is not None and not keep_egress:
+                await self._egress.revoke(entry.server_id)
+            raise
         finally:
             await connector.aclose()
+        if self._egress is not None and not keep_egress:
+            await self._egress.revoke(entry.server_id)
+        await self._record_tested(entry)
 
     async def apply(
         self,
@@ -63,7 +83,9 @@ class McpConnectionManager:
         tested: bool = False,
     ) -> None:
         if not restore and not tested:
-            await self.test(entry)
+            await self.test(entry, persist_egress=True)
+        elif self._egress is not None:
+            await self._egress.apply(entry)
         previous = self._connectors.get(entry.server_id)
         definition = self._definition(entry, enabled=True)
         connector = self._factory(definition)
@@ -75,6 +97,8 @@ class McpConnectionManager:
         self._generations[entry.server_id] = entry.revision
         if self._catalog is not None:
             await self._catalog.register_server(definition)
+        now = datetime.now(UTC)
+        tested_at = None if restore else now
         await self._registry.record_runtime(
             McpServerRuntimeRecord(
                 server_id=entry.server_id,
@@ -82,7 +106,8 @@ class McpConnectionManager:
                 observed_state=(
                     McpObservedState.LOADING if restore else McpObservedState.ACTIVE
                 ),
-                updated_at=datetime.now(UTC),
+                last_test_at=tested_at,
+                updated_at=now,
             )
         )
         if previous is not None and previous is not connector:
@@ -99,6 +124,7 @@ class McpConnectionManager:
                     server_id=entry.server_id,
                     loaded_revision=entry.revision,
                     observed_state=observed,
+                    last_test_at=tested_at,
                     last_sync_at=datetime.now(UTC),
                     consecutive_failures=0 if result.error is None else 1,
                     safe_error_code=(
@@ -111,6 +137,8 @@ class McpConnectionManager:
     async def revoke(self, server_id: str) -> None:
         previous = self._connectors.pop(server_id, None)
         self._generations.pop(server_id, None)
+        if self._egress is not None:
+            await self._egress.revoke(server_id)
         if self._reconciler is not None:
             await self._reconciler.drop_server(server_id)
         await self._registry.record_runtime(
@@ -145,6 +173,33 @@ class McpConnectionManager:
                 await self.apply(entry)
                 changed += 1
         return changed
+
+    async def _record_tested(self, entry: McpActiveSnapshotEntry) -> None:
+        now = datetime.now(UTC)
+        record = await self._registry.get_server(
+            tenant_id=entry.tenant_id or "platform",
+            server_id=entry.server_id,
+            actor_id="mcp-admin",
+        )
+        previous = record.runtime
+        await self._registry.record_runtime(
+            McpServerRuntimeRecord(
+                server_id=entry.server_id,
+                loaded_revision=(
+                    previous.loaded_revision if previous is not None else None
+                ),
+                observed_state=(
+                    previous.observed_state
+                    if previous is not None
+                    else McpObservedState.PENDING
+                ),
+                last_test_at=now,
+                last_sync_at=previous.last_sync_at if previous is not None else None,
+                consecutive_failures=0,
+                safe_error_code=None,
+                updated_at=now,
+            )
+        )
 
     def _definition(
         self, entry: McpActiveSnapshotEntry, *, enabled: bool

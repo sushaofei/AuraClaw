@@ -112,6 +112,10 @@ class SkillPackageRegistry:
         self._packages: dict[tuple[str, str, str, str], SkillPackage] = {}
         self._publications: dict[tuple[str, str, str, str], PublishedSkill] = {}
 
+    @property
+    def resources(self) -> McpResourceRegistry | None:
+        return self._resources
+
     async def publish(self, tenant_id: str, package: SkillPackage) -> PublishedSkill:
         normalized = _validate_package(package, self._max_package_bytes, self._max_files)
         if not self._signature_verifier.verify(normalized):
@@ -244,6 +248,99 @@ class SkillPackageRegistry:
                 if descriptor.capability_id == capability_id
             ),
             None,
+        )
+
+    def list_publications(self, tenant_id: str) -> tuple[PublishedSkill, ...]:
+        return tuple(
+            sorted(
+                (
+                    publication
+                    for publication in self._publications.values()
+                    if publication.tenant_id == tenant_id
+                ),
+                key=lambda item: (
+                    item.manifest.publisher,
+                    item.manifest.name,
+                    _semver(item.manifest.version),
+                ),
+                reverse=True,
+            )
+        )
+
+    def get_publication(
+        self,
+        tenant_id: str,
+        publisher: str,
+        name: str,
+        version: str | None = None,
+    ) -> PublishedSkill:
+        matches = [
+            publication
+            for publication in self.list_publications(tenant_id)
+            if publication.manifest.publisher == publisher
+            and publication.manifest.name == name
+            and (version is None or publication.manifest.version == version)
+        ]
+        if not matches:
+            raise NotFoundError("Skill publication not found")
+        if version is None:
+            return max(matches, key=lambda item: _semver(item.manifest.version))
+        return matches[0]
+
+    def skill_markdown(
+        self,
+        tenant_id: str,
+        publisher: str,
+        name: str,
+        version: str,
+    ) -> str | None:
+        key = (tenant_id, publisher, name, version)
+        package = self._packages.get(key)
+        if package is None:
+            raise NotFoundError("Skill package not found")
+        raw = package.files.get("SKILL.md")
+        if raw is None:
+            return None
+        return raw.decode()
+
+    def enable_skill(self, tenant_id: str, publisher: str, name: str) -> tuple[PublishedSkill, ...]:
+        keys = [
+            key
+            for key in self._publications
+            if key[0] == tenant_id and key[1] == publisher and key[2] == name
+        ]
+        if not keys:
+            raise NotFoundError("Skill publication not found")
+        enabled: list[PublishedSkill] = []
+        for key in keys:
+            publication = self._publications[key]
+            if publication.status == SkillPublicationStatus.ACTIVE:
+                enabled.append(publication)
+                continue
+            reactivated = publication.model_copy(
+                update={"status": SkillPublicationStatus.ACTIVE}
+            )
+            self._publications[key] = reactivated
+            package = self._packages[key]
+            if self._resources is not None:
+                for resource in _package_resources(
+                    tenant_id, package, reactivated.package_digest
+                ):
+                    self._resources.register_resource(resource)
+            enabled.append(reactivated)
+        return tuple(enabled)
+
+    def disable_skill(self, tenant_id: str, publisher: str, name: str) -> tuple[PublishedSkill, ...]:
+        keys = [
+            key
+            for key in self._publications
+            if key[0] == tenant_id and key[1] == publisher and key[2] == name
+        ]
+        if not keys:
+            raise NotFoundError("Skill publication not found")
+        return tuple(
+            self.revoke(tenant_id, publisher, name, version)
+            for (_tenant, _publisher, _name, version) in keys
         )
 
     def load_part(

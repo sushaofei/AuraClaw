@@ -64,16 +64,19 @@ class PostgresTaskProjection(LazyPool):
                 view["projected_at"] = event.occurred_at
                 await connection.execute(
                     """INSERT INTO projection.task_view
-                    (tenant_id, session_id, root_session_id, run_id, status, goal, role,
+                    (tenant_id, session_id, root_session_id, run_id, status, goal, source,
+                     schedule_id, occurrence_id, role,
                      parent_session_id, progress, current_stage, run_status,
                      result_summary, result_ref,
                      artifact_refs, error, delivery_status, delivery_id,
                      delivery_attempt_count, delivery_response_summary,
                      skill_activations, source_version, source_event_id, projected_at)
-                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14::jsonb,
-                            $15::jsonb,$16,$17,$18,$19,$20::jsonb,$21,$22,$23)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16::jsonb,
+                            $17::jsonb,$18::jsonb,$19,$20,$21,$22,$23::jsonb,$24,$25,$26)
                     ON CONFLICT (tenant_id, session_id) DO UPDATE SET
                       run_id=EXCLUDED.run_id, status=EXCLUDED.status, goal=EXCLUDED.goal,
+                      source=EXCLUDED.source, schedule_id=EXCLUDED.schedule_id,
+                      occurrence_id=EXCLUDED.occurrence_id,
                       role=EXCLUDED.role, parent_session_id=EXCLUDED.parent_session_id,
                       progress=EXCLUDED.progress, current_stage=EXCLUDED.current_stage,
                       run_status=EXCLUDED.run_status,
@@ -93,6 +96,9 @@ class PostgresTaskProjection(LazyPool):
                     view.get("run_id"),
                     view["status"],
                     view.get("goal", ""),
+                    view.get("source", "chat"),
+                    view.get("schedule_id"),
+                    view.get("occurrence_id"),
                     view.get("role", "root"),
                     view.get("parent_session_id"),
                     view["progress"],
@@ -130,6 +136,72 @@ class PostgresTaskProjection(LazyPool):
         )
         if row is None:
             return None
+        return self._task_from_row(row)
+
+    async def list_tasks(
+        self,
+        tenant_id: str,
+        *,
+        kind: str | None = None,
+        status: str | None = None,
+        cursor: str | None = None,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        from datetime import datetime
+
+        from auraclaw.projection.task.listing import (
+            decode_task_cursor,
+            encode_task_cursor,
+            source_for_kind,
+        )
+
+        pool = await self.pool()
+        source = source_for_kind(kind)
+        clauses = ["tenant_id = $1", "role = 'root'"]
+        args: list[Any] = [tenant_id]
+        if source is not None:
+            args.append(source)
+            clauses.append(f"source = ${len(args)}")
+        if status is not None:
+            args.append(status)
+            clauses.append(f"status = ${len(args)}")
+        if cursor:
+            projected_at, session_id = decode_task_cursor(cursor)
+            args.append(datetime.fromisoformat(projected_at))
+            args.append(session_id)
+            clauses.append(
+                f"(projected_at, session_id) < (${len(args) - 1}, ${len(args)})"
+            )
+        args.append(limit + 1)
+        sql = f"""
+            SELECT * FROM projection.task_view
+            WHERE {' AND '.join(clauses)}
+            ORDER BY projected_at DESC, session_id DESC
+            LIMIT ${len(args)}
+        """
+        rows = await pool.fetch(sql, *args)
+        tasks = [self._task_from_row(row) for row in rows[:limit]]
+        next_cursor = None
+        if len(rows) > limit:
+            last = tasks[-1]
+            next_cursor = encode_task_cursor(
+                projected_at=str(last["projected_at"]),
+                session_id=str(last["session_id"]),
+            )
+        return {"tasks": tasks, "next_cursor": next_cursor}
+
+    @staticmethod
+    def _task_from_row(row: Any) -> dict[str, Any]:
+        source = "chat"
+        schedule_id = None
+        occurrence_id = None
+        try:
+            raw_source = row["source"]
+            source = str(raw_source) if raw_source is not None else "chat"
+            schedule_id = row["schedule_id"]
+            occurrence_id = row["occurrence_id"]
+        except KeyError:
+            pass
         return {
             "tenant_id": str(row["tenant_id"]),
             "session_id": str(row["session_id"]),
@@ -138,6 +210,9 @@ class PostgresTaskProjection(LazyPool):
             "status": str(row["status"]),
             "run_status": str(row["run_status"]) if row["run_status"] is not None else None,
             "goal": str(row["goal"]),
+            "source": source,
+            "schedule_id": schedule_id,
+            "occurrence_id": occurrence_id,
             "role": str(row["role"]),
             "parent_session_id": row["parent_session_id"],
             "progress": float(row["progress"]),

@@ -40,13 +40,28 @@ class TaskService:
         self._approvals = approvals
         self._approval_notifier = approval_notifier
 
-    async def create_task(self, *, goal: str, context: CommandContext) -> dict[str, Any]:
+    async def create_task(
+        self,
+        *,
+        goal: str,
+        context: CommandContext,
+        source: str = "chat",
+        schedule_id: str | None = None,
+        occurrence_id: str | None = None,
+    ) -> dict[str, Any]:
         started = time.perf_counter()
         await self._admission.admit(goal=goal, context=context)
         session_id = f"ses_{uuid4().hex}"
         run_id = f"run_{uuid4().hex}"
         session = SessionAggregate.empty(session_id, context.tenant_id)
-        session.create(goal=goal, run_id=run_id, dept_id=context.dept_id)
+        session.create(
+            goal=goal,
+            run_id=run_id,
+            dept_id=context.dept_id,
+            source=source,
+            schedule_id=schedule_id,
+            occurrence_id=occurrence_id,
+        )
         response = {
             "session_id": session_id,
             "run_id": run_id,

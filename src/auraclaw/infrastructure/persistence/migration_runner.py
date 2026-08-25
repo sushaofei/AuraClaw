@@ -223,8 +223,11 @@ class PostgresMigrationRunner:
 
 def _split_mysql_statements(source: str) -> tuple[str, ...]:
     body = _transaction_body(source)
+    without_line_comments = "\n".join(
+        line for line in body.splitlines() if not line.lstrip().startswith("--")
+    )
     statements: list[str] = []
-    for chunk in body.split(";"):
+    for chunk in without_line_comments.split(";"):
         statement = chunk.strip()
         if not statement or statement.startswith("/*"):
             continue

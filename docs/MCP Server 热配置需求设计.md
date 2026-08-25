@@ -192,6 +192,7 @@ Server revision 匹配。
 POST   /v1/admin/mcp-servers
 GET    /v1/admin/mcp-servers
 GET    /v1/admin/mcp-servers/{server_id}
+GET    /v1/admin/mcp-servers/{server_id}/tools
 PUT    /v1/admin/mcp-servers/{server_id}
 POST   /v1/admin/mcp-servers/{server_id}:test
 POST   /v1/admin/mcp-servers/{server_id}:enable
@@ -206,7 +207,7 @@ GET    /v1/admin/mcp-operations/{operation_id}
 - 创建和更新只写候选 revision，默认不直接启用。
 - 写请求要求 `Idempotency-Key`、`X-Expected-Revision`（创建固定为 `0`）和权威管理员身份。
 - 返回 `202 Accepted + operation_id`；调用方通过 operation 查询装载、测试和切换结果。
-- `test` 执行 DNS/网络策略、认证、协议握手和受限 list，不发布 Capability 或 Tool 路由。
+- `test` 执行 DNS/网络策略、认证、协议握手和受限 list，不发布 Capability 或 Tool 路由。未启用的 Server 会先让 Credential Proxy 临时装载 `mcp:{server_id}` egress，探测结束后撤销；只有 `enable` 成功后才保留出口。
 - `enable` 只有在目标 revision 测试成功后才设置为 active；可将“测试并启用”实现为同一 operation。
 - `disable` 先阻止新调用并撤销发现/路由，再异步排空旧连接。
 - `retire` 是软删除；保留 revision、Operation、Invocation 和审计证据。本期不提供硬删除 API。
@@ -229,7 +230,7 @@ Admin API
 
 - `McpConnectionManager` 根据 active revision 构建 `ManagedMcpConnector`。
 - `McpEgressManager` 根据同一 revision 构建网络和认证 Adapter。
-- 配置变更通过持久化 Outbox 通知；通知丢失时，两个 Manager 至少每 30 秒按 revision 对账。
+- 配置变更通过持久化 Outbox 通知；通知丢失时，两个 Manager 至少每 30 秒按 revision 对账。Credential Proxy 对账只刷新 snapshot 中已启用的 revision，不把 Hands 正在探测/启用的临时出口卸掉；停用由 Hands 显式 `revoke`。
 - 服务启动时先读取完整 active snapshot，再接收增量通知。环境变量不再是运行事实源。
 - Action Hands 提供只读的内部 Registry snapshot/revision contract；Credential Proxy 通过该契约启动恢复，
   不跨服务写 Hands 数据表。Action Hands readiness 不依赖任一远端 MCP 可达，避免形成启动死锁。

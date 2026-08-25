@@ -270,3 +270,44 @@ def test_catalog_search_matches_chinese_query_without_year_token() -> None:
         assert [item.capability_id for item in matches] == ["cap-price-profile"]
 
     asyncio.run(scenario())
+
+
+def test_catalog_lists_tools_without_enabled_filter() -> None:
+    async def scenario() -> None:
+        store = InMemoryCapabilityCatalogStore()
+        catalog = CapabilityCatalog(store)
+        await catalog.register_server(
+            McpServerDefinition(
+                server_id="server-tenant-a",
+                tenant_id="tenant-a",
+                title="Tenant A",
+                endpoint="https://tenant-a.example/mcp",
+                trust_level=CapabilityTrustLevel.TENANT_VERIFIED,
+                status=CapabilityStatus.QUARANTINED,
+                enabled=False,
+            )
+        )
+        await catalog.replace_server_capabilities(
+            "server-tenant-a",
+            (
+                _descriptor("cap-tool", "order.create", tenant_id="tenant-a"),
+                _descriptor(
+                    "cap-resource",
+                    "order.docs",
+                    tenant_id="tenant-a",
+                ).model_copy(update={"kind": CapabilityKind.RESOURCE}),
+            ),
+        )
+        assert await catalog.search(tenant_id="tenant-a") == ()
+        tools = await catalog.list_server_tools(
+            tenant_id="tenant-a", server_id="server-tenant-a"
+        )
+        assert [item.canonical_name for item in tools] == ["order.create"]
+        assert (
+            await catalog.list_server_tools(
+                tenant_id="other", server_id="server-tenant-a"
+            )
+            == ()
+        )
+
+    asyncio.run(scenario())

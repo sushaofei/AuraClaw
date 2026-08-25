@@ -26,6 +26,8 @@ from auraclaw.contracts.internal import (
     CredentialResourceRequest,
     CredentialResourceResponse,
     LoadCheckpointRequest,
+    McpEgressCommandRequest,
+    McpEgressCommandResponse,
     McpRegistryAdminRequest,
     McpRegistryAdminResponse,
     McpRegistrySnapshotRequest,
@@ -172,6 +174,9 @@ def credential_routes(
         ),
         "/internal/v1/credentials/resource": contract_route(
             CredentialResourceRequest, CredentialResourceResponse, service.resource
+        ),
+        "/internal/v1/credentials/mcp-egress": contract_route(
+            McpEgressCommandRequest, McpEgressCommandResponse, service.mcp_egress
         ),
     }
 

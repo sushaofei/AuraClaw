@@ -123,7 +123,16 @@ class SessionAggregate:
             "dept_id": self.dept_id,
         }
 
-    def create(self, *, goal: str, run_id: str, dept_id: str | None = None) -> None:
+    def create(
+        self,
+        *,
+        goal: str,
+        run_id: str,
+        dept_id: str | None = None,
+        source: str = "chat",
+        schedule_id: str | None = None,
+        occurrence_id: str | None = None,
+    ) -> None:
         if self.version or self.status is not None:
             raise InvalidTransitionError("Session already exists")
         self.dept_id = dept_id
@@ -132,9 +141,13 @@ class SessionAggregate:
             "role": "root",
             "root_session_id": self.session_id,
             "parent_session_id": None,
+            "source": source,
         }
         if dept_id:
             created_payload["dept_id"] = dept_id
+        if source == "schedule":
+            created_payload["schedule_id"] = schedule_id
+            created_payload["occurrence_id"] = occurrence_id
         self._raise(
             NewEvent(
                 type="session.created",

@@ -39,8 +39,7 @@ class PostgresMcpServerRegistryStore(LazyPool, McpServerRegistryStore):
         pool = await self.pool()
         rows = await pool.fetch(
             """SELECT * FROM hands.mcp_server
-            WHERE desired_state <> 'retired'
-              AND (tenant_id=$1 OR tenant_id IS NULL)
+            WHERE tenant_id=$1 OR tenant_id IS NULL
             ORDER BY server_id""",
             tenant_id,
         )
@@ -112,7 +111,8 @@ class PostgresMcpServerRegistryStore(LazyPool, McpServerRegistryStore):
                 else:
                     updated = await connection.fetchval(
                         """UPDATE hands.mcp_server
-                        SET latest_revision=$1, tenant_id=$2, updated_at=$3
+                        SET latest_revision=$1, tenant_id=$2, updated_at=$3,
+                            desired_state=$6
                         WHERE server_id=$4 AND latest_revision=$5
                         RETURNING server_id""",
                         record.latest_revision,
@@ -120,6 +120,7 @@ class PostgresMcpServerRegistryStore(LazyPool, McpServerRegistryStore):
                         record.updated_at,
                         record.server_id,
                         record.latest_revision - 1,
+                        record.desired_state.value,
                     )
                     if updated is None:
                         existing = await connection.fetchval(

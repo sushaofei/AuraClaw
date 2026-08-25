@@ -62,6 +62,7 @@ from auraclaw.api.dependencies import (
     get_task_query_service,
 )
 from auraclaw.api.routes.admin_mcp import create_mcp_admin_router
+from auraclaw.api.routes.admin_skills import create_skill_admin_router
 from auraclaw.artifact.internal_service import (
     ArtifactInternalService,
     SeaweedFSObjectVerifier,
@@ -97,6 +98,8 @@ from auraclaw.infrastructure.artifacts.seaweedfs import (
 from auraclaw.infrastructure.artifacts.store import ArtifactStore, InMemoryObjectStorage
 from auraclaw.infrastructure.clients.artifact import RemoteArtifactWriter
 from auraclaw.infrastructure.clients.credential import RemoteCredentialProxy
+from auraclaw.infrastructure.clients.mcp_egress import RemoteMcpEgressClient
+from auraclaw.infrastructure.clients.mcp_registry import RemoteMcpRegistryClient
 from auraclaw.infrastructure.clients.model import RemoteModelClient
 from auraclaw.infrastructure.clients.policy import (
     RemotePolicyClient,
@@ -214,6 +217,7 @@ from auraclaw.session.internal_service import SessionInternalService
 from auraclaw.session.task_service import TaskService
 
 logger = logging.getLogger(__name__)
+_SKILL_PACKAGE_REGISTRY: SkillPackageRegistry | None = None
 
 
 def _mcp_registry_service(settings: Settings) -> tuple[
@@ -236,6 +240,41 @@ def _mcp_registry_service(settings: Settings) -> tuple[
         ),
         store,
     )
+
+
+def _capability_catalog_store(
+    settings: Settings,
+) -> InMemoryCapabilityCatalogStore | PostgresCapabilityCatalogStore:
+    if settings.sql_storage_enabled:
+        return PostgresCapabilityCatalogStore(settings.resolved_database_url)
+    return InMemoryCapabilityCatalogStore()
+
+
+def _skill_registry_service(settings: Settings) -> SkillPackageRegistry:
+    global _SKILL_PACKAGE_REGISTRY
+    if _SKILL_PACKAGE_REGISTRY is not None:
+        return _SKILL_PACKAGE_REGISTRY
+    configured_signing_key = (
+        settings.skill_signing_key.get_secret_value().encode()
+        if settings.skill_signing_key is not None
+        else None
+    )
+    signing_key = (
+        configured_signing_key or b"auraclaw-development-platform-skill-key"
+    )
+    _SKILL_PACKAGE_REGISTRY = SkillPackageRegistry(
+        artifacts=ArtifactStore(InMemoryObjectStorage(), signing_key=signing_key),
+        signature_verifier=HmacSkillSignatureVerifier(
+            {
+                "ct-model": (
+                    configured_signing_key or b"auraclaw-development-model-skill-key"
+                ),
+                "platform": signing_key,
+            }
+        ),
+        resources=HandsResourceRegistry(),
+    )
+    return _SKILL_PACKAGE_REGISTRY
 
 
 async def _hands_mcp_snapshot(
@@ -581,9 +620,25 @@ def _task_api_app(settings: Settings) -> FastAPI:
         ),
     )
     mcp_registry, mcp_store = _mcp_registry_service(settings)
-    app.include_router(create_mcp_admin_router(mcp_registry))
+    mcp_lifecycle = RemoteMcpRegistryClient(
+        settings.hands_url,
+        bearer_token=_service_bearer_token(settings, ServiceIdentity.TASK_API),
+    )
+    capability_catalog_store = _capability_catalog_store(settings)
+    app.include_router(
+        create_mcp_admin_router(
+            mcp_registry,
+            lifecycle=mcp_lifecycle,
+            catalog=CapabilityCatalog(capability_catalog_store),
+        )
+    )
+    app.include_router(create_skill_admin_router(_skill_registry_service(settings)))
+    extra_closeables: list[Any] = [mcp_lifecycle]
     if isinstance(mcp_store, PostgresMcpServerRegistryStore):
-        app.state.closeables = (*app.state.closeables, mcp_store)
+        extra_closeables.append(mcp_store)
+    if isinstance(capability_catalog_store, PostgresCapabilityCatalogStore):
+        extra_closeables.append(capability_catalog_store)
+    app.state.closeables = (*app.state.closeables, *extra_closeables)
     app.state.config_ready = config_ready
     app.state.storage_label = "projection-read-only"
     app.state.session_access = "http"
@@ -1101,9 +1156,7 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
     artifacts: RemoteArtifactWriter
     invocation_store: PostgresInvocationStore | None = None
     tool_registry_store: PostgresToolRegistryStore | None = None
-    capability_catalog_store: (
-        InMemoryCapabilityCatalogStore | PostgresCapabilityCatalogStore
-    ) = InMemoryCapabilityCatalogStore()
+    capability_catalog_store = _capability_catalog_store(settings)
     mcp_registry, mcp_registry_store = _mcp_registry_service(settings)
     remote_clients: list[Any] = []
     hands_token = _service_bearer_token(settings, ServiceIdentity.ACTION_HANDS)
@@ -1111,7 +1164,10 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
     credential_proxy = RemoteCredentialProxy(
         settings.credential_proxy_base_url, bearer_token=hands_token
     )
-    remote_clients.extend((policy, credential_proxy))
+    mcp_egress_client = RemoteMcpEgressClient(
+        settings.credential_proxy_base_url, bearer_token=hands_token
+    )
+    remote_clients.extend((policy, credential_proxy, mcp_egress_client))
     artifacts = RemoteArtifactWriter(
         settings.artifact_base_url,
         bearer_token=_service_bearer_token(settings, ServiceIdentity.ACTION_HANDS),
@@ -1119,9 +1175,6 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
     if settings.sql_storage_enabled:
         invocation_store = PostgresInvocationStore(settings.resolved_database_url)
         tool_registry_store = PostgresToolRegistryStore(settings.resolved_database_url)
-        capability_catalog_store = PostgresCapabilityCatalogStore(
-            settings.resolved_database_url
-        )
     closeables = (
         *remote_clients,
         artifacts,
@@ -1144,39 +1197,12 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         closeables=closeables,
     )
     capability_catalog = CapabilityCatalog(capability_catalog_store)
-    resources = HandsResourceRegistry()
+    skill_registry = _skill_registry_service(settings)
+    resources = skill_registry.resources or HandsResourceRegistry()
     resource_gateway = ManagedResourceGateway(
         resources,
         artifacts=artifacts,
         policy=policy if isinstance(policy, RemotePolicyClient) else None,
-    )
-    configured_signing_key = (
-        settings.skill_signing_key.get_secret_value().encode()
-        if settings.skill_signing_key is not None
-        else None
-    )
-    skill_signer = HmacSkillSignatureVerifier(
-        {
-            "ct-model": (
-                configured_signing_key or b"auraclaw-development-model-skill-key"
-            ),
-            "platform": (
-                configured_signing_key or b"auraclaw-development-platform-skill-key"
-            ),
-        }
-    )
-    skill_artifacts: ArtifactStore | RemoteArtifactWriter = artifacts
-    if settings.deployment_profile == "development":
-        skill_artifacts = ArtifactStore(
-            InMemoryObjectStorage(),
-            signing_key=(
-                configured_signing_key or b"auraclaw-development-platform-skill-key"
-            ),
-        )
-    skill_registry = SkillPackageRegistry(
-        artifacts=skill_artifacts,
-        signature_verifier=skill_signer,
-        resources=resources,
     )
     skill_resolver = SkillResolver(
         skill_registry,
@@ -1211,6 +1237,7 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
                 factory=_mcp_connector,  # type: ignore[arg-type]
                 catalog=capability_catalog,
                 reconciler=app.state.catalog_reconciler,
+                egress=mcp_egress_client,
             )
             mcp_registry.bind_runtime(manager)
             app.state.mcp_connection_manager = manager
@@ -1489,6 +1516,7 @@ def _credential_proxy_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         proxy,
         adapters=adapters,
         policy=policy,
+        mcp_egress=mcp_egress,
     )
     _seed_managed_connector_credentials(proxy, settings)
 

@@ -135,6 +135,10 @@ class CapabilityCatalogStore(Protocol):
         self, tenant_id: str
     ) -> tuple[CapabilityDescriptor, ...]: ...
 
+    async def list_server_capabilities(
+        self, tenant_id: str, server_id: str
+    ) -> tuple[CapabilityDescriptor, ...]: ...
+
     async def get_capability(
         self, tenant_id: str, capability_id: str
     ) -> CapabilityDescriptor | None: ...

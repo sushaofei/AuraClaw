@@ -1,6 +1,6 @@
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Header, Response, status
+from fastapi import APIRouter, Depends, Header, Query, Response, status
 
 from auraclaw.api.dependencies import (
     RequestIdentity,
@@ -18,6 +18,7 @@ from auraclaw.api.models import (
     CommandResponse,
     CreateTaskRequest,
     TaskAcceptedResponse,
+    TaskListResponse,
     TaskView,
 )
 from auraclaw.gateways.query.reader import TaskQueryService
@@ -42,7 +43,31 @@ async def create_task(
         expected_version=0,
         operation="create_task",
     )
-    return await service.create_task(goal=request.goal, context=context)
+    return await service.create_task(
+        goal=request.goal,
+        context=context,
+        source=request.source,
+        schedule_id=request.schedule_id,
+        occurrence_id=request.occurrence_id,
+    )
+
+
+@router.get("/tasks", response_model=TaskListResponse)
+async def list_tasks(
+    identity: Identity,
+    query: TaskQueryDependency,
+    kind: str | None = Query(default=None, pattern="^(chat|scheduled)$"),
+    status_filter: str | None = Query(default=None, alias="status"),
+    cursor: str | None = None,
+    limit: int = 20,
+) -> dict[str, Any]:
+    return await query.list_tasks(
+        tenant_id=identity.tenant_id,
+        kind=kind,
+        status=status_filter,
+        cursor=cursor,
+        limit=min(max(limit, 1), 100),
+    )
 
 
 @router.get("/tasks/{session_id}", response_model=TaskView)

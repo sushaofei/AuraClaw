@@ -44,7 +44,7 @@ X-Expected-Revision: 0
 }
 ```
 
-创建成功后 `POST /v1/admin/mcp-servers/auramcp:test`，再 `:enable`。Catalog 出现 `auramcp.health.ping`、`auramcp.example.echo`、`auramcp.ops.catalog_snapshot` 即登记成功。
+创建成功后 `POST /v1/admin/mcp-servers/auramcp:test`，再 `:enable`。Catalog 出现 `auramcp.health.ping`、`auramcp.example.echo`、`auramcp.ops.catalog_snapshot` 即登记成功。工作台可用 `GET /v1/admin/mcp-servers/auramcp/tools` 核对同一目录。
 
 AuraMCP 侧：
 

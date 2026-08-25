@@ -100,6 +100,26 @@ class InMemoryTaskProjection:
         task = self._tasks.get((tenant_id, session_id))
         return dict(task) if task else None
 
+    async def list_tasks(
+        self,
+        tenant_id: str,
+        *,
+        kind: str | None = None,
+        status: str | None = None,
+        cursor: str | None = None,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        from auraclaw.projection.task.listing import page_task_views
+
+        views = [
+            dict(view)
+            for (view_tenant, _session_id), view in self._tasks.items()
+            if view_tenant == tenant_id
+        ]
+        return page_task_views(
+            views, kind=kind, status=status, cursor=cursor, limit=limit
+        )
+
     async def clear(self) -> None:
         async with self._lock:
             self._tasks.clear()
@@ -147,6 +167,9 @@ class InMemoryTaskProjection:
             "delivery_attempt_count": 0,
             "delivery_response_summary": None,
             "skill_activations": [],
+            "source": "chat",
+            "schedule_id": None,
+            "occurrence_id": None,
             "projection_version": 0,
         }
 
@@ -161,6 +184,9 @@ class InMemoryTaskProjection:
                 status=SessionStatus.CREATED.value,
                 user_id=event.actor.id if event.actor.type == "user" else view.get("user_id"),
                 dept_id=payload.get("dept_id", view.get("dept_id")),
+                source=payload.get("source", view.get("source", "chat")),
+                schedule_id=payload.get("schedule_id"),
+                occurrence_id=payload.get("occurrence_id"),
             )
         elif event.type == "child.created":
             dependencies = list(payload.get("dependency_ids", []))

@@ -397,6 +397,8 @@ var getOrderTool = SyncToolSpecification.builder()
 配置入口：Task API 的热配置 Admin API（`/v1/admin/mcp-servers`）。配置以不可变
 revision 写入 Hands Registry，Action Hands 与 Credential Proxy **无需重启**即可加载。
 配置里 **只能有非密信息 + `credential_ref`**；本地开发可用 `network_mode=loopback`。
+工作台可用 `GET /v1/admin/mcp-servers/{server_id}/tools` 查看对账后的 Catalog tools，
+这不是对远端 `tools/list` 的实时探测。
 
 `loopback` 地址是相对 **Credential Proxy 所在网络命名空间** 而言。容器内的 `127.0.0.1`
 不是开发者宿主机；跨网络命名空间应使用私网服务名或受管宿主机别名。

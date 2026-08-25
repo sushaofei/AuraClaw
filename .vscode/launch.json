@@ -12,6 +12,25 @@
       "envFile": "${workspaceFolder}/.env.dev",
       "console": "integratedTerminal",
       "justMyCode": false
+    },
+    {
+      "name": "AuraMCP run",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "auramcp",
+      "args": ["run", "--host", "127.0.0.1", "--port", "8020"],
+      "cwd": "${workspaceFolder}/../AuraMCP",
+      "python": "${workspaceFolder}/../AuraMCP/.venv/bin/python",
+      "envFile": "${workspaceFolder}/../AuraMCP/.env",
+      "console": "integratedTerminal",
+      "justMyCode": false
+    }
+  ],
+  "compounds": [
+    {
+      "name": "AuraClaw + AuraMCP",
+      "configurations": ["AuraClaw serve", "AuraMCP run"],
+      "stopAll": true
     }
   ]
 }

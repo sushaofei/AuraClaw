@@ -12,6 +12,16 @@ class ProjectionWriter(Protocol):
 class TaskReader(Protocol):
     async def get_task(self, tenant_id: str, session_id: str) -> dict[str, object] | None: ...
 
+    async def list_tasks(
+        self,
+        tenant_id: str,
+        *,
+        kind: str | None = None,
+        status: str | None = None,
+        cursor: str | None = None,
+        limit: int = 20,
+    ) -> dict[str, object]: ...
+
 
 class CollaborationReader(Protocol):
     async def get(self, tenant_id: str, session_id: str) -> dict[str, object] | None: ...
