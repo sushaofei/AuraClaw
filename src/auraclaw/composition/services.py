@@ -65,12 +65,13 @@ from auraclaw.api.dependencies import (
 )
 from auraclaw.api.routes.admin_mcp import create_mcp_admin_router
 from auraclaw.api.routes.admin_skills import create_skill_admin_router
-from auraclaw.artifact.internal_service import (
-    ArtifactInternalService,
-    SeaweedFSObjectVerifier,
-)
+from auraclaw.artifact.internal_service import ArtifactInternalService
 from auraclaw.composition import providers
 from auraclaw.composition.api import create_app
+from auraclaw.composition.object_storage import (
+    build_object_storage,
+    object_storage_closeables,
+)
 from auraclaw.composition.worker_wake import WorkerWakeGate
 from auraclaw.config import Settings, get_settings
 from auraclaw.contracts.internal import (
@@ -95,10 +96,6 @@ from auraclaw.gateways.query.waiter import TaskResultWaiter
 from auraclaw.gateways.streaming.gateway import StreamingGateway
 from auraclaw.gateways.task.commands import TaskCommandGateway
 from auraclaw.gateways.task.invocations import SyncInvocationGateway
-from auraclaw.infrastructure.artifacts.seaweedfs import (
-    SeaweedFSMultipartClient,
-    SeaweedFSS3Presigner,
-)
 from auraclaw.infrastructure.artifacts.store import ArtifactStore, InMemoryObjectStorage
 from auraclaw.infrastructure.clients.artifact import RemoteArtifactWriter
 from auraclaw.infrastructure.clients.credential import RemoteCredentialProxy
@@ -771,13 +768,14 @@ def _readiness(name: str, settings: Settings) -> tuple[bool, dict[str, str]]:
         ready = ready and lease_ready and identity_ready
     if name == "artifact-service":
         storage_ready = (
-            settings.seaweedfs_enabled or settings.artifact_backend == "local"
+            settings.object_storage_enabled
+            or settings.resolved_artifact_backend == "local"
         )
         dependencies["object_storage"] = (
-            "seaweedfs"
-            if settings.seaweedfs_enabled
+            settings.resolved_artifact_backend
+            if settings.object_storage_enabled
             else "local"
-            if settings.artifact_backend == "local"
+            if settings.resolved_artifact_backend == "local"
             else "missing"
         )
         policy_identity_ready = bool(
@@ -1567,24 +1565,7 @@ def _credential_proxy_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
 
 
 def _artifact_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
-    access_key = (
-        settings.seaweedfs_access_key.get_secret_value()
-        if settings.seaweedfs_access_key is not None
-        else "development-access-key"
-    )
-    secret_key = (
-        settings.seaweedfs_secret_key.get_secret_value()
-        if settings.seaweedfs_secret_key is not None
-        else "development-secret-key"
-    )
-    presigner = SeaweedFSS3Presigner(
-        settings.seaweedfs_s3_endpoint,
-        access_key=access_key,
-        secret_key=secret_key,
-        bucket=settings.seaweedfs_bucket,
-        region=settings.seaweedfs_region,
-        path_style=settings.seaweedfs_path_style,
-    )
+    storage = build_object_storage(settings)
     repository = (
         PostgresArtifactRepository(settings.resolved_database_url)
         if settings.sql_storage_enabled
@@ -1595,8 +1576,6 @@ def _artifact_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         if settings.sql_storage_enabled
         else None
     )
-    verifier = SeaweedFSObjectVerifier(presigner) if settings.seaweedfs_enabled else None
-    multipart = SeaweedFSMultipartClient(presigner) if settings.seaweedfs_enabled else None
     policy: RemotePolicyClient | None = None
     token = settings.workload_token_value(ServiceIdentity.ARTIFACT_SERVICE.value)
     if token:
@@ -1608,29 +1587,30 @@ def _artifact_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
     closeables: tuple[Any, ...] = (
         *((repository,) if repository is not None else ()),
         *((admin_store,) if admin_store is not None else ()),
-        *((verifier,) if verifier is not None else ()),
-        *((multipart,) if multipart is not None else ()),
+        *object_storage_closeables(storage),
         *((policy,) if policy is not None else ()),
     )
     app = _base_service_app(
         spec,
         settings,
         closeables=closeables,
-        readiness_probe=verifier.readiness if verifier is not None else None,
+        readiness_probe=(
+            storage.verifier.readiness if storage.verifier is not None else None
+        ),
     )
     service = ArtifactInternalService(
-        presigner,
+        storage.presigner,
         repository=repository,
-        object_verifier=verifier,
+        object_verifier=storage.verifier,
         policy=policy,
-        multipart=multipart,
+        multipart=storage.multipart,
         multipart_threshold=settings.artifact_multipart_threshold,
         multipart_part_size=settings.artifact_multipart_part_size,
     )
 
     async def artifact_status(parameters: dict[str, Any]) -> dict[str, Any]:
         del parameters
-        return {"storage": "seaweedfs", "metadata_owner": "artifact-service"}
+        return {"storage": storage.backend, "metadata_owner": "artifact-service"}
 
     async def artifact_retention(parameters: dict[str, Any]) -> dict[str, Any]:
         del parameters

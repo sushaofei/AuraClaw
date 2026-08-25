@@ -122,12 +122,14 @@ def test_production_compose_mounts_least_privilege_secrets() -> None:
         "vault_token" not in secret_sources(service)
         for service in APPLICATION_SERVICES - {"credential-proxy"}
     )
-    assert {"seaweedfs_access_key", "seaweedfs_secret_key"} <= secret_sources(
+    assert {"seaweedfs_access_key", "seaweedfs_secret_key", "obs_ak", "obs_sk"} <= secret_sources(
         "artifact-service"
     )
     assert all(
         "seaweedfs_access_key" not in secret_sources(service)
         and "seaweedfs_secret_key" not in secret_sources(service)
+        and "obs_ak" not in secret_sources(service)
+        and "obs_sk" not in secret_sources(service)
         for service in APPLICATION_SERVICES - {"artifact-service"}
     )
     assert "runtime_workload_token" in secret_sources("agent-runtime")
@@ -193,6 +195,8 @@ def test_committed_files_do_not_contain_environment_secret_values() -> None:
         "AURACLAW_CREDENTIAL_VAULT_TOKEN",
         "SEAWEEDFS_ACCESS_KEY",
         "SEAWEEDFS_SECRET_KEY",
+        "OBS_AK",
+        "OBS_SK",
     }
     local_values = {
         value
@@ -236,7 +240,11 @@ def test_env_templates_are_ready_to_copy() -> None:
     test = dotenv_values(ROOT / ".env.test.example")
     production = dotenv_values(ROOT / ".env.prod.example")
     for label, values in (("test", test), ("production", production)):
-        missing = [name for name in module.REQUIRED if not values.get(name)]
+        missing = [
+            name
+            for name in module.required_variables(values)
+            if not values.get(name)
+        ]
         assert missing == [], f"{label} missing {missing}"
         assert values["AURACLAW_DEPLOYMENT_PROFILE"] == "production"
         assert values["AURACLAW_ALLOW_INSECURE_IDENTITY_HEADERS"] == "false"
@@ -273,8 +281,7 @@ def test_env_templates_are_ready_to_copy() -> None:
 
     tokens = [
         production[name] or ""
-        for name in module.REQUIRED
-        if name.endswith("_WORKLOAD_TOKEN")
+        for name in module.WORKLOAD_TOKENS
     ]
     assert all(len(token) >= 32 for token in tokens)
     assert len(set(tokens)) == len(tokens)
