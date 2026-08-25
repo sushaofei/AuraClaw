@@ -196,6 +196,7 @@ class InMemoryControlStateStore:
                 "completed",
                 "failed",
                 "waiting_children",
+                "waiting_for_human",
             }:
                 return False
             self._assignments[task_id] = (assignment, "assigned")
@@ -272,7 +273,13 @@ class InMemoryControlStateStore:
             if entry is not None:
                 assignment = entry[0]
                 self._assignments[task_id] = (assignment, outcome)
-                if outcome in {"completed", "failed", "cancelled", "waiting_children"}:
+                if outcome in {
+                    "completed",
+                    "failed",
+                    "cancelled",
+                    "waiting_children",
+                    "waiting_for_human",
+                }:
                     self._assignment_started_at.pop(task_id, None)
                     resource_id = f"session:{assignment.tenant_id}:{assignment.session_id}"
                     lease = self._leases.get(resource_id)
@@ -283,7 +290,7 @@ class InMemoryControlStateStore:
                 self._queue[task_id] = (queued[0], "acked", queued[2])
 
     async def suspend_assignment(self, task_id: str, reason: str) -> None:
-        if reason != "waiting_children":
+        if reason not in {"waiting_children", "waiting_for_human"}:
             raise ValueError(f"unsupported assignment suspension: {reason}")
         await self.finish_assignment(task_id, reason)
 
@@ -291,7 +298,11 @@ class InMemoryControlStateStore:
         async with self._lock:
             entry = self._assignments.get(task_id)
             queued = self._queue.get(task_id)
-            if entry is None or entry[1] != "waiting_children" or queued is None:
+            if (
+                entry is None
+                or entry[1] not in {"waiting_children", "waiting_for_human"}
+                or queued is None
+            ):
                 return False
             self._queue[task_id] = (queued[0], "queued", None)
             self._queue_claims.pop(task_id, None)

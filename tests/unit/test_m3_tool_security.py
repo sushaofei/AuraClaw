@@ -522,7 +522,13 @@ def test_runtime_waits_for_approval_then_resumes_same_tool_call() -> None:
         )
         await approvals.project([approved_event])
 
-        await harness.execute(assignment)
+        task_id = f"{tenant_id}:{assignment.session_id}:{assignment.run_id}"
+        assert await control.wake_assignment(task_id)
+        resumed_assignment = await orchestrator.schedule_once()
+        assert resumed_assignment is not None
+        assert resumed_assignment.run_id == assignment.run_id
+        assert resumed_assignment.fencing_token > assignment.fencing_token
+        await harness.execute(resumed_assignment)
         completed_events = await event_store.load(tenant_id, assignment.session_id)
         assert [event.type for event in completed_events].count("tool.call.completed") == 1
         assert [event.type for event in completed_events].count("run.completed") == 1
