@@ -308,22 +308,34 @@ Gateway 的短期 Replay Buffer，不为每个浏览器创建 Kafka Consumer。
 Event 回写，并通过 Task/Result Query 的 `delivery_status`、`delivery_id`、attempt count 与响应
 摘要查询。Sink 只保存 `credential_ref`，Job 不保存 Secret。
 
-## 主存储（MySQL / PostgreSQL）
+## 主存储（MySQL / PostgreSQL / KingBase）
 
 存储配置支持两种形式：
 
 - `AURACLAW_DATABASE_URL=mysql+aiomysql://...` 或 `postgresql+asyncpg://...`
+  （KingBase 也可用 `kingbase://` / `kingbase+asyncpg://`，运行时规范为 `postgresql+asyncpg://`）
 - `DB_HOST`、`DB_PORT`、`DB_USER`、`DB_PWD`、`DB_NAME`
 
 方言选择：
 
 - `AURACLAW_DB_DIALECT=mysql|postgres`（默认 **mysql**）
-- `AURACLAW_STORAGE_BACKEND=auto|memory|mysql|postgres`
+- `AURACLAW_STORAGE_BACKEND=auto|memory|mysql|postgres|kingbase`
 
 当存在完整 `DB_*` 且 `storage_backend=auto` 时启用 SQL 存储，方言默认 MySQL。
 继续使用 PostgreSQL 时请显式设置 `AURACLAW_STORAGE_BACKEND=postgres`（或
 `AURACLAW_DB_DIALECT=postgres` 且 URL scheme 为 postgresql）。密码中的 `#`、`,` 由
 `Settings.resolved_database_url` 自动 URL 编码。
+
+**KingBase（PostgreSQL 兼容模式）**：设 `AURACLAW_STORAGE_BACKEND=kingbase`。启动时从
+`.kingbase.env`（或 `AURACLAW_KINGBASE_ENV_FILE`）读取 `KINGBASE_*` 并覆盖写入 `DB_*`；
+方言与连接池复用 PostgreSQL / `asyncpg` 路径，Domain ports 与 Store 代码无需改动。
+示例见 `.kingbase.env.example`。
+
+**本地 PostgreSQL**：开发默认可用 `AURACLAW_STORAGE_BACKEND=postgres`。启动时从
+`.postgresql.local.env`（或 `.postgresql.env` / `AURACLAW_POSTGRESQL_ENV_FILE`）读取
+`POSTGRESQL_*` 并覆盖写入 `DB_*`。示例见 `.postgresql.env.example`；Kafka 开发默认指向
+`localhost:9092`。开发 / 测试 / 生产均使用统一 `AURACLAW_DATABASE_URL`（Compose 共享
+`database_url` secret）；不再按服务注入分角色 DSN。`deploy/*/roles.sql` 仅作可选硬化参考。
 
 迁移：
 
@@ -331,18 +343,20 @@ Event 回写，并通过 Task/Result Query 的 `delivery_status`、`delivery_id`
 # MySQL（默认目录 migrations/mysql）
 uv run auraclaw migrate up
 
-# PostgreSQL
+# PostgreSQL / KingBase（同一迁移树）
 AURACLAW_STORAGE_BACKEND=postgres uv run auraclaw migrate up --directory migrations
+AURACLAW_STORAGE_BACKEND=kingbase uv run auraclaw migrate up --directory migrations
 ```
 
 首次启动前按版本顺序应用 migrations。开发和生产使用各自配置文件中的 `DB_NAME`。
 
-PostgreSQL 脚本在 `migrations/`；MySQL 对照脚本在 `migrations/mysql/`（表名使用
-`schema_table` 前缀，例如 `session_core_canonical_event`）。生产角色授权：
+PostgreSQL / KingBase 脚本在 `migrations/`；MySQL 对照脚本在 `migrations/mysql/`（表名使用
+`schema_table` 前缀，例如 `session_core_canonical_event`）。可选角色授权脚本（当前部署不注入
+分角色 DSN）：
 
 - MySQL：`deploy/mysql/roles.sql`（意图文档）；托管实例若拒绝通配 GRANT，使用
   `uv run python scripts/apply_mysql_roles.py` 按前缀展开到具体表
-- PostgreSQL：`deploy/postgres/roles.sql`
+- PostgreSQL / KingBase：`deploy/postgres/roles.sql`（需在目标实例验证语法兼容）
 
 ```text
 migrations/0001_initial.sql

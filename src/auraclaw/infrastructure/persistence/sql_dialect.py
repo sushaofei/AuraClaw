@@ -43,7 +43,12 @@ def detect_dialect(database_url: str) -> Dialect:
     lowered = database_url.lower()
     if lowered.startswith("mysql:") or lowered.startswith("mysql+"):
         return "mysql"
-    if lowered.startswith("postgresql:") or lowered.startswith("postgres:"):
+    if (
+        lowered.startswith("postgresql:")
+        or lowered.startswith("postgres:")
+        or lowered.startswith("kingbase:")
+        or lowered.startswith("kingbase+")
+    ):
         return "postgres"
     if "+asyncpg" in lowered or "+psycopg" in lowered:
         return "postgres"
@@ -60,7 +65,11 @@ def normalize_database_url(database_url: str, dialect: Dialect | None = None) ->
             .replace("mysql+asyncmy://", "mysql://", 1)
             .replace("mysql+pymysql://", "mysql://", 1)
         )
-    return database_url.replace("postgresql+asyncpg://", "postgresql://", 1)
+    return (
+        database_url.replace("postgresql+asyncpg://", "postgresql://", 1)
+        .replace("kingbase+asyncpg://", "postgresql://", 1)
+        .replace("kingbase://", "postgresql://", 1)
+    )
 
 
 def parse_mysql_url(database_url: str) -> dict[str, Any]:

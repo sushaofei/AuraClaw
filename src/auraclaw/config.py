@@ -129,6 +129,125 @@ def apply_local_dev_proxy_env(env_file: str | Path | None = None) -> None:
         os.environ.pop(key, None)
 
 
+_POSTGRESQL_TO_DB = {
+    "POSTGRESQL_HOST": "DB_HOST",
+    "POSTGRESQL_PORT": "DB_PORT",
+    "POSTGRESQL_DB_USER": "DB_USER",
+    "POSTGRESQL_DB_PWD": "DB_PWD",
+    "POSTGRESQL_AURACLAW_DB": "DB_NAME",
+}
+
+_KINGBASE_TO_DB = {
+    "KINGBASE_HOST": "DB_HOST",
+    "KINGBASE_PORT": "DB_PORT",
+    "KINGBASE_DB_USER": "DB_USER",
+    "KINGBASE_DB_PWD": "DB_PWD",
+    "KINGBASE_AURACLAW_DB": "DB_NAME",
+}
+
+
+def _settings_backend(
+    selected: dict[str, str],
+    settings_env_file: str | Path | None,
+    *extra_file_values: dict[str, str],
+) -> str:
+    settings_file_values = (
+        _parse_dotenv_values(Path(settings_env_file))
+        if settings_env_file is not None
+        else {}
+    )
+    for source in (selected, settings_file_values, *extra_file_values):
+        value = (source.get("AURACLAW_STORAGE_BACKEND") or "").strip().lower()
+        if value:
+            return value
+    return ""
+
+
+def apply_postgresql_env_aliases(
+    environ: dict[str, str] | None = None,
+    *,
+    settings_env_file: str | Path | None = None,
+) -> None:
+    """Map local PostgreSQL credentials onto `DB_*` when backend is postgres.
+
+    Loads `POSTGRESQL_*` from `.postgresql.local.env` (or
+    `AURACLAW_POSTGRESQL_ENV_FILE` / `.postgresql.env`). Explicit process-env
+    wins over the file. When `AURACLAW_STORAGE_BACKEND=postgres`, resolved
+    values overwrite `DB_*`. Domain / store code continues to use only `DB_*`
+    and `resolved_database_url`.
+    """
+    selected = os.environ if environ is None else environ
+    postgresql_path = Path(
+        selected.get("AURACLAW_POSTGRESQL_ENV_FILE")
+        or (
+            ".postgresql.local.env"
+            if Path(".postgresql.local.env").is_file()
+            else ".postgresql.env"
+        )
+    )
+    postgresql_file_values = _parse_dotenv_values(postgresql_path)
+
+    def postgresql_value(key: str) -> str | None:
+        return selected.get(key) or postgresql_file_values.get(key)
+
+    backend = _settings_backend(selected, settings_env_file, postgresql_file_values)
+    has_postgresql = any(postgresql_value(source) for source in _POSTGRESQL_TO_DB)
+    if backend == "postgres":
+        for source, destination in _POSTGRESQL_TO_DB.items():
+            value = postgresql_value(source)
+            if value:
+                selected[destination] = value
+        selected.setdefault("AURACLAW_STORAGE_BACKEND", "postgres")
+        return
+
+    if has_postgresql and backend in {"", "auto"} and not selected.get("DB_HOST"):
+        for source, destination in _POSTGRESQL_TO_DB.items():
+            value = postgresql_value(source)
+            if value and not selected.get(destination):
+                selected[destination] = value
+
+
+def apply_kingbase_env_aliases(
+    environ: dict[str, str] | None = None,
+    *,
+    settings_env_file: str | Path | None = None,
+) -> None:
+    """Map KingBase credentials onto `DB_*` when the storage backend is kingbase.
+
+    Loads `KINGBASE_*` from `.kingbase.env` (or `AURACLAW_KINGBASE_ENV_FILE`).
+    Explicit process-env `KINGBASE_*` wins over the file. When
+    `AURACLAW_STORAGE_BACKEND=kingbase`, resolved values overwrite `DB_*` so a
+    MySQL-oriented `.env.dev` can switch without editing host credentials.
+    Domain / store code continues to use only `DB_*` and `resolved_database_url`.
+    """
+    selected = os.environ if environ is None else environ
+    kingbase_path = Path(
+        selected.get("AURACLAW_KINGBASE_ENV_FILE") or ".kingbase.env"
+    )
+    kingbase_file_values = _parse_dotenv_values(kingbase_path)
+
+    def kingbase_value(key: str) -> str | None:
+        return selected.get(key) or kingbase_file_values.get(key)
+
+    backend = _settings_backend(selected, settings_env_file, kingbase_file_values)
+
+    has_kingbase = any(kingbase_value(source) for source in _KINGBASE_TO_DB)
+    if backend == "kingbase":
+        for source, destination in _KINGBASE_TO_DB.items():
+            value = kingbase_value(source)
+            if value:
+                selected[destination] = value
+        selected.setdefault("AURACLAW_STORAGE_BACKEND", "kingbase")
+        return
+
+    # Fill empty DB_* from KingBase when backend is auto and no DB_HOST yet.
+    if has_kingbase and backend in {"", "auto"} and not selected.get("DB_HOST"):
+        for source, destination in _KINGBASE_TO_DB.items():
+            value = kingbase_value(source)
+            if value and not selected.get(destination):
+                selected[destination] = value
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env.dev", env_prefix="AURACLAW_", extra="ignore"
@@ -195,7 +314,7 @@ class Settings(BaseSettings):
     artifact_base_url: str = "http://127.0.0.1:8009"
     delivery_base_url: str = "http://127.0.0.1:8011"
     log_level: str = "INFO"
-    storage_backend: Literal["auto", "memory", "postgres", "mysql"] = "auto"
+    storage_backend: Literal["auto", "memory", "postgres", "mysql", "kingbase"] = "auto"
     db_dialect: Literal["mysql", "postgres"] = "mysql"
     database_url: str = "mysql+aiomysql://auraclaw:auraclaw@localhost:3306/auraclaw"
     migration_database_url: SecretStr | None = None
@@ -331,7 +450,7 @@ class Settings(BaseSettings):
 
     @property
     def resolved_db_dialect(self) -> Literal["mysql", "postgres"]:
-        if self.storage_backend == "postgres":
+        if self.storage_backend in {"postgres", "kingbase"}:
             return "postgres"
         if self.storage_backend == "mysql":
             return "mysql"
@@ -339,6 +458,8 @@ class Settings(BaseSettings):
         if (
             url.startswith("postgresql:")
             or url.startswith("postgres:")
+            or url.startswith("kingbase:")
+            or url.startswith("kingbase+")
             or "+asyncpg" in url
         ):
             return "postgres"
@@ -366,7 +487,13 @@ class Settings(BaseSettings):
             if dialect == "mysql":
                 return f"mysql+aiomysql://{user}:{password}@{self.db_host}:{self.db_port}/{database}"
             return f"postgresql+asyncpg://{user}:{password}@{self.db_host}:{self.db_port}/{database}"
-        return self.database_url
+        url = self.database_url
+        lowered = url.lower()
+        if lowered.startswith("kingbase+asyncpg://"):
+            return "postgresql+asyncpg://" + url.split("://", 1)[1]
+        if lowered.startswith("kingbase://"):
+            return "postgresql+asyncpg://" + url.split("://", 1)[1]
+        return url
 
     @property
     def resolved_migration_database_url(self) -> str:
@@ -378,13 +505,13 @@ class Settings(BaseSettings):
     def sql_storage_enabled(self) -> bool:
         if self.storage_backend == "memory":
             return False
-        if self.storage_backend in {"postgres", "mysql"}:
+        if self.storage_backend in {"postgres", "mysql", "kingbase"}:
             return True
         return bool(self.db_host and self.db_user and self.db_name)
 
     @property
     def postgres_enabled(self) -> bool:
-        """True when primary SQL storage is PostgreSQL (backward-compatible name)."""
+        """True when primary SQL storage is PostgreSQL-compatible (incl. KingBase)."""
         return self.sql_storage_enabled and self.resolved_db_dialect == "postgres"
 
     @property
@@ -392,9 +519,15 @@ class Settings(BaseSettings):
         return self.sql_storage_enabled and self.resolved_db_dialect == "mysql"
 
     @property
+    def kingbase_enabled(self) -> bool:
+        return self.sql_storage_enabled and self.storage_backend == "kingbase"
+
+    @property
     def storage_label(self) -> str:
         if not self.sql_storage_enabled:
             return "memory"
+        if self.storage_backend == "kingbase":
+            return "kingbase"
         return self.resolved_db_dialect
 
     @property
@@ -572,4 +705,6 @@ def get_settings() -> Settings:
     load_secret_files()
     env_file = _resolve_settings_env_file()
     apply_local_dev_proxy_env(env_file)
+    apply_postgresql_env_aliases(settings_env_file=env_file)
+    apply_kingbase_env_aliases(settings_env_file=env_file)
     return Settings(_env_file=env_file)

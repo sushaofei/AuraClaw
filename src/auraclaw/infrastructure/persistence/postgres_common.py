@@ -13,7 +13,11 @@ from auraclaw.infrastructure.persistence.sql_dialect import Dialect, detect_dial
 
 
 def asyncpg_url(database_url: str) -> str:
-    return database_url.replace("postgresql+asyncpg://", "postgresql://", 1)
+    return (
+        database_url.replace("postgresql+asyncpg://", "postgresql://", 1)
+        .replace("kingbase+asyncpg://", "postgresql://", 1)
+        .replace("kingbase://", "postgresql://", 1)
+    )
 
 
 def json_dumps(value: Any) -> str:

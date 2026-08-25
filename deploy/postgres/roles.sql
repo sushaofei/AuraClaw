@@ -1,4 +1,7 @@
--- Run as a PostgreSQL administrator. Passwords are supplied separately by the platform.
+-- Optional PostgreSQL privilege bootstrap for AuraClaw role-scoped accounts.
+-- Current Compose/dev/test/prod deployments use a shared AURACLAW_DATABASE_URL;
+-- run this only if operators want least-privilege hardening later.
+-- Passwords are supplied separately by the platform.
 DO $$
 DECLARE role_name text;
 BEGIN

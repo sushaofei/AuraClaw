@@ -6,24 +6,10 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from urllib.parse import urlsplit
 
 from dotenv import dotenv_values
 
 ROOT = Path(__file__).parents[1]
-DATABASE_ROLES = {
-    "TASK_QUERY_DATABASE_URL": "auraclaw_task_query_ro",
-    "SESSION_DATABASE_URL": "auraclaw_session",
-    "PROJECTION_DATABASE_URL": "auraclaw_projection",
-    "CONTROL_DATABASE_URL": "auraclaw_control",
-    "HANDS_DATABASE_URL": "auraclaw_hands",
-    "POLICY_DATABASE_URL": "auraclaw_policy",
-    "CREDENTIAL_DATABASE_URL": "auraclaw_credential",
-    "ARTIFACT_DATABASE_URL": "auraclaw_artifact",
-    "STREAMING_DATABASE_URL": "auraclaw_streaming",
-    "MODEL_DATABASE_URL": "auraclaw_model",
-    "DELIVERY_DATABASE_URL": "auraclaw_delivery",
-}
 WORKLOAD_TOKENS = (
     "AURACLAW_TASK_API_WORKLOAD_TOKEN",
     "AURACLAW_PROJECTION_WORKLOAD_TOKEN",
@@ -39,8 +25,8 @@ WORKLOAD_TOKENS = (
 )
 BASE_REQUIRED = (
     "AURACLAW_IMAGE",
+    "AURACLAW_DATABASE_URL",
     "AURACLAW_MIGRATION_DATABASE_URL",
-    *DATABASE_ROLES,
     *WORKLOAD_TOKENS,
     "AURACLAW_LEASE_SIGNING_KEY",
     "AURACLAW_MODEL_API_KEY",
@@ -63,16 +49,6 @@ OBS_REQUIRED = (
     "OBS_SK",
     "OBS_REGION",
 )
-
-
-def _dsn_username(value: str) -> str | None:
-    normalized = (
-        value.replace("postgresql+asyncpg://", "postgresql://")
-        .replace("mysql+aiomysql://", "mysql://")
-        .replace("mysql+asyncmy://", "mysql://")
-        .replace("mysql+pymysql://", "mysql://")
-    )
-    return urlsplit(normalized).username
 
 
 def _compose_file_for_env(env_path: Path) -> Path:
@@ -148,18 +124,6 @@ def main() -> int:
         or ":" not in image.split("/")[-1]
     ):
         failures.append("AURACLAW_IMAGE must use an immutable digest or version/SHA tag")
-
-    role_urls: set[str] = set()
-    for variable, expected_role in DATABASE_ROLES.items():
-        value = values[variable]
-        if not value:
-            continue
-        username = _dsn_username(value)
-        if username != expected_role:
-            failures.append(f"{variable} must authenticate as {expected_role}")
-        if value in role_urls:
-            failures.append(f"{variable} reuses another service DSN")
-        role_urls.add(value)
 
     token_values = [values[name] for name in WORKLOAD_TOKENS if values[name]]
     if any(len(value) < 32 for value in token_values):
