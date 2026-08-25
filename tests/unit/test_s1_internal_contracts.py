@@ -267,6 +267,40 @@ def test_task_api_can_append_user_message_and_cancel_run() -> None:
     asyncio.run(scenario())
 
 
+def test_runtime_can_append_approval_events() -> None:
+    async def scenario() -> None:
+        service = SessionInternalService(
+            InMemoryEventStore(),
+            lease_verifier=_verifier(),
+        )
+        await service.append(_append_request(_assertion(token=1)))
+
+        response = await service.append(
+            _append_request(_assertion(token=2)).model_copy(
+                update={
+                    "command_id": "runtime-approval-request",
+                    "expected_version": 1,
+                    "operation": "runtime.approval.requested",
+                    "events": (
+                        EventInput(
+                            type="approval.requested",
+                            payload={
+                                "approval_id": "apr-runtime-s1",
+                                "run_id": "run-s1",
+                                "tool_name": "controlled-write",
+                                "reason": "write requires approval",
+                            },
+                        ),
+                    ),
+                }
+            )
+        )
+
+        assert [event["type"] for event in response.events] == ["approval.requested"]
+
+    asyncio.run(scenario())
+
+
 def test_session_rejects_event_spoofing_bad_signatures_and_stale_fencing() -> None:
     async def scenario() -> None:
         service = SessionInternalService(
