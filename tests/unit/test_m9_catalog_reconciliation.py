@@ -631,11 +631,62 @@ def test_trusted_remote_tool_annotations_use_safe_defaults_when_missing() -> Non
         metadata={"source": {}},
     )
 
-    capability = _tool_capability(
-        descriptor,
-        "remote-mcp",
-        trust_annotations=True,
-    )
+    capability = _tool_capability(descriptor, "remote-mcp")
 
     assert capability.permission.value == "write-with-approval"
     assert capability.risk_level.value == "high"
+
+
+def test_remote_tool_permission_follows_trust_boundary() -> None:
+    from auraclaw.action.catalog_reconciler import _remote_tool_permission
+    from auraclaw.contracts.hands import HandsToolDescriptor
+
+    read_only = HandsToolDescriptor(
+        name="auramcp.about.auraclaw",
+        version="1",
+        description="About AuraClaw",
+        read_only=True,
+    )
+    write_tool = HandsToolDescriptor(
+        name="auramcp.example.echo",
+        version="1",
+        description="Echo",
+        read_only=False,
+    )
+    untrusted = _server().model_copy(
+        update={"trust_level": CapabilityTrustLevel.EXTERNAL_UNTRUSTED}
+    )
+    trusted = _server()
+
+    assert (
+        _remote_tool_permission(
+            untrusted,
+            read_only,
+            trust_remote_tool_annotations=False,
+        )
+        == "write-with-approval"
+    )
+    assert (
+        _remote_tool_permission(
+            trusted,
+            read_only,
+            trust_remote_tool_annotations=False,
+        )
+        == "read-only"
+    )
+    assert (
+        _remote_tool_permission(
+            untrusted,
+            read_only,
+            trust_remote_tool_annotations=True,
+        )
+        == "read-only"
+    )
+    assert (
+        _remote_tool_permission(
+            trusted,
+            write_tool,
+            trust_remote_tool_annotations=False,
+        )
+        == "write-with-approval"
+    )

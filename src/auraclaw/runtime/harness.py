@@ -8,6 +8,7 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
+from dataclasses import replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
@@ -261,18 +262,32 @@ class AgentHarness:
                 "call_signatures": {},
             }
         )
+        if checkpoint is not None and checkpoint.phase == "capability.approval_waiting":
+            approval_id = str(state.get("approval_id", ""))
+            session_events = await self._session.load(assignment)
+            approved = bool(approval_id) and any(
+                event.type == "approval.approved"
+                and event.payload.get("approval_id") == approval_id
+                for event in session_events
+            )
+            if not approved:
+                await self._control.finish_assignment(
+                    self._task_id(assignment), "waiting_for_human"
+                )
+                return
         turn_events = events
         while int(state.get("steps_used", 0)) < assignment.budget.max_steps:
             await self._guard(assignment)
             turn_index = int(state.get("turn_index", 0))
             model_call_id = f"mdl_{assignment.run_id}_turn_{turn_index + 1}"
             resume_phase = checkpoint.phase if checkpoint is not None else ""
+            if resume_phase == "capability.approval_waiting":
+                resume_phase = "capability.model_completed"
             if (
                 resume_phase
                 in {
                     "capability.model_completed",
                     "capability.call_completed",
-                    "capability.approval_waiting",
                 }
                 and int(state.get("turn_index", -1)) == turn_index
                 and isinstance(state.get("response"), dict)
@@ -384,6 +399,13 @@ class AgentHarness:
             call_index = int(state.get("call_index", 0))
             while call_index < len(response.tool_calls):
                 call = response.tool_calls[call_index]
+                pending_approval_id = state.get("approval_id")
+                if (
+                    pending_approval_id
+                    and call.tool_invocation_id == state.get("tool_invocation_id")
+                    and call.approval_id is None
+                ):
+                    call = replace(call, approval_id=str(pending_approval_id))
                 events = await self._session.load(assignment)
                 await self._append_once(
                     assignment,

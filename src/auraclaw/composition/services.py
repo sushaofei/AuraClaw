@@ -265,14 +265,7 @@ def _skill_registry_service(settings: Settings) -> SkillPackageRegistry:
     )
     _SKILL_PACKAGE_REGISTRY = SkillPackageRegistry(
         artifacts=ArtifactStore(InMemoryObjectStorage(), signing_key=signing_key),
-        signature_verifier=HmacSkillSignatureVerifier(
-            {
-                "ct-model": (
-                    configured_signing_key or b"auraclaw-development-model-skill-key"
-                ),
-                "platform": signing_key,
-            }
-        ),
+        signature_verifier=HmacSkillSignatureVerifier({"platform": signing_key}),
         resources=HandsResourceRegistry(),
     )
     return _SKILL_PACKAGE_REGISTRY

@@ -24,10 +24,7 @@ from auraclaw.infrastructure.projection.postgres_task_store import PostgresTaskP
 
 
 def _mysql_url() -> str | None:
-    """Resolve primary MySQL DSN from Settings / DB_* / explicit smoke overrides.
-
-    Do not use MYSQL_DB_NAME — that is the Model Skill read-only source database.
-    """
+    """Resolve primary MySQL DSN from Settings / DB_* / explicit smoke overrides."""
     settings = get_settings()
     if settings.mysql_enabled:
         return settings.resolved_database_url

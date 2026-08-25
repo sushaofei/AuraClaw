@@ -45,6 +45,7 @@ DEFAULT_EVENT_ALLOWLIST: Mapping[ServiceIdentity, tuple[str, ...]] = {
         "context.",
         "child.",
         "runtime.",
+        "approval.",
     ),
     ServiceIdentity.DELIVERY_WORKER: ("delivery.",),
     ServiceIdentity.POLICY: ("approval.", "policy."),

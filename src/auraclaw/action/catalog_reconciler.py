@@ -18,6 +18,7 @@ from auraclaw.contracts.capabilities import (
     CapabilityDescriptor,
     CapabilityKind,
     CapabilityStatus,
+    CapabilityTrustLevel,
     McpServerDefinition,
 )
 from auraclaw.contracts.hands import (
@@ -138,7 +139,12 @@ class CapabilityCatalogReconciler:
         trusted = _reconcile_context(server)
         try:
             snapshot = await connector.snapshot(trusted)
-            descriptors = _normalize_snapshot(server, snapshot, self._max_items)
+            descriptors = _normalize_snapshot(
+                server,
+                snapshot,
+                self._max_items,
+                trust_remote_tool_annotations=self._trust_remote_tool_annotations,
+            )
             ids = [item.capability_id for item in descriptors]
             if len(ids) != len(set(ids)):
                 raise ValueError("remote connector returned duplicate capabilities")
@@ -265,11 +271,7 @@ class CapabilityCatalogReconciler:
             return
         owner = connector.connector_id
         capabilities = tuple(
-            _tool_capability(
-                descriptor,
-                owner,
-                trust_annotations=self._trust_remote_tool_annotations,
-            )
+            _tool_capability(descriptor, owner)
             for descriptor in snapshot
             if descriptor.kind == CapabilityKind.TOOL
         )
@@ -311,9 +313,17 @@ def _normalize_snapshot(
     server: McpServerDefinition,
     snapshot: CapabilitySnapshot,
     max_items: int,
+    *,
+    trust_remote_tool_annotations: bool = False,
 ) -> tuple[CapabilityDescriptor, ...]:
     items: list[CapabilityDescriptor] = []
-    items.extend(_normalize_tools(server, snapshot.tools))
+    items.extend(
+        _normalize_tools(
+            server,
+            snapshot.tools,
+            trust_remote_tool_annotations=trust_remote_tool_annotations,
+        )
+    )
     items.extend(_normalize_resources(server, snapshot.resources, CapabilityKind.RESOURCE))
     items.extend(
         _normalize_resources(
@@ -329,6 +339,8 @@ def _normalize_snapshot(
 def _normalize_tools(
     server: McpServerDefinition,
     tools: tuple[HandsToolDescriptor, ...],
+    *,
+    trust_remote_tool_annotations: bool = False,
 ) -> tuple[CapabilityDescriptor, ...]:
     normalized: list[CapabilityDescriptor] = []
     for tool in tools:
@@ -349,13 +361,48 @@ def _normalize_tools(
                 source=source,
                 title=tool.name,
                 description=tool.description,
-                permission="read-only" if tool.read_only else "write-with-approval",
-                risk_level=tool.risk_level or "medium",
+                permission=_remote_tool_permission(
+                    server,
+                    tool,
+                    trust_remote_tool_annotations=trust_remote_tool_annotations,
+                ),
+                risk_level=_remote_tool_risk_level(
+                    tool,
+                    trust_remote_tool_annotations=trust_remote_tool_annotations,
+                ),
                 version=_capability_semver(tool.version),
                 tags=_tool_search_tags(server, tool.name),
             )
         )
     return tuple(normalized)
+
+
+def _remote_tool_risk_level(
+    tool: HandsToolDescriptor,
+    *,
+    trust_remote_tool_annotations: bool,
+) -> str:
+    if trust_remote_tool_annotations:
+        return tool.risk_level or "high"
+    return "high"
+
+
+def _remote_tool_permission(
+    server: McpServerDefinition,
+    tool: HandsToolDescriptor,
+    *,
+    trust_remote_tool_annotations: bool,
+) -> str:
+    if not tool.read_only:
+        return "write-with-approval"
+    if trust_remote_tool_annotations:
+        return "read-only"
+    if server.trust_level in {
+        CapabilityTrustLevel.PLATFORM,
+        CapabilityTrustLevel.TENANT_VERIFIED,
+    }:
+        return "read-only"
+    return "write-with-approval"
 
 
 def _normalize_resources(
@@ -460,8 +507,6 @@ def _descriptor(
 def _tool_capability(
     descriptor: CapabilityDescriptor,
     owner: str,
-    *,
-    trust_annotations: bool = False,
 ) -> ToolCapability:
     source = descriptor.metadata.get("source", {})
     if not isinstance(source, dict):
@@ -470,21 +515,16 @@ def _tool_capability(
     output_schema = source.get("outputSchema", {"type": "object"})
     if not isinstance(input_schema, dict) or not isinstance(output_schema, dict):
         raise ValueError("remote MCP Tool schemas are invalid")
-    permission = ToolPermission.WRITE_WITH_APPROVAL
-    risk_level = RiskLevel.HIGH
-    if trust_annotations:
-        permission = ToolPermission(
-            descriptor.permission or ToolPermission.WRITE_WITH_APPROVAL
-        )
-        risk_level = RiskLevel(descriptor.risk_level or RiskLevel.HIGH)
     return ToolCapability(
         name=descriptor.canonical_name,
         version=descriptor.version,
         description=descriptor.description,
         input_schema=input_schema,
         output_schema=output_schema,
-        permission=permission,
-        risk_level=risk_level,
+        permission=ToolPermission(
+            descriptor.permission or ToolPermission.WRITE_WITH_APPROVAL
+        ),
+        risk_level=RiskLevel(descriptor.risk_level or RiskLevel.HIGH),
         runtime_location="remote-mcp",
         owner=owner,
     )
