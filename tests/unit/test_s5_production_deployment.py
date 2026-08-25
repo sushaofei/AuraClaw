@@ -249,6 +249,7 @@ def test_env_templates_are_ready_to_copy() -> None:
         "AURACLAW_MODEL_BASE_URL",
         "AURACLAW_MODEL_NAME",
         "AURACLAW_CREDENTIAL_VAULT_ADDR",
+        "AURACLAW_CORS_ALLOW_ORIGINS",
         "AURACLAW_MIGRATIONS_DIRECTORY",
         "AURACLAW_PORT",
         "AURACLAW_RUNTIME_ID",

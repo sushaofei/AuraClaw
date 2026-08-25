@@ -24,6 +24,7 @@ class HashiCorpVault:
             headers={"X-Vault-Token": token},
             timeout=5.0,
             transport=transport,
+            trust_env=False,
         )
 
     async def aclose(self) -> None:
