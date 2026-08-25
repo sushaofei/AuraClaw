@@ -29,6 +29,7 @@ class CollaborationNode:
     dependency_ids: tuple[str, ...] = ()
     owner: str | None = None
     budget: float = 0.0
+    runtime_budget: dict[str, int | float | None] = field(default_factory=dict)
     status: str = "blocked"
     result: dict[str, Any] | None = None
     target_session_id: str | None = None
@@ -87,6 +88,7 @@ class CollaborationAggregate:
                 output_contract=OutputContract.from_dict(dict(payload["output_contract"])),
                 dependency_ids=tuple(str(item) for item in payload.get("dependency_ids", ())),
                 budget=float(payload.get("budget", 1.0)),
+                runtime_budget=dict(payload.get("runtime_budget", {})),
                 target_session_id=payload.get("target_session_id"),
             )
             self._refresh_runnable()

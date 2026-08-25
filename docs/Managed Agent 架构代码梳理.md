@@ -464,13 +464,20 @@ Canonical 终态 / delivery Outbox
 ### 4.6 协作（Coordinator 语义拆分）
 
 ```text
-CoordinatorRole / CollaborationService
-  → create_child / 合同 / 委派 / Join
-  → Canonical Events → Collaboration Projection（runnable children）
-  → Orchestrator 只消费 runnable，不拆 DAG
-WorkerRole → publish_child_result
-ReviewerRole → publish_review（独立 Review Session，不覆盖 Worker Artifact）
+AgentHarness（按 Assignment.role 暴露工具）
+  → RuntimeCollaborationController
+  → RemoteCollaborationClient + 签名 Lease Assertion
+  → CollaborationInternalService（派生 actor、校验角色/Lease/版本）
+  → CollaborationService → Canonical Events
+  → RunnableFeedConsumer 按 Root Feed 重算 runnable / 唤醒等待中的 Root
+
+Coordinator → create_child / set_dependencies / request_review / await_children / join
+Worker / Repair → publish_result
+Reviewer → publish_review（独立 Review Session，不覆盖 Worker Artifact）
 ```
+
+Runtime 实例统一注册到 `agent` Pool；`root`、`worker`、`reviewer`、`repair` 是 Assignment 的语义
+角色。V1 模型工具不暴露 `delegate` / `handoff`，Service 能力与 owner 事件语义继续保留。
 
 ---
 

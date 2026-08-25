@@ -401,6 +401,7 @@ def test_production_task_api_requires_signed_context() -> None:
         Settings(
             _env_file=None,
             deployment_profile="production",
+            storage_backend="memory",
             chaintower_workload_token=SecretStr(WORKLOAD),
             agent_context_signing_keys_json='{"k1":"chaintower-agent-context-signing-key-01"}',
         )

@@ -17,6 +17,8 @@ from auraclaw.contracts.internal import (
     SessionAppendResponse,
     SessionFeedRequest,
     SessionFeedResponse,
+    SessionRootFeedRequest,
+    SessionRootFeedResponse,
 )
 from auraclaw.contracts.state import Visibility
 from auraclaw.infrastructure.persistence.memory_event_store import (
@@ -172,6 +174,24 @@ class SessionInternalService:
         return SessionFeedResponse(
             events=tuple(event.as_dict() for event in page),
             next_version=next_version,
+        )
+
+    async def root_feed(
+        self, request: SessionRootFeedRequest
+    ) -> SessionRootFeedResponse:
+        if request.context.service_identity not in {
+            ServiceIdentity.ORCHESTRATOR,
+            ServiceIdentity.PROJECTION_WORKER,
+        }:
+            raise AuthorizationError("root feed is restricted to control and projection")
+        events = await self._event_store.load_root(
+            request.context.tenant_id,
+            request.root_session_id,
+            event_types=request.event_types,
+            limit=request.limit,
+        )
+        return SessionRootFeedResponse(
+            events=tuple(event.as_dict() for event in events)
         )
 
     @staticmethod

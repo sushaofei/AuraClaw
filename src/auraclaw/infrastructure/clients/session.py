@@ -21,6 +21,8 @@ from auraclaw.contracts.internal import (
     SessionAppendResponse,
     SessionFeedRequest,
     SessionFeedResponse,
+    SessionRootFeedRequest,
+    SessionRootFeedResponse,
 )
 from auraclaw.contracts.state import Visibility
 from auraclaw.internal.http import HttpContractClient
@@ -172,6 +174,36 @@ class RemoteSessionEventStore:
     async def load_all(self, tenant_id: str | None = None) -> list[CanonicalEvent]:
         del tenant_id
         self._unsupported("load_all")
+
+    async def load_root(
+        self,
+        tenant_id: str,
+        root_session_id: str,
+        *,
+        event_types: Sequence[str] | None = None,
+        limit: int | None = None,
+    ) -> list[CanonicalEvent]:
+        response = await self._contract.call(
+            "/internal/v1/session/root-feed",
+            SessionRootFeedRequest(
+                context=InternalRequestContext(
+                    tenant_id=tenant_id,
+                    service_identity=self._identity,
+                    request_id=f"root-feed:{root_session_id}",
+                    correlation_id=f"root-feed:{root_session_id}",
+                    causation_id=f"root-feed:{root_session_id}",
+                ),
+                root_session_id=root_session_id,
+                event_types=(
+                    tuple(event_types) if event_types is not None else None
+                ),
+                limit=limit or 5000,
+            ),
+            SessionRootFeedResponse,
+        )
+        return [
+            canonical_event_from_dict(dict(event)) for event in response.events
+        ]
 
     async def get_snapshot(
         self, tenant_id: str, session_id: str

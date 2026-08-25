@@ -10,6 +10,7 @@ from auraclaw.contracts.errors import (
     LeaseConflictError,
 )
 from auraclaw.control.ports import (
+    AGENT_RUNTIME_POOL,
     DEFAULT_RUNTIME_MAX_STEPS,
     ClaimedAssignment,
     ClaimedRunnable,
@@ -381,6 +382,7 @@ class PostgresControlStateStore(_LazyPool):
                     "expired",
                     "completed",
                     "failed",
+                    "waiting_children",
                 }:
                     return False
                 await connection.execute(
@@ -430,7 +432,7 @@ class PostgresControlStateStore(_LazyPool):
                       fencing_token=EXCLUDED.fencing_token, role=EXCLUDED.role,
                       resource_profile=EXCLUDED.resource_profile
                     WHERE control.assignment.assignment_status
-                      IN ('expired','completed','failed')
+                      IN ('expired','completed','failed','waiting_children')
                     RETURNING task_id
                     """,
                     task_id,
@@ -494,13 +496,14 @@ class PostgresControlStateStore(_LazyPool):
             LEFT JOIN control.assignment assignment
               ON assignment.runtime_id=runtime.runtime_id
              AND assignment.assignment_status IN ('assigned','running')
-            WHERE runtime.role=$1 AND runtime.status='ready'
+            WHERE runtime.role IN ($1, $2) AND runtime.status='ready'
               AND runtime.last_heartbeat_at > now() - interval '30 seconds'
-              AND runtime.capabilities @> $2::jsonb
+              AND runtime.capabilities @> $3::jsonb
             GROUP BY runtime.runtime_id
             HAVING count(assignment.task_id) < runtime.capacity
             ORDER BY count(assignment.task_id),runtime.last_heartbeat_at DESC,runtime.runtime_id
             LIMIT 1""",
+            AGENT_RUNTIME_POOL,
             item.role,
             _json(item.required_capability),
         )
@@ -524,7 +527,12 @@ class PostgresControlStateStore(_LazyPool):
         rows = await pool.fetch(
             """WITH candidates AS (
                 SELECT task_id FROM control.assignment
-                WHERE runtime_id=$1 AND role=$2
+                WHERE runtime_id=$1
+                  AND EXISTS (
+                    SELECT 1 FROM control.runtime_instance runtime
+                    WHERE runtime.runtime_id=$1 AND runtime.role=$2
+                      AND runtime.status='ready'
+                  )
                   AND (
                     assignment_status='assigned'
                     OR (
@@ -569,7 +577,12 @@ class PostgresControlStateStore(_LazyPool):
             rows = await connection.fetch(
                 """
                 SELECT task_id FROM control.assignment
-                WHERE runtime_id=$1 AND role=$2
+                WHERE runtime_id=$1
+                  AND EXISTS (
+                    SELECT 1 FROM control.runtime_instance runtime
+                    WHERE runtime.runtime_id=$1 AND runtime.role=$2
+                      AND runtime.status='ready'
+                  )
                   AND (
                     assignment_status='assigned'
                     OR (
@@ -610,7 +623,7 @@ class PostgresControlStateStore(_LazyPool):
     async def finish_assignment(self, task_id: str, outcome: str) -> None:
         pool = await self.pool()
         async with pool.acquire() as connection, connection.transaction():
-            if outcome in {"completed", "failed", "cancelled"}:
+            if outcome in {"completed", "failed", "cancelled", "waiting_children"}:
                 if self.dialect == "mysql":
                     await connection.execute(
                         """
@@ -645,6 +658,38 @@ class PostgresControlStateStore(_LazyPool):
                 "UPDATE control.runnable_item SET status='acked' WHERE task_id=$1", task_id
             )
 
+    async def suspend_assignment(self, task_id: str, reason: str) -> None:
+        if reason != "waiting_children":
+            raise ValueError(f"unsupported assignment suspension: {reason}")
+        await self.finish_assignment(task_id, reason)
+
+    async def wake_assignment(self, task_id: str) -> bool:
+        pool = await self.pool()
+        async with pool.acquire() as connection, connection.transaction():
+            status = await connection.fetchval(
+                "SELECT assignment_status FROM control.assignment WHERE task_id=$1 FOR UPDATE",
+                task_id,
+            )
+            if status is None or str(status) != "waiting_children":
+                return False
+            if self.dialect == "mysql":
+                await connection.execute(
+                    """UPDATE control.runnable_item
+                    SET status='queued', claimed_by=NULL, claim_token=NULL,
+                        claim_expires_at=NULL, available_at=now()
+                    WHERE task_id=$1""",
+                    task_id,
+                )
+                return True
+            updated = await connection.fetchval(
+                """UPDATE control.runnable_item
+                SET status='queued', claimed_by=NULL, claim_token=NULL,
+                    claim_expires_at=NULL, available_at=now()
+                WHERE task_id=$1 RETURNING task_id""",
+                task_id,
+            )
+            return updated is not None
+
     async def register_runtime(self, instance: RuntimeInstance) -> None:
         pool = await self.pool()
         await pool.execute(
@@ -653,7 +698,9 @@ class PostgresControlStateStore(_LazyPool):
               (runtime_id,runtime_type,role,node_id,capabilities,status,capacity)
             VALUES ($1,$2,$3,$4,$5::jsonb,'ready',$6)
             ON CONFLICT (runtime_id) DO UPDATE SET status='ready',
-              capabilities=EXCLUDED.capabilities, capacity=EXCLUDED.capacity,
+              runtime_type=EXCLUDED.runtime_type, role=EXCLUDED.role,
+              node_id=EXCLUDED.node_id, capabilities=EXCLUDED.capabilities,
+              capacity=EXCLUDED.capacity,
               last_heartbeat_at=now()
             """,
             instance.runtime_id,

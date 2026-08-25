@@ -21,6 +21,8 @@ from auraclaw.contracts.internal import (
     CancellationRequest,
     CancellationResponse,
     CheckpointResponse,
+    CollaborationCommandRequest,
+    CollaborationCommandResponse,
     CredentialInvokeRequest,
     CredentialInvokeResponse,
     CredentialResourceRequest,
@@ -53,6 +55,8 @@ from auraclaw.contracts.internal import (
     SessionAppendResponse,
     SessionFeedRequest,
     SessionFeedResponse,
+    SessionRootFeedRequest,
+    SessionRootFeedResponse,
     ValidateLeaseRequest,
     ValidateLeaseResponse,
 )
@@ -66,6 +70,7 @@ from auraclaw.internal.http import (
 )
 from auraclaw.model_gateway.internal_service import ModelGatewayInternalService
 from auraclaw.policy.internal_service import PolicyInternalService
+from auraclaw.session.collaboration_internal_service import CollaborationInternalService
 from auraclaw.session.internal_service import SessionInternalService
 
 
@@ -77,6 +82,9 @@ def session_routes(service: SessionInternalService) -> dict[str, ContractRoute]:
         "/internal/v1/session/feed": contract_route(
             SessionFeedRequest, SessionFeedResponse, service.feed
         ),
+        "/internal/v1/session/root-feed": contract_route(
+            SessionRootFeedRequest, SessionRootFeedResponse, service.root_feed
+        ),
         "/internal/v1/session/outbox/claim": contract_route(
             OutboxClaimRequest, OutboxClaimResponse, service.claim_outbox
         ),
@@ -85,6 +93,18 @@ def session_routes(service: SessionInternalService) -> dict[str, ContractRoute]:
             OutboxDispositionResponse,
             service.disposition_outbox,
         ),
+    }
+
+
+def collaboration_routes(
+    service: CollaborationInternalService,
+) -> dict[str, ContractRoute]:
+    return {
+        "/internal/v1/collaboration/command": contract_route(
+            CollaborationCommandRequest,
+            CollaborationCommandResponse,
+            service.command,
+        )
     }
 
 

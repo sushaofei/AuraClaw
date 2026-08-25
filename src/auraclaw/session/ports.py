@@ -48,6 +48,15 @@ class EventStore(Protocol):
 
     async def load_all(self, tenant_id: str | None = None) -> list[CanonicalEvent]: ...
 
+    async def load_root(
+        self,
+        tenant_id: str,
+        root_session_id: str,
+        *,
+        event_types: Sequence[str] | None = None,
+        limit: int | None = None,
+    ) -> list[CanonicalEvent]: ...
+
     async def get_snapshot(self, tenant_id: str, session_id: str) -> SessionSnapshot | None: ...
 
     async def save_snapshot(self, snapshot: SessionSnapshot) -> None: ...

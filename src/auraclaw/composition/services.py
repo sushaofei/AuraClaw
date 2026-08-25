@@ -107,6 +107,7 @@ from auraclaw.infrastructure.clients.policy import (
     RemoteTaskAdmissionController,
 )
 from auraclaw.infrastructure.clients.runtime import (
+    RemoteCollaborationClient,
     RemoteOrchestratorSessionClient,
     RemoteRuntimeControlClient,
     RemoteRuntimeSessionClient,
@@ -186,6 +187,7 @@ from auraclaw.internal.http import HttpContractClient, create_contract_app
 from auraclaw.internal.routes import (
     admin_routes,
     artifact_routes,
+    collaboration_routes,
     control_routes,
     credential_routes,
     mcp_registry_routes,
@@ -211,9 +213,12 @@ from auraclaw.projection.ports import (
 )
 from auraclaw.projection.relay import OutboxRelay
 from auraclaw.runtime.capability_controller import RuntimeCapabilityController
+from auraclaw.runtime.collaboration_controller import RuntimeCollaborationController
 from auraclaw.runtime.hands_adapter import HandsRuntimeAdapter
 from auraclaw.runtime.hands_client import HttpHandsClient
 from auraclaw.runtime.harness import AgentHarness
+from auraclaw.session.collaboration_internal_service import CollaborationInternalService
+from auraclaw.session.collaboration_service import CollaborationService
 from auraclaw.session.internal_service import SessionInternalService
 from auraclaw.session.task_service import TaskService
 
@@ -1034,8 +1039,18 @@ def _session_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         ledger=InMemoryFencingTokenLedger(),
         audience=("session", "runtime"),
     )
+    event_store = providers.get_event_store()
     service = SessionInternalService(
-        providers.get_event_store(),
+        event_store,
+        lease_verifier=verifier,
+        outbox_wake=None if wake is None else wake.schedule,
+    )
+    collaboration_service = CollaborationInternalService(
+        CollaborationService(
+            event_store=event_store,
+            relay=NoOpOutboxRelay(),
+        ),
+        event_store,
         lease_verifier=verifier,
         outbox_wake=None if wake is None else wake.schedule,
     )
@@ -1053,7 +1068,7 @@ def _session_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
     )
     contract_app = create_contract_app(
         "session",
-        session_routes(service),
+        {**session_routes(service), **collaboration_routes(collaboration_service)},
         workload_identities=identities,
     )
     app.mount("/", contract_app)
@@ -1876,6 +1891,10 @@ def _runtime_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         settings.session_base_url,
         bearer_token=bearer_token,
     )
+    collaboration = RemoteCollaborationClient(
+        settings.session_base_url,
+        bearer_token=bearer_token,
+    )
     model = RemoteModelClient(
         settings.model_gateway_base_url,
         bearer_token=bearer_token,
@@ -1898,6 +1917,7 @@ def _runtime_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         tools=hands,
         runtime_events=providers.get_runtime_event_publisher(),
         capability_controller=RuntimeCapabilityController(hands),
+        collaboration_controller=RuntimeCollaborationController(collaboration),
     )
     worker = RemoteRuntimeWorker(control, harness)
     app = _base_service_app(
@@ -1905,7 +1925,7 @@ def _runtime_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         settings,
         tick=worker.tick,
         worker_interval=settings.runtime_poll_interval,
-        closeables=(control, session, model, hands_http),
+        closeables=(control, session, collaboration, model, hands_http),
     )
     app.state.data_access = "remote-only"
 

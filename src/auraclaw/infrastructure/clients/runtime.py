@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import UTC, datetime
+from typing import Any
 
 import httpx
 
@@ -16,6 +17,8 @@ from auraclaw.contracts.internal import (
     CancellationResponse,
     CheckpointResponse,
     CheckpointState,
+    CollaborationCommandRequest,
+    CollaborationCommandResponse,
     EventInput,
     InternalRequestContext,
     LoadCheckpointRequest,
@@ -124,7 +127,6 @@ class RemoteRuntimeSessionClient:
             SessionFeedResponse,
         )
         return [canonical_event_from_dict(event) for event in response.events]
-
     async def append(
         self,
         assignment: RuntimeAssignment,
@@ -199,6 +201,51 @@ class RemoteRuntimeSessionClient:
             SessionAppendResponse,
         )
         return [canonical_event_from_dict(event) for event in response.events]
+
+
+class RemoteCollaborationClient:
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        bearer_token: str,
+        timeout: float = 10.0,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        self._client = httpx.AsyncClient(
+            base_url=base_url, timeout=timeout, transport=transport
+        )
+        self._contract = HttpContractClient(self._client, bearer_token=bearer_token)
+
+    async def aclose(self) -> None:
+        await self._client.aclose()
+
+    async def execute(
+        self,
+        assignment: RuntimeAssignment,
+        *,
+        operation: str,
+        arguments: dict[str, Any],
+        command_id: str,
+    ) -> dict[str, Any]:
+        if assignment.lease_assertion is None:
+            raise RuntimeError("Runtime assignment has no signed lease assertion")
+        response = await self._contract.call(
+            "/internal/v1/collaboration/command",
+            CollaborationCommandRequest(
+                context=_context(
+                    assignment.tenant_id, command_id, assignment.run_id
+                ),
+                lease_assertion=assignment.lease_assertion,
+                root_session_id=assignment.root_session_id,
+                session_id=assignment.session_id,
+                command_id=command_id,
+                operation=operation,
+                arguments=dict(arguments),
+            ),
+            CollaborationCommandResponse,
+        )
+        return dict(response.result)
 
 
 class RemoteOrchestratorSessionClient:
@@ -527,6 +574,34 @@ class RemoteRuntimeControlClient:
                 fencing_token=entry.fencing_token,
                 disposition=disposition,
                 outcome=outcome,
+            ),
+            AssignmentDispositionResponse,
+        )
+        for key, (known_task_id, _) in list(self._assignments.items()):
+            if known_task_id == task_id:
+                self._assignments.pop(key, None)
+
+    async def suspend_assignment(self, task_id: str, reason: str) -> None:
+        entry = next(
+            (
+                assignment
+                for known_task_id, assignment in self._assignments.values()
+                if known_task_id == task_id
+            ),
+            None,
+        )
+        if entry is None:
+            raise RuntimeError("Runtime does not own this task")
+        await self._contract.call(
+            "/internal/v1/control/assignments/disposition",
+            AssignmentDispositionRequest(
+                context=_context(entry.tenant_id, f"suspend:{task_id}", entry.run_id),
+                task_id=task_id,
+                runtime_id=entry.runtime_id,
+                lease_id=entry.lease_id,
+                fencing_token=entry.fencing_token,
+                disposition="suspend",
+                outcome=reason,
             ),
             AssignmentDispositionResponse,
         )
