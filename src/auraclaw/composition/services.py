@@ -1261,7 +1261,20 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
             )
             mcp_registry.bind_runtime(manager)
             app.state.mcp_connection_manager = manager
-            await manager.restore()
+            for attempt in range(20):
+                try:
+                    await manager.restore()
+                    break
+                except Exception as exc:
+                    if attempt >= 19:
+                        raise
+                    logger.warning(
+                        "Action Hands startup dependency is unavailable; "
+                        "retrying MCP restore (%s/20, error=%s)",
+                        attempt + 1,
+                        type(exc).__name__,
+                    )
+                    await asyncio.sleep(0.5)
         for java_server in settings.java_api_servers:
             catalog_server = catalog_server_definition(java_server)
             await capability_catalog.register_server(catalog_server)
