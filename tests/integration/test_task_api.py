@@ -1,12 +1,15 @@
 import asyncio
 from datetime import UTC, datetime, timedelta
 
+import httpx
 from fastapi.testclient import TestClient
 
 from auraclaw.composition.providers import (
     get_approval_projection,
     get_event_store,
+    get_sync_invocation_gateway,
     get_task_projection,
+    get_task_result_waiter,
     get_task_service,
 )
 from auraclaw.config import get_settings
@@ -20,10 +23,13 @@ def setup_function() -> None:
     get_settings().storage_backend = "memory"
     get_settings().runtime_event_backend = "memory"
     get_settings().allow_insecure_identity_headers = True
+    get_settings().sync_invoke_poll_interval_seconds = 0.05
     get_task_service.cache_clear()
     get_event_store.cache_clear()
     get_task_projection.cache_clear()
     get_approval_projection.cache_clear()
+    get_task_result_waiter.cache_clear()
+    get_sync_invocation_gateway.cache_clear()
 
 
 def test_cancelled_run_leaves_root_session_ready_and_session_can_be_closed() -> None:
@@ -273,3 +279,209 @@ def test_create_records_source_and_lists_root_tasks() -> None:
 
         other = client.get("/v1/tasks", headers={"X-Tenant-ID": "tenant-other"})
         assert other.json()["tasks"] == []
+
+
+def _async_client(app: object) -> httpx.AsyncClient:
+    return httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    )
+
+
+def test_sync_invoke_times_out_without_cancelling_the_session() -> None:
+    async def scenario() -> None:
+        app = create_app(profile="task-api")
+        async with _async_client(app) as client:
+            response = await client.post(
+                "/v1/tasks/sync",
+                headers={"Idempotency-Key": "sync-timeout", "X-Tenant-ID": "tenant-sync"},
+                json={"goal": "a long running analysis", "timeout_seconds": 1},
+            )
+            assert response.status_code == 202
+            body = response.json()
+            assert body["wait_outcome"] == "timeout"
+            assert body["status"] == "pending"
+            assert "result_url" in body
+            session_id = body["session_id"]
+            task = await client.get(
+                f"/v1/tasks/{session_id}", headers={"X-Tenant-ID": "tenant-sync"}
+            )
+            assert task.status_code == 200
+            assert task.json()["run_status"] == "pending"
+
+    asyncio.run(scenario())
+
+
+def test_sync_invoke_reuses_idempotent_session_and_returns_cancelled() -> None:
+    async def scenario() -> None:
+        app = create_app(profile="task-api")
+        headers = {"X-Tenant-ID": "tenant-sync-cancel"}
+        async with _async_client(app) as client:
+            created = await client.post(
+                "/v1/tasks",
+                headers={**headers, "Idempotency-Key": "sync-same-key"},
+                json={"goal": "cancel while waiting"},
+            )
+            assert created.status_code == 202
+            session_id = created.json()["session_id"]
+            wait = asyncio.create_task(
+                client.post(
+                    "/v1/tasks/sync",
+                    headers={**headers, "Idempotency-Key": "sync-same-key"},
+                    json={"goal": "cancel while waiting", "timeout_seconds": 5},
+                )
+            )
+            await asyncio.sleep(0.05)
+            async with _async_client(app) as other:
+                cancelled = await other.post(
+                    f"/v1/sessions/{session_id}/cancel",
+                    headers={
+                        **headers,
+                        "Idempotency-Key": "sync-cancel-run",
+                        "X-Expected-Version": "2",
+                    },
+                    json={"reason": "stop waiting"},
+                )
+            assert cancelled.status_code == 202
+            response = await wait
+            assert response.status_code == 200
+            body = response.json()
+            assert body["session_id"] == session_id
+            assert body["wait_outcome"] == "cancelled"
+            assert body["status"] == "cancelled"
+
+    asyncio.run(scenario())
+
+
+def test_result_wait_returns_after_cancel() -> None:
+    async def scenario() -> None:
+        app = create_app(profile="task-api")
+        headers = {"X-Tenant-ID": "tenant-result-wait"}
+        async with _async_client(app) as client:
+            created = await client.post(
+                "/v1/tasks",
+                headers={**headers, "Idempotency-Key": "result-wait-create"},
+                json={"goal": "wait on existing session"},
+            )
+            session_id = created.json()["session_id"]
+            wait = asyncio.create_task(
+                client.get(
+                    f"/v1/tasks/{session_id}/result",
+                    headers=headers,
+                    params={"wait": "true", "timeout_seconds": 5},
+                )
+            )
+            await asyncio.sleep(0.05)
+            async with _async_client(app) as other:
+                await other.post(
+                    f"/v1/sessions/{session_id}/cancel",
+                    headers={
+                        **headers,
+                        "Idempotency-Key": "result-wait-cancel",
+                        "X-Expected-Version": "2",
+                    },
+                    json={"reason": "done"},
+                )
+            response = await wait
+            assert response.status_code == 200
+            assert response.json()["wait_outcome"] == "cancelled"
+
+            snapshot = await client.get(
+                f"/v1/tasks/{session_id}/result", headers=headers
+            )
+            assert snapshot.status_code == 200
+            assert "wait_outcome" not in snapshot.json()
+
+    asyncio.run(scenario())
+
+
+def test_result_wait_returns_conflict_when_waiting_for_human() -> None:
+    async def scenario() -> None:
+        app = create_app(profile="task-api")
+        headers = {"X-Tenant-ID": "tenant-sync-hitl"}
+        async with _async_client(app) as client:
+            created = await client.post(
+                "/v1/tasks",
+                headers={**headers, "Idempotency-Key": "sync-hitl-create"},
+                json={"goal": "needs approval"},
+            )
+            session_id = created.json()["session_id"]
+            run_id = created.json()["run_id"]
+            store = get_event_store()
+            result = await store.append(
+                root_session_id=session_id,
+                session_id=session_id,
+                run_id=run_id,
+                context=CommandContext(
+                    command_id="runtime-approval-request-sync",
+                    tenant_id="tenant-sync-hitl",
+                    actor=Actor(type="runtime", id="runtime-1"),
+                    correlation_id=run_id,
+                    expected_version=2,
+                    operation="runtime.approval.requested",
+                ),
+                events=[
+                    NewEvent(
+                        type="approval.requested",
+                        payload={
+                            "approval_id": "apr-sync",
+                            "run_id": run_id,
+                            "action_digest": "digest-sync",
+                            "tool_name": "controlled-write",
+                            "redacted_arguments": {"target": "release"},
+                            "risk": "high",
+                            "reason": "write requires approval",
+                            "expected_effect": "write",
+                            "allowed_decisions": ["approved", "rejected"],
+                            "assigned_approvers": ["approver-1"],
+                            "policy_version": "m3-v1",
+                            "expires_at": (
+                                datetime.now(UTC) + timedelta(hours=1)
+                            ).isoformat(),
+                            "status": "waiting",
+                        },
+                    )
+                ],
+                command_result={"approval_id": "apr-sync"},
+            )
+            await CompositeProjection(
+                get_task_projection(), get_approval_projection()
+            ).project(result.events)
+
+            response = await client.get(
+                f"/v1/tasks/{session_id}/result",
+                headers=headers,
+                params={"wait": "true", "timeout_seconds": 5},
+            )
+            assert response.status_code == 409
+            body = response.json()
+            assert body["code"] == "needs_human"
+            assert body["wait_outcome"] == "needs_human"
+
+    asyncio.run(scenario())
+
+
+def test_sync_invoke_rejects_schedule_fields() -> None:
+    with TestClient(create_app(profile="task-api")) as client:
+        response = client.post(
+            "/v1/tasks/sync",
+            headers={"Idempotency-Key": "sync-schedule", "X-Tenant-ID": "tenant-1"},
+            json={
+                "goal": "timer must not use sync",
+                "source": "schedule",
+                "schedule_id": "sch_daily",
+                "occurrence_id": "2026-08-25T01:00:00Z",
+            },
+        )
+        assert response.status_code == 422
+
+
+def test_create_task_still_returns_accepted() -> None:
+    with TestClient(create_app(profile="task-api")) as client:
+        response = client.post(
+            "/v1/tasks",
+            headers={"Idempotency-Key": "still-async", "X-Tenant-ID": "tenant-1"},
+            json={"goal": "keep 202"},
+        )
+        assert response.status_code == 202
+        assert "wait_outcome" not in response.json()

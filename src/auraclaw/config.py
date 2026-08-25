@@ -254,6 +254,10 @@ class Settings(BaseSettings):
     projection_worker_interval: float = Field(default=0.1, ge=0.01, le=30.0)
     orchestrator_worker_interval: float = Field(default=0.1, ge=0.01, le=30.0)
     orchestrator_lease_ttl_seconds: int = Field(default=300, ge=30, le=3600)
+    sync_invoke_default_timeout_seconds: int = Field(default=60, ge=1, le=3600)
+    sync_invoke_max_timeout_seconds: int = Field(default=120, ge=1, le=3600)
+    sync_invoke_poll_interval_seconds: float = Field(default=0.25, ge=0.05, le=5.0)
+    sync_invoke_max_concurrent: int = Field(default=32, ge=1, le=1000)
     runtime_id: str = "runtime-local-1"
     runtime_role: str = "root"
     runtime_node_id: str = "local"

@@ -4,10 +4,17 @@ class AuraClawError(Exception):
     code = "auraclaw_error"
     status_code = 500
 
-    def __init__(self, message: str, *, detail: str | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        detail: str | None = None,
+        retry_after: int | None = None,
+    ) -> None:
         super().__init__(message)
         self.message = message
         self.detail = detail
+        self.retry_after = retry_after
 
 
 class NotFoundError(AuraClawError):
@@ -108,3 +115,17 @@ class CredentialAccessError(AuraClawError):
 class CollaborationValidationError(AuraClawError):
     code = "collaboration_invalid"
     status_code = 409
+
+
+class SyncInvokeBusyError(AuraClawError):
+    code = "sync_invoke_busy"
+    status_code = 429
+
+    def __init__(
+        self,
+        message: str = "too many synchronous waits",
+        *,
+        detail: str | None = None,
+        retry_after: int = 2,
+    ) -> None:
+        super().__init__(message, detail=detail, retry_after=retry_after)

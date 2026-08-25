@@ -14,8 +14,10 @@ from auraclaw.contracts.identity import (
     identity_error,
 )
 from auraclaw.gateways.query.reader import TaskQueryService
+from auraclaw.gateways.query.waiter import TaskResultWaiter
 from auraclaw.gateways.streaming.gateway import StreamingGateway
 from auraclaw.gateways.task.commands import TaskCommandGateway
+from auraclaw.gateways.task.invocations import SyncInvocationGateway
 from auraclaw.observability.service import ObservabilityService
 from auraclaw.projection.ports import CollaborationReader, TaskReader
 
@@ -162,6 +164,14 @@ def get_task_projection() -> TaskReader:
 
 def get_task_query_service() -> TaskQueryService:
     raise RuntimeError("TaskQueryService dependency was not configured by composition")
+
+
+def get_task_result_waiter() -> TaskResultWaiter:
+    raise RuntimeError("TaskResultWaiter dependency was not configured by composition")
+
+
+def get_sync_invocation_gateway() -> SyncInvocationGateway:
+    raise RuntimeError("SyncInvocationGateway dependency was not configured by composition")
 
 
 def get_collaboration_projection() -> CollaborationReader:

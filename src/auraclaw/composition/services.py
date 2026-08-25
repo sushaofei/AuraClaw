@@ -57,9 +57,11 @@ from auraclaw.api.dependencies import (
     get_collaboration_projection,
     get_observability_service,
     get_streaming_gateway,
+    get_sync_invocation_gateway,
     get_task_command_gateway,
     get_task_projection,
     get_task_query_service,
+    get_task_result_waiter,
 )
 from auraclaw.api.routes.admin_mcp import create_mcp_admin_router
 from auraclaw.api.routes.admin_skills import create_skill_admin_router
@@ -89,8 +91,10 @@ from auraclaw.control.runnable_feed import RunnableFeedConsumer
 from auraclaw.credential_proxy.internal_service import CredentialProxyInternalService
 from auraclaw.delivery.worker import ResultDeliveryWorker
 from auraclaw.gateways.query.reader import TaskQueryService
+from auraclaw.gateways.query.waiter import TaskResultWaiter
 from auraclaw.gateways.streaming.gateway import StreamingGateway
 from auraclaw.gateways.task.commands import TaskCommandGateway
+from auraclaw.gateways.task.invocations import SyncInvocationGateway
 from auraclaw.infrastructure.artifacts.seaweedfs import (
     SeaweedFSMultipartClient,
     SeaweedFSS3Presigner,
@@ -595,10 +599,20 @@ def _task_api_app(settings: Settings) -> FastAPI:
     )
     gateway = TaskCommandGateway(task_service)
     query = TaskQueryService(task_projection, collaboration_projection, remote_session)
+    waiter = TaskResultWaiter(
+        query,
+        poll_interval=settings.sync_invoke_poll_interval_seconds,
+        max_concurrent=settings.sync_invoke_max_concurrent,
+        default_timeout_seconds=settings.sync_invoke_default_timeout_seconds,
+        max_timeout_seconds=settings.sync_invoke_max_timeout_seconds,
+    )
+    invocations = SyncInvocationGateway(gateway, waiter)
     observability = ObservabilityService(InMemoryObservabilityStore(), remote_session)
     app.dependency_overrides[get_task_command_gateway] = lambda: gateway
     app.dependency_overrides[get_task_projection] = lambda: task_projection
     app.dependency_overrides[get_task_query_service] = lambda: query
+    app.dependency_overrides[get_task_result_waiter] = lambda: waiter
+    app.dependency_overrides[get_sync_invocation_gateway] = lambda: invocations
     app.dependency_overrides[get_collaboration_projection] = lambda: (
         collaboration_projection
     )

@@ -5,8 +5,10 @@ from fastapi import APIRouter, Depends, Header, Query, Response, status
 from auraclaw.api.dependencies import (
     RequestIdentity,
     command_context,
+    get_sync_invocation_gateway,
     get_task_command_gateway,
     get_task_query_service,
+    get_task_result_waiter,
     request_identity,
 )
 from auraclaw.api.models import (
@@ -17,17 +19,38 @@ from auraclaw.api.models import (
     CloseSessionRequest,
     CommandResponse,
     CreateTaskRequest,
+    SyncCreateTaskRequest,
     TaskAcceptedResponse,
     TaskListResponse,
     TaskView,
 )
 from auraclaw.gateways.query.reader import TaskQueryService
+from auraclaw.gateways.query.waiter import TaskResultWaiter, WaitedResult, decorate_result
 from auraclaw.gateways.task.commands import TaskCommandGateway
+from auraclaw.gateways.task.invocations import SyncInvocationGateway
 
 router = APIRouter(prefix="/v1", tags=["tasks"])
 Identity = Annotated[RequestIdentity, Depends(request_identity)]
 TaskCommandDependency = Annotated[TaskCommandGateway, Depends(get_task_command_gateway)]
 TaskQueryDependency = Annotated[TaskQueryService, Depends(get_task_query_service)]
+TaskWaiterDependency = Annotated[TaskResultWaiter, Depends(get_task_result_waiter)]
+SyncInvocationDependency = Annotated[
+    SyncInvocationGateway, Depends(get_sync_invocation_gateway)
+]
+
+
+def _apply_wait_outcome(
+    response: Response, waited: WaitedResult, session_id: str
+) -> dict[str, Any]:
+    body = decorate_result(waited.result, session_id=session_id, outcome=waited.outcome)
+    if waited.outcome == "timeout":
+        response.status_code = status.HTTP_202_ACCEPTED
+        response.headers["Retry-After"] = "2"
+    elif waited.outcome in {"needs_human", "needs_resume"}:
+        response.status_code = status.HTTP_409_CONFLICT
+    else:
+        response.status_code = status.HTTP_200_OK
+    return body
 
 
 @router.post("/tasks", response_model=TaskAcceptedResponse, status_code=status.HTTP_202_ACCEPTED)
@@ -50,6 +73,28 @@ async def create_task(
         schedule_id=request.schedule_id,
         occurrence_id=request.occurrence_id,
     )
+
+
+@router.post("/tasks/sync")
+async def sync_invoke_task(
+    request: SyncCreateTaskRequest,
+    response: Response,
+    identity: Identity,
+    service: SyncInvocationDependency,
+    idempotency_key: str = Header(alias="Idempotency-Key", min_length=1),
+) -> dict[str, Any]:
+    context = command_context(
+        identity=identity,
+        command_id=idempotency_key,
+        expected_version=0,
+        operation="create_task",
+    )
+    accepted, waited = await service.invoke(
+        goal=request.goal,
+        context=context,
+        timeout_seconds=request.timeout_seconds,
+    )
+    return _apply_wait_outcome(response, waited, str(accepted["session_id"]))
 
 
 @router.get("/tasks", response_model=TaskListResponse)
@@ -109,9 +154,20 @@ async def get_result(
     response: Response,
     identity: Identity,
     query: TaskQueryDependency,
+    waiter: TaskWaiterDependency,
     min_version: int | None = None,
+    wait: bool = False,
+    timeout_seconds: int | None = Query(default=None, ge=1, le=3600),
     if_none_match: str | None = Header(default=None, alias="If-None-Match"),
 ) -> dict[str, Any]:
+    if wait:
+        waited = await waiter.wait(
+            identity.tenant_id,
+            session_id,
+            timeout_seconds=waiter.clamp_timeout(timeout_seconds),
+        )
+        return _apply_wait_outcome(response, waited, session_id)
+
     result = await query.get_result(tenant_id=identity.tenant_id, session_id=session_id)
     projection_is_fresh = min_version is None or int(result["projection_version"]) >= min_version
     result_is_ready = result["status"] in {"completed", "failed", "cancelled"}

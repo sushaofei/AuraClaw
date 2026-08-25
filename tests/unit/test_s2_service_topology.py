@@ -118,6 +118,7 @@ def test_task_api_and_streaming_gateway_have_disjoint_public_routes() -> None:
     task_paths = set(create_app(profile="task-api").openapi()["paths"])
     stream_paths = set(create_app(profile="streaming-gateway").openapi()["paths"])
     assert "/v1/tasks" in task_paths
+    assert "/v1/tasks/sync" in task_paths
     assert not any(path.startswith("/v1/streams") for path in task_paths)
     assert any(path.startswith("/v1/streams") for path in stream_paths)
     assert "/v1/tasks" not in stream_paths
