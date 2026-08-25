@@ -156,7 +156,7 @@ Compose 容器入口保留；在 `deployment_profile=development` 下 CLI 会拒
 | `.env.test.example` | `.env.test` | 服务器测试：`docker compose` 部署（如 DEV_SERVICE `10.244.16.131`）。 |
 | `.env.prod.example` | `.env.prod` | 服务器生产：Compose 发布（当前与 test 一致）。 |
 
-`.env.dev` 与 `.env.test` 除大模型 `AURACLAW_MODEL_API_KEY` / `AURACLAW_MODEL_BASE_URL` 及本地运行拓扑（`HOST`、12 入口 URL、`NO_PROXY` 等）外保持一致。`NO_PROXY` 仅用于本机开发绕过 HTTP 代理，测试 / 生产 Compose 不要配置。
+`.env.dev` 与 `.env.test` 除大模型 `AURACLAW_MODEL_API_KEY` / `AURACLAW_MODEL_BASE_URL` 及本地运行拓扑（`HOST`、12 入口 URL、`NO_PROXY` 等）外保持一致。开发机共用 Vault `http://10.244.16.132:8200`（KV v2 mount `secret`），`credential_ref` 只填引用。`AURACLAW_HOST=0.0.0.0` 让局域网 AuraX 访问 Ingress `:8080`；12 个内部入口 URL 仍指向 `127.0.0.1`。`NO_PROXY` 仅用于本机开发绕过 HTTP 代理，测试 / 生产 Compose 不要配置。
 
 ### 服务身份（Workload Token）
 

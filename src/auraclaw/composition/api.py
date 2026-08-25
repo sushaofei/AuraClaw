@@ -44,12 +44,55 @@ from auraclaw.api.routes.streams import router as stream_router
 from auraclaw.api.routes.tasks import router as task_router
 from auraclaw.composition import providers
 from auraclaw.composition.identity import build_identity_verifier
-from auraclaw.config import get_settings
+from auraclaw.config import Settings, get_settings
 from auraclaw.contracts.errors import AuraClawError
 from auraclaw.contracts.observability import TraceContext
 from auraclaw.infrastructure.observability.stores import StructuredLogger
 
 ApiProfile = Literal["task-api", "streaming-gateway"]
+
+DEVELOPMENT_CORS_ORIGIN_REGEX = (
+    r"^https?://(localhost|127\.0\.0\.1|\[::1\]|"
+    r"10(?:\.\d{1,3}){3}|"
+    r"192\.168(?:\.\d{1,3}){2}|"
+    r"172\.(?:1[6-9]|2\d|3[0-1])(?:\.\d{1,3}){2})"
+    r"(?::\d+)?$"
+)
+DEVELOPMENT_TAURI_ORIGINS = ("tauri://localhost", "https://tauri.localhost")
+_CORS_ALLOW_METHODS = ["GET", "POST", "PUT", "OPTIONS"]
+_CORS_ALLOW_HEADERS = [
+    "Authorization",
+    "Content-Type",
+    "Idempotency-Key",
+    "If-None-Match",
+    "Last-Event-ID",
+    "X-Actor-ID",
+    "X-Correlation-ID",
+    "X-CT-Agent-Context",
+    "X-Dept-ID",
+    "X-Expected-Revision",
+    "X-Expected-Version",
+    "X-Tenant-ID",
+]
+_CORS_EXPOSE_HEADERS = ["ETag", "Retry-After", "traceparent"]
+
+
+def install_public_cors(app: FastAPI, settings: Settings) -> None:
+    origins = list(settings.allowed_cors_origins)
+    origin_regex: str | None = None
+    if settings.deployment_profile == "development":
+        origins = list(dict.fromkeys([*origins, *DEVELOPMENT_TAURI_ORIGINS]))
+        origin_regex = DEVELOPMENT_CORS_ORIGIN_REGEX
+    if not origins and origin_regex is None:
+        return
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=origins,
+        allow_origin_regex=origin_regex,
+        allow_methods=_CORS_ALLOW_METHODS,
+        allow_headers=_CORS_ALLOW_HEADERS,
+        expose_headers=_CORS_EXPOSE_HEADERS,
+    )
 
 
 @asynccontextmanager
@@ -114,27 +157,7 @@ def create_app(*, profile: ApiProfile) -> FastAPI:
         }
     )
     app.state.identity_verifier = build_identity_verifier(settings)
-    if settings.allowed_cors_origins:
-        app.add_middleware(
-            CORSMiddleware,
-            allow_origins=settings.allowed_cors_origins,
-            allow_methods=["GET", "POST", "PUT", "OPTIONS"],
-            allow_headers=[
-                "Authorization",
-                "Content-Type",
-                "Idempotency-Key",
-                "If-None-Match",
-                "Last-Event-ID",
-                "X-Actor-ID",
-                "X-Correlation-ID",
-                "X-CT-Agent-Context",
-                "X-Dept-ID",
-                "X-Expected-Revision",
-                "X-Expected-Version",
-                "X-Tenant-ID",
-            ],
-            expose_headers=["ETag", "Retry-After", "traceparent"],
-        )
+    install_public_cors(app, settings)
     app.include_router(health_router)
     if profile == "task-api":
         app.include_router(task_router)

@@ -64,7 +64,7 @@ AuraMCP 默认听 `127.0.0.1:8020`。热配置 body 与生产相同，只改网�
 }
 ```
 
-`loopback` 相对 **Credential Proxy 所在网络命名空间**。容器内的 `127.0.0.1` 不是宿主机。开发可 `AURAMCP_PLATFORM_STORE=memory`。Hands 出站契约由 `tests/unit/test_auramcp_egress.py` 覆盖。
+`loopback` 相对 **Credential Proxy 所在网络命名空间**。容器内的 `127.0.0.1` 不是宿主机。开发机共用 Vault `http://10.244.16.132:8200` 的 `vault/auramcp#workload`，各机 `AURAMCP_HANDS_WORKLOAD_TOKEN` 必须与该值相同。开发可 `AURAMCP_PLATFORM_STORE=memory`。Hands 出站契约由 `tests/unit/test_auramcp_egress.py` 覆盖。
 
 ## 不要做的事
 

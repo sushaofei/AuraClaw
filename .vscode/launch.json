@@ -6,7 +6,7 @@
       "type": "debugpy",
       "request": "launch",
       "module": "auraclaw",
-      "args": ["serve", "--host", "127.0.0.1"],
+      "args": ["serve", "--host", "0.0.0.0"],
       "cwd": "${workspaceFolder}",
       "python": "${workspaceFolder}/.venv/bin/python",
       "envFile": "${workspaceFolder}/.env.dev",
