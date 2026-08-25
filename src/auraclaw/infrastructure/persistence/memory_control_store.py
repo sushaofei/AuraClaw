@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from auraclaw.contracts.errors import FencingTokenError, LeaseConflictError
 from auraclaw.control.ports import (
+    AGENT_RUNTIME_POOL,
     ClaimedAssignment,
     ClaimedRunnable,
     RunnableItem,
@@ -190,7 +191,12 @@ class InMemoryControlStateStore:
             ):
                 return False
             current = self._assignments.get(task_id)
-            if current is not None and current[1] not in {"expired", "completed", "failed"}:
+            if current is not None and current[1] not in {
+                "expired",
+                "completed",
+                "failed",
+                "waiting_children",
+            }:
                 return False
             self._assignments[task_id] = (assignment, "assigned")
             if task_id in self._queue:
@@ -208,7 +214,10 @@ class InMemoryControlStateStore:
         async with self._lock:
             candidates: list[tuple[int, RuntimeInstance]] = []
             for runtime, heartbeat_at in self._runtimes.values():
-                if runtime.role != item.role or heartbeat_at <= _now() - timedelta(seconds=30):
+                if (
+                    runtime.role not in {AGENT_RUNTIME_POOL, item.role}
+                    or heartbeat_at <= _now() - timedelta(seconds=30)
+                ):
                     continue
                 if any(
                     runtime.capabilities.get(key) != value
@@ -229,10 +238,13 @@ class InMemoryControlStateStore:
         self, runtime_id: str, role: str, *, limit: int = 1
     ) -> list[ClaimedAssignment]:
         async with self._lock:
+            runtime_entry = self._runtimes.get(runtime_id)
+            if runtime_entry is None or runtime_entry[0].role != role:
+                return []
             now = _now()
             claimed: list[ClaimedAssignment] = []
             for task_id, (assignment, status) in self._assignments.items():
-                if assignment.runtime_id != runtime_id or assignment.role != role:
+                if assignment.runtime_id != runtime_id:
                     continue
                 if status == "assigned":
                     pass
@@ -260,7 +272,7 @@ class InMemoryControlStateStore:
             if entry is not None:
                 assignment = entry[0]
                 self._assignments[task_id] = (assignment, outcome)
-                if outcome in {"completed", "failed", "cancelled"}:
+                if outcome in {"completed", "failed", "cancelled", "waiting_children"}:
                     self._assignment_started_at.pop(task_id, None)
                     resource_id = f"session:{assignment.tenant_id}:{assignment.session_id}"
                     lease = self._leases.get(resource_id)
@@ -269,6 +281,21 @@ class InMemoryControlStateStore:
             queued = self._queue.get(task_id)
             if queued is not None:
                 self._queue[task_id] = (queued[0], "acked", queued[2])
+
+    async def suspend_assignment(self, task_id: str, reason: str) -> None:
+        if reason != "waiting_children":
+            raise ValueError(f"unsupported assignment suspension: {reason}")
+        await self.finish_assignment(task_id, reason)
+
+    async def wake_assignment(self, task_id: str) -> bool:
+        async with self._lock:
+            entry = self._assignments.get(task_id)
+            queued = self._queue.get(task_id)
+            if entry is None or entry[1] != "waiting_children" or queued is None:
+                return False
+            self._queue[task_id] = (queued[0], "queued", None)
+            self._queue_claims.pop(task_id, None)
+            return True
 
     async def register_runtime(self, instance: RuntimeInstance) -> None:
         async with self._lock:

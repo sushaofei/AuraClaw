@@ -73,6 +73,7 @@ class LeaseAssertion(ContractModel):
     session_id: str
     run_id: str
     runtime_id: str | None = None
+    role: str = "root"
     user_id: str | None = None
     dept_id: str | None = None
     lease_id: str
@@ -121,6 +122,42 @@ class SessionFeedResponse(ContractModel):
     api_version: str = INTERNAL_API_VERSION
     events: tuple[dict[str, Any], ...]
     next_version: int | None = None
+
+
+class SessionRootFeedRequest(ContractModel):
+    context: InternalRequestContext
+    root_session_id: str = Field(min_length=1)
+    event_types: tuple[str, ...] | None = None
+    limit: int = Field(default=5000, ge=1, le=10000)
+
+
+class SessionRootFeedResponse(ContractModel):
+    api_version: str = INTERNAL_API_VERSION
+    events: tuple[dict[str, Any], ...]
+
+
+class CollaborationCommandRequest(ContractModel):
+    context: InternalRequestContext
+    lease_assertion: LeaseAssertion
+    root_session_id: str = Field(min_length=1)
+    session_id: str = Field(min_length=1)
+    command_id: str = Field(min_length=1)
+    operation: Literal[
+        "get_graph",
+        "create_child",
+        "set_dependencies",
+        "request_review",
+        "cancel_child",
+        "join",
+        "publish_result",
+        "publish_review",
+    ]
+    arguments: dict[str, Any] = Field(default_factory=dict)
+
+
+class CollaborationCommandResponse(ContractModel):
+    api_version: str = INTERNAL_API_VERSION
+    result: dict[str, Any]
 
 
 class OutboxClaimRequest(ContractModel):
@@ -270,7 +307,7 @@ class AssignmentDispositionRequest(ContractModel):
     runtime_id: str
     lease_id: str
     fencing_token: int = Field(ge=1)
-    disposition: Literal["ack", "finish", "fail"]
+    disposition: Literal["ack", "finish", "fail", "suspend"]
     outcome: str | None = None
 
 
@@ -564,4 +601,3 @@ class McpEgressCommandResponse(ContractModel):
     server_id: str
     operation: str
     status: Literal["applied", "revoked"]
-

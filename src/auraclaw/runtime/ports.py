@@ -116,6 +116,8 @@ class RuntimeControlClient(Protocol):
 
     async def finish_assignment(self, task_id: str, outcome: str) -> None: ...
 
+    async def suspend_assignment(self, task_id: str, reason: str) -> None: ...
+
 
 class ModelClient(Protocol):
     async def generate(self, request: ModelRequest) -> ModelResponse: ...
@@ -252,6 +254,17 @@ class CapabilityClient(ToolClient, Protocol):
         publisher: str | None = None,
         active_skill_names: tuple[str, ...] = (),
     ) -> SkillBinding: ...
+
+
+class CollaborationClient(Protocol):
+    async def execute(
+        self,
+        assignment: RuntimeAssignment,
+        *,
+        operation: str,
+        arguments: dict[str, Any],
+        command_id: str,
+    ) -> dict[str, Any]: ...
 
 
 class SkillBindingResolver(Protocol):

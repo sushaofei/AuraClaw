@@ -177,6 +177,7 @@ class ControlInternalService:
                     session_id=assignment.session_id,
                     run_id=assignment.run_id,
                     runtime_id=assignment.runtime_id,
+                    role=assignment.role,
                     user_id=assignment.user_id,
                     dept_id=assignment.dept_id,
                     lease_id=assignment.lease_id,
@@ -222,7 +223,11 @@ class ControlInternalService:
             f"session:{assignment.tenant_id}:{assignment.session_id}",
             request.fencing_token,
         )
-        if request.disposition != "ack":
+        if request.disposition == "suspend":
+            await self._store.suspend_assignment(
+                request.task_id, request.outcome or "waiting_children"
+            )
+        elif request.disposition != "ack":
             await self._store.finish_assignment(
                 request.task_id,
                 "completed" if request.disposition == "finish" else "failed",

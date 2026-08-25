@@ -34,17 +34,32 @@ Dynamic Replanner
 ## 协作工具
 
 ```text
-createChildSession(parent, role, goal, outputContract)
-setDependencies(childId, dependencyIds)
-delegate(childId, agentProfile)
-publishResult(childId, resultRef)
-join(childIds)
-cancel(childId)
-handoff(sessionId, targetRole)
-requestReview(targetSessionId, contract)
+auraclaw.collaboration.get_graph
+auraclaw.collaboration.create_child
+auraclaw.collaboration.set_dependencies
+auraclaw.collaboration.request_review
+auraclaw.collaboration.cancel_child
+auraclaw.collaboration.await_children
+auraclaw.collaboration.join
 ```
 
 所有工具调用进入 Session / Collaboration Service，由服务校验 DAG、权限、版本和所有权。Coordinator 不直接修改数据库或启动 Runtime。
+
+V1 不向模型开放 `delegate` / `handoff`。这两个 Service 能力继续保留，既有 `owner` 事件语义冻结，
+但 Runtime 的模型工具清单中没有对应入口。执行归属由 Control Plane 的 Lease 和 fencing token
+确定，避免模型同时操纵业务 owner 与实际执行租约，后续只有在两者语义、恢复和冲突策略明确后才开放。
+
+## Runtime 执行与恢复
+
+- 所有语义角色共用 `agent` Runtime Pool；`root`、`worker`、`reviewer`、`repair` 仍保留在
+  Assignment 中，由 Harness 决定可见工具和终态合同。
+- Coordinator 每一轮都读取同一 Root 的 Canonical Collaboration Graph；`task_key` 是创建 Child
+  的稳定幂等键。
+- `await_children` 写入 `agent.waiting_children` checkpoint，释放 Assignment Lease，并且不写
+  `run.completed`。
+- Child 终态事件使 Orchestrator 从 Canonical Root Feed 重算 runnable DAG；所有等待目标终态后，
+  同一个 Root Run 被重新排队并从 checkpoint 继续。
+- `join` 是 Coordinator 唯一的协作终态工具；只要存在 Child，普通文本输出不能把 Root 标成完成。
 
 ## Task DAG 规则
 
@@ -102,4 +117,6 @@ aggregation_latency
 - 简单任务可以不启动 Coordinator。
 - Coordinator 不能绕过 Collaboration Service 修改 DAG。
 - Coordinator 重启后不会重复创建相同 Child。
+- 等待 Child 时 Root Run 释放 Lease，恢复后不重复已提交工具调用。
+- 模型无法调用 `delegate` / `handoff`，也不能提交 actor、owner、tenant 或 fencing token。
 - Root Result 能追溯到所有 Child Result 和 Artifact。

@@ -330,7 +330,9 @@ class SkillPackageRegistry:
             enabled.append(reactivated)
         return tuple(enabled)
 
-    def disable_skill(self, tenant_id: str, publisher: str, name: str) -> tuple[PublishedSkill, ...]:
+    def disable_skill(
+        self, tenant_id: str, publisher: str, name: str
+    ) -> tuple[PublishedSkill, ...]:
         keys = [
             key
             for key in self._publications

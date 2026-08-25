@@ -7,6 +7,7 @@ from typing import Any, Protocol
 from auraclaw.contracts.internal import LeaseAssertion
 
 DEFAULT_RUNTIME_MAX_STEPS = 48
+AGENT_RUNTIME_POOL = "agent"
 
 
 @dataclass(frozen=True)
@@ -143,6 +144,10 @@ class ControlStateStore(Protocol):
     ) -> list[ClaimedAssignment]: ...
 
     async def finish_assignment(self, task_id: str, outcome: str) -> None: ...
+
+    async def suspend_assignment(self, task_id: str, reason: str) -> None: ...
+
+    async def wake_assignment(self, task_id: str) -> bool: ...
 
     async def register_runtime(self, instance: RuntimeInstance) -> None: ...
 

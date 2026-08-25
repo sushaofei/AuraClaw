@@ -28,6 +28,11 @@ Result Publisher
 Checkpoint Manager
 ```
 
+V1 Worker / Repair 模型只获得 `auraclaw.collaboration.publish_result` 协作工具。调用经由带签名
+Lease Assertion 的内部 Collaboration Client，服务从签名角色与 Runtime identity 派生 actor，
+模型不能伪造 Coordinator 或改写 Root。`publish_result` 在同一 Canonical append 中写入
+`child.result_published` 与 `run.completed`，然后结束 Assignment。
+
 ## Reviewer Runtime
 
 核心职责：
@@ -49,6 +54,10 @@ Decision Publisher
 ```
 
 Reviewer 不应直接覆盖 Worker Artifact；应提交 Review Event、Patch 或 Repair Request。
+
+V1 Reviewer 模型只获得 `auraclaw.collaboration.publish_review`。服务要求目标 Worker Result 已存在，
+并在同一 Canonical append 中写入 `review.completed` 与 Review Run 的 `run.completed`。如果 Worker、
+Repair 或 Reviewer 只返回普通文本而没有调用规定的发布工具，Harness fail closed，不产生成功终态。
 
 ## 输入输出契约
 
@@ -78,6 +87,8 @@ Child Result
 - Reviewer 使用独立 Session 或 Review Branch。
 - 外部资源写入遵循 Artifact Ownership 和工具幂等键。
 - Tool Permission 不得超过 Child Profile 和 Root Policy 的交集。
+- Runtime 实例注册在共享 `agent` Pool；Assignment 的语义 `role` 只用于 Context、工具白名单和
+  Output Contract，不再要求为每个角色建立独立 Runtime 池。
 
 ## 错误与重试
 
@@ -103,3 +114,5 @@ tool_side_effect_unknown
 - Reviewer 结论包含可追溯证据。
 - Worker Runtime 崩溃不会丢失已提交事实。
 - Child 结果只有通过规定合同后才进入 completed。
+- Worker / Reviewer 不能调用 Coordinator DAG 工具；签名 Lease 中的角色被篡改会验签失败。
+- Child 发布结果和 Run 完成是一个原子事实提交，不存在“结果已发布但 Run 未完成”的恢复窗口。

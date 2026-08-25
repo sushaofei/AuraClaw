@@ -90,6 +90,42 @@ class PostgresEventStore(LazyPool):
             )
         return [event_from_record(row) for row in rows]
 
+    async def load_root(
+        self,
+        tenant_id: str,
+        root_session_id: str,
+        *,
+        event_types: Sequence[str] | None = None,
+        limit: int | None = None,
+    ) -> list[CanonicalEvent]:
+        pool = await self.pool()
+        params: list[Any] = [tenant_id, root_session_id]
+        clauses = ["tenant_id = $1", "root_session_id = $2"]
+        if event_types is not None:
+            if self.dialect == "mysql":
+                placeholders: list[str] = []
+                for event_type in event_types:
+                    params.append(event_type)
+                    placeholders.append(f"${len(params)}")
+                clauses.append(
+                    f"event_type IN ({', '.join(placeholders)})"
+                    if placeholders
+                    else "1=0"
+                )
+            else:
+                params.append(list(event_types))
+                clauses.append(f"event_type = ANY(${len(params)}::text[])")
+        query = f"""
+            SELECT * FROM session_core.canonical_event
+            WHERE {' AND '.join(clauses)}
+            ORDER BY occurred_at, session_id, aggregate_version
+        """
+        if limit is not None:
+            params.append(limit)
+            query += f" LIMIT ${len(params)}"
+        rows = await pool.fetch(query, *params)
+        return [event_from_record(row) for row in rows]
+
     async def get_snapshot(self, tenant_id: str, session_id: str) -> SessionSnapshot | None:
         pool = await self.pool()
         row = await pool.fetchrow(

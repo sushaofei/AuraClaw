@@ -14,14 +14,34 @@ from auraclaw.control.ports import (
     RunnableItem,
     RuntimeBudget,
 )
+from auraclaw.domain.collaboration import CollaborationAggregate
+from auraclaw.projection.collaboration.projector import COLLABORATION_EVENTS
 from auraclaw.session.ports import ClaimedOutboxRecord
 
 logger = logging.getLogger(__name__)
+
+COLLABORATION_CONTROL_EVENTS = {
+    "run.requested",
+    "dependency.changed",
+    "child.result_published",
+    "review.completed",
+    "run.failed",
+    "run.cancelled",
+}
 
 
 class ControlFeedSource(Protocol):
     async def load(
         self, tenant_id: str, session_id: str, *, from_version: int = 1
+    ) -> list[CanonicalEvent]: ...
+
+    async def load_root(
+        self,
+        tenant_id: str,
+        root_session_id: str,
+        *,
+        event_types: Sequence[str] | None = None,
+        limit: int | None = None,
     ) -> list[CanonicalEvent]: ...
 
     async def claim_outbox(
@@ -94,6 +114,25 @@ class RunnableFeedConsumer:
                     )
                 if item is not None:
                     enqueued += int(await self._store.enqueue(item))
+                if (
+                    record.event.root_session_id != record.event.session_id
+                    and record.event.type in COLLABORATION_CONTROL_EVENTS
+                ):
+                    root_events = await self._source.load_root(
+                        record.event.tenant_id,
+                        record.event.root_session_id,
+                        event_types=tuple(COLLABORATION_EVENTS),
+                    )
+                    graph = CollaborationAggregate.from_events(
+                        record.event.tenant_id,
+                        record.event.root_session_id,
+                        root_events,
+                    )
+                    for collaboration_item in self._derive_collaboration(
+                        root_events, graph=graph
+                    ):
+                        enqueued += int(await self._store.enqueue(collaboration_item))
+                    await self._wake_waiting_coordinator(graph)
                 # Ack off the schedule critical path; enqueue is idempotent so
                 # a redelivered outbox row after crash is safe.
                 self._schedule_ack(record)
@@ -222,6 +261,94 @@ class RunnableFeedConsumer:
             budget=budget,
             user_id=owner_user_id,
             dept_id=owner_dept_id,
+        )
+
+    @staticmethod
+    def _derive_collaboration(
+        events: Sequence[CanonicalEvent],
+        *,
+        graph: CollaborationAggregate | None = None,
+    ) -> list[RunnableItem]:
+        if not events:
+            return []
+        root = events[0].root_session_id
+        tenant_id = events[0].tenant_id
+        selected_graph = graph or CollaborationAggregate.from_events(
+            tenant_id, root, events
+        )
+        latest_versions: dict[str, int] = {}
+        runtime_budgets: dict[str, RuntimeBudget] = {}
+        for event in events:
+            latest_versions[event.session_id] = max(
+                latest_versions.get(event.session_id, 0), event.aggregate_version
+            )
+            if event.type != "child.created":
+                continue
+            configured = event.payload.get("runtime_budget")
+            if isinstance(configured, dict):
+                runtime_budgets[event.session_id] = RuntimeBudget(
+                    max_steps=int(
+                        configured.get("max_steps", DEFAULT_RUNTIME_MAX_STEPS)
+                    ),
+                    max_output_tokens=int(
+                        configured.get("max_output_tokens", 8192)
+                    ),
+                    max_cost=(
+                        float(configured["max_cost"])
+                        if configured.get("max_cost") is not None
+                        else None
+                    ),
+                )
+        owner_user_id = RunnableFeedConsumer._owner_user_id(events)
+        owner_dept_id = RunnableFeedConsumer._owner_dept_id(events)
+        items: list[RunnableItem] = []
+        for node in selected_graph.runnable():
+            if node.run_id is None:
+                continue
+            items.append(
+                RunnableItem(
+                    task_id=f"{tenant_id}:{node.session_id}:{node.run_id}",
+                    tenant_id=tenant_id,
+                    root_session_id=root,
+                    session_id=node.session_id,
+                    run_id=node.run_id,
+                    source_version=latest_versions[node.session_id],
+                    queue_partition=tenant_id,
+                    role=node.role.value,
+                    budget=runtime_budgets.get(node.session_id, RuntimeBudget()),
+                    user_id=owner_user_id,
+                    dept_id=owner_dept_id,
+                )
+            )
+        return items
+
+    async def _wake_waiting_coordinator(
+        self, graph: CollaborationAggregate
+    ) -> bool:
+        root = graph.nodes.get(graph.root_session_id)
+        if root is None or root.run_id is None:
+            return False
+        checkpoint = await self._store.load_checkpoint(
+            graph.tenant_id, graph.root_session_id, root.run_id
+        )
+        if checkpoint is None or checkpoint.phase not in {
+            "agent.waiting_children",
+            "collaboration.waiting_children",
+        }:
+            return False
+        waiting = tuple(
+            str(item) for item in checkpoint.state.get("waiting_child_ids", ())
+        )
+        if not waiting:
+            return False
+        terminal = {"completed", "failed", "cancelled"}
+        if not all(
+            child_id in graph.nodes and graph.nodes[child_id].status in terminal
+            for child_id in waiting
+        ):
+            return False
+        return await self._store.wake_assignment(
+            f"{graph.tenant_id}:{graph.root_session_id}:{root.run_id}"
         )
 
     @staticmethod

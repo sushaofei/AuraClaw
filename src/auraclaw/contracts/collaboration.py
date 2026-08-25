@@ -77,6 +77,7 @@ class ChildSpec:
     input_refs: tuple[str, ...] = ()
     tool_permissions: tuple[str, ...] = ()
     budget: float = 1.0
+    runtime_budget: dict[str, int | float | None] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -86,6 +87,13 @@ class ChildSpec:
             raise ValueError("a Child cannot use the root role")
         if self.budget <= 0:
             raise ValueError("child budget must be positive")
+        for key in ("max_steps", "max_output_tokens"):
+            value = self.runtime_budget.get(key)
+            if value is not None and int(value) < 1:
+                raise ValueError(f"child runtime {key} must be positive")
+        max_cost = self.runtime_budget.get("max_cost")
+        if max_cost is not None and float(max_cost) <= 0:
+            raise ValueError("child runtime max_cost must be positive")
 
 
 @dataclass(frozen=True)

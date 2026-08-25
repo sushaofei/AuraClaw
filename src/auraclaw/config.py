@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Mapping
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -147,7 +148,7 @@ _KINGBASE_TO_DB = {
 
 
 def _settings_backend(
-    selected: dict[str, str],
+    selected: Mapping[str, str],
     settings_env_file: str | Path | None,
     *extra_file_values: dict[str, str],
 ) -> str:
@@ -389,7 +390,7 @@ class Settings(BaseSettings):
     sync_invoke_poll_interval_seconds: float = Field(default=0.25, ge=0.05, le=5.0)
     sync_invoke_max_concurrent: int = Field(default=32, ge=1, le=1000)
     runtime_id: str = "runtime-local-1"
-    runtime_role: str = "root"
+    runtime_role: str = "agent"
     runtime_node_id: str = "local"
     runtime_capacity: int = Field(default=1, ge=1)
     model_api_key: str | None = None

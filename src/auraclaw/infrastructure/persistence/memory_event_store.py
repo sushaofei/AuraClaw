@@ -19,7 +19,15 @@ DELIVERY_TRIGGER_EVENTS = {
     "approval.requested",
     "child.result_published",
 }
-CONTROL_TRIGGER_EVENTS = {"run.requested", "session.resumed", "dependency.changed"}
+CONTROL_TRIGGER_EVENTS = {
+    "run.requested",
+    "session.resumed",
+    "dependency.changed",
+    "child.result_published",
+    "review.completed",
+    "run.failed",
+    "run.cancelled",
+}
 
 
 @dataclass
@@ -77,6 +85,32 @@ class InMemoryEventStore:
             events,
             key=lambda event: (event.tenant_id, event.session_id, event.aggregate_version),
         )
+
+    async def load_root(
+        self,
+        tenant_id: str,
+        root_session_id: str,
+        *,
+        event_types: Sequence[str] | None = None,
+        limit: int | None = None,
+    ) -> list[CanonicalEvent]:
+        allowed = set(event_types) if event_types is not None else None
+        events = [
+            event
+            for (stream_tenant, _), stream in self._streams.items()
+            if stream_tenant == tenant_id
+            for event in stream
+            if event.root_session_id == root_session_id
+            and (allowed is None or event.type in allowed)
+        ]
+        events.sort(
+            key=lambda event: (
+                event.occurred_at,
+                event.session_id,
+                event.aggregate_version,
+            )
+        )
+        return events if limit is None else events[:limit]
 
     async def get_snapshot(self, tenant_id: str, session_id: str) -> SessionSnapshot | None:
         return self._snapshots.get((tenant_id, session_id))

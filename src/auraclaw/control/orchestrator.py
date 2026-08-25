@@ -9,6 +9,7 @@ from typing import Any
 
 from auraclaw.contracts.events import NewEvent
 from auraclaw.control.ports import (
+    AGENT_RUNTIME_POOL,
     DEFAULT_RUNTIME_MAX_STEPS,
     ControlStateStore,
     RunnableItem,
@@ -247,7 +248,7 @@ class LocalRuntimeProvisioner:
         return RuntimeInstance(
             runtime_id=f"runtime-{self._node_id}-{self._counter}",
             runtime_type="agent",
-            role=item.role,
+            role=AGENT_RUNTIME_POOL,
             node_id=self._node_id,
             capabilities=dict(item.required_capability),
             capacity=1,
