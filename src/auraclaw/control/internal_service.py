@@ -227,6 +227,11 @@ class ControlInternalService:
             await self._store.suspend_assignment(
                 request.task_id, request.outcome or "waiting_children"
             )
+        elif (
+            request.disposition == "ack"
+            and request.outcome == "waiting_for_human"
+        ):
+            await self._store.finish_assignment(request.task_id, request.outcome)
         elif request.disposition != "ack":
             await self._store.finish_assignment(
                 request.task_id,

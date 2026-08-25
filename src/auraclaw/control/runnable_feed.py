@@ -29,6 +29,8 @@ COLLABORATION_CONTROL_EVENTS = {
     "run.cancelled",
 }
 
+APPROVAL_RESUME_EVENTS = {"approval.approved", "approval.rejected"}
+
 
 class ControlFeedSource(Protocol):
     async def load(
@@ -113,7 +115,15 @@ class RunnableFeedConsumer:
                         dept_id=item.dept_id or self._owner_dept_id(root_events),
                     )
                 if item is not None:
-                    enqueued += int(await self._store.enqueue(item))
+                    inserted = await self._store.enqueue(item)
+                    enqueued += int(inserted)
+                    if (
+                        not inserted
+                        and record.event.type in APPROVAL_RESUME_EVENTS
+                    ):
+                        enqueued += int(
+                            await self._store.wake_assignment(item.task_id)
+                        )
                 if (
                     record.event.root_session_id != record.event.session_id
                     and record.event.type in COLLABORATION_CONTROL_EVENTS

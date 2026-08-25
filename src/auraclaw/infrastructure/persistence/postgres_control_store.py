@@ -383,6 +383,7 @@ class PostgresControlStateStore(_LazyPool):
                     "completed",
                     "failed",
                     "waiting_children",
+                    "waiting_for_human",
                 }:
                     return False
                 await connection.execute(
@@ -432,7 +433,8 @@ class PostgresControlStateStore(_LazyPool):
                       fencing_token=EXCLUDED.fencing_token, role=EXCLUDED.role,
                       resource_profile=EXCLUDED.resource_profile
                     WHERE control.assignment.assignment_status
-                      IN ('expired','completed','failed','waiting_children')
+                      IN ('expired','completed','failed','waiting_children',
+                          'waiting_for_human')
                     RETURNING task_id
                     """,
                     task_id,
@@ -623,7 +625,13 @@ class PostgresControlStateStore(_LazyPool):
     async def finish_assignment(self, task_id: str, outcome: str) -> None:
         pool = await self.pool()
         async with pool.acquire() as connection, connection.transaction():
-            if outcome in {"completed", "failed", "cancelled", "waiting_children"}:
+            if outcome in {
+                "completed",
+                "failed",
+                "cancelled",
+                "waiting_children",
+                "waiting_for_human",
+            }:
                 if self.dialect == "mysql":
                     await connection.execute(
                         """
@@ -659,7 +667,7 @@ class PostgresControlStateStore(_LazyPool):
             )
 
     async def suspend_assignment(self, task_id: str, reason: str) -> None:
-        if reason != "waiting_children":
+        if reason not in {"waiting_children", "waiting_for_human"}:
             raise ValueError(f"unsupported assignment suspension: {reason}")
         await self.finish_assignment(task_id, reason)
 
@@ -670,7 +678,10 @@ class PostgresControlStateStore(_LazyPool):
                 "SELECT assignment_status FROM control.assignment WHERE task_id=$1 FOR UPDATE",
                 task_id,
             )
-            if status is None or str(status) != "waiting_children":
+            if status is None or str(status) not in {
+                "waiting_children",
+                "waiting_for_human",
+            }:
                 return False
             if self.dialect == "mysql":
                 await connection.execute(

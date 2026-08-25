@@ -22,6 +22,8 @@ DELIVERY_TRIGGER_EVENTS = {
 CONTROL_TRIGGER_EVENTS = {
     "run.requested",
     "session.resumed",
+    "approval.approved",
+    "approval.rejected",
     "dependency.changed",
     "child.result_published",
     "review.completed",
