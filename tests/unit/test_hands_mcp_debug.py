@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from fastapi.testclient import TestClient
 
 from auraclaw.composition.services import create_service_app
@@ -37,6 +38,41 @@ def test_development_hands_starts_catalog_reconciler() -> None:
         assert getattr(app.state, "catalog_reconciler", None) is not None
         assert getattr(app.state, "mcp_connection_manager", None) is not None
         assert app.state.capability_connectors == {}
+
+
+def test_hands_retries_transient_mcp_restore_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from auraclaw.action.mcp_connection_manager import McpConnectionManager
+
+    attempts = 0
+
+    async def flaky_restore(_manager: McpConnectionManager) -> int:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise ConnectionError("dependency is starting")
+        return 0
+
+    async def no_delay(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(McpConnectionManager, "restore", flaky_restore)
+    monkeypatch.setattr("auraclaw.composition.services.asyncio.sleep", no_delay)
+    app = create_service_app(
+        "hands",
+        _settings(
+            deployment_profile="development",
+            runtime_workload_token="runtime-token",
+            action_hands_workload_token="hands-token",
+            lease_signing_key="test-hands-lease-key-with-32-bytes",
+        ),
+    )
+
+    with TestClient(app) as client:
+        assert client.get("/health/live").status_code == 200
+
+    assert attempts == 2
 
 
 def test_policy_allows_mcp_remote_invoke_without_tool_permission() -> None:
