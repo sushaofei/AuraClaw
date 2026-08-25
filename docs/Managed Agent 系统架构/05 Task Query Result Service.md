@@ -58,6 +58,7 @@ GET /v1/approvals/{approval_id}
 - 支持 `ETag / If-None-Match`，无变化返回 `304`。
 - 返回 `Retry-After`，避免客户端固定高频轮询。
 - 支持 `min_version`；投影尚未追上时返回 `202` 或受控等待。
+- 支持 `GET /v1/tasks/{session_id}/result?wait=true` 与 `POST /v1/tasks/sync`：在 Read Model 上受控等待 **当前 Run 终态**（`completed` / `failed` / `cancelled`）。`waiting_for_human` / `paused` 提前结束等待。超时返回当前快照，不取消任务。等待不得订 Runtime Event / SSE，也不得回退扫描 Session Log。
 - 大列表使用 Cursor Pagination，不使用不稳定 Offset Pagination。
 - Root 查询默认返回聚合结果，Child 详情显式查询。
 

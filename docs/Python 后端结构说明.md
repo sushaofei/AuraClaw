@@ -77,10 +77,11 @@ entrypoint -> composition -> api -> gateways
 | 目标组件 | 主归属模块 | 状态 |
 |---|---|---|
 | Task Gateway / Admission | `gateways/task/` | 命令转发与准入边界已实现 |
+| Sync invocation facade | `gateways/task/invocations.py`、`gateways/query/waiter.py` | `POST /v1/tasks/sync` 写命令后只读投影等待终态 |
 | Session / Collaboration | `session/`、`domain/` | Canonical Session 写侧已实现 |
 | Canonical Event / Outbox | `infrastructure/persistence/*event_store.py` | PostgreSQL 与内存适配器已实现 |
 | Projection / Read Model | `projection/`、`infrastructure/projection/` | 幂等、gap、checkpoint、重建已实现 |
-| Task Query / Result | `gateways/query/reader.py` | 只读 Projection 查询已实现 |
+| Task Query / Result | `gateways/query/reader.py`、`gateways/query/waiter.py` | 只读 Projection 查询；可选受控等待 Run 终态 |
 | Control State | `control/ports.py`、`infrastructure/persistence/*control_store.py` | Queue、Lease、Fencing、Assignment、Heartbeat、Capacity、Checkpoint |
 | Orchestrator | `control/orchestrator.py` | watch、claim、schedule、provision、cancel、heartbeat、reconcile |
 | Agent Runtime | `runtime/harness.py`、`runtime/clients.py` | Budget、Deadline、Cancel、Checkpoint 与四类端口 |

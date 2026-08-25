@@ -188,13 +188,21 @@ X-Actor-ID: local-user
 | `POST` | `/v1/sessions/{session_id}/close` | 关闭会话，之后拒绝新消息和 Run |
 | `POST` | `/v1/sessions/{session_id}/approvals/{approval_id}/responses` | 人审批准 / 拒绝 |
 
+### 同步外观（Query 等待，不是第二条写路径）
+
+接纳语义与 `POST /v1/tasks` 相同（Canonical Event + `202` 意义的接纳）。HTTP 连接额外阻塞到当前 Run 终态或超时。AuraX 和 Timer **不要**用这条路径。
+
+| 方法 | 路径 | 作用 |
+|---|---|---|
+| `POST` | `/v1/tasks/sync` | 创建任务并等待权威结果 |
+
 ### 查询
 
 | 方法 | 路径 | 作用 |
 |---|---|---|
 | `GET` | `/v1/tasks` | Root Session 列表（cursor 分页，按租户隔离） |
 | `GET` | `/v1/tasks/{session_id}` | Task View（Session + 最新 Run 投影） |
-| `GET` | `/v1/tasks/{session_id}/result` | 权威结果；未就绪返回 `202` |
+| `GET` | `/v1/tasks/{session_id}/result` | 权威结果；未就绪返回 `202`。`wait=true` 时可阻塞到终态 |
 | `GET` | `/v1/tasks/{session_id}/transcript` | 对话恢复（用户 / 助手消息 + 待审批） |
 | `GET` | `/v1/tasks/{session_id}/children` | 子 Session 图 |
 | `GET` | `/v1/operations/sessions/{session_id}/timeline` | 运维时间线 |
@@ -253,6 +261,19 @@ Secret 只允许引用 `credential_ref`，响应里不会出现明文。写命�
 3. 不要保持 SSE；配置 Result Delivery，或事后用 Query 核对
 4. Timer 在 202 Accepted 后结束本次触发
 ```
+
+Java / 脚本一次性调用（同步外观）：
+
+```text
+1. POST /v1/tasks/sync
+     终态     → 200，wait_outcome=completed|failed|cancelled，result_summary 为权威答案
+     超时     → 202，任务继续，可用 GET .../result?wait=true 再等
+     人审/暂停 → 409 needs_human / needs_resume，走既有审批或 resume
+2. 客户端 HTTP 读超时必须大于 timeout_seconds（默认 60，最大 120）
+3. 断线不会取消已接纳任务
+```
+
+不要对 Timer 使用 `/v1/tasks/sync`。`source=schedule` 及多余字段会被 422 拒绝。
 
 人审完整处理见 [§8 Human-in-the-Loop](#8-human-in-the-loop人审)。
 
@@ -441,6 +462,27 @@ approval_id + tenant_id + session_id + action_digest(tool + version + args) + po
 
 同一 `Idempotency-Key` 重试返回同一 body，不会创建第二个 Session。
 
+### `POST /v1/tasks/sync`
+
+给 Java / 脚本等无法轮询的调用方。内部仍调用 `create_task` 写入 Canonical Event，然后在 Result 投影上等待当前 Run 终态。**不是** Gateway 同步调度 Runtime，也 **不是** 订 SSE。
+
+```json
+{ "goal": "分析华东区本周猪肉价格波动", "timeout_seconds": 60 }
+```
+
+只接受 `goal` 与可选 `timeout_seconds`。禁止 `source=schedule` 及其他多余字段（422）。身份头、`Idempotency-Key` 与 `POST /v1/tasks` 相同。
+
+| 条件 | HTTP | `wait_outcome` |
+|---|---|---|
+| Run `completed` / `failed` / `cancelled` | 200 | 同 Run 状态。业务失败仍是 200 + `status=failed` |
+| 超时且仍在跑（含 `retry_wait`） | 202 + `Retry-After` | `timeout`；任务继续，不取消 |
+| `waiting_for_human` / `paused` | 409 | `needs_human` / `needs_resume`，并带 `code` |
+| 同步等待并发超额 | 429 + `Retry-After` | `code=sync_invoke_busy` |
+
+响应在 Result 形状上增加 `wait_outcome`、`status_url` / `result_url` / `stream_url`。人审之后用 `GET /v1/tasks/{session_id}/result?wait=true` 继续等，不要把批准发到这条连接上。
+
+配置：`AURACLAW_SYNC_INVOKE_DEFAULT_TIMEOUT_SECONDS`（60）、`MAX_TIMEOUT_SECONDS`（120）、`POLL_INTERVAL_SECONDS`（0.25）、`MAX_CONCURRENT`（32）。
+
 ### `GET /v1/tasks`
 
 只列出当前租户的 **Root Session**（`role=root`），按 `projected_at` 倒序，cursor 分页。不要扫 Canonical Event Log。
@@ -560,6 +602,8 @@ Run：`pending` / `runnable` / `running` / `waiting_for_human` / `paused` / `ret
 ```
 
 这里的 `status` 是 **Run**，`session_status` 才是 Session。流式内容与这里不一致时，以这里为准。
+
+可选 `wait=true`（及 `timeout_seconds`）会在 Query 侧受控等待到 Run 终态、人审/暂停或超时，响应形状与 `POST /v1/tasks/sync` 相同。未传 `wait` 时行为不变：立即返回当前快照，未就绪为 202。`wait=true` 时不使用 `If-None-Match` / `304`。
 
 ### `GET /v1/tasks/{session_id}/transcript`
 

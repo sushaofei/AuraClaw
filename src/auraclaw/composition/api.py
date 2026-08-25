@@ -24,6 +24,9 @@ from auraclaw.api.dependencies import (
     get_streaming_gateway as streaming_gateway_dependency,
 )
 from auraclaw.api.dependencies import (
+    get_sync_invocation_gateway as sync_invocation_gateway_dependency,
+)
+from auraclaw.api.dependencies import (
     get_task_command_gateway as task_command_gateway_dependency,
 )
 from auraclaw.api.dependencies import (
@@ -31,6 +34,9 @@ from auraclaw.api.dependencies import (
 )
 from auraclaw.api.dependencies import (
     get_task_query_service as task_query_service_dependency,
+)
+from auraclaw.api.dependencies import (
+    get_task_result_waiter as task_result_waiter_dependency,
 )
 from auraclaw.api.routes.health import router as health_router
 from auraclaw.api.routes.operations import router as operations_router
@@ -100,6 +106,8 @@ def create_app(*, profile: ApiProfile) -> FastAPI:
             task_command_gateway_dependency: providers.get_task_command_gateway,
             task_projection_dependency: providers.get_task_projection,
             task_query_service_dependency: providers.get_task_query_service,
+            task_result_waiter_dependency: providers.get_task_result_waiter,
+            sync_invocation_gateway_dependency: providers.get_sync_invocation_gateway,
             collaboration_projection_dependency: providers.get_collaboration_projection,
             streaming_gateway_dependency: providers.get_streaming_gateway,
             observability_service_dependency: providers.get_observability_service,
@@ -193,9 +201,13 @@ def create_app(*, profile: ApiProfile) -> FastAPI:
 
     @app.exception_handler(AuraClawError)
     async def handle_auraclaw_error(_: Request, exc: AuraClawError) -> JSONResponse:
+        headers = {}
+        if exc.retry_after is not None:
+            headers["Retry-After"] = str(exc.retry_after)
         return JSONResponse(
             status_code=exc.status_code,
             content={"code": exc.code, "message": exc.message, "detail": exc.detail},
+            headers=headers,
         )
 
     return app

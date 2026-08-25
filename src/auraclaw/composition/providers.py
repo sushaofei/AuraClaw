@@ -2,9 +2,11 @@ from functools import lru_cache
 
 from auraclaw.config import get_settings
 from auraclaw.gateways.query.reader import TaskQueryService
+from auraclaw.gateways.query.waiter import TaskResultWaiter
 from auraclaw.gateways.streaming.gateway import StreamingGateway
 from auraclaw.gateways.task.admission import AllowAllAdmissionController
 from auraclaw.gateways.task.commands import TaskCommandGateway
+from auraclaw.gateways.task.invocations import SyncInvocationGateway
 from auraclaw.infrastructure.kafka.runtime_events import (
     KafkaRuntimeEventProducer,
     KafkaStreamingIngestor,
@@ -110,6 +112,23 @@ def get_task_query_service() -> TaskQueryService:
         get_collaboration_projection(),
         get_event_store(),
     )
+
+
+@lru_cache
+def get_task_result_waiter() -> TaskResultWaiter:
+    settings = get_settings()
+    return TaskResultWaiter(
+        get_task_query_service(),
+        poll_interval=settings.sync_invoke_poll_interval_seconds,
+        max_concurrent=settings.sync_invoke_max_concurrent,
+        default_timeout_seconds=settings.sync_invoke_default_timeout_seconds,
+        max_timeout_seconds=settings.sync_invoke_max_timeout_seconds,
+    )
+
+
+@lru_cache
+def get_sync_invocation_gateway() -> SyncInvocationGateway:
+    return SyncInvocationGateway(get_task_command_gateway(), get_task_result_waiter())
 
 
 @lru_cache

@@ -265,6 +265,7 @@ AuraClaw 是纯 Python 后端。外部客户端（如智问 UI）只调用公开
 - `GET /health/live`
 - `GET /health/ready`
 - `POST /v1/tasks`
+- `POST /v1/tasks/sync`（Java/脚本一次性等待结果；AuraX / Timer 不要用）
 - `GET /v1/tasks/{session_id}`
 - `GET /v1/tasks/{session_id}/result`
 - `GET /v1/tasks/{session_id}/children`

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class CreateTaskRequest(BaseModel):
@@ -21,6 +21,13 @@ class CreateTaskRequest(BaseModel):
             self.schedule_id = None
             self.occurrence_id = None
         return self
+
+
+class SyncCreateTaskRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    goal: str = Field(min_length=1, max_length=100_000)
+    timeout_seconds: int | None = Field(default=None, ge=1, le=3600)
 
 
 class CancelTaskRequest(BaseModel):
