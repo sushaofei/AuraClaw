@@ -11,8 +11,11 @@ from auraclaw.contracts.internal import (
     CredentialInvokeResponse,
     CredentialResourceRequest,
     CredentialResourceResponse,
+    McpEgressCommandRequest,
+    McpEgressCommandResponse,
     ServiceIdentity,
 )
+from auraclaw.contracts.mcp_registry import McpActiveSnapshotEntry
 from auraclaw.contracts.tools import CredentialReference
 from auraclaw.infrastructure.credentials.proxy import CredentialProxy
 
@@ -37,6 +40,12 @@ class PolicyDecisionValidator(Protocol):
     ) -> bool: ...
 
 
+class McpEgressLoader(Protocol):
+    async def apply(self, entry: McpActiveSnapshotEntry) -> None: ...
+
+    async def revoke(self, server_id: str) -> None: ...
+
+
 class CredentialProxyInternalService:
     """Owns secret resolution and the allowlisted outbound target adapters."""
 
@@ -46,10 +55,12 @@ class CredentialProxyInternalService:
         *,
         adapters: dict[str, CredentialTargetAdapter] | None = None,
         policy: PolicyDecisionValidator | None = None,
+        mcp_egress: McpEgressLoader | None = None,
     ) -> None:
         self._proxy = proxy
         self._adapters = adapters if adapters is not None else {}
         self._policy = policy
+        self._mcp_egress = mcp_egress
 
     async def invoke(self, request: CredentialInvokeRequest) -> CredentialInvokeResponse:
         if request.context.service_identity not in {
@@ -111,4 +122,30 @@ class CredentialProxyInternalService:
         )
         return CredentialResourceResponse(
             credential_ref=request.credential_ref, status="active"
+        )
+
+    async def mcp_egress(
+        self, request: McpEgressCommandRequest
+    ) -> McpEgressCommandResponse:
+        if request.context.service_identity is not ServiceIdentity.ACTION_HANDS:
+            raise CredentialAccessError("workload may not load MCP egress")
+        if self._mcp_egress is None:
+            raise CredentialAccessError("MCP egress manager is not configured")
+        if request.operation == "revoke":
+            await self._mcp_egress.revoke(request.server_id)
+            return McpEgressCommandResponse(
+                server_id=request.server_id,
+                operation="revoke",
+                status="revoked",
+            )
+        if request.entry is None:
+            raise CredentialAccessError("MCP egress apply requires a snapshot entry")
+        entry = McpActiveSnapshotEntry.model_validate(request.entry)
+        if entry.server_id != request.server_id:
+            raise CredentialAccessError("MCP egress server binding does not match")
+        await self._mcp_egress.apply(entry)
+        return McpEgressCommandResponse(
+            server_id=request.server_id,
+            operation="apply",
+            status="applied",
         )

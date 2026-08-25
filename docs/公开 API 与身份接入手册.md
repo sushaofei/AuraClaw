@@ -19,7 +19,7 @@
 - **AuraClaw 不会自己跑起来。** 合法触发只有两类：已登录用户，或 chaintower 侧的定时/调度任务。两者都走同一套 `POST /v1/tasks`。
 - **chaintower 是用户身份与业务权限的唯一权威。** AuraClaw 不实现 SSO，不管理用户 access token，不查询菜单/部门 RBAC。
 - **AuraClaw 必须自己验签。** 它验证 chaintower workload 与短期 Agent Context，再按租户隔离 Session。不能因为“请求来自内网”就信任裸 `X-Tenant-ID`。
-- **对外只有 Task API + Streaming Gateway + 健康检查。** `/internal/v1/*`、Hands、MCP 都不是给业务调用方用的。
+- **对外是 Task API + Streaming Gateway + 工作台 Admin + 健康检查。** `/internal/v1/*`、Hands、AuraMCP 都不是给业务调用方或 AuraX 用的。
 - **人审是公开写命令，不是 SSE 上行。** 高风险工具进入 `waiting_for_human` 后，必须走 `POST .../approvals/{approval_id}/responses`；Streaming 只通知，不接收批准/拒绝。
 
 ```text
@@ -192,6 +192,7 @@ X-Actor-ID: local-user
 
 | 方法 | 路径 | 作用 |
 |---|---|---|
+| `GET` | `/v1/tasks` | Root Session 列表（cursor 分页，按租户隔离） |
 | `GET` | `/v1/tasks/{session_id}` | Task View（Session + 最新 Run 投影） |
 | `GET` | `/v1/tasks/{session_id}/result` | 权威结果；未就绪返回 `202` |
 | `GET` | `/v1/tasks/{session_id}/transcript` | 对话恢复（用户 / 助手消息 + 待审批） |
@@ -204,6 +205,27 @@ X-Actor-ID: local-user
 | 方法 | 路径 | 作用 |
 |---|---|---|
 | `GET` | `/v1/streams/{session_id}` | SSE；`Accept: text/event-stream` |
+
+### 工作台 Admin（AuraX / 运维）
+
+Secret 只允许引用 `credential_ref`，响应里不会出现明文。写命令仍要 `Idempotency-Key`。
+
+| 方法 | 路径 | 作用 |
+|---|---|---|
+| `GET` / `POST` | `/v1/admin/mcp-servers` | 列出 / 创建受管 MCP Server |
+| `GET` / `PUT` | `/v1/admin/mcp-servers/{server_id}` | 详情 / 更新配置 |
+| `GET` | `/v1/admin/mcp-servers/{server_id}/tools` | 列出该 Server 对账后的 Catalog tools |
+| `POST` | `/v1/admin/mcp-servers/{server_id}:test` | 连通性探测 |
+| `POST` | `/v1/admin/mcp-servers/{server_id}:enable` | 启用 |
+| `POST` | `/v1/admin/mcp-servers/{server_id}:disable` | 停用 |
+| `POST` | `/v1/admin/mcp-servers/{server_id}:reconcile` | 对账 |
+| `POST` | `/v1/admin/mcp-servers/{server_id}:retire` | 退役 |
+| `GET` | `/v1/admin/mcp-operations/{operation_id}` | 异步操作状态 |
+| `GET` | `/v1/admin/skills` | 租户可见 Skill 目录（每个 name 一条最新版本） |
+| `GET` | `/v1/admin/skills/{publisher}/{name}` | Skill 详情 + `SKILL.md` + 版本列表 |
+| `GET` | `/v1/admin/skills/{publisher}/{name}/versions/{version}` | 指定版本详情 |
+| `POST` | `/v1/admin/skills/{publisher}/{name}:enable` | 租户级启用（不改进行中 Run 的 binding） |
+| `POST` | `/v1/admin/skills/{publisher}/{name}:disable` | 租户级停用 |
 
 ---
 
@@ -399,10 +421,12 @@ approval_id + tenant_id + session_id + action_digest(tool + version + args) + po
 创建 Root Session，并立刻请求第一轮 Run。`Idempotency-Key` 必填；**不要**带 `X-Expected-Version`。
 
 ```json
-{ "goal": "分析华东区本周猪肉价格波动" }
+{ "goal": "分析华东区本周猪肉价格波动", "source": "chat" }
 ```
 
-`goal`：1～100000 字符。
+`goal`：1～100000 字符。  
+`source`：`chat`（默认）或 `schedule`。对话工作台固定传 `chat`。  
+`schedule` 必须同时带 `schedule_id` 与 `occurrence_id`；`chat` 会忽略这两个字段。它们写入 `session.created`，并出现在 Task 投影 / 列表里。v1 AuraX 只用 `chat`；`schedule*` 先落契约，等 AuraAPI Timer。
 
 ```json
 {
@@ -417,7 +441,47 @@ approval_id + tenant_id + session_id + action_digest(tool + version + args) + po
 
 同一 `Idempotency-Key` 重试返回同一 body，不会创建第二个 Session。
 
+### `GET /v1/tasks`
+
+只列出当前租户的 **Root Session**（`role=root`），按 `projected_at` 倒序，cursor 分页。不要扫 Canonical Event Log。
+
+查询参数：
+
+| 参数 | 说明 |
+|---|---|
+| `kind` | 可选。`chat` → `source=chat`；`scheduled` → `source=schedule`。省略则两种都返回 |
+| `status` | 可选。按 Session `status` 过滤 |
+| `cursor` | 上一页返回的 `next_cursor` |
+| `limit` | 默认 20，最大 100 |
+
+```json
+{
+  "tasks": [
+    {
+      "session_id": "ses_...",
+      "goal": "分析华东区本周猪肉价格波动",
+      "source": "chat",
+      "schedule_id": null,
+      "occurrence_id": null,
+      "status": "ready",
+      "run_status": "completed",
+      "projection_version": 8,
+      "projected_at": "2026-08-24T06:00:00+00:00"
+    }
+  ],
+  "next_cursor": null
+}
+```
+
+AuraX 历史页 v1 只请求 `kind=chat`。多进程 memory 投影暂不提供跨进程列表（返回空页）；开发与生产用 SQL 投影。
+
 开发示例：
+
+```bash
+curl -sS 'http://127.0.0.1:8000/v1/tasks?kind=chat&limit=20' \
+  -H 'X-Tenant-ID: local' \
+  -H 'X-Actor-ID: local-user'
+```
 
 ```bash
 curl -sS -X POST http://127.0.0.1:8000/v1/tasks \
@@ -425,7 +489,7 @@ curl -sS -X POST http://127.0.0.1:8000/v1/tasks \
   -H 'Idempotency-Key: cmd-create-1' \
   -H 'X-Tenant-ID: local' \
   -H 'X-Actor-ID: local-user' \
-  -d '{"goal":"分析华东区本周猪肉价格波动"}'
+  -d '{"goal":"分析华东区本周猪肉价格波动","source":"chat"}'
 ```
 
 ### `GET /v1/tasks/{session_id}`
@@ -444,6 +508,9 @@ curl -sS -X POST http://127.0.0.1:8000/v1/tasks \
   "status": "pending",
   "run_status": "pending",
   "goal": "...",
+  "source": "chat",
+  "schedule_id": null,
+  "occurrence_id": null,
   "progress": 0.0,
   "current_stage": "pending",
   "result_summary": null,
@@ -597,7 +664,38 @@ Run：`pending` / `runnable` / `running` / `waiting_for_human` / `paused` / `ret
 { "reason": "对话结束" }
 ```
 
-之后 messages / runs 都会 409。这是 Root Session 的真正终态。
+之后 messages / runs 都会 409。这是 Root Session 的真正终态。关窗口 ≠ 关闭 Session。
+
+### Skill Admin（只读 + 启停）
+
+不发布签名包。启停是租户级目录状态，**不改**进行中 Run 的 Skill binding。挂在 task-api 的 `/v1/admin/skills*`。
+
+```bash
+curl -sS http://127.0.0.1:8000/v1/admin/skills \
+  -H 'X-Tenant-ID: local' \
+  -H 'X-Actor-ID: local-user'
+```
+
+```json
+{
+  "skills": [
+    {
+      "publisher": "platform",
+      "name": "release.prepare",
+      "version": "1.4.0",
+      "status": "active",
+      "description": "Prepare an auditable release",
+      "risk_level": "medium",
+      "package_digest": "sha256:...",
+      "required_tools": [{"name": "github.pull_request.get", "version": ">=2,<3"}],
+      "required_resources": [{"uri_template": "repo://{repo}/release-policy"}],
+      "required_skills": []
+    }
+  ]
+}
+```
+
+详情含 `skill_markdown` 与 `versions`。`POST ...:disable` / `:enable` 返回 `202`，需要 `Idempotency-Key`。
 
 ### `POST /v1/sessions/{session_id}/approvals/{approval_id}/responses`
 

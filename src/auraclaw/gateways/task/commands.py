@@ -10,8 +10,22 @@ class TaskCommandGateway:
     def __init__(self, service: TaskService) -> None:
         self._service = service
 
-    async def create_task(self, *, goal: str, context: CommandContext) -> dict[str, Any]:
-        return await self._service.create_task(goal=goal, context=context)
+    async def create_task(
+        self,
+        *,
+        goal: str,
+        context: CommandContext,
+        source: str = "chat",
+        schedule_id: str | None = None,
+        occurrence_id: str | None = None,
+    ) -> dict[str, Any]:
+        return await self._service.create_task(
+            goal=goal,
+            context=context,
+            source=source,
+            schedule_id=schedule_id,
+            occurrence_id=occurrence_id,
+        )
 
     async def append_message(
         self, *, session_id: str, message: str, context: CommandContext

@@ -51,6 +51,47 @@ def _context(tenant_id: str, request_id: str, correlation_id: str) -> InternalRe
     )
 
 
+def _assertion_expires_at(assignment: RuntimeAssignment) -> datetime | None:
+    assertion = assignment.lease_assertion
+    if assertion is None:
+        return None
+    expires_at = assertion.expires_at
+    if expires_at.tzinfo is None:
+        return expires_at.replace(tzinfo=UTC)
+    return expires_at.astimezone(UTC)
+
+
+def select_assignment_for_fence(
+    assignments: dict[tuple[str, str, str], tuple[str, RuntimeAssignment]],
+    resource_id: str,
+    fencing_token: int,
+    *,
+    now: datetime | None = None,
+) -> RuntimeAssignment | None:
+    """Pick a still-valid assignment for a Session fence.
+
+    The in-process cache keeps prior Runs of the same Session. Those entries often
+    share fencing_token=1 after the lease row is re-inserted, so the first match
+    can be an expired assertion and block follow-up Runs in `_guard`.
+    """
+    current = now or datetime.now(UTC)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=UTC)
+    live: list[RuntimeAssignment] = []
+    for _task_id, assignment in assignments.values():
+        if f"session:{assignment.tenant_id}:{assignment.session_id}" != resource_id:
+            continue
+        if assignment.fencing_token != fencing_token:
+            continue
+        expires_at = _assertion_expires_at(assignment)
+        if expires_at is None or expires_at <= current:
+            continue
+        live.append(assignment)
+    if not live:
+        return None
+    return max(live, key=lambda item: _assertion_expires_at(item) or current)
+
+
 class RemoteRuntimeSessionClient:
     def __init__(
         self,
@@ -383,14 +424,8 @@ class RemoteRuntimeControlClient:
             raise RuntimeError("Runtime does not own this assignment") from exc
 
     async def assert_fencing(self, resource_id: str, fencing_token: int) -> None:
-        match = next(
-            (
-                assignment
-                for _, assignment in self._assignments.values()
-                if f"session:{assignment.tenant_id}:{assignment.session_id}" == resource_id
-                and assignment.fencing_token == fencing_token
-            ),
-            None,
+        match = select_assignment_for_fence(
+            self._assignments, resource_id, fencing_token
         )
         if match is None or match.lease_assertion is None:
             raise RuntimeError("Runtime does not own this fencing token")
@@ -495,3 +530,6 @@ class RemoteRuntimeControlClient:
             ),
             AssignmentDispositionResponse,
         )
+        for key, (known_task_id, _) in list(self._assignments.items()):
+            if known_task_id == task_id:
+                self._assignments.pop(key, None)

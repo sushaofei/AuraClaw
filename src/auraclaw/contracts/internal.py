@@ -551,3 +551,17 @@ class McpRegistrySnapshotResponse(ContractModel):
     api_version: str = INTERNAL_API_VERSION
     servers: tuple[dict[str, Any], ...] = ()
 
+
+class McpEgressCommandRequest(ContractModel):
+    context: InternalRequestContext
+    operation: Literal["apply", "revoke"]
+    server_id: str
+    entry: dict[str, Any] | None = None
+
+
+class McpEgressCommandResponse(ContractModel):
+    api_version: str = INTERNAL_API_VERSION
+    server_id: str
+    operation: str
+    status: Literal["applied", "revoked"]
+

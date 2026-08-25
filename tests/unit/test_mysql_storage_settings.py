@@ -345,3 +345,155 @@ def test_mysql_fetchval_insert_returning_do_nothing_miss_returns_none() -> None:
         assert await connection.fetchval(sql, "evt_dup") is None
 
     asyncio.run(exercise())
+
+
+_MCP_REVIVE_UPDATE_SQL = """
+UPDATE hands.mcp_server
+SET latest_revision=$1, tenant_id=$2, updated_at=$3,
+    desired_state=$6
+WHERE server_id=$4 AND latest_revision=$5
+RETURNING server_id
+""".strip()
+
+
+def test_where_after_update_drops_assigned_revision_predicate() -> None:
+    from auraclaw.infrastructure.persistence.mysql_pool import _where_after_update
+
+    where = _where_after_update(
+        "latest_revision=$1, tenant_id=$2, updated_at=$3, desired_state=$6",
+        "server_id=$4 AND latest_revision=$5",
+    )
+    assert where == "server_id=$4"
+
+
+def test_mysql_fetchval_update_returning_uses_new_revision() -> None:
+    import asyncio
+
+    from auraclaw.infrastructure.persistence.mysql_pool import MysqlConnection
+
+    class _FakeCursor:
+        def __init__(self, owner: _FakeRaw) -> None:
+            self._owner = owner
+            self.rowcount = 0
+            self._rows: list[dict[str, object]] = []
+
+        async def execute(self, sql: str, params: tuple[object, ...] = ()) -> None:
+            self._owner.statements.append((sql, params))
+            normalized = " ".join(sql.upper().split())
+            if normalized.startswith("UPDATE"):
+                self._owner.revision = int(params[0])
+                self.rowcount = 1
+                self._rows = []
+                return
+            if "SELECT SERVER_ID FROM" in normalized:
+                assert "LATEST_REVISION=%S" not in normalized
+                self.rowcount = 1
+                self._rows = [{"server_id": "auramcp"}]
+                return
+            raise AssertionError(f"unexpected SQL: {sql}")
+
+        async def fetchall(self) -> list[dict[str, object]]:
+            return list(self._rows)
+
+        async def __aenter__(self) -> _FakeCursor:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+    class _FakeRaw:
+        def __init__(self) -> None:
+            self.revision = 1
+            self.statements: list[tuple[str, tuple[object, ...]]] = []
+
+        def cursor(self, *_args: object, **_kwargs: object) -> _FakeCursor:
+            return _FakeCursor(self)
+
+    async def exercise() -> None:
+        raw = _FakeRaw()
+        connection = MysqlConnection(raw)  # type: ignore[arg-type]
+        value = await connection.fetchval(
+            _MCP_REVIVE_UPDATE_SQL,
+            2,
+            None,
+            "2026-08-25",
+            "auramcp",
+            1,
+            "disabled",
+        )
+        assert value == "auramcp"
+        select_sql = next(
+            sql for sql, _ in raw.statements if sql.upper().lstrip().startswith("SELECT")
+        )
+        assert "latest_revision" not in select_sql.lower()
+
+    asyncio.run(exercise())
+
+
+def test_mysql_record_marks_naive_datetimes_utc() -> None:
+    from datetime import UTC, datetime
+
+    from auraclaw.infrastructure.persistence.mysql_pool import MysqlRecord
+
+    naive = datetime(2026, 8, 25, 12, 0, 0)
+    row = MysqlRecord({"expires_at": naive, "name": "auramcp"})
+    value = row["expires_at"]
+    assert value.tzinfo is not None
+    assert value == naive.replace(tzinfo=UTC)
+    assert value > datetime(2026, 8, 25, 11, 0, 0, tzinfo=UTC)
+    assert row["name"] == "auramcp"
+
+
+def test_policy_validate_compares_naive_mysql_expiry() -> None:
+    import asyncio
+    from datetime import UTC, datetime, timedelta
+
+    from auraclaw.contracts.internal import (
+        InternalRequestContext,
+        PolicyValidateDecisionRequest,
+        ServiceIdentity,
+    )
+    from auraclaw.infrastructure.persistence.mysql_pool import MysqlRecord
+    from auraclaw.infrastructure.persistence.postgres_policy_store import (
+        PostgresPolicyStateStore,
+    )
+
+    class _Pool:
+        async def fetchrow(self, query: str, *args: object) -> MysqlRecord:
+            del query, args
+            return MysqlRecord(
+                {
+                    "action": "mcp.remote.invoke",
+                    "resource": "mcp:auramcp",
+                    "expires_at": datetime.now(UTC).replace(tzinfo=None)
+                    + timedelta(minutes=5),
+                    "decision": "allow",
+                    "policy_version": "s3-v1",
+                    "constraints": {},
+                }
+            )
+
+    class _Store(PostgresPolicyStateStore):
+        async def pool(self) -> object:  # type: ignore[override]
+            return _Pool()
+
+    async def scenario() -> None:
+        store = _Store("mysql+aiomysql://unused:unused@localhost:3306/unused")
+        result = await store.validate_decision(
+            PolicyValidateDecisionRequest(
+                context=InternalRequestContext(
+                    tenant_id="platform",
+                    service_identity=ServiceIdentity.CREDENTIAL_PROXY,
+                    request_id="req-1",
+                    correlation_id="corr-1",
+                    causation_id="cause-1",
+                ),
+                decision_id="decision-1",
+                action="mcp.remote.invoke",
+                resource="mcp:auramcp",
+            )
+        )
+        assert result.valid is True
+        assert result.expires_at.tzinfo is not None
+
+    asyncio.run(scenario())

@@ -41,6 +41,23 @@ class TaskQueryService:
             raise NotFoundError(f"Session not found: {session_id}")
         return dict(task)
 
+    async def list_tasks(
+        self,
+        tenant_id: str,
+        *,
+        kind: str | None = None,
+        status: str | None = None,
+        cursor: str | None = None,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        return await self._reader.list_tasks(
+            tenant_id,
+            kind=kind,
+            status=status,
+            cursor=cursor,
+            limit=limit,
+        )
+
     async def list_children(self, tenant_id: str, root_session_id: str) -> list[dict[str, Any]]:
         children = await self._collaboration.list_children(tenant_id, root_session_id)
         return [dict(item) for item in children]

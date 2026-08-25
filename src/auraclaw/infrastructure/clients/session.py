@@ -271,6 +271,18 @@ class RemoteTaskProjection:
         await projection.project(events)
         return await projection.get_task(tenant_id, session_id)
 
+    async def list_tasks(
+        self,
+        tenant_id: str,
+        *,
+        kind: str | None = None,
+        status: str | None = None,
+        cursor: str | None = None,
+        limit: int = 20,
+    ) -> dict[str, object]:
+        del tenant_id, kind, status, cursor, limit
+        return {"tasks": [], "next_cursor": None}
+
 
 @dataclass
 class RemoteOutboxItem:

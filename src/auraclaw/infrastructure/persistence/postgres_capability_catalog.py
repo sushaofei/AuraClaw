@@ -163,6 +163,19 @@ class PostgresCapabilityCatalogStore(LazyPool):
         )
         return tuple(_capability(row) for row in rows)
 
+    async def list_server_capabilities(
+        self, tenant_id: str, server_id: str
+    ) -> tuple[CapabilityDescriptor, ...]:
+        pool = await self.pool()
+        rows = await pool.fetch(
+            """SELECT * FROM hands.capability_catalog
+            WHERE server_id=$1 AND (tenant_id IS NULL OR tenant_id=$2)
+            ORDER BY canonical_name, version""",
+            server_id,
+            tenant_id,
+        )
+        return tuple(_capability(row) for row in rows)
+
     async def get_capability(
         self, tenant_id: str, capability_id: str
     ) -> CapabilityDescriptor | None:

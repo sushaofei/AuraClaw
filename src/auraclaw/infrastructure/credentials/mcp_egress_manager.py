@@ -51,12 +51,13 @@ class McpEgressManager:
         self._generations.pop(server_id, None)
 
     async def reconcile(self, snapshot: tuple[McpActiveSnapshotEntry, ...]) -> int:
+        """Refresh enabled revisions. Unload is Hands `revoke`, not a missing snapshot.
+
+        The snapshot only contains desired=enabled servers. Test/enable first apply an
+        adapter while the server is still disabled; dropping it here races the probe.
+        """
         desired = {entry.server_id: entry for entry in snapshot}
         changed = 0
-        for server_id in list(self._generations):
-            if server_id not in desired:
-                await self.revoke(server_id)
-                changed += 1
         for server_id, entry in desired.items():
             if self._generations.get(server_id) != entry.revision:
                 await self.apply(entry)

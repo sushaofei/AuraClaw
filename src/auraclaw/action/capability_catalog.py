@@ -103,6 +103,19 @@ class InMemoryCapabilityCatalogStore:
             if capability.tenant_id is None or capability.tenant_id == tenant_id
         )
 
+    async def list_server_capabilities(
+        self, tenant_id: str, server_id: str
+    ) -> tuple[CapabilityDescriptor, ...]:
+        return tuple(
+            capability
+            for capability in sorted(
+                self._capabilities.values(),
+                key=lambda item: (item.canonical_name, item.version),
+            )
+            if capability.server_id == server_id
+            if capability.tenant_id is None or capability.tenant_id == tenant_id
+        )
+
     async def get_capability(
         self, tenant_id: str, capability_id: str
     ) -> CapabilityDescriptor | None:
@@ -182,6 +195,17 @@ class CapabilityCatalog:
             )
         )
         return tuple(capability for _score_value, capability in ranked[:limit])
+
+    async def list_server_tools(
+        self, *, tenant_id: str, server_id: str
+    ) -> tuple[CapabilityDescriptor, ...]:
+        return tuple(
+            capability
+            for capability in await self._store.list_server_capabilities(
+                tenant_id, server_id
+            )
+            if capability.kind is CapabilityKind.TOOL
+        )
 
     async def get(
         self, *, tenant_id: str, capability_id: str

@@ -1,6 +1,6 @@
 BEGIN;
 
--- MySQL auto-names CHECK constraints; drop any CHECK on endpoint before widening.
+-- MySQL auto-names CHECK constraints. Drop any CHECK on endpoint before widening.
 SET @drop_endpoint_check := (
     SELECT CONCAT('ALTER TABLE `hands_downstream_mcp_server` DROP CHECK `', CONSTRAINT_NAME, '`')
     FROM information_schema.TABLE_CONSTRAINTS
@@ -91,9 +91,36 @@ CREATE TABLE IF NOT EXISTS `hands_mcp_server_operation` (
     UNIQUE KEY mcp_server_operation_command_uidx (tenant_id, command_id)
 );
 
-CREATE INDEX mcp_server_tenant_idx
-    ON `hands_mcp_server` (tenant_id, desired_state);
-CREATE INDEX mcp_server_operation_server_idx
-    ON `hands_mcp_server_operation` (server_id, created_at);
+SET @create_tenant_idx := (
+    SELECT IF(
+        EXISTS(
+            SELECT 1 FROM information_schema.statistics
+            WHERE table_schema = DATABASE()
+              AND table_name = 'hands_mcp_server'
+              AND index_name = 'mcp_server_tenant_idx'
+        ),
+        'SELECT 1',
+        'CREATE INDEX mcp_server_tenant_idx ON `hands_mcp_server` (tenant_id, desired_state)'
+    )
+);
+PREPARE stmt FROM @create_tenant_idx;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+SET @create_operation_idx := (
+    SELECT IF(
+        EXISTS(
+            SELECT 1 FROM information_schema.statistics
+            WHERE table_schema = DATABASE()
+              AND table_name = 'hands_mcp_server_operation'
+              AND index_name = 'mcp_server_operation_server_idx'
+        ),
+        'SELECT 1',
+        'CREATE INDEX mcp_server_operation_server_idx ON `hands_mcp_server_operation` (server_id, created_at)'
+    )
+);
+PREPARE stmt FROM @create_operation_idx;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
 
 COMMIT;

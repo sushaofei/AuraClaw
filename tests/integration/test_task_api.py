@@ -223,3 +223,53 @@ def test_human_approval_response_enters_through_task_gateway() -> None:
         )
         assert task.json()["status"] == "runnable"
         assert task.json()["projection_version"] == 5
+
+
+def test_create_records_source_and_lists_root_tasks() -> None:
+    with TestClient(create_app(profile="task-api")) as client:
+        headers = {"X-Tenant-ID": "tenant-list"}
+        chat = client.post(
+            "/v1/tasks",
+            headers={**headers, "Idempotency-Key": "list-chat"},
+            json={"goal": "chat goal", "source": "chat"},
+        )
+        scheduled = client.post(
+            "/v1/tasks",
+            headers={**headers, "Idempotency-Key": "list-schedule"},
+            json={
+                "goal": "scheduled goal",
+                "source": "schedule",
+                "schedule_id": "sch_daily",
+                "occurrence_id": "2026-08-24T01:00:00Z",
+            },
+        )
+        rejected = client.post(
+            "/v1/tasks",
+            headers={**headers, "Idempotency-Key": "list-bad-schedule"},
+            json={"goal": "missing occurrence", "source": "schedule", "schedule_id": "sch_x"},
+        )
+        assert chat.status_code == 202
+        assert scheduled.status_code == 202
+        assert rejected.status_code == 422
+
+        chat_task = client.get(
+            f"/v1/tasks/{chat.json()['session_id']}", headers=headers
+        )
+        assert chat_task.json()["source"] == "chat"
+        scheduled_task = client.get(
+            f"/v1/tasks/{scheduled.json()['session_id']}", headers=headers
+        )
+        assert scheduled_task.json()["source"] == "schedule"
+        assert scheduled_task.json()["schedule_id"] == "sch_daily"
+
+        listed = client.get("/v1/tasks", headers=headers)
+        assert listed.status_code == 200
+        session_ids = {item["session_id"] for item in listed.json()["tasks"]}
+        assert chat.json()["session_id"] in session_ids
+        assert scheduled.json()["session_id"] in session_ids
+
+        chats = client.get("/v1/tasks", headers=headers, params={"kind": "chat"})
+        assert {item["source"] for item in chats.json()["tasks"]} == {"chat"}
+
+        other = client.get("/v1/tasks", headers={"X-Tenant-ID": "tenant-other"})
+        assert other.json()["tasks"] == []

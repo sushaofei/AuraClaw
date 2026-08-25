@@ -105,7 +105,6 @@ class InMemoryMcpServerRegistryStore:
             self._hydrate(record)
             for record in self._servers.values()
             if record.tenant_id in {tenant_id, None}
-            and record.desired_state is not McpDesiredState.RETIRED
         ]
         return tuple(sorted(records, key=lambda item: item.server_id))
 
@@ -258,7 +257,7 @@ class McpServerRegistryService:
     ) -> McpServerRecord:
         del actor_id
         record = await self._store.get_server(server_id)
-        if record is None or record.desired_state is McpDesiredState.RETIRED:
+        if record is None:
             raise NotFoundError("MCP server was not found")
         self._assert_visible(record, tenant_id)
         return record
@@ -284,6 +283,16 @@ class McpServerRegistryService:
         existing = await self._idempotent(command.command_id, command.tenant_id)
         if existing is not None:
             return existing
+        current = await self._store.get_server(command.config.server_id)
+        if current is not None:
+            if current.desired_state is McpDesiredState.RETIRED:
+                return await self._append_revision(
+                    command,
+                    current,
+                    kind=McpRegistryOperationKind.CREATE,
+                    desired_state=McpDesiredState.DISABLED,
+                )
+            raise VersionConflictError("MCP server already exists")
         now = datetime.now(UTC)
         revision = McpServerRevisionRecord(
             server_id=command.config.server_id,
@@ -334,6 +343,20 @@ class McpServerRegistryService:
             raise InvalidTransitionError("retired MCP server cannot be updated")
         if current.latest_revision != command.expected_revision:
             raise VersionConflictError("MCP server revision conflict")
+        return await self._append_revision(
+            command,
+            current,
+            kind=McpRegistryOperationKind.UPDATE,
+        )
+
+    async def _append_revision(
+        self,
+        command: McpServerWriteCommand,
+        current: McpServerRecord,
+        *,
+        kind: McpRegistryOperationKind,
+        desired_state: McpDesiredState | None = None,
+    ) -> McpServerOperationRecord:
         now = datetime.now(UTC)
         next_revision = current.latest_revision + 1
         revision = McpServerRevisionRecord(
@@ -349,12 +372,17 @@ class McpServerRegistryService:
                 "latest_revision": next_revision,
                 "updated_at": now,
                 "tenant_id": command.config.tenant_id,
+                **(
+                    {"desired_state": desired_state}
+                    if desired_state is not None
+                    else {}
+                ),
             }
         )
         operation = _new_operation(
             command,
             server_id=command.config.server_id,
-            kind=McpRegistryOperationKind.UPDATE,
+            kind=kind,
             target_revision=next_revision,
             now=now,
         )
@@ -366,7 +394,10 @@ class McpServerRegistryService:
                 update={
                     "status": McpRegistryOperationStatus.SUCCEEDED,
                     "completed_at": datetime.now(UTC),
-                    "result": {"latest_revision": next_revision},
+                    "result": {
+                        "latest_revision": next_revision,
+                        "desired_state": record.desired_state.value,
+                    },
                 }
             )
         )
@@ -446,6 +477,7 @@ class McpServerRegistryService:
                 update={
                     "status": McpRegistryOperationStatus.FAILED,
                     "safe_error_code": _safe_error(exc),
+                    "result": _failure_result(exc),
                     "completed_at": datetime.now(UTC),
                 }
             )
@@ -492,7 +524,6 @@ class McpServerRegistryService:
             return current.desired_state, current.active_revision
         if kind is McpRegistryOperationKind.ENABLE:
             if self._runtime is not None:
-                await self._runtime.test(entry)
                 await self._runtime.apply(entry)
             return McpDesiredState.ENABLED, revision.revision
         if kind is McpRegistryOperationKind.DISABLE:
@@ -576,6 +607,20 @@ def _new_operation(
         status=McpRegistryOperationStatus.ACCEPTED,
         created_at=now,
     )
+
+
+def _failure_result(exc: BaseException) -> dict[str, str]:
+    payload = {"error_type": type(exc).__name__}
+    message = getattr(exc, "message", None)
+    if not isinstance(message, str) or not message:
+        message = str(exc)
+    if message:
+        payload["error_message"] = message[:200]
+    if isinstance(exc, AuraClawError):
+        payload["error_code"] = exc.code
+        if exc.detail:
+            payload["error_detail"] = exc.detail[:200]
+    return payload
 
 
 def _safe_error(exc: BaseException) -> str:
