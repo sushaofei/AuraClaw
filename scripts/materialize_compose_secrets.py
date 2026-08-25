@@ -8,17 +8,7 @@ from pathlib import Path
 from dotenv import dotenv_values
 
 SECRET_VARIABLES = {
-    "task_query_database_url": "TASK_QUERY_DATABASE_URL",
-    "session_database_url": "SESSION_DATABASE_URL",
-    "projection_database_url": "PROJECTION_DATABASE_URL",
-    "control_database_url": "CONTROL_DATABASE_URL",
-    "model_database_url": "MODEL_DATABASE_URL",
-    "hands_database_url": "HANDS_DATABASE_URL",
-    "policy_database_url": "POLICY_DATABASE_URL",
-    "credential_database_url": "CREDENTIAL_DATABASE_URL",
-    "artifact_database_url": "ARTIFACT_DATABASE_URL",
-    "streaming_database_url": "STREAMING_DATABASE_URL",
-    "delivery_database_url": "DELIVERY_DATABASE_URL",
+    "database_url": "AURACLAW_DATABASE_URL",
     "migration_database_url": "AURACLAW_MIGRATION_DATABASE_URL",
     "task_api_workload_token": "AURACLAW_TASK_API_WORKLOAD_TOKEN",
     "projection_workload_token": "AURACLAW_PROJECTION_WORKLOAD_TOKEN",

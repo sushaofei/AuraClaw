@@ -1,11 +1,10 @@
--- MySQL privilege bootstrap for AuraClaw role-scoped service accounts.
+-- MySQL privilege bootstrap for AuraClaw role-scoped service accounts (optional).
+-- Current Compose/dev/test/prod deployments use a shared AURACLAW_DATABASE_URL;
+-- this script is retained for operators who want least-privilege hardening later.
 -- Run as a MySQL administrator. Passwords are supplied separately by the platform.
 -- Table naming uses schema prefixes (session_core_*, projection_*, ...).
 --
 -- Replace `auraclaw` below with the deployment DB_NAME (e.g. auraclaw_dev).
--- Role DSN examples (after creating users + grants):
---   SESSION_DATABASE_URL=mysql+aiomysql://auraclaw_session:...@host:3306/auraclaw
---   CONTROL_DATABASE_URL=mysql+aiomysql://auraclaw_control:...@host:3306/auraclaw
 -- PostgreSQL equivalent: deploy/postgres/roles.sql
 -- Compose migrate defaults to /app/migrations/mysql; override with
 -- AURACLAW_MIGRATIONS_DIRECTORY=/app/migrations for PostgreSQL.

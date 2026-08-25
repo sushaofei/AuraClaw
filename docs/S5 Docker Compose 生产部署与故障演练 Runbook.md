@@ -15,9 +15,8 @@ Docker Compose 不提供 Kubernetes HPA、PDB 或 NetworkPolicy。本方案以�
 
 - Docker Engine 与 Compose v2；
 - 已推送且使用 digest 或不可变 Git SHA 标记的 AuraClaw 镜像；
-- 主存储已执行角色授权：MySQL 用 `deploy/mysql/roles.sql`，PostgreSQL 用
-  `deploy/postgres/roles.sql`；各服务注入独立角色 DSN（`mysql+aiomysql://` 或
-  `postgresql://`）；
+- 主存储使用统一 `AURACLAW_DATABASE_URL`（Compose 共享 `database_url` secret；`mysql+aiomysql://`
+  或 `postgresql://`）。`deploy/*/roles.sql` 为可选硬化参考，当前部署不按服务注入分角色 DSN；
 - Compose `migrate` 默认目录为 `/app/migrations/mysql`（目标 `0016`）。PostgreSQL
   部署需设置 `AURACLAW_MIGRATIONS_DIRECTORY=/app/migrations`；
 - Kafka/Replay Router、SeaweedFS、Vault 和模型出口可从 `auraclaw-platform` 网络访问；
@@ -32,7 +31,7 @@ docker network inspect auraclaw-platform >/dev/null 2>&1 ||
   docker network create auraclaw-platform
 ```
 
-最低必填配置包括不可变 `AURACLAW_IMAGE`、11 个角色 DSN、migration admin DSN、工作负载
+最低必填配置包括不可变 `AURACLAW_IMAGE`、统一应用 DSN、migration admin DSN、工作负载
 令牌、lease key、chaintower workload token、Agent Context 验签密钥、模型凭据、Vault 配置
 及 SeaweedFS 配置。Agent Runtime 没有数据库、模型、Vault 或 SeaweedFS Secret；chaintower
 身份密钥只挂到 Task API。只有对应 owner service 获得这些凭据。
