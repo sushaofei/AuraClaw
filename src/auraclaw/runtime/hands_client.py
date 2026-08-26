@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 from collections.abc import Mapping
 from typing import Any
 
@@ -38,6 +40,8 @@ from auraclaw.contracts.internal import INTERNAL_API_VERSION, InternalError
 from auraclaw.control.ports import RuntimeAssignment
 from auraclaw.internal.http import raise_contract_error
 
+logger = logging.getLogger(__name__)
+
 
 class HttpHandsClient:
     """Runtime Hands client over the protocol-agnostic internal HTTP contract."""
@@ -49,11 +53,19 @@ class HttpHandsClient:
         bearer_tokens: Mapping[str, str],
         max_request_bytes: int = HANDS_MAX_REQUEST_BYTES,
         max_response_bytes: int = HANDS_MAX_RESPONSE_BYTES,
+        connect_attempts: int = 3,
+        connect_retry_delay_seconds: float = 0.05,
     ) -> None:
+        if connect_attempts < 1:
+            raise ValueError("connect_attempts must be at least 1")
+        if connect_retry_delay_seconds < 0:
+            raise ValueError("connect_retry_delay_seconds cannot be negative")
         self._client = client
         self._bearer_tokens = dict(bearer_tokens)
         self._max_request_bytes = max_request_bytes
         self._max_response_bytes = max_response_bytes
+        self._connect_attempts = connect_attempts
+        self._connect_retry_delay_seconds = connect_retry_delay_seconds
 
     def _headers(self, assignment: RuntimeAssignment) -> dict[str, str]:
         token = self._bearer_tokens.get(assignment.runtime_id)
@@ -186,14 +198,40 @@ class HttpHandsClient:
         encoded = json.dumps(payload, separators=(",", ":")).encode()
         if len(encoded) > self._max_request_bytes:
             raise AuraClawError("Hands request exceeds the configured size limit")
-        response = await self._client.post(
-            path,
-            content=encoded,
-            headers={
-                **self._headers(assignment),
-                "Content-Type": "application/json",
-            },
-        )
+        response: httpx.Response | None = None
+        for attempt in range(1, self._connect_attempts + 1):
+            try:
+                response = await self._client.post(
+                    path,
+                    content=encoded,
+                    headers={
+                        **self._headers(assignment),
+                        "Content-Type": "application/json",
+                    },
+                )
+                break
+            except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+                if attempt >= self._connect_attempts:
+                    raise AuraClawError(
+                        "Action Hands is unavailable after "
+                        f"{self._connect_attempts} connection attempts",
+                        detail=(
+                            f"transport={type(exc).__name__}; "
+                            f"path={path}"
+                        ),
+                    ) from exc
+                logger.warning(
+                    "Action Hands connection failed; retrying request "
+                    "(attempt=%s/%s, path=%s, error=%s)",
+                    attempt,
+                    self._connect_attempts,
+                    path,
+                    type(exc).__name__,
+                )
+                await asyncio.sleep(
+                    self._connect_retry_delay_seconds * (2 ** (attempt - 1))
+                )
+        assert response is not None
         if len(response.content) > self._max_response_bytes:
             raise AuraClawError("Hands response exceeds the configured size limit")
         if response.is_error:
