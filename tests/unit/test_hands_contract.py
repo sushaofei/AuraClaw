@@ -23,6 +23,7 @@ from auraclaw.action.mcp_primitives import (
 )
 from auraclaw.action.policy import PolicyEngine
 from auraclaw.action.tool_gateway import ToolGateway, ToolRegistry
+from auraclaw.contracts.errors import AuraClawError
 from auraclaw.contracts.hands import (
     HANDS_CONTRACT_VERSION,
     HANDS_MAX_REQUEST_BYTES,
@@ -388,6 +389,88 @@ def test_http_hands_rejects_auth_version_size_and_schema_errors() -> None:
                 ToolCall(tool_invocation_id="http-1", name="lookup", arguments={}),
             )
             assert result["status"] == "success"
+
+    asyncio.run(scenario())
+
+
+def test_http_hands_retries_transient_connection_failures() -> None:
+    async def scenario() -> None:
+        assignment = _assignment()
+        attempts = 0
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            if attempts < 3:
+                raise httpx.ConnectError("temporary refusal", request=request)
+            return httpx.Response(
+                200,
+                json={"status": "success", "content": {"value": "ready"}},
+            )
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="http://hands",
+        ) as raw:
+            client = HttpHandsClient(
+                raw,
+                bearer_tokens={assignment.runtime_id: "runtime-token"},
+                connect_retry_delay_seconds=0,
+            )
+            result = await client.call_tool(
+                assignment,
+                HandsToolCall(
+                    tool_invocation_id="retry-connect-1",
+                    name="lookup",
+                    idempotency_key="retry-connect-1",
+                ),
+            )
+
+        assert result.status == "success"
+        assert result.content == {"value": "ready"}
+        assert attempts == 3
+
+    asyncio.run(scenario())
+
+
+def test_http_hands_reports_exhausted_connection_retries() -> None:
+    async def scenario() -> None:
+        assignment = _assignment()
+        attempts = 0
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            raise httpx.ConnectError("connection refused", request=request)
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="http://hands",
+        ) as raw:
+            client = HttpHandsClient(
+                raw,
+                bearer_tokens={assignment.runtime_id: "runtime-token"},
+                connect_attempts=2,
+                connect_retry_delay_seconds=0,
+            )
+            with pytest.raises(
+                AuraClawError,
+                match="Action Hands is unavailable after 2 connection attempts",
+            ) as raised:
+                await client.call_tool(
+                    assignment,
+                    HandsToolCall(
+                        tool_invocation_id="retry-connect-2",
+                        name="lookup",
+                        idempotency_key="retry-connect-2",
+                    ),
+                )
+
+        assert raised.value.detail == (
+            "transport=ConnectError; path=/internal/v1/hands/tools/call"
+        )
+        assert isinstance(raised.value.__cause__, httpx.ConnectError)
+        assert attempts == 2
 
     asyncio.run(scenario())
 
