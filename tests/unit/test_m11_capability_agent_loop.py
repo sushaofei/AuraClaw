@@ -178,6 +178,7 @@ class _Capabilities:
                 "capabilities": [
                     {
                         "capability_id": "cap-one",
+                        "server_id": "github",
                         "kind": self.kind,
                         "canonical_name": (
                             "github.issue.get"
@@ -195,6 +196,7 @@ class _Capabilities:
                     "capabilities": [
                         {
                             "capability_id": "cap-one",
+                            "server_id": "github",
                             "kind": "tool",
                             "canonical_name": "github.issue.get",
                             "version": "1.0.0",
@@ -413,6 +415,22 @@ def test_capability_loop_searches_loads_calls_and_returns_final_output() -> None
         assert [event.type for event in session.events].count(
             "model.turn.completed"
         ) == 4
+        assert [event.type for event in session.events].count(
+            "model.input.prepared"
+        ) == 4
+        tool_requested = next(
+            event
+            for event in session.events
+            if event.type == "tool.call.requested"
+            and event.payload.get("name") == "github.issue.get"
+        )
+        assert tool_requested.payload["activity"] == {
+            "source": "mcp",
+            "capability_id": "cap-one",
+            "kind": "tool",
+            "server_id": "github",
+            "version": "1.0.0",
+        }
 
     asyncio.run(scenario())
 

@@ -105,6 +105,31 @@ class TaskListResponse(BaseModel):
     next_cursor: str | None = None
 
 
+class ActivityNodeResponse(BaseModel):
+    id: str
+    type: str
+    status: str
+    title: str
+    summary: str
+    sequence: int = Field(ge=1)
+    updated_version: int = Field(ge=1)
+    run_id: str | None = None
+    started_at: str
+    completed_at: str | None = None
+    duration_ms: int | None = Field(default=None, ge=0)
+    detail: Any
+    correlation: dict[str, Any]
+
+
+class ActivityPageResponse(BaseModel):
+    session_id: str
+    projection_version: int = Field(ge=0)
+    source_version: int = Field(ge=0)
+    nodes: list[ActivityNodeResponse]
+    next_after_version: int = Field(ge=0)
+    has_more: bool
+
+
 class ErrorResponse(BaseModel):
     code: str
     message: str

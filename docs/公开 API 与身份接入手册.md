@@ -204,6 +204,7 @@ X-Actor-ID: local-user
 | `GET` | `/v1/tasks/{session_id}` | Task View（Session + 最新 Run 投影） |
 | `GET` | `/v1/tasks/{session_id}/result` | 权威结果；未就绪返回 `202`。`wait=true` 时可阻塞到终态 |
 | `GET` | `/v1/tasks/{session_id}/transcript` | 对话恢复（用户 / 助手消息 + 待审批） |
+| `GET` | `/v1/tasks/{session_id}/activity` | 产品级执行轨迹（模型 / MCP / Tool / Skill / 状态） |
 | `GET` | `/v1/tasks/{session_id}/children` | 子 Session 图 |
 | `GET` | `/v1/operations/sessions/{session_id}/timeline` | 运维时间线 |
 | `GET` | `/v1/operations/metrics` | 当前租户可见指标 |
@@ -636,6 +637,55 @@ Run：`pending` / `runnable` / `running` / `waiting_for_human` / `paused` / `ret
 
 `messages` 来自 `session.created`（goal）、`user.message.appended`、`model.output.completed`。  
 有待审时 `pending_approval` 含 `approval_id`、`tool_name`、`reason`、`risk`、`redacted_arguments`、`expected_effect`、`status`。人审发现与响应见 [§8.2](#82-接入方如何发现待审) / [§8.3](#83-如何批准或拒绝)。
+
+### `GET /v1/tasks/{session_id}/activity`
+
+恢复面向用户的产品执行轨迹，不返回 trace span、audit、alert 或完整内部 Prompt。参数：
+
+- `after_version`：默认 `0`；只返回最后变化版本大于该 Session aggregate version 的节点；
+- `limit`：默认/最大 `200`。
+
+```json
+{
+  "session_id": "ses_...",
+  "projection_version": 31,
+  "source_version": 34,
+  "nodes": [
+    {
+      "id": "tool:run_...:tci_...",
+      "type": "tool",
+      "status": "completed",
+      "title": "procurement.price.profile",
+      "summary": "success",
+      "sequence": 18,
+      "updated_version": 20,
+      "run_id": "run_...",
+      "started_at": "2026-08-20T06:00:04+00:00",
+      "completed_at": "2026-08-20T06:00:06+00:00",
+      "duration_ms": 2000,
+      "detail": {
+        "request": {"activity": {"source": "mcp", "server_id": "price-data"}},
+        "result": {"status": "success"}
+      },
+      "correlation": {
+        "event_ids": ["evt_request", "evt_completed"],
+        "tool_invocation_id": "tci_..."
+      }
+    }
+  ],
+  "next_after_version": 34,
+  "has_more": false
+}
+```
+
+Tool、Skill、Approval 与 Model 生命周期按稳定 ID 折叠；同一节点在增量读取时可能再次返回，
+消费者应以更大的 `updated_version` 覆盖旧节点。`next_after_version` 是下次读取游标，
+`source_version` 是本次 Canonical Event 读取的最高版本。响应带 `Cache-Control: private, no-store`
+与 `X-Activity-Version`。
+
+`model_input` 只含消息计数、用户输入预览、Tool 名称、模型策略和 digest，不包含完整 system
+prompt、Skill/Resource 正文或 Chain-of-Thought。Tool 参数/结果递归脱敏并限制大小。SSE 只用于
+通知客户端刷新 Activity；刷新、重连和游标过期均以本接口为准。
 
 ### `GET /v1/tasks/{session_id}/children`
 
