@@ -232,6 +232,7 @@ def test_runtime_recovers_at_all_required_failure_injection_points(
         event_types = [event.type for event in events]
         assert event_types.count("runtime.failed") == 1
         assert event_types.count("runtime.reprovisioned") == 1
+        assert event_types.count("model.input.prepared") == 1
         assert event_types.count("model.output.completed") == 1
         assert event_types.count("tool.call.requested") == 1
         assert event_types.count("tool.call.completed") == 1

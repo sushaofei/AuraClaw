@@ -146,16 +146,20 @@ class AgentHarness:
                     "model request has no user/assistant messages "
                     f"(session={assignment.session_id} run={assignment.run_id})"
                 )
+            request = ModelRequest(
+                model_call_id=model_call_id,
+                tenant_id=assignment.tenant_id,
+                run_id=assignment.run_id,
+                messages=messages,
+                policy=self._policy,
+                max_output_tokens=assignment.budget.max_output_tokens,
+            )
+            await self._record_model_input(
+                assignment, events, request=request, turn_index=0
+            )
             response, sequence = await self._generate_with_live_deltas(
                 assignment,
-                ModelRequest(
-                    model_call_id=model_call_id,
-                    tenant_id=assignment.tenant_id,
-                    run_id=assignment.run_id,
-                    messages=messages,
-                    policy=self._policy,
-                    max_output_tokens=assignment.budget.max_output_tokens,
-                ),
+                request,
                 sequence=0,
                 execute_started=execute_started,
                 prep=checkpoint_ready,
@@ -350,20 +354,27 @@ class AgentHarness:
                 )
                 await self._inject(InjectionPoint.BEFORE_MODEL)
                 await self._guard(assignment)
+                request = ModelRequest(
+                    model_call_id=model_call_id,
+                    tenant_id=assignment.tenant_id,
+                    run_id=assignment.run_id,
+                    messages=(
+                        *trusted,
+                        *self._build_capability_messages(turn_events),
+                    ),
+                    tools=model_tools,
+                    policy=self._policy,
+                    max_output_tokens=remaining_output_tokens,
+                )
+                await self._record_model_input(
+                    assignment,
+                    turn_events,
+                    request=request,
+                    turn_index=turn_index,
+                )
                 response, sequence = await self._generate_with_live_deltas(
                     assignment,
-                    ModelRequest(
-                        model_call_id=model_call_id,
-                        tenant_id=assignment.tenant_id,
-                        run_id=assignment.run_id,
-                        messages=(
-                            *trusted,
-                            *self._build_capability_messages(turn_events),
-                        ),
-                        tools=model_tools,
-                        policy=self._policy,
-                        max_output_tokens=remaining_output_tokens,
-                    ),
+                    request,
                     sequence=int(state.get("sequence", 0)),
                     publish_deltas=True,
                     execute_started=execute_started,
@@ -441,6 +452,11 @@ class AgentHarness:
                         "name": call.name,
                         "arguments": call.arguments,
                         "turn_index": turn_index,
+                        "version": call.version,
+                        "expected_side_effect": call.expected_side_effect,
+                        "activity": self._tool_activity_metadata(
+                            dict(state.get("capability_state", {})), call
+                        ),
                     },
                     identity=call.tool_invocation_id,
                 )
@@ -908,6 +924,9 @@ class AgentHarness:
                 "tool_invocation_id": call.tool_invocation_id,
                 "name": call.name,
                 "arguments": call.arguments,
+                "version": call.version,
+                "expected_side_effect": call.expected_side_effect,
+                "activity": {"source": "tool"},
             },
             identity=call.tool_invocation_id,
         )
@@ -1039,6 +1058,91 @@ class AgentHarness:
             refreshed = await self._session.load(assignment)
             existing.clear()
             existing.extend(refreshed)
+
+    async def _record_model_input(
+        self,
+        assignment: RuntimeAssignment,
+        existing: list[Any],
+        *,
+        request: ModelRequest,
+        turn_index: int,
+    ) -> None:
+        await self._append_once(
+            assignment,
+            existing,
+            "model.input.prepared",
+            self._model_input_evidence(request, turn_index=turn_index),
+            identity=request.model_call_id,
+            visibility=Visibility.USER,
+        )
+
+    @staticmethod
+    def _model_input_evidence(
+        request: ModelRequest, *, turn_index: int
+    ) -> dict[str, Any]:
+        roles: dict[str, int] = {}
+        user_prompt_preview = ""
+        for message in request.messages:
+            role = str(message.get("role", "unknown"))
+            roles[role] = roles.get(role, 0) + 1
+            if role == "user" and isinstance(message.get("content"), str):
+                user_prompt_preview = " ".join(str(message["content"]).split())[:800]
+        tool_names: list[str] = []
+        for tool in request.tools:
+            function = tool.get("function")
+            if isinstance(function, dict) and function.get("name"):
+                tool_names.append(str(function["name"]))
+        encoded = json.dumps(
+            {"messages": request.messages, "tools": request.tools},
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            default=str,
+        ).encode()
+        tool_encoded = json.dumps(
+            request.tools,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            default=str,
+        ).encode()
+        return {
+            "model_call_id": request.model_call_id,
+            "turn_index": turn_index,
+            "message_count": len(request.messages),
+            "role_counts": roles,
+            "user_prompt_preview": user_prompt_preview,
+            "input_digest": f"sha256:{hashlib.sha256(encoded).hexdigest()}",
+            "tool_schema_digest": f"sha256:{hashlib.sha256(tool_encoded).hexdigest()}",
+            "tool_names": tool_names,
+            "preferred_model": request.policy.preferred_model,
+            "allowed_providers": list(request.policy.allowed_providers),
+            "data_classification": request.policy.data_classification,
+            "max_output_tokens": request.max_output_tokens,
+            "trusted_instruction_count": roles.get("system", 0),
+        }
+
+    @staticmethod
+    def _tool_activity_metadata(
+        capability_state: dict[str, Any], call: ToolCall
+    ) -> dict[str, Any]:
+        for capability_id, item in dict(capability_state.get("loaded", {})).items():
+            if not isinstance(item, dict):
+                continue
+            if item.get("kind") != "tool" or item.get("canonical_name") != call.name:
+                continue
+            server_id = str(item.get("server_id", ""))
+            return {
+                "source": "mcp" if server_id else "catalog",
+                "capability_id": str(item.get("capability_id") or capability_id),
+                "kind": "tool",
+                "server_id": server_id or None,
+                "version": str(item.get("version") or call.version),
+            }
+        return {
+            "source": "auraclaw" if call.name.startswith("auraclaw.") else "tool",
+            "version": call.version,
+        }
 
     async def _guard(self, assignment: RuntimeAssignment) -> None:
         await self._control.assert_fencing(

@@ -12,6 +12,7 @@ from auraclaw.api.dependencies import (
     request_identity,
 )
 from auraclaw.api.models import (
+    ActivityPageResponse,
     AppendMessageRequest,
     ApprovalCommandResponse,
     ApprovalResponseRequest,
@@ -188,6 +189,26 @@ async def get_transcript(
     query: TaskQueryDependency,
 ) -> dict[str, Any]:
     return await query.get_transcript(tenant_id=identity.tenant_id, session_id=session_id)
+
+
+@router.get("/tasks/{session_id}/activity", response_model=ActivityPageResponse)
+async def get_activity(
+    session_id: str,
+    response: Response,
+    identity: Identity,
+    query: TaskQueryDependency,
+    after_version: int = Query(default=0, ge=0),
+    limit: int = Query(default=200, ge=1, le=200),
+) -> dict[str, Any]:
+    activity = await query.get_activity(
+        tenant_id=identity.tenant_id,
+        session_id=session_id,
+        after_version=after_version,
+        limit=limit,
+    )
+    response.headers["Cache-Control"] = "private, no-store"
+    response.headers["X-Activity-Version"] = str(activity["source_version"])
+    return activity
 
 
 @router.post(
