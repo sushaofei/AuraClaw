@@ -5,7 +5,12 @@ from pathlib import Path
 
 import pytest
 
-from auraclaw.config import apply_local_dev_proxy_env, get_settings
+from auraclaw.config import (
+    Settings,
+    _validate_local_dev_storage,
+    apply_local_dev_proxy_env,
+    get_settings,
+)
 
 
 def test_apply_local_dev_proxy_env_only_for_env_dev(
@@ -70,3 +75,18 @@ def test_get_settings_skips_proxy_for_prod_env_file(
         assert os.environ.get("HTTP_PROXY") == "http://corp-proxy.example:8080"
     finally:
         get_settings.cache_clear()
+
+
+def test_local_dev_env_rejects_memory_storage(tmp_path: Path) -> None:
+    env = tmp_path / ".env.dev"
+    env.write_text(
+        "AURACLAW_DEPLOYMENT_PROFILE=development\n"
+        "AURACLAW_STORAGE_BACKEND=memory\n"
+    )
+    settings = Settings(
+        _env_file=env,
+        deployment_profile="development",
+        storage_backend="memory",
+    )
+    with pytest.raises(ValueError, match="requires SQL storage"):
+        _validate_local_dev_storage(settings, env)

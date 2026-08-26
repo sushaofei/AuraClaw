@@ -117,7 +117,6 @@ from auraclaw.infrastructure.clients.session import (
     RemoteSessionDeliveryOutboxSource,
     RemoteSessionEventStore,
     RemoteSessionOutboxSource,
-    RemoteTaskProjection,
 )
 from auraclaw.infrastructure.clients.worker_wake import (
     HttpWorkerWakeClient,
@@ -140,7 +139,7 @@ from auraclaw.infrastructure.delivery import (
 from auraclaw.infrastructure.delivery.remote_sinks import CredentialProxyWebhookSink
 from auraclaw.infrastructure.delivery.sinks import ParentSessionResultSink
 from auraclaw.infrastructure.hands.local import LocalHandsService
-from auraclaw.infrastructure.observability.stores import InMemoryObservabilityStore
+from auraclaw.infrastructure.observability.stores import PostgresObservabilityStore
 from auraclaw.infrastructure.persistence.memory_control_store import (
     InMemoryControlStateStore,
 )
@@ -204,13 +203,7 @@ from auraclaw.internal.security import (
 from auraclaw.model_gateway.internal_service import ModelGatewayInternalService
 from auraclaw.observability.service import ObservabilityService
 from auraclaw.policy.internal_service import PolicyInternalService
-from auraclaw.projection.approval.projector import InMemoryApprovalProjection
-from auraclaw.projection.collaboration.projector import InMemoryCollaborationProjection
-from auraclaw.projection.ports import (
-    ApprovalViewReader,
-    CollaborationReader,
-    TaskReader,
-)
+from auraclaw.projection.approval.projector import CompositeProjection
 from auraclaw.projection.relay import OutboxRelay
 from auraclaw.runtime.capability_controller import RuntimeCapabilityController
 from auraclaw.runtime.collaboration_controller import RuntimeCollaborationController
@@ -554,7 +547,7 @@ def _task_api_app(settings: Settings) -> FastAPI:
     token = settings.workload_token_value(ServiceIdentity.TASK_API.value)
     config_ready = bool(
         token
-        and (settings.sql_storage_enabled or settings.storage_backend == "memory")
+        and settings.sql_storage_enabled
         and (
             settings.signed_identity_configured
             or settings.insecure_identity_headers_enabled
@@ -570,20 +563,16 @@ def _task_api_app(settings: Settings) -> FastAPI:
         bearer_token=token or secrets.token_urlsafe(32),
         service_identity=ServiceIdentity.TASK_API,
     )
-    task_projection: TaskReader
-    approval_projection: ApprovalViewReader
-    collaboration_projection: CollaborationReader
-    if settings.sql_storage_enabled:
-        task_projection = PostgresTaskProjection(settings.resolved_database_url)
-        approval_projection = PostgresApprovalProjection(settings.resolved_database_url)
-        collaboration_projection = PostgresCollaborationProjection(
-            settings.resolved_database_url
+    if not settings.sql_storage_enabled:
+        raise ValueError(
+            "task-api requires SQL storage; use `auraclaw serve` with .env.dev "
+            "configured for postgres, mysql, or kingbase"
         )
-    else:
-        # Session owns the memory store in the multi-process debug topology.
-        task_projection = RemoteTaskProjection(remote_session)
-        approval_projection = InMemoryApprovalProjection()
-        collaboration_projection = InMemoryCollaborationProjection()
+    task_projection = PostgresTaskProjection(settings.resolved_database_url)
+    approval_projection = PostgresApprovalProjection(settings.resolved_database_url)
+    collaboration_projection = PostgresCollaborationProjection(
+        settings.resolved_database_url
+    )
     task_service = TaskService(
         event_store=remote_session,
         relay=NoOpOutboxRelay(),
@@ -602,7 +591,8 @@ def _task_api_app(settings: Settings) -> FastAPI:
         max_timeout_seconds=settings.sync_invoke_max_timeout_seconds,
     )
     invocations = SyncInvocationGateway(gateway, waiter)
-    observability = ObservabilityService(InMemoryObservabilityStore(), remote_session)
+    observability_store = PostgresObservabilityStore(settings.resolved_database_url)
+    observability = ObservabilityService(observability_store, remote_session)
     app.dependency_overrides[get_task_command_gateway] = lambda: gateway
     app.dependency_overrides[get_task_projection] = lambda: task_projection
     app.dependency_overrides[get_task_query_service] = lambda: query
@@ -622,11 +612,10 @@ def _task_api_app(settings: Settings) -> FastAPI:
         *identity_closeables,
         remote_session,
         policy,
-        *(
-            (task_projection, approval_projection, collaboration_projection)
-            if settings.sql_storage_enabled
-            else ()
-        ),
+        task_projection,
+        approval_projection,
+        collaboration_projection,
+        observability_store,
     )
     mcp_registry, mcp_store = _mcp_registry_service(settings)
     mcp_lifecycle = RemoteMcpRegistryClient(
@@ -655,31 +644,21 @@ def _task_api_app(settings: Settings) -> FastAPI:
 
 
 def _streaming_app(settings: Settings) -> FastAPI:
-    app = create_app(profile="streaming-gateway")
-    token = settings.workload_token_value(ServiceIdentity.STREAMING_GATEWAY.value)
-    remote_session: RemoteSessionEventStore | None = None
-    projection: TaskReader
-    if settings.sql_storage_enabled:
-        projection = PostgresTaskProjection(settings.resolved_database_url)
-    else:
-        # Session owns the memory store in the multi-process debug topology.
-        remote_session = RemoteSessionEventStore(
-            settings.session_base_url,
-            service_identity=ServiceIdentity.STREAMING_GATEWAY,
-            bearer_token=token or secrets.token_urlsafe(32),
+    if not settings.sql_storage_enabled:
+        raise ValueError(
+            "streaming-gateway requires SQL storage; use `auraclaw serve` with .env.dev "
+            "configured for postgres, mysql, or kingbase"
         )
-        projection = RemoteTaskProjection(remote_session)
+    app = create_app(profile="streaming-gateway")
+    projection = PostgresTaskProjection(settings.resolved_database_url)
     gateway = StreamingGateway(
         reader=projection,
         bus=providers.get_runtime_replay_bus(),
     )
     app.dependency_overrides[get_streaming_gateway] = lambda: gateway
-    app.state.closeables = (
-        *((projection,) if settings.sql_storage_enabled else ()),
-        *((remote_session,) if remote_session is not None else ()),
-    )
+    app.state.closeables = (projection,)
     app.state.storage_label = "projection-read-only"
-    app.state.session_access = "http" if remote_session is not None else "database"
+    app.state.session_access = "database"
     return app
 
 
@@ -701,17 +680,10 @@ def _readiness(name: str, settings: Settings) -> tuple[bool, dict[str, str]]:
     dependencies: dict[str, str] = {}
     ready = True
     if name in DATABASE_SERVICES:
-        database_ready = (
-            settings.sql_storage_enabled or settings.storage_backend == "memory"
+        dependencies["database"] = (
+            settings.storage_label if settings.sql_storage_enabled else "missing"
         )
-        dependencies["postgres"] = (
-            "ready"
-            if settings.sql_storage_enabled
-            else "memory"
-            if settings.storage_backend == "memory"
-            else "missing"
-        )
-        ready = ready and database_ready
+        ready = ready and settings.sql_storage_enabled
     if name == "task-api":
         identity_ready = (
             settings.insecure_identity_headers_enabled
@@ -1364,14 +1336,8 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
                 setter = getattr(connector, "set_notification_handler", None)
                 if setter is not None:
                     setter(reconciler.handle_notification)
-            expected = len(app.state.capability_connectors)
-            for attempt in range(20):
-                active = await reconciler.reconcile_all()
-                await skill_reconciler.reconcile_all()
-                if expected == 0 or active >= expected:
-                    break
-                if attempt < 19:
-                    await asyncio.sleep(0.5)
+            await reconciler.reconcile_all()
+            await skill_reconciler.reconcile_all()
 
         async def reconcile_catalog_and_skills() -> int:
             active = await reconciler.reconcile_all()
@@ -1765,7 +1731,10 @@ def _projection_app(
 ) -> FastAPI:
     if not settings.sql_storage_enabled:
         return _base_service_app(spec, settings, worker_interval=worker_interval)
-    projector = providers.get_task_projection()
+    task_projection = providers.get_task_projection()
+    approval_projection = providers.get_approval_projection()
+    collaboration_projection = providers.get_collaboration_projection()
+    projector = CompositeProjection(*providers.session_outbox_projectors())
     admin_store = PostgresAdminOperationStore(
         settings.resolved_database_url, schema="projection"
     )
@@ -1786,7 +1755,13 @@ def _projection_app(
         wait_seconds=claim_wait,
     )
     relay = OutboxRelay(source, projector)
-    closeables = (remote_session, projector, admin_store)
+    closeables = (
+        remote_session,
+        task_projection,
+        approval_projection,
+        collaboration_projection,
+        admin_store,
+    )
     app = _base_service_app(
         spec,
         settings,
@@ -1798,29 +1773,29 @@ def _projection_app(
     async def status(parameters: dict[str, Any]) -> dict[str, Any]:
         tenant_id = parameters.get("tenant_id")
         count = (
-            await projector.poison_count(str(tenant_id) if tenant_id else None)
-            if isinstance(projector, PostgresTaskProjection)
+            await task_projection.poison_count(str(tenant_id) if tenant_id else None)
+            if isinstance(task_projection, PostgresTaskProjection)
             else 0
         )
         return {"poison_count": count}
 
     async def redrive(parameters: dict[str, Any]) -> dict[str, Any]:
-        if not isinstance(projector, PostgresTaskProjection):
+        if not isinstance(task_projection, PostgresTaskProjection):
             return {"changed": False}
-        changed = await projector.redrive_poison(
+        changed = await task_projection.redrive_poison(
             str(parameters["tenant_id"]), str(parameters["event_id"])
         )
         return {"changed": changed}
 
     async def rebuild(parameters: dict[str, Any]) -> dict[str, Any]:
-        if not isinstance(projector, PostgresTaskProjection) or remote_session is None:
+        if not isinstance(task_projection, PostgresTaskProjection) or remote_session is None:
             return {"processed": 0}
         tenant = parameters.get("tenant_id")
         tenant_id = str(tenant) if tenant else None
         events = []
-        for event_tenant, session_id in await projector.session_keys(tenant_id):
+        for event_tenant, session_id in await task_projection.session_keys(tenant_id):
             events.extend(await remote_session.load(event_tenant, session_id))
-        processed = await projector.rebuild(events, tenant_id)
+        processed = await task_projection.rebuild(events, tenant_id)
         return {"processed": processed}
 
     admin_app = create_contract_app(

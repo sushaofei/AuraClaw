@@ -29,6 +29,7 @@ if [[ "${COMPOSE_ENV_FILE}" == ".env.test" ]]; then
   COMPOSE_FILE="compose.test.yml"
 fi
 COMPOSE_PREFIX="docker compose --env-file ${COMPOSE_ENV_FILE} -f ${COMPOSE_FILE}"
+COMPOSE_PREFIX+=' $(test -f compose.kafka-fix.yml && echo -f compose.kafka-fix.yml)'
 COMPOSE_PREFIX+=' $(test -f compose.hotfix-errors.yml && echo -f compose.hotfix-errors.yml)'
 
 remote_cmd() {

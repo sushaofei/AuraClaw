@@ -14,36 +14,6 @@
       "justMyCode": false
     },
     {
-      "name": "AuraClaw serve (PostgreSQL)",
-      "type": "debugpy",
-      "request": "launch",
-      "module": "auraclaw",
-      "args": ["serve", "--host", "0.0.0.0"],
-      "cwd": "${workspaceFolder}",
-      "python": "${workspaceFolder}/.venv/bin/python",
-      "envFile": "${workspaceFolder}/.env.dev",
-      "env": {
-        "AURACLAW_STORAGE_BACKEND": "postgres"
-      },
-      "console": "integratedTerminal",
-      "justMyCode": false
-    },
-    {
-      "name": "AuraClaw serve (KingBase)",
-      "type": "debugpy",
-      "request": "launch",
-      "module": "auraclaw",
-      "args": ["serve", "--host", "0.0.0.0"],
-      "cwd": "${workspaceFolder}",
-      "python": "${workspaceFolder}/.venv/bin/python",
-      "envFile": "${workspaceFolder}/.env.dev",
-      "env": {
-        "AURACLAW_STORAGE_BACKEND": "kingbase"
-      },
-      "console": "integratedTerminal",
-      "justMyCode": false
-    },
-    {
       "name": "AuraMCP run",
       "type": "debugpy",
       "request": "launch",
@@ -60,16 +30,6 @@
     {
       "name": "AuraClaw + AuraMCP",
       "configurations": ["AuraClaw serve", "AuraMCP run"],
-      "stopAll": true
-    },
-    {
-      "name": "AuraClaw (PostgreSQL) + AuraMCP",
-      "configurations": ["AuraClaw serve (PostgreSQL)", "AuraMCP run"],
-      "stopAll": true
-    },
-    {
-      "name": "AuraClaw (KingBase) + AuraMCP",
-      "configurations": ["AuraClaw serve (KingBase)", "AuraMCP run"],
       "stopAll": true
     }
   ]

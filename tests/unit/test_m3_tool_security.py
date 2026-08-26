@@ -12,11 +12,12 @@ from auraclaw.contracts.errors import (
     ApprovalValidationError,
     ArtifactAccessError,
     CredentialAccessError,
+    NotFoundError,
     PolicyDeniedError,
     SandboxViolationError,
     SchemaValidationError,
 )
-from auraclaw.contracts.events import Actor, CanonicalEvent
+from auraclaw.contracts.events import Actor, CanonicalEvent, NewEvent
 from auraclaw.contracts.state import Visibility
 from auraclaw.contracts.tools import (
     ApprovalStatus,
@@ -533,5 +534,100 @@ def test_runtime_waits_for_approval_then_resumes_same_tool_call() -> None:
         assert [event.type for event in completed_events].count("tool.call.completed") == 1
         assert [event.type for event in completed_events].count("run.completed") == 1
         assert hands.calls == 1
+
+    asyncio.run(scenario())
+
+
+def test_approval_response_rebuilds_from_canonical_events_without_projection() -> None:
+    async def scenario() -> None:
+        tenant_id = "tenant-hitl-events"
+        event_store = InMemoryEventStore()
+        task_projection = InMemoryTaskProjection()
+        service = TaskService(
+            event_store=event_store,
+            relay=OutboxRelay(event_store, task_projection),
+            reader=task_projection,
+            admission=AllowAllAdmissionController(),
+        )
+        created = await service.create_task(
+            goal="approve from events",
+            context=CommandContext(
+                command_id="create-hitl-events",
+                tenant_id=tenant_id,
+                actor=Actor(type="user", id="human"),
+                correlation_id="corr-hitl-events",
+                expected_version=0,
+                operation="create_task",
+            ),
+        )
+        session_id = str(created["session_id"])
+        run_id = str(created["run_id"])
+        approval_id = "apr_unprojected"
+        await event_store.append(
+            root_session_id=session_id,
+            session_id=session_id,
+            run_id=run_id,
+            context=CommandContext(
+                command_id="runtime-approval-request",
+                tenant_id=tenant_id,
+                actor=Actor(type="runtime", id="runtime-1"),
+                correlation_id=run_id,
+                expected_version=2,
+                operation="runtime.approval.requested",
+            ),
+            events=[
+                NewEvent(
+                    type="approval.requested",
+                    payload={
+                        "approval_id": approval_id,
+                        "run_id": run_id,
+                        "action_digest": "digest-hitl-events",
+                        "tool_name": "auramcp.about.auraclaw",
+                        "redacted_arguments": {},
+                        "risk": "high",
+                        "reason": "write-with-approval action requires human approval",
+                        "expected_effect": "write",
+                        "allowed_decisions": ["approved", "rejected"],
+                        "assigned_approvers": [],
+                        "policy_version": "m3-v1",
+                        "expires_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+                        "status": "waiting",
+                    },
+                )
+            ],
+            command_result={"approval_id": approval_id},
+        )
+        responded = await service.record_approval_response(
+            session_id=session_id,
+            approval_id=approval_id,
+            decision="approved",
+            feedback=None,
+            context=CommandContext(
+                command_id="human-approve",
+                tenant_id=tenant_id,
+                actor=Actor(type="user", id="human"),
+                correlation_id=run_id,
+                expected_version=3,
+                operation="record_approval_response",
+            ),
+        )
+        assert responded["decision"] == "approved"
+        events = await event_store.load(tenant_id, session_id)
+        assert any(event.type == "approval.approved" for event in events)
+        with pytest.raises(NotFoundError, match="apr_missing"):
+            await service.record_approval_response(
+                session_id=session_id,
+                approval_id="apr_missing",
+                decision="approved",
+                feedback=None,
+                context=CommandContext(
+                    command_id="human-approve-missing",
+                    tenant_id=tenant_id,
+                    actor=Actor(type="user", id="human"),
+                    correlation_id=run_id,
+                    expected_version=5,
+                    operation="record_approval_response",
+                ),
+            )
 
     asyncio.run(scenario())

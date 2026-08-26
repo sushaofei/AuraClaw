@@ -2,13 +2,22 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
 from auraclaw.contracts.errors import ApprovalValidationError
+from auraclaw.contracts.events import CanonicalEvent
 from auraclaw.contracts.tools import ApprovalRecord, ApprovalStatus, RiskLevel
+
+
+def _aware_expires_at(value: object) -> datetime:
+    expires_at = datetime.fromisoformat(str(value))
+    if expires_at.tzinfo is None:
+        return expires_at.replace(tzinfo=UTC)
+    return expires_at
 
 
 def action_digest(tool_name: str, tool_version: str, arguments: dict[str, Any]) -> str:
@@ -22,6 +31,52 @@ def action_digest(tool_name: str, tool_version: str, arguments: dict[str, Any]) 
 
 
 class ApprovalAggregate:
+    @staticmethod
+    def from_events(
+        events: Sequence[CanonicalEvent],
+        *,
+        tenant_id: str,
+        session_id: str,
+        approval_id: str,
+    ) -> ApprovalRecord | None:
+        """Rebuild an ApprovalRecord from Canonical Session Events."""
+        record: ApprovalRecord | None = None
+        for event in events:
+            if event.tenant_id != tenant_id or event.session_id != session_id:
+                continue
+            if str(event.payload.get("approval_id", "")) != approval_id:
+                continue
+            if event.type == "approval.requested":
+                payload = event.payload
+                record = ApprovalRecord(
+                    approval_id=approval_id,
+                    tenant_id=event.tenant_id,
+                    session_id=event.session_id,
+                    run_id=str(payload.get("run_id") or event.run_id or ""),
+                    action_digest=str(payload["action_digest"]),
+                    tool_name=str(payload["tool_name"]),
+                    redacted_arguments=dict(payload.get("redacted_arguments", {})),
+                    risk=RiskLevel(str(payload["risk"])),
+                    reason=str(payload.get("reason", "")),
+                    expected_effect=str(payload.get("expected_effect", "")),
+                    allowed_decisions=tuple(payload.get("allowed_decisions", ())),
+                    assigned_approvers=tuple(payload.get("assigned_approvers", ())),
+                    policy_version=str(payload["policy_version"]),
+                    expires_at=_aware_expires_at(payload["expires_at"]),
+                    status=ApprovalStatus(str(payload.get("status", "waiting"))),
+                )
+                continue
+            if record is None or not event.type.startswith("approval."):
+                continue
+            status = ApprovalStatus(event.type.split(".", 1)[1])
+            record = replace(
+                record,
+                status=status,
+                decision=event.payload.get("decision"),
+                feedback=event.payload.get("feedback"),
+            )
+        return record
+
     @staticmethod
     def request(
         *,

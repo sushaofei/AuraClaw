@@ -13,6 +13,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from auraclaw.contracts.capabilities import JavaApiServerDefinition
 
+# Shared agent-runtime pool registration role. Coordinator/worker/reviewer are
+# assignment roles chosen by Orchestrator, not values for AURACLAW_RUNTIME_ROLE.
+RUNTIME_POOL_ROLE = "agent"
+
 _SECRET_FILE_VARIABLES = {
     "AURACLAW_DATABASE_URL",
     "AURACLAW_MIGRATION_DATABASE_URL",
@@ -215,22 +219,33 @@ def apply_kingbase_env_aliases(
 ) -> None:
     """Map KingBase credentials onto `DB_*` when the storage backend is kingbase.
 
-    Loads `KINGBASE_*` from `.kingbase.env` (or `AURACLAW_KINGBASE_ENV_FILE`).
-    Explicit process-env `KINGBASE_*` wins over the file. When
-    `AURACLAW_STORAGE_BACKEND=kingbase`, resolved values overwrite `DB_*` so a
-    MySQL-oriented `.env.dev` can switch without editing host credentials.
-    Domain / store code continues to use only `DB_*` and `resolved_database_url`.
+    Reads `KINGBASE_*` from the active settings env file (``.env.test`` / ``.env.prod``)
+    or process environment. When ``AURACLAW_STORAGE_BACKEND=kingbase``, resolved
+    ``KINGBASE_*`` values overwrite ``DB_*``. Inline ``DB_*`` in the same env file
+    are used when no ``KINGBASE_*`` alias is present. Domain / store code continues to
+    use only ``DB_*`` and ``resolved_database_url``.
     """
     selected = os.environ if environ is None else environ
-    kingbase_path = Path(
-        selected.get("AURACLAW_KINGBASE_ENV_FILE") or ".kingbase.env"
+    settings_file_values = (
+        _parse_dotenv_values(Path(settings_env_file))
+        if settings_env_file is not None
+        else {}
     )
-    kingbase_file_values = _parse_dotenv_values(kingbase_path)
+    optional_path = selected.get("AURACLAW_KINGBASE_ENV_FILE")
+    legacy_file_values = (
+        _parse_dotenv_values(Path(optional_path)) if optional_path else {}
+    )
 
     def kingbase_value(key: str) -> str | None:
-        return selected.get(key) or kingbase_file_values.get(key)
+        return (
+            selected.get(key)
+            or settings_file_values.get(key)
+            or legacy_file_values.get(key)
+        )
 
-    backend = _settings_backend(selected, settings_env_file, kingbase_file_values)
+    backend = _settings_backend(
+        selected, settings_env_file, settings_file_values, legacy_file_values
+    )
 
     has_kingbase = any(kingbase_value(source) for source in _KINGBASE_TO_DB)
     if backend == "kingbase":
@@ -273,6 +288,7 @@ class Settings(BaseSettings):
     ingress_enabled: bool = True
     lease_signing_key: SecretStr | None = None
     allow_insecure_identity_headers: bool | None = None
+    test_uplink_insecure_identity: bool | None = None
     chaintower_workload_token: SecretStr | None = None
     agent_context_issuer: str = "chaintower"
     agent_context_audience: str = "auraclaw-task-api"
@@ -390,7 +406,7 @@ class Settings(BaseSettings):
     sync_invoke_poll_interval_seconds: float = Field(default=0.25, ge=0.05, le=5.0)
     sync_invoke_max_concurrent: int = Field(default=32, ge=1, le=1000)
     runtime_id: str = "runtime-local-1"
-    runtime_role: str = "agent"
+    runtime_role: str = RUNTIME_POOL_ROLE
     runtime_node_id: str = "local"
     runtime_capacity: int = Field(default=1, ge=1)
     model_api_key: str | None = None
@@ -409,6 +425,17 @@ class Settings(BaseSettings):
             and self.allow_insecure_identity_headers is True
         ):
             raise ValueError("insecure identity headers cannot be enabled in production")
+        return self
+
+    @model_validator(mode="after")
+    def validate_runtime_pool_role(self) -> Settings:
+        if self.runtime_role != RUNTIME_POOL_ROLE:
+            raise ValueError(
+                "AURACLAW_RUNTIME_ROLE must be "
+                f"{RUNTIME_POOL_ROLE!r}; got {self.runtime_role!r}. "
+                "Coordinator/worker/reviewer assignment roles are chosen by "
+                "Orchestrator, not by this setting."
+            )
         return self
 
     @model_validator(mode="after")
@@ -634,6 +661,8 @@ class Settings(BaseSettings):
 
     @property
     def insecure_identity_headers_enabled(self) -> bool:
+        if self.test_uplink_insecure_identity is True:
+            return True
         if self.deployment_profile == "production":
             return False
         return self.allow_insecure_identity_headers is True
@@ -701,6 +730,18 @@ class Settings(BaseSettings):
             raise ValueError(f"unknown service: {service_name}") from exc
 
 
+def _validate_local_dev_storage(settings: Settings, env_file: str | Path | None) -> None:
+    if not _is_local_dev_env_file(env_file):
+        return
+    if settings.sql_storage_enabled:
+        return
+    raise ValueError(
+        "Local development (.env.dev) requires SQL storage so registrations and "
+        "projections survive process restarts. Set AURACLAW_STORAGE_BACKEND to "
+        "postgres, mysql, or kingbase and configure DB_* credentials."
+    )
+
+
 @lru_cache
 def get_settings() -> Settings:
     load_secret_files()
@@ -708,4 +749,6 @@ def get_settings() -> Settings:
     apply_local_dev_proxy_env(env_file)
     apply_postgresql_env_aliases(settings_env_file=env_file)
     apply_kingbase_env_aliases(settings_env_file=env_file)
-    return Settings(_env_file=env_file)
+    settings = Settings(_env_file=env_file)
+    _validate_local_dev_storage(settings, env_file)
+    return settings

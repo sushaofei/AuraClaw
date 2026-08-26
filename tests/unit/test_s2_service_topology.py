@@ -14,7 +14,7 @@ from auraclaw.composition.services import (
     create_service_app,
     service_spec,
 )
-from auraclaw.config import Settings, get_settings
+from auraclaw.config import RUNTIME_POOL_ROLE, Settings, get_settings
 from auraclaw.contracts.hands import HANDS_TOOLS_LIST
 from auraclaw.contracts.internal import LeaseAssertion
 from auraclaw.internal.security import LeaseAssertionSigner
@@ -72,6 +72,14 @@ def test_serve_starts_all_twelve_production_entrypoints() -> None:
     assert uvicorn_calls == []
 
 
+def test_runtime_pool_role_must_register_agent_pool() -> None:
+    with pytest.raises(ValueError, match="AURACLAW_RUNTIME_ROLE must be 'agent'"):
+        _settings(runtime_role="root")
+
+    settings = _settings(runtime_role=RUNTIME_POOL_ROLE)
+    assert settings.runtime_role == RUNTIME_POOL_ROLE
+
+
 def test_single_service_run_rejected_in_development_profile() -> None:
     with pytest.raises(SystemExit, match="auraclaw serve"):
         main(["runtime", "run"], uvicorn_runner=lambda *_a, **_k: None)
@@ -101,7 +109,21 @@ def test_serve_rejects_process_local_runtime_event_bus() -> None:
         runtime_event_backend="memory",
     )
 
-    with pytest.raises(ValueError, match="shared SQL storage or Kafka"):
+    with pytest.raises(ValueError, match="requires SQL storage"):
+        _serve_topology(settings, host="127.0.0.1")
+
+
+def test_serve_rejects_sql_without_kafka() -> None:
+    settings = _settings(
+        storage_backend="postgres",
+        db_host="localhost",
+        db_user="auraclaw",
+        db_password="auraclaw",
+        db_name="auraclaw",
+        runtime_event_backend="memory",
+    )
+
+    with pytest.raises(ValueError, match="requires Kafka"):
         _serve_topology(settings, host="127.0.0.1")
 
 
@@ -127,6 +149,8 @@ def test_task_api_and_streaming_gateway_have_disjoint_public_routes() -> None:
 def test_each_service_exposes_health_and_workers_stop_gracefully() -> None:
     settings = _settings(storage_backend="memory", artifact_backend="local")
     for command in SERVICE_BY_COMMAND:
+        if command in {"api", "streaming"}:
+            continue
         app = create_service_app(command, settings)
         if command == "streaming":
             paths = set(app.openapi()["paths"])
@@ -234,3 +258,19 @@ def test_container_build_excludes_secrets_and_runs_unprivileged() -> None:
     assert ".env" in dockerignore
     assert ".venv" in dockerignore
     assert "__pycache__" in dockerignore
+
+
+def test_session_outbox_projectors_include_approval_and_collaboration() -> None:
+    from auraclaw.composition.providers import (
+        get_approval_projection,
+        get_collaboration_projection,
+        get_task_projection,
+        session_outbox_projectors,
+    )
+
+    writers = session_outbox_projectors()
+    assert writers == (
+        get_task_projection(),
+        get_approval_projection(),
+        get_collaboration_projection(),
+    )

@@ -6,6 +6,8 @@ from fastapi.testclient import TestClient
 
 import auraclaw.composition.services as services
 from auraclaw.action.skill_packages import HmacSkillSignatureVerifier, SkillPackage
+from auraclaw.api.routes.admin_skills import create_skill_admin_router
+from auraclaw.composition.api import create_app
 from auraclaw.composition.providers import (
     get_approval_projection,
     get_event_store,
@@ -13,7 +15,7 @@ from auraclaw.composition.providers import (
     get_task_service,
 )
 from auraclaw.composition.services import create_service_app
-from auraclaw.config import get_settings
+from auraclaw.config import Settings, get_settings
 from auraclaw.contracts.skills import (
     SkillManifest,
     SkillResourceRequirement,
@@ -60,8 +62,9 @@ def _package() -> SkillPackage:
 
 
 def test_skill_admin_lists_and_toggles_publication() -> None:
-    app = create_service_app("api")
+    app = create_app(profile="task-api")
     registry = services._skill_registry_service(get_settings())
+    app.include_router(create_skill_admin_router(registry))
     asyncio.run(registry.publish("tenant-1", _package()))
     headers = {"X-Tenant-ID": "tenant-1", "X-Actor-ID": "admin-1"}
     with TestClient(app) as client:
@@ -94,7 +97,17 @@ def test_skill_admin_lists_and_toggles_publication() -> None:
 
 
 def test_task_api_service_exposes_skill_admin_routes() -> None:
-    paths = set(create_service_app("api").openapi()["paths"])
+    settings = Settings(
+        _env_file=None,
+        storage_backend="postgres",
+        db_host="localhost",
+        db_user="auraclaw",
+        db_password="auraclaw",
+        db_name="auraclaw",
+        allow_insecure_identity_headers=True,
+        task_api_workload_token="task-api-token",
+    )
+    paths = set(create_service_app("api", settings).openapi()["paths"])
     assert "/v1/admin/skills" in paths
     assert "/v1/admin/skills/{publisher}/{name}:enable" in paths
     assert "/v1/admin/skills/{publisher}/{name}:disable" in paths

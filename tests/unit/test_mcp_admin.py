@@ -16,6 +16,7 @@ from auraclaw.action.mcp_registry import (
 from auraclaw.api.routes.admin_mcp import create_mcp_admin_router
 from auraclaw.composition.api import create_app
 from auraclaw.composition.services import create_service_app
+from auraclaw.config import Settings
 from auraclaw.contracts.capabilities import (
     CapabilityDescriptor,
     CapabilityKind,
@@ -130,5 +131,15 @@ def test_mcp_admin_lists_catalogued_tools() -> None:
 
 
 def test_task_api_exposes_mcp_tools_route() -> None:
-    paths = set(create_service_app("api").openapi()["paths"])
+    settings = Settings(
+        _env_file=None,
+        storage_backend="postgres",
+        db_host="localhost",
+        db_user="auraclaw",
+        db_password="auraclaw",
+        db_name="auraclaw",
+        allow_insecure_identity_headers=True,
+        task_api_workload_token="task-api-token",
+    )
+    paths = set(create_service_app("api", settings).openapi()["paths"])
     assert "/v1/admin/mcp-servers/{server_id}/tools" in paths

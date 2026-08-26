@@ -233,6 +233,7 @@ def test_env_templates_are_ready_to_copy() -> None:
 
     debug_settings = Settings(_env_file=ROOT / ".env.dev.example")
     assert debug_settings.storage_backend == "postgres"
+    assert debug_settings.sql_storage_enabled is True
     assert debug_settings.runtime_event_backend == "kafka"
     assert debug_settings.kafka_host == "localhost"
     assert debug_settings.artifact_backend == "seaweedfs"

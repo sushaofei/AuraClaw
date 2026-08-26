@@ -326,10 +326,10 @@ Event 回写，并通过 Task/Result Query 的 `delivery_status`、`delivery_id`
 `AURACLAW_DB_DIALECT=postgres` 且 URL scheme 为 postgresql）。密码中的 `#`、`,` 由
 `Settings.resolved_database_url` 自动 URL 编码。
 
-**KingBase（PostgreSQL 兼容模式）**：设 `AURACLAW_STORAGE_BACKEND=kingbase`。启动时从
-`.kingbase.env`（或 `AURACLAW_KINGBASE_ENV_FILE`）读取 `KINGBASE_*` 并覆盖写入 `DB_*`；
+**KingBase（PostgreSQL 兼容模式）**：设 `AURACLAW_STORAGE_BACKEND=kingbase`，在
+`.env.test` / `.env.prod` 的 Database 段填写 `DB_*` 与 `AURACLAW_DATABASE_URL`；
 方言与连接池复用 PostgreSQL / `asyncpg` 路径，Domain ports 与 Store 代码无需改动。
-示例见 `.kingbase.env.example`。
+可选：同文件内使用 `KINGBASE_*` 别名，启动时会映射到 `DB_*`。
 
 **本地 PostgreSQL**：开发默认可用 `AURACLAW_STORAGE_BACKEND=postgres`。启动时从
 `.postgresql.local.env`（或 `.postgresql.env` / `AURACLAW_POSTGRESQL_ENV_FILE`）读取

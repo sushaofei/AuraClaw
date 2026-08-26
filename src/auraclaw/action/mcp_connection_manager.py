@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Callable, MutableMapping
 from datetime import UTC, datetime
 from typing import Any, Protocol
@@ -10,6 +11,7 @@ from auraclaw.action.catalog_reconciler import CapabilityCatalogReconciler
 from auraclaw.action.mcp_registry import McpServerRegistryService
 from auraclaw.action.ports import CapabilityConnector
 from auraclaw.contracts.capabilities import CapabilityStatus, McpServerDefinition
+from auraclaw.contracts.errors import AuraClawError
 from auraclaw.contracts.mcp_registry import (
     McpActiveSnapshotEntry,
     McpDesiredState,
@@ -18,6 +20,7 @@ from auraclaw.contracts.mcp_registry import (
 )
 
 McpConnectorFactory = Callable[[McpServerDefinition], CapabilityConnector]
+logger = logging.getLogger(__name__)
 
 
 class McpEgressLoader(Protocol):
@@ -52,9 +55,11 @@ class McpConnectionManager:
 
     async def restore(self) -> int:
         snapshot = await self._registry.active_snapshot()
+        loaded = 0
         for entry in snapshot:
-            await self.apply(entry, restore=True)
-        return len(snapshot)
+            if await self._apply_isolated(entry, restore=True):
+                loaded += 1
+        return loaded
 
     async def test(
         self, entry: McpActiveSnapshotEntry, *, persist_egress: bool = False
@@ -162,17 +167,72 @@ class McpConnectionManager:
         for server_id, revision in list(self._generations.items()):
             desired = snapshot.get(server_id)
             if desired is None:
-                await self.revoke(server_id)
-                changed += 1
+                if await self._revoke_isolated(server_id):
+                    changed += 1
                 continue
             if desired.revision != revision:
-                await self.apply(desired)
-                changed += 1
+                if await self._apply_isolated(desired):
+                    changed += 1
         for server_id, entry in snapshot.items():
             if self._generations.get(server_id) != entry.revision:
-                await self.apply(entry)
-                changed += 1
+                if await self._apply_isolated(entry):
+                    changed += 1
         return changed
+
+    async def _apply_isolated(
+        self,
+        entry: McpActiveSnapshotEntry,
+        *,
+        restore: bool = False,
+    ) -> bool:
+        try:
+            await self.apply(entry, restore=restore)
+            return True
+        except Exception as exc:
+            logger.warning(
+                "MCP server %s is unreachable; continuing with other servers (%s)",
+                entry.server_id,
+                type(exc).__name__,
+            )
+            await self._record_unavailable(entry, exc)
+            return False
+
+    async def _revoke_isolated(self, server_id: str) -> bool:
+        try:
+            await self.revoke(server_id)
+            return True
+        except Exception as exc:
+            logger.warning(
+                "MCP server %s revoke failed; continuing with other servers (%s)",
+                server_id,
+                type(exc).__name__,
+            )
+            return False
+
+    async def _record_unavailable(
+        self, entry: McpActiveSnapshotEntry, exc: BaseException
+    ) -> None:
+        safe_error_code = (
+            exc.code
+            if isinstance(exc, AuraClawError) and isinstance(exc.code, str)
+            else "mcp_connection_test_failed"
+        )
+        try:
+            await self._registry.record_runtime(
+                McpServerRuntimeRecord(
+                    server_id=entry.server_id,
+                    loaded_revision=self._generations.get(entry.server_id),
+                    observed_state=McpObservedState.UNAVAILABLE,
+                    consecutive_failures=1,
+                    safe_error_code=safe_error_code,
+                    updated_at=datetime.now(UTC),
+                )
+            )
+        except Exception:
+            logger.warning(
+                "failed to persist unavailable state for MCP server %s",
+                entry.server_id,
+            )
 
     async def _record_tested(self, entry: McpActiveSnapshotEntry) -> None:
         now = datetime.now(UTC)
