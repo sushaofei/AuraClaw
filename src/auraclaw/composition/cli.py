@@ -234,10 +234,16 @@ def _run_ingress_process(
 
 
 def _serve_topology(settings: Settings, *, host: str) -> None:
-    if not settings.sql_storage_enabled and not settings.kafka_enabled:
+    if not settings.sql_storage_enabled:
         raise ValueError(
-            "auraclaw serve requires shared SQL storage or Kafka for cross-process "
-            "runtime event streaming"
+            "auraclaw serve requires SQL storage (postgres, mysql, or kingbase) so "
+            "MCP registry, session facts and projections survive restarts. Configure "
+            "AURACLAW_STORAGE_BACKEND and DB_* credentials in .env.dev."
+        )
+    if not settings.kafka_enabled:
+        raise ValueError(
+            "auraclaw serve requires Kafka for cross-process runtime event streaming. "
+            "Configure KAFKA_HOST in .env.dev."
         )
     processes: list[multiprocessing.Process] = []
     for command in SERVICE_BY_COMMAND:

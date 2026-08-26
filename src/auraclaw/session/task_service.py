@@ -217,10 +217,18 @@ class TaskService:
         feedback: str | None,
         context: CommandContext,
     ) -> dict[str, Any]:
-        if self._approvals is None:
-            raise NotFoundError(f"Approval not found: {approval_id}")
-        record = await self._approvals.get(context.tenant_id, approval_id)
-        if record is None or record.session_id != session_id:
+        events = await self._event_store.load(context.tenant_id, session_id)
+        record = ApprovalAggregate.from_events(
+            events,
+            tenant_id=context.tenant_id,
+            session_id=session_id,
+            approval_id=approval_id,
+        )
+        if record is None and self._approvals is not None:
+            projected = await self._approvals.get(context.tenant_id, approval_id)
+            if projected is not None and projected.session_id == session_id:
+                record = projected
+        if record is None:
             raise NotFoundError(f"Approval not found: {approval_id}")
         decided = ApprovalAggregate.respond(
             record,

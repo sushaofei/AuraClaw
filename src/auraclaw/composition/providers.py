@@ -32,6 +32,7 @@ from auraclaw.infrastructure.projection.postgres_task_store import PostgresTaskP
 from auraclaw.observability.service import ObservabilityProjector, ObservabilityService
 from auraclaw.projection.approval.projector import CompositeProjection, InMemoryApprovalProjection
 from auraclaw.projection.collaboration.projector import InMemoryCollaborationProjection
+from auraclaw.projection.ports import ProjectionWriter
 from auraclaw.projection.relay import OutboxRelay
 from auraclaw.projection.task.projector import InMemoryTaskProjection
 from auraclaw.runtime.model_gateway import ModelGateway, StaticCredentialResolver
@@ -78,18 +79,24 @@ def get_collaboration_projection() -> CollaborationProjection:
     return InMemoryCollaborationProjection()
 
 
+def session_outbox_projectors() -> tuple[ProjectionWriter, ...]:
+    """Projectors that must consume Session outbox in every topology."""
+    return (
+        get_task_projection(),
+        get_approval_projection(),
+        get_collaboration_projection(),
+    )
+
+
 @lru_cache
 def get_task_service() -> TaskService:
     projection = get_task_projection()
     approvals = get_approval_projection()
-    collaboration = get_collaboration_projection()
     event_store = get_event_store()
     relay = OutboxRelay(
         event_store,
         CompositeProjection(
-            projection,
-            approvals,
-            collaboration,
+            *session_outbox_projectors(),
             ObservabilityProjector(get_observability_service()),
         ),
     )

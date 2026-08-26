@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator
 from contextlib import suppress
 
@@ -14,6 +15,8 @@ from auraclaw.contracts.internal import (
 )
 from auraclaw.internal.http import HttpContractClient
 from auraclaw.runtime.ports import ModelRequest, ModelResponse, ModelStreamChunk, ToolCall
+
+logger = logging.getLogger(__name__)
 
 
 class RemoteModelClient:
@@ -54,7 +57,27 @@ class RemoteModelClient:
     async def generate_stream(
         self, request: ModelRequest
     ) -> AsyncIterator[ModelStreamChunk]:
-        payload = ModelGenerateRequest(
+        payload = self._payload(request)
+        got_completed = False
+        async for chunk in self._consume_stream(payload):
+            if chunk.kind == "completed":
+                got_completed = True
+            yield chunk
+        if got_completed:
+            return
+        # Tail event can be lost after gateway has already finished (and cached).
+        # Reconnect once; forward only completed to avoid duplicate live deltas.
+        logger.warning(
+            "model stream ended without completed; reconnecting once model_call=%s",
+            request.model_call_id,
+        )
+        async for chunk in self._consume_stream(payload):
+            if chunk.kind == "completed":
+                yield chunk
+                return
+
+    def _payload(self, request: ModelRequest) -> ModelGenerateRequest:
+        return ModelGenerateRequest(
             context=InternalRequestContext(
                 tenant_id=request.tenant_id,
                 service_identity=ServiceIdentity.AGENT_RUNTIME,
@@ -72,6 +95,10 @@ class RemoteModelClient:
             data_classification=request.policy.data_classification,
             max_output_tokens=request.max_output_tokens,
         )
+
+    async def _consume_stream(
+        self, payload: ModelGenerateRequest
+    ) -> AsyncIterator[ModelStreamChunk]:
         async for event in self._contract.stream(
             "/internal/v1/model/stream",
             payload,

@@ -388,6 +388,17 @@ def test_development_header_adapter_is_explicit() -> None:
         assert isinstance(
             build_identity_verifier(production), SignedAgentContextVerifier
         )
+        uplink = Settings(
+            _env_file=None,
+            deployment_profile="production",
+            test_uplink_insecure_identity=True,
+            chaintower_workload_token=WORKLOAD,
+            agent_context_signing_keys_json='{"k1":"chaintower-agent-context-signing-key-01"}',
+        )
+        assert uplink.insecure_identity_headers_enabled is True
+        assert isinstance(
+            build_identity_verifier(uplink), DevelopmentHeaderIdentityVerifier
+        )
 
     asyncio.run(scenario())
 

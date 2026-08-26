@@ -36,8 +36,6 @@ logs/
 !.env.dev.example
 !.env.test.example
 !.env.prod.example
-.kingbase.env
-!.kingbase.env.example
 .postgresql.env
 .postgresql.local.env
 !.postgresql.env.example

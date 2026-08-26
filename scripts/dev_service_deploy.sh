@@ -137,6 +137,7 @@ fi
 # Optional hotfix overlay files stay on the server if present.
 # Keep $(...) literal so the remote shell expands them (same as remote_compose.sh).
 COMPOSE_CMD="docker compose --env-file ${COMPOSE_ENV_FILE} -f ${COMPOSE_FILE}"
+COMPOSE_CMD+=' $(test -f compose.kafka-fix.yml && echo -f compose.kafka-fix.yml)'
 COMPOSE_CMD+=' $(test -f compose.hotfix-errors.yml && echo -f compose.hotfix-errors.yml)'
 
 if [[ "${DO_MIGRATE}" -eq 1 ]]; then

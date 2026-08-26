@@ -135,7 +135,13 @@ class HttpxPinnedMcpSender:
         )
         if parsed.scheme == "https":
             request.extensions["sni_hostname"] = server_hostname.encode()
-        response = await self._client.send(request, follow_redirects=False)
+        try:
+            response = await self._client.send(request, follow_redirects=False)
+        except httpx.RequestError as exc:
+            raise CredentialAccessError(
+                "MCP egress target is unreachable",
+                detail=type(exc).__name__,
+            ) from exc
         return McpEgressResponse(
             status_code=response.status_code,
             headers={key.lower(): value for key, value in response.headers.items()},

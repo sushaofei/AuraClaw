@@ -9,6 +9,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 
 from auraclaw.contracts.capabilities import CapabilityStatus, McpAuthStrategy, McpNetworkMode
+from auraclaw.contracts.errors import CredentialAccessError
 from auraclaw.contracts.mcp_registry import McpDesiredState, McpObservedState, McpServerConfig
 from auraclaw.infrastructure.connectors.mcp.wire import (
     MCP_CLIENT_CAPABILITIES_META_KEY,
@@ -152,6 +153,58 @@ def test_loopback_auth_none_reaches_real_local_mcp(host: str) -> None:
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+def test_unreachable_loopback_mcp_is_credential_access_error() -> None:
+    port = _free_port()
+
+    async def scenario() -> None:
+        endpoint = f"http://127.0.0.1:{port}/mcp"
+        definition = McpServerConfig(
+            server_id="down-smoke-mcp",
+            tenant_id="development",
+            title="Down Smoke MCP",
+            endpoint=endpoint,
+            network_mode=McpNetworkMode.LOOPBACK,
+            auth_strategy=McpAuthStrategy.NONE,
+            allowed_tool_prefixes=("demo.",),
+        ).materialize(
+            revision=1,
+            desired_state=McpDesiredState.ENABLED,
+            observed_state=McpObservedState.ACTIVE,
+        ).model_copy(
+            update={
+                "enabled": True,
+                "status": CapabilityStatus.ACTIVE,
+            }
+        )
+        adapter = ManagedMcpEgressAdapter(
+            definition,
+            resolver=SystemMcpDnsResolver(),
+            sender=HttpxPinnedMcpSender(timeout_seconds=2.0),
+        )
+        try:
+            with pytest.raises(CredentialAccessError, match="unreachable"):
+                await adapter(
+                    {
+                        "server_id": "down-smoke-mcp",
+                        "config_revision": 1,
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "tools/list",
+                        "params": {
+                            "_meta": {
+                                MCP_PROTOCOL_VERSION_META_KEY: MCP_PROTOCOL_VERSION,
+                                MCP_CLIENT_CAPABILITIES_META_KEY: {},
+                            }
+                        },
+                    },
+                    "",
+                )
+        finally:
+            await adapter.aclose()
+
+    asyncio.run(scenario())
 
 
 def test_localhost_and_ipv6_loopback_configs_are_accepted() -> None:

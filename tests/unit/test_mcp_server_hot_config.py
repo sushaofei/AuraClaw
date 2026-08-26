@@ -324,6 +324,109 @@ def test_connection_manager_hot_swaps_and_restore() -> None:
     asyncio.run(scenario())
 
 
+def test_connection_manager_restore_skips_unreachable_server() -> None:
+    async def scenario() -> None:
+        boom = False
+
+        def factory(server: object) -> CapabilityConnector:
+            from auraclaw.contracts.capabilities import McpServerDefinition
+
+            assert isinstance(server, McpServerDefinition)
+            if boom and server.server_id == "down-mcp":
+                raise ConnectionError("MCP server is not running")
+            return _FakeConnector()
+
+        store = InMemoryMcpServerRegistryStore()
+        service = McpServerRegistryService(store)
+        connectors: dict[str, CapabilityConnector] = {}
+        manager = McpConnectionManager(
+            registry=service,
+            connectors=connectors,
+            factory=factory,
+            drain_seconds=0,
+        )
+        service.bind_runtime(manager)
+        await service.create(_write(_config()))
+        await service.create(
+            _write(
+                _config(server_id="down-mcp", endpoint="http://127.0.0.1:9/mcp"),
+                command_id="cmd-down",
+            )
+        )
+        await service.enable("local-order-mcp", _life())
+        await service.enable(
+            "down-mcp",
+            _life(command_id="cmd-enable-down"),
+        )
+        connectors.clear()
+        boom = True
+        restored = await manager.restore()
+        assert restored == 1
+        assert "local-order-mcp" in connectors
+        assert "down-mcp" not in connectors
+        down = await service.get_server(
+            tenant_id="tenant-a",
+            server_id="down-mcp",
+            actor_id="admin-1",
+        )
+        assert down.desired_state is McpDesiredState.ENABLED
+        assert down.runtime is not None
+        assert down.runtime.observed_state is McpObservedState.UNAVAILABLE
+
+    asyncio.run(scenario())
+
+
+def test_connection_manager_reconcile_continues_after_unreachable_server() -> None:
+    async def scenario() -> None:
+        boom = False
+
+        def factory(server: object) -> CapabilityConnector:
+            from auraclaw.contracts.capabilities import McpServerDefinition
+
+            assert isinstance(server, McpServerDefinition)
+            if boom and server.server_id == "down-mcp":
+                raise ConnectionError("MCP server is not running")
+            return _FakeConnector()
+
+        store = InMemoryMcpServerRegistryStore()
+        service = McpServerRegistryService(store)
+        connectors: dict[str, CapabilityConnector] = {}
+        manager = McpConnectionManager(
+            registry=service,
+            connectors=connectors,
+            factory=factory,
+            drain_seconds=0,
+        )
+        service.bind_runtime(manager)
+        await service.create(_write(_config()))
+        await service.create(
+            _write(
+                _config(server_id="down-mcp", endpoint="http://127.0.0.1:9/mcp"),
+                command_id="cmd-down",
+            )
+        )
+        await service.enable("local-order-mcp", _life())
+        await service.enable(
+            "down-mcp",
+            _life(command_id="cmd-enable-down"),
+        )
+        connectors.pop("down-mcp", None)
+        manager._generations.pop("down-mcp", None)
+        boom = True
+        changed = await manager.reconcile_loaded()
+        assert changed == 0
+        assert "local-order-mcp" in connectors
+        down = await service.get_server(
+            tenant_id="tenant-a",
+            server_id="down-mcp",
+            actor_id="admin-1",
+        )
+        assert down.runtime is not None
+        assert down.runtime.observed_state is McpObservedState.UNAVAILABLE
+
+    asyncio.run(scenario())
+
+
 def test_connection_manager_test_records_last_test_at() -> None:
     async def scenario() -> None:
         store = InMemoryMcpServerRegistryStore()
