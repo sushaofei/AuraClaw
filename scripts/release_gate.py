@@ -21,12 +21,11 @@ SECRET_PATTERNS = {
 REQUIRED = (
     ROOT / "migrations/0007_m6_observability_reliability.sql",
     ROOT / "migrations/0007_m6_observability_reliability.down.sql",
-    ROOT / "docs/M6 测试报告.md",
-    ROOT / "docs/M6 运维与灰度发布 Runbook.md",
+    ROOT / "docs/development/stage-gates.md",
+    ROOT / "docs/operations/observability-and-canary.md",
     ROOT / "compose.prod.yml",
     ROOT / "compose.test.yml",
-    ROOT / "docs/S5 Docker Compose 生产部署与故障演练 Runbook.md",
-    ROOT / "docs/S5 测试报告.md",
+    ROOT / "docs/operations/production-deployment.md",
 )
 
 
