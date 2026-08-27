@@ -84,11 +84,11 @@ api → application → domain → contracts
 架构完成标准以**可恢复性**定义：任一 Brain/Hands/Orchestrator 实例死亡后任务可从 Session
 恢复；相同幂等键不重复创建 Root Session 或外部副作用；Projection 可从 Event Log 全量重建。
 
-深入设计见 [Managed Agent 系统架构总览](docs/Managed%20Agent%20系统架构/00%20Managed%20Agent%20系统架构总览.md)、
-[开发方案与实施计划](docs/Managed%20Agent%20开发方案与实施计划.md) 与
-[架构代码梳理](docs/Managed%20Agent%20架构代码梳理.md)。MCP 数据、工具和 Skill 接入见
-[M9 MCP Runtime 实施与运维](docs/M9%20MCP%20Runtime%20实施与运维.md)。扩展能力登记 AuraMCP 见
-[AuraMCP 接入](docs/AuraMCP%20接入.md)。
+深入设计见 [文档导航](docs/README.md)、
+[Managed Agent 系统架构总览](docs/architecture/system/00%20Managed%20Agent%20系统架构总览.md)与
+[代码组织与部署映射](docs/architecture/code-organization.md)。MCP 数据、工具和 Skill 接入见
+[M9 MCP Runtime 实施与运维](docs/development/implementation/mcp-runtime.md)。扩展能力登记 AuraMCP 见
+[AuraMCP 接入](docs/guides/auramcp-integration.md)。
 
 ## 架构概览
 
@@ -232,7 +232,7 @@ docker compose --env-file .env.prod -f compose.prod.yml up -d --wait
 ```
 
 副本、资源、Secret 文件挂载、蓝绿发布、回滚、扩缩容与 kill test 见
-[S5 Docker Compose 生产部署与故障演练 Runbook](docs/S5%20Docker%20Compose%20生产部署与故障演练%20Runbook.md)。
+[S5 Docker Compose 生产部署与故障演练 Runbook](docs/operations/production-deployment.md)。
 
 S3 生产装配已切换为 owner HTTP/MCP Client：Session、Control、Model、Policy、Credential、
 Artifact 和 Admin 写路径不再共享跨域 Store。Action Hands 以 MCP Server 暴露工具，并通过持久
@@ -380,8 +380,8 @@ migrations/0014_s4_policy_version.sql
 不应由 API 进程在启动时自动修改 Schema。
 
 多副本生产边界、角色配置、恢复与回滚顺序见
-[S4 横向扩展与恢复运行说明](docs/S4%20横向扩展与恢复运行说明.md)，验证证据见
-[S4 测试报告](docs/S4%20测试报告.md)。
+[S4 横向扩展与恢复运行说明](docs/operations/scaling-and-recovery.md)，验证证据见
+[开发阶段校验清单](docs/development/stage-gates.md)中的 S4 验收记录。
 
 Outbox Worker 与投影重建（需已运行的 12 服务拓扑；`projection relay --watch` 由 Compose
 在 `deployment_profile=production` 下启动，本地请用 `auraclaw serve`）：
@@ -442,7 +442,7 @@ M5/M8 关键实现位于 `infrastructure/kafka/runtime_events.py`、
 `observability/`、`infrastructure/observability/`、
 `infrastructure/persistence/postgres_operations_store.py` 和
 `api/routes/operations.py`。SLO、故障处置、数据保留和灰度回滚见
-[M6 运维与灰度发布 Runbook](docs/M6%20运维与灰度发布%20Runbook.md)。
+[M6 运维与灰度发布 Runbook](docs/operations/observability-and-canary.md)。
 
 ## 当前边界
 
@@ -462,5 +462,5 @@ Metrics Pipeline 和 Alert Receiver 通过同一观测端口接入。
 AuraClaw 不再直接读取业务数据库或内置业务 Tool。Tool、Resource 与 Skill 包均通过
 `action-hands` 的 MCP / Java API egress 对账发现；业务数据由远端 MCP Server 提供。
 Skill 包经 `skill://` Resource 下载并由 `SkillPackageReconciler` 发布。开发与联调见
-[MCP 开发手册](docs/MCP%20开发手册.md)；历史价格洞察实施说明见
-[M12 价格洞察业务 Skill 实施与运维](docs/M12%20价格洞察业务%20Skill%20实施与运维.md)（**已废弃本地 DWD 直连路径**）。
+[MCP 开发手册](docs/guides/mcp-development.md)。价格洞察的本地 DWD 直连路径已经移除，
+业务 Tool、Resource 与 Skill 统一通过受治理的 MCP egress 接入。

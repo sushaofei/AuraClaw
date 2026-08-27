@@ -1,7 +1,7 @@
 # AuraClaw 远程部署目录说明
 
 本目录用于 `compose.prod.yml` 与 `compose.test.yml` 部署。详细步骤见仓库内
-`docs/S5 Docker Compose 生产部署与故障演练 Runbook.md`。
+`docs/operations/production-deployment.md`。
 
 ## 目录内容
 
