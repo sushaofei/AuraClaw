@@ -385,6 +385,15 @@ def test_claim_reclaims_orphan_running_assignment_after_grace() -> None:
             resource_profile={},
         )
         task_id = "tenant-m2:ses_1:run_1"
+        resource_id = "session:tenant-m2:ses_1"
+        async with control._lock:
+            control._leases[resource_id] = RuntimeLease(
+                resource_id=resource_id,
+                lease_id="lea_1",
+                owner="orch",
+                fencing_token=1,
+                expires_at=datetime.now(UTC) + timedelta(seconds=30),
+            )
         control._assignments[task_id] = (assignment, "running")
         control._assignment_started_at[task_id] = datetime.now(UTC) - timedelta(
             seconds=1

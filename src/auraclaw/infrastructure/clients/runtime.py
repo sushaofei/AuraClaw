@@ -9,6 +9,8 @@ import httpx
 from auraclaw.contracts.errors import VersionConflictError
 from auraclaw.contracts.events import CanonicalEvent, NewEvent
 from auraclaw.contracts.internal import (
+    AssignmentAbandonRequest,
+    AssignmentAbandonResponse,
     AssignmentClaimRequest,
     AssignmentClaimResponse,
     AssignmentDispositionRequest,
@@ -580,6 +582,41 @@ class RemoteRuntimeControlClient:
         for key, (known_task_id, _) in list(self._assignments.items()):
             if known_task_id == task_id:
                 self._assignments.pop(key, None)
+
+    async def abandon_assignment(
+        self,
+        task_id: str,
+        *,
+        runtime_id: str,
+        lease_id: str,
+        fencing_token: int,
+    ) -> bool:
+        entry = next(
+            (
+                assignment
+                for known_task_id, assignment in self._assignments.values()
+                if known_task_id == task_id
+            ),
+            None,
+        )
+        if entry is None:
+            raise RuntimeError("Runtime does not own this task")
+        response = await self._contract.call(
+            "/internal/v1/control/assignments/abandon",
+            AssignmentAbandonRequest(
+                context=_context(entry.tenant_id, f"abandon:{task_id}", entry.run_id),
+                task_id=task_id,
+                runtime_id=runtime_id,
+                lease_id=lease_id,
+                fencing_token=fencing_token,
+            ),
+            AssignmentAbandonResponse,
+        )
+        if response.accepted:
+            for key, (known_task_id, _) in list(self._assignments.items()):
+                if known_task_id == task_id:
+                    self._assignments.pop(key, None)
+        return response.accepted
 
     async def suspend_assignment(self, task_id: str, reason: str) -> None:
         entry = next(

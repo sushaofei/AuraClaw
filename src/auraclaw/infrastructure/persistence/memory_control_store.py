@@ -258,6 +258,14 @@ class InMemoryControlStateStore:
                         continue
                 else:
                     continue
+                resource_id = f"session:{assignment.tenant_id}:{assignment.session_id}"
+                lease = self._leases.get(resource_id)
+                if (
+                    lease is None
+                    or lease.expires_at <= now
+                    or lease.fencing_token != assignment.fencing_token
+                ):
+                    continue
                 self._assignments[task_id] = (assignment, "running")
                 self._assignment_started_at.setdefault(task_id, now)
                 claimed.append(
@@ -266,6 +274,50 @@ class InMemoryControlStateStore:
                 if len(claimed) >= limit:
                     break
             return claimed
+
+    async def abandon_stale_assignment(
+        self,
+        task_id: str,
+        *,
+        runtime_id: str,
+        lease_id: str,
+        fencing_token: int,
+    ) -> bool:
+        async with self._lock:
+            entry = self._assignments.get(task_id)
+            queued = self._queue.get(task_id)
+            if entry is None:
+                return False
+            assignment, status = entry
+            if (
+                assignment.runtime_id != runtime_id
+                or assignment.lease_id != lease_id
+                or assignment.fencing_token != fencing_token
+            ):
+                return False
+            if status in {
+                "expired",
+                "completed",
+                "failed",
+                "cancelled",
+                "waiting_children",
+                "waiting_for_human",
+            }:
+                return True
+            resource_id = f"session:{assignment.tenant_id}:{assignment.session_id}"
+            lease = self._leases.get(resource_id)
+            if (
+                lease is not None
+                and lease.expires_at > _now()
+                and lease.fencing_token == fencing_token
+            ):
+                return False
+            self._assignments[task_id] = (assignment, "expired")
+            self._assignment_started_at.pop(task_id, None)
+            if queued is not None:
+                self._queue[task_id] = (queued[0], "queued", None)
+                self._queue_claims.pop(task_id, None)
+            return True
 
     async def finish_assignment(self, task_id: str, outcome: str) -> None:
         async with self._lock:

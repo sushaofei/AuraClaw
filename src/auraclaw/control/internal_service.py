@@ -4,6 +4,8 @@ from datetime import UTC, datetime
 
 from auraclaw.contracts.errors import AuthorizationError
 from auraclaw.contracts.internal import (
+    AssignmentAbandonRequest,
+    AssignmentAbandonResponse,
     AssignmentClaimRequest,
     AssignmentClaimResponse,
     AssignmentDispositionRequest,
@@ -238,3 +240,15 @@ class ControlInternalService:
                 "completed" if request.disposition == "finish" else "failed",
             )
         return AssignmentDispositionResponse(accepted=True)
+
+    async def abandon_assignment(
+        self, request: AssignmentAbandonRequest
+    ) -> AssignmentAbandonResponse:
+        self._require_runtime(request.context.service_identity)
+        accepted = await self._store.abandon_stale_assignment(
+            request.task_id,
+            runtime_id=request.runtime_id,
+            lease_id=request.lease_id,
+            fencing_token=request.fencing_token,
+        )
+        return AssignmentAbandonResponse(accepted=accepted)

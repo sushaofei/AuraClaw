@@ -14,6 +14,8 @@ from auraclaw.contracts.internal import (
     ArtifactFinalizeRequest,
     ArtifactFinalizeResponse,
     ArtifactUploadResponse,
+    AssignmentAbandonRequest,
+    AssignmentAbandonResponse,
     AssignmentClaimRequest,
     AssignmentClaimResponse,
     AssignmentDispositionRequest,
@@ -129,6 +131,11 @@ def control_routes(service: ControlInternalService) -> dict[str, ContractRoute]:
             AssignmentDispositionRequest,
             AssignmentDispositionResponse,
             service.disposition_assignment,
+        ),
+        "/internal/v1/control/assignments/abandon": contract_route(
+            AssignmentAbandonRequest,
+            AssignmentAbandonResponse,
+            service.abandon_assignment,
         ),
         "/internal/v1/control/checkpoints/save": contract_route(
             SaveCheckpointRequest, CheckpointResponse, service.save_checkpoint

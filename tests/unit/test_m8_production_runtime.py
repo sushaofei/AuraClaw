@@ -1,5 +1,6 @@
 import asyncio
 import json
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -8,6 +9,7 @@ import pytest
 
 from auraclaw.composition.services import RemoteRuntimeWorker
 from auraclaw.config import Settings
+from auraclaw.control.ports import RunnableItem, RuntimeAssignment, RuntimeInstance
 from auraclaw.contracts.errors import (
     ModelAuthenticationError,
     ModelProviderError,
@@ -108,6 +110,153 @@ def test_remote_runtime_does_not_ack_when_canonical_failure_cannot_be_written() 
         with pytest.raises(ConnectionError, match="session unavailable"):
             await worker.tick()
         assert control.finished is False
+
+    asyncio.run(scenario())
+
+
+def test_remote_runtime_abandons_stale_assignment_when_lease_is_lost() -> None:
+    class Assignment:
+        tenant_id = "tenant-m8"
+        session_id = "session-m8"
+        run_id = "run-m8"
+        runtime_id = "runtime-m8"
+        lease_id = "lea-m8"
+        fencing_token = 1
+
+    class Control:
+        def __init__(self) -> None:
+            self.abandoned: list[tuple[str, dict[str, object]]] = []
+            self.finished = False
+
+        async def register(self) -> None:
+            return None
+
+        async def heartbeat(self) -> None:
+            return None
+
+        async def claim(self, *, limit: int) -> list[Assignment]:
+            del limit
+            return [Assignment()]
+
+        async def abandon_assignment(
+            self,
+            task_id: str,
+            *,
+            runtime_id: str,
+            lease_id: str,
+            fencing_token: int,
+        ) -> bool:
+            self.abandoned.append(
+                (
+                    task_id,
+                    {
+                        "runtime_id": runtime_id,
+                        "lease_id": lease_id,
+                        "fencing_token": fencing_token,
+                    },
+                )
+            )
+            return True
+
+        async def finish_assignment(self, task_id: str, outcome: str) -> None:
+            del task_id, outcome
+            self.finished = True
+
+    class Harness:
+        async def execute(self, assignment: Assignment) -> None:
+            del assignment
+            from auraclaw.contracts.errors import FencingTokenError
+
+            raise FencingTokenError("stale fencing token")
+
+        async def record_failure(
+            self, assignment: Assignment, error: Exception
+        ) -> None:
+            del assignment, error
+            raise AssertionError("record_failure must not run for stale lease")
+
+    async def scenario() -> None:
+        control = Control()
+        worker = RemoteRuntimeWorker(control, Harness())  # type: ignore[arg-type]
+        assert await worker.tick() == 1
+        assert control.abandoned == [
+            (
+                "tenant-m8:session-m8:run-m8",
+                {
+                    "runtime_id": "runtime-m8",
+                    "lease_id": "lea-m8",
+                    "fencing_token": 1,
+                },
+            )
+        ]
+        assert control.finished is False
+
+    asyncio.run(scenario())
+
+
+def test_abandon_stale_assignment_requeues_superseded_running_rows() -> None:
+    async def scenario() -> None:
+        from auraclaw.infrastructure.persistence.memory_control_store import (
+            InMemoryControlStateStore,
+        )
+
+        control = InMemoryControlStateStore()
+        task_id = "tenant:session:run"
+        item = RunnableItem(
+            task_id=task_id,
+            tenant_id="tenant",
+            root_session_id="session",
+            session_id="session",
+            run_id="run",
+            source_version=1,
+        )
+        await control.enqueue(item)
+        claimed = await control.claim("orch", limit=1)
+        assert claimed
+        resource_id = "session:tenant:session"
+        lease = await control.acquire_lease(
+            resource_id, "orch", ttl=timedelta(milliseconds=5)
+        )
+        assert lease is not None
+        assignment = RuntimeAssignment(
+            tenant_id="tenant",
+            root_session_id="session",
+            session_id="session",
+            run_id="run",
+            runtime_id="runtime-1",
+            lease_id=lease.lease_id,
+            fencing_token=lease.fencing_token,
+            role="root",
+            resource_profile={},
+        )
+        await control.register_runtime(
+            RuntimeInstance(
+                runtime_id="runtime-1",
+                runtime_type="agent",
+                role="agent",
+                node_id="local",
+                capabilities={},
+                capacity=4,
+            )
+        )
+        assert await control.assign(task_id, assignment, claim_token=claimed[0].claim_token)
+        await control.claim_assignments("runtime-1", "agent", limit=1)
+        await asyncio.sleep(0.01)
+        new_lease = await control.acquire_lease(
+            resource_id, "orch", ttl=timedelta(seconds=30)
+        )
+        assert new_lease is not None
+        assert new_lease.fencing_token > lease.fencing_token
+
+        accepted = await control.abandon_stale_assignment(
+            task_id,
+            runtime_id="runtime-1",
+            lease_id=lease.lease_id,
+            fencing_token=lease.fencing_token,
+        )
+        assert accepted is True
+        assert control._assignments[task_id][1] == "expired"  # type: ignore[attr-defined]
+        assert control._queue[task_id][1] == "queued"  # type: ignore[attr-defined]
 
     asyncio.run(scenario())
 
