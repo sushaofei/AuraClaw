@@ -444,26 +444,27 @@ class RemoteRuntimeWorker:
         async def keep_alive() -> None:
             while not stop.is_set():
                 try:
+                    await self._control.heartbeat()
+                    self._last_heartbeat_at = time.monotonic()
+                except Exception:
+                    # Transient control-plane blips must not stop keep-alive;
+                    # exiting here leaves last_heartbeat_at stale and
+                    # recover_expired can reclaim a still-running long call.
+                    logger.warning(
+                        "runtime heartbeat failed during execute "
+                        "for session=%s run=%s; will retry",
+                        assignment.session_id,
+                        assignment.run_id,
+                        exc_info=True,
+                    )
+                try:
                     await asyncio.wait_for(
                         stop.wait(),
                         timeout=self._heartbeat_interval.total_seconds(),
                     )
                     return
                 except TimeoutError:
-                    try:
-                        await self._control.heartbeat()
-                        self._last_heartbeat_at = time.monotonic()
-                    except Exception:
-                        # Transient control-plane blips must not stop keep-alive;
-                        # exiting here leaves last_heartbeat_at stale and
-                        # recover_expired can reclaim a still-running long call.
-                        logger.warning(
-                            "runtime heartbeat failed during execute "
-                            "for session=%s run=%s; will retry",
-                            assignment.session_id,
-                            assignment.run_id,
-                            exc_info=True,
-                        )
+                    continue
 
         heartbeats = asyncio.create_task(keep_alive(), name="remote-runtime-heartbeat")
         try:
