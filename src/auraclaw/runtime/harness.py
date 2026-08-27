@@ -66,6 +66,16 @@ FailureInjector = Callable[[InjectionPoint], Awaitable[None] | None]
 class AgentHarness:
     """Recoverable Agent harness with optional governed multi-turn capabilities."""
 
+    _APPROVAL_TERMINAL_TYPES = frozenset(
+        {
+            "approval.approved",
+            "approval.rejected",
+            "approval.expired",
+            "approval.cancelled",
+            "human.response.recorded",
+        }
+    )
+
     def __init__(
         self,
         *,
@@ -1032,7 +1042,10 @@ class AgentHarness:
         identity: str,
         visibility: Visibility = Visibility.INTERNAL,
     ) -> None:
-        if any(
+        if event_type == "approval.requested":
+            if self._approval_request_is_pending(existing, identity):
+                return
+        elif any(
             event.type == event_type
             and (
                 event.payload.get("run_id") == identity
@@ -1047,7 +1060,7 @@ class AgentHarness:
         appended = await self._session.append(
             assignment,
             [NewEvent(type=event_type, payload=payload, visibility=visibility)],
-            command_id=f"runtime:{event_type}:{identity}",
+            command_id=f"runtime:{event_type}:{assignment.run_id}:{identity}",
             operation=f"runtime.{event_type}",
             expected_version=len(existing),
         )
@@ -1058,6 +1071,20 @@ class AgentHarness:
             refreshed = await self._session.load(assignment)
             existing.clear()
             existing.extend(refreshed)
+
+    @classmethod
+    def _approval_request_is_pending(
+        cls, existing: list[Any], approval_id: str
+    ) -> bool:
+        open_request = False
+        for event in existing:
+            if str(event.payload.get("approval_id", "")) != approval_id:
+                continue
+            if event.type == "approval.requested":
+                open_request = True
+            elif event.type in cls._APPROVAL_TERMINAL_TYPES:
+                open_request = False
+        return open_request
 
     async def _record_model_input(
         self,

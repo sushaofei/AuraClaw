@@ -109,6 +109,55 @@ def test_build_transcript_filters_messages_and_pending_approval() -> None:
     assert transcript["pending_approval"]["tool_name"] == "shell"
 
 
+def test_build_transcript_pending_approval_after_prior_decision() -> None:
+    session_id = "ses_1"
+    events = [
+        _event(
+            event_id="e1",
+            session_id=session_id,
+            version=1,
+            event_type="approval.requested",
+            payload={
+                "approval_id": "apr_1",
+                "tool_name": "managed",
+                "reason": "first review",
+                "risk": "high",
+                "redacted_arguments": {},
+                "expected_effect": "write",
+                "status": "waiting",
+            },
+            run_id="run-1",
+        ),
+        _event(
+            event_id="e2",
+            session_id=session_id,
+            version=2,
+            event_type="approval.approved",
+            payload={"approval_id": "apr_1", "decision": "approved"},
+            run_id="run-1",
+        ),
+        _event(
+            event_id="e3",
+            session_id=session_id,
+            version=3,
+            event_type="approval.requested",
+            payload={
+                "approval_id": "apr_2",
+                "tool_name": "managed",
+                "reason": "second review",
+                "risk": "high",
+                "redacted_arguments": {},
+                "expected_effect": "write",
+                "status": "waiting",
+            },
+            run_id="run-2",
+        ),
+    ]
+    transcript = build_transcript(events)
+    assert transcript["pending_approval"]["approval_id"] == "apr_2"
+    assert transcript["pending_approval"]["reason"] == "second review"
+
+
 def test_event_store_load_supports_type_filter_and_limit() -> None:
     async def scenario() -> None:
         store = InMemoryEventStore()
