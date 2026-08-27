@@ -316,6 +316,19 @@ class AssignmentDispositionResponse(ContractModel):
     accepted: bool
 
 
+class AssignmentAbandonRequest(ContractModel):
+    context: InternalRequestContext
+    task_id: str
+    runtime_id: str
+    lease_id: str
+    fencing_token: int = Field(ge=1)
+
+
+class AssignmentAbandonResponse(ContractModel):
+    api_version: str = INTERNAL_API_VERSION
+    accepted: bool
+
+
 class ModelGenerateRequest(ContractModel):
     context: InternalRequestContext
     model_call_id: str

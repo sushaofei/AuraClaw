@@ -74,6 +74,7 @@ from auraclaw.composition.object_storage import (
 )
 from auraclaw.composition.worker_wake import WorkerWakeGate
 from auraclaw.config import Settings, get_settings
+from auraclaw.contracts.errors import FencingTokenError, LeaseConflictError
 from auraclaw.contracts.internal import (
     InternalRequestContext,
     McpRegistrySnapshotRequest,
@@ -416,6 +417,25 @@ class RemoteRuntimeWorker:
             )
             try:
                 await self._execute_with_heartbeat(assignment)
+            except (FencingTokenError, LeaseConflictError):
+                logger.warning(
+                    "runtime lost lease for %s; abandoning stale assignment",
+                    task_id,
+                    exc_info=True,
+                )
+                try:
+                    await self._control.abandon_assignment(
+                        task_id,
+                        runtime_id=assignment.runtime_id,
+                        lease_id=assignment.lease_id,
+                        fencing_token=assignment.fencing_token,
+                    )
+                except Exception:
+                    logger.exception(
+                        "failed to abandon stale assignment %s",
+                        task_id,
+                    )
+                continue
             except Exception as exc:
                 try:
                     await self._harness.record_failure(assignment, exc)

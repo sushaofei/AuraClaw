@@ -145,6 +145,15 @@ class ControlStateStore(Protocol):
 
     async def finish_assignment(self, task_id: str, outcome: str) -> None: ...
 
+    async def abandon_stale_assignment(
+        self,
+        task_id: str,
+        *,
+        runtime_id: str,
+        lease_id: str,
+        fencing_token: int,
+    ) -> bool: ...
+
     async def suspend_assignment(self, task_id: str, reason: str) -> None: ...
 
     async def wake_assignment(self, task_id: str) -> bool: ...
