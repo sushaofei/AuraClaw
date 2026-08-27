@@ -26,6 +26,7 @@ from auraclaw.contracts.errors import (
 )
 from auraclaw.contracts.tools import (
     ApprovalRecord,
+    ApprovalStatus,
     ArtifactRef,
     PolicyDecision,
     ToolCapability,
@@ -283,9 +284,17 @@ class ToolGateway:
                     invocation, capability, digest, policy_version
                 )
                 if not approval:
-                    pending = self._pending_approvals.get(
-                        (invocation.tenant_id, invocation.session_id, digest)
+                    pending_key = (
+                        invocation.tenant_id,
+                        invocation.session_id,
+                        digest,
                     )
+                    pending = self._pending_approvals.get(pending_key)
+                    if pending is not None and not await self._pending_approval_is_waiting(
+                        pending
+                    ):
+                        self._pending_approvals.pop(pending_key, None)
+                        pending = None
                     if pending is None:
                         pending = ApprovalAggregate.request(
                             tenant_id=invocation.tenant_id,
@@ -300,9 +309,7 @@ class ToolGateway:
                             policy_version=policy_version,
                             ttl=self._approval_ttl,
                         )
-                        self._pending_approvals[
-                            (invocation.tenant_id, invocation.session_id, digest)
-                        ] = pending
+                        self._pending_approvals[pending_key] = pending
                         if self._approval_controller is not None:
                             await self._approval_controller.request_approval(pending)
                     result = ToolResult(
@@ -333,19 +340,16 @@ class ToolGateway:
         policy_version: str,
     ) -> bool:
         del capability
-        if self._approval_controller is not None:
-            if invocation.approval_id is None:
-                return False
-            return await self._approval_controller.validate_approval(
-                tenant_id=invocation.tenant_id,
-                approval_id=invocation.approval_id,
-                session_id=invocation.session_id,
-                run_id=invocation.run_id,
-                action_digest=digest,
-                policy_version=policy_version,
-            )
-        record = None
         if invocation.approval_id is not None:
+            if self._approval_controller is not None:
+                return await self._approval_controller.validate_approval(
+                    tenant_id=invocation.tenant_id,
+                    approval_id=invocation.approval_id,
+                    session_id=invocation.session_id,
+                    run_id=invocation.run_id,
+                    action_digest=digest,
+                    policy_version=policy_version,
+                )
             record = await self._approvals.get(
                 invocation.tenant_id, invocation.approval_id
             )
@@ -358,8 +362,8 @@ class ToolGateway:
                 digest,
                 policy_version,
             )
-        if record is None:
-            return False
+            if record is None:
+                return False
         ApprovalAggregate.validate(
             record,
             tenant_id=invocation.tenant_id,
@@ -368,6 +372,12 @@ class ToolGateway:
             policy_version=policy_version,
         )
         return True
+
+    async def _pending_approval_is_waiting(self, pending: ApprovalRecord) -> bool:
+        record = await self._approvals.get(pending.tenant_id, pending.approval_id)
+        if record is None:
+            return True
+        return record.status in {ApprovalStatus.REQUESTED, ApprovalStatus.WAITING}
 
     async def _dispatch(
         self,

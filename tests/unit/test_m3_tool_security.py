@@ -20,6 +20,7 @@ from auraclaw.contracts.errors import (
 from auraclaw.contracts.events import Actor, CanonicalEvent, NewEvent
 from auraclaw.contracts.state import Visibility
 from auraclaw.contracts.tools import (
+    ApprovalRecord,
     ApprovalStatus,
     CredentialReference,
     RiskLevel,
@@ -232,6 +233,137 @@ def test_write_requires_approval_and_argument_change_invalidates_it() -> None:
                 )
             )
         assert hands.calls == 1
+
+    asyncio.run(scenario())
+
+
+def test_find_approved_reuses_session_approval_on_later_run_without_approval_id() -> None:
+    async def scenario() -> None:
+        hands = RecordingHands({"resource_id": "external-1"})
+        approvals = InMemoryApprovalProjection()
+        gateway, _ = _gateway(hands, approvals)
+        denied = await gateway.execute(_invocation(key="digest-reuse"))
+        assert denied.error_code == "approval_required"
+        payload = dict(denied.metadata["approval_request"])
+        await approvals.project([_event("approval.requested", payload, 1)])
+        record = await approvals.get("tenant-m3", str(payload["approval_id"]))
+        assert record is not None
+        approved = ApprovalAggregate.respond(
+            record, actor_id="human", decision="approved", feedback=None
+        )
+        await approvals.project(
+            [
+                _event(
+                    "approval.approved",
+                    {
+                        "approval_id": approved.approval_id,
+                        "decision": ApprovalStatus.APPROVED.value,
+                    },
+                    2,
+                )
+            ]
+        )
+
+        later = ToolInvocation(
+            **_invocation(
+                key="digest-reuse-later",
+                approval_id=None,
+            ).__dict__
+            | {"run_id": "run-later", "tool_invocation_id": "tool-later"}
+        )
+        result = await gateway.execute(later)
+        assert result.status.value == "success"
+        assert hands.calls == 1
+
+    asyncio.run(scenario())
+
+
+def test_find_approved_works_with_approval_controller_without_approval_id() -> None:
+    class ControllerThatNeverValidates:
+        def __init__(self) -> None:
+            self.requested: list[ApprovalRecord] = []
+
+        async def request_approval(self, record: ApprovalRecord) -> None:
+            self.requested.append(record)
+
+        async def validate_approval(self, **kwargs: object) -> bool:
+            del kwargs
+            return False
+
+    async def scenario() -> None:
+        hands = RecordingHands({"resource_id": "external-1"})
+        approvals = InMemoryApprovalProjection()
+        controller = ControllerThatNeverValidates()
+        gateway = ToolGateway(
+            registry=ToolRegistry((_capability(),)),
+            policy=PolicyEngine(),
+            approvals=approvals,
+            hands=hands,
+            artifacts=ArtifactStore(
+                InMemoryObjectStorage(), signing_key=b"m3-test-signing-key"
+            ),
+            approval_controller=controller,
+        )
+        denied = await gateway.execute(_invocation(key="controller-find"))
+        assert denied.error_code == "approval_required"
+        payload = dict(denied.metadata["approval_request"])
+        await approvals.project([_event("approval.requested", payload, 1)])
+        record = await approvals.get("tenant-m3", str(payload["approval_id"]))
+        assert record is not None
+        approved = ApprovalAggregate.respond(
+            record, actor_id="human", decision="approved", feedback=None
+        )
+        await approvals.project(
+            [
+                _event(
+                    "approval.approved",
+                    {
+                        "approval_id": approved.approval_id,
+                        "decision": ApprovalStatus.APPROVED.value,
+                    },
+                    2,
+                )
+            ]
+        )
+
+        result = await gateway.execute(
+            _invocation(key="controller-find-run-2", approval_id=None)
+        )
+        assert result.status.value == "success"
+        assert hands.calls == 1
+
+    asyncio.run(scenario())
+
+
+def test_stale_pending_cache_requests_fresh_approval_after_rejection() -> None:
+    async def scenario() -> None:
+        hands = RecordingHands({"resource_id": "external-1"})
+        approvals = InMemoryApprovalProjection()
+        gateway, _ = _gateway(hands, approvals)
+        first = await gateway.execute(_invocation(key="rejected-digest"))
+        assert first.error_code == "approval_required"
+        first_payload = dict(first.metadata["approval_request"])
+        first_id = str(first_payload["approval_id"])
+        await approvals.project([_event("approval.requested", first_payload, 1)])
+        record = await approvals.get("tenant-m3", first_id)
+        assert record is not None
+        await approvals.project(
+            [
+                _event(
+                    "approval.rejected",
+                    {
+                        "approval_id": first_id,
+                        "decision": ApprovalStatus.REJECTED.value,
+                    },
+                    2,
+                )
+            ]
+        )
+
+        second = await gateway.execute(_invocation(key="rejected-digest-2"))
+        assert second.error_code == "approval_required"
+        second_id = str(second.metadata["approval_request"]["approval_id"])
+        assert second_id != first_id
 
     asyncio.run(scenario())
 
