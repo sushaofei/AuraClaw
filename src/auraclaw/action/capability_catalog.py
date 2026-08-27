@@ -85,6 +85,14 @@ class InMemoryCapabilityCatalogStore:
             {capability.capability_id: capability for capability in capabilities}
         )
 
+    async def remove_server(self, server_id: str) -> None:
+        self._servers.pop(server_id, None)
+        self._capabilities = {
+            capability_id: capability
+            for capability_id, capability in self._capabilities.items()
+            if capability.server_id != server_id
+        }
+
     async def list_capabilities(
         self, tenant_id: str
     ) -> tuple[CapabilityDescriptor, ...]:
@@ -139,6 +147,9 @@ class CapabilityCatalog:
 
     async def register_server(self, server: McpServerDefinition) -> None:
         await self._store.upsert_server(server)
+
+    async def remove_server(self, server_id: str) -> None:
+        await self._store.remove_server(server_id)
 
     async def replace_server_capabilities(
         self,

@@ -158,6 +158,11 @@ class McpConnectionManager:
             self._draining.append(previous)
             asyncio.create_task(self._drain(previous))
 
+    async def purge(self, server_id: str) -> None:
+        await self.revoke(server_id)
+        if self._catalog is not None:
+            await self._catalog.remove_server(server_id)
+
     async def reconcile_loaded(self) -> int:
         snapshot = {
             entry.server_id: entry

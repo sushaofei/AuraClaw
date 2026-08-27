@@ -61,6 +61,7 @@ class McpRegistryInternalService:
                 McpRegistryOperationKind.DISABLE: self._registry.disable,
                 McpRegistryOperationKind.RECONCILE: self._registry.reconcile,
                 McpRegistryOperationKind.RETIRE: self._registry.retire,
+                McpRegistryOperationKind.DELETE: self._registry.delete,
             }[kind]
             record = await handler(request.server_id, lifecycle)
         return McpRegistryAdminResponse(

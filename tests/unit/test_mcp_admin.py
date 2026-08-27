@@ -130,6 +130,66 @@ def test_mcp_admin_lists_catalogued_tools() -> None:
         assert outsider.status_code == 403
 
 
+def test_mcp_admin_hard_deletes_server_via_gateway_alias() -> None:
+    registry, catalog = _seed()
+    app = create_app(profile="task-api")
+    app.include_router(create_mcp_admin_router(registry, catalog=catalog))
+    app.state.config_ready = True
+    headers = {
+        "X-Tenant-ID": "tenant-a",
+        "X-Actor-ID": "admin-1",
+        "Idempotency-Key": "cmd-delete-alias",
+        "X-Expected-Revision": "1",
+    }
+    with TestClient(app) as client:
+        deleted = client.post(
+            "/v1/admin/mcp-servers/lifecycle",
+            headers=headers,
+            json={
+                "server_id": "local-order-mcp",
+                "operation": "drop",
+            },
+        )
+        assert deleted.status_code == 202, deleted.text
+        payload = deleted.json()
+        assert payload["operation"] == "delete"
+        assert payload["status"] == "succeeded"
+        assert payload["result"]["deleted"] is True
+
+        missing = client.get("/v1/admin/mcp-servers/local-order-mcp", headers=headers)
+        assert missing.status_code == 404
+
+
+def test_mcp_admin_hard_deletes_server() -> None:
+    registry, catalog = _seed()
+    app = create_app(profile="task-api")
+    app.include_router(create_mcp_admin_router(registry, catalog=catalog))
+    app.state.config_ready = True
+    headers = {
+        "X-Tenant-ID": "tenant-a",
+        "X-Actor-ID": "admin-1",
+        "Idempotency-Key": "cmd-delete",
+        "X-Expected-Revision": "1",
+    }
+    with TestClient(app) as client:
+        deleted = client.put(
+            "/v1/admin/mcp-servers/local-order-mcp",
+            headers=headers,
+            json={
+                "server_id": "local-order-mcp",
+                "metadata": {"mcp_action": "delete"},
+            },
+        )
+        assert deleted.status_code == 202, deleted.text
+        payload = deleted.json()
+        assert payload["operation"] == "delete"
+        assert payload["status"] == "succeeded"
+        assert payload["result"]["deleted"] is True
+
+        missing = client.get("/v1/admin/mcp-servers/local-order-mcp", headers=headers)
+        assert missing.status_code == 404
+
+
 def test_task_api_exposes_mcp_tools_route() -> None:
     settings = Settings(
         _env_file=None,

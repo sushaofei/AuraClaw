@@ -285,11 +285,10 @@ class CapabilityCatalogReconciler:
     async def drop_server(self, server_id: str) -> None:
         server = await self._store.get_server(server_id)
         if server is None:
-            server = McpServerDefinition(
-                server_id=server_id,
-                title=server_id,
-                endpoint="https://invalid.invalid/mcp",
-            )
+            await self._catalog.remove_server(server_id)
+            self._failures.pop(server_id, None)
+            self._dirty.discard(server_id)
+            return
         self._remove_remote_tools(server)
         await self._catalog.replace_server_capabilities(server_id, ())
         self._failures.pop(server_id, None)

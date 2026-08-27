@@ -75,6 +75,8 @@ class McpServerRegistryStore(Protocol):
 
     async def list_active_snapshot(self) -> tuple[McpActiveSnapshotEntry, ...]: ...
 
+    async def delete_server(self, server_id: str) -> None: ...
+
 
 class McpRuntimeController(Protocol):
     async def test(self, entry: McpActiveSnapshotEntry) -> None: ...
@@ -212,6 +214,18 @@ class InMemoryMcpServerRegistryStore:
                 )
             )
         return tuple(sorted(entries, key=lambda item: item.server_id))
+
+    async def delete_server(self, server_id: str) -> None:
+        if server_id not in self._servers:
+            raise NotFoundError("MCP server was not found")
+        del self._servers[server_id]
+        self._runtime.pop(server_id, None)
+        for key in [
+            revision_key
+            for revision_key in self._revisions
+            if revision_key[0] == server_id
+        ]:
+            del self._revisions[key]
 
     def _save_operation(self, operation: McpServerOperationRecord) -> None:
         self._operations[operation.operation_id] = operation
@@ -435,6 +449,52 @@ class McpServerRegistryService:
     ) -> McpServerOperationRecord:
         return await self._lifecycle(
             server_id, command, McpRegistryOperationKind.RETIRE
+        )
+
+    async def delete(
+        self, server_id: str, command: McpServerLifecycleCommand
+    ) -> McpServerOperationRecord:
+        existing = await self._idempotent(command.command_id, command.tenant_id)
+        if existing is not None:
+            return existing
+        current = await self._require_server(server_id, command.tenant_id)
+        if current.latest_revision != command.expected_revision:
+            raise VersionConflictError("MCP server revision conflict")
+        now = datetime.now(UTC)
+        operation = _new_operation(
+            command,
+            server_id=server_id,
+            kind=McpRegistryOperationKind.DELETE,
+            target_revision=current.latest_revision,
+            now=now,
+        )
+        await self._store.complete_operation(operation)
+        try:
+            if self._runtime is not None:
+                purge = getattr(self._runtime, "purge", None)
+                if callable(purge):
+                    await purge(server_id)
+                else:
+                    await self._runtime.revoke(server_id)
+            await self._store.delete_server(server_id)
+        except Exception as exc:
+            failed = operation.model_copy(
+                update={
+                    "status": McpRegistryOperationStatus.FAILED,
+                    "safe_error_code": _safe_error(exc),
+                    "result": _failure_result(exc),
+                    "completed_at": datetime.now(UTC),
+                }
+            )
+            return await self._store.complete_operation(failed)
+        return await self._store.complete_operation(
+            operation.model_copy(
+                update={
+                    "status": McpRegistryOperationStatus.SUCCEEDED,
+                    "completed_at": datetime.now(UTC),
+                    "result": {"deleted": True, "server_id": server_id},
+                }
+            )
         )
 
     async def active_snapshot(self) -> tuple[McpActiveSnapshotEntry, ...]:

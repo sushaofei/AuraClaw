@@ -149,6 +149,18 @@ class PostgresCapabilityCatalogStore(LazyPool):
                     ],
                 )
 
+    async def remove_server(self, server_id: str) -> None:
+        pool = await self.pool()
+        async with pool.acquire() as connection, connection.transaction():
+            await connection.execute(
+                "DELETE FROM hands.capability_catalog WHERE server_id=$1",
+                server_id,
+            )
+            await connection.execute(
+                "DELETE FROM hands.downstream_mcp_server WHERE server_id=$1",
+                server_id,
+            )
+
     async def list_capabilities(
         self, tenant_id: str
     ) -> tuple[CapabilityDescriptor, ...]:
