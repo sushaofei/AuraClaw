@@ -63,6 +63,11 @@ class RemoteMcpRegistryClient:
     ) -> McpServerOperationRecord:
         return await self._lifecycle("retire", server_id, command)
 
+    async def delete(
+        self, server_id: str, command: McpServerLifecycleCommand
+    ) -> McpServerOperationRecord:
+        return await self._lifecycle("delete", server_id, command)
+
     async def _lifecycle(
         self,
         operation: str,

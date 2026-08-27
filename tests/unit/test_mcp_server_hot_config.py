@@ -17,6 +17,7 @@ from auraclaw.contracts.capabilities import McpAuthStrategy, McpNetworkMode
 from auraclaw.contracts.errors import (
     AuthorizationError,
     CredentialAccessError,
+    NotFoundError,
     VersionConflictError,
 )
 from auraclaw.contracts.hands import (
@@ -227,6 +228,45 @@ def test_registry_lists_retired_and_create_revives() -> None:
         assert listed[0].desired_state is McpDesiredState.DISABLED
         assert listed[0].latest_config is not None
         assert listed[0].latest_config.title == "Back"
+
+    asyncio.run(scenario())
+
+
+def test_registry_hard_delete_removes_registration_and_allows_fresh_create() -> None:
+    async def scenario() -> None:
+        service = McpServerRegistryService(InMemoryMcpServerRegistryStore())
+        await service.create(_write(_config()))
+        await service.retire("local-order-mcp", _life(command_id="cmd-retire"))
+        deleted = await service.delete(
+            "local-order-mcp",
+            _life(command_id="cmd-delete", expected_revision=1),
+        )
+        assert deleted.status.value == "succeeded"
+        assert deleted.result["deleted"] is True
+        assert await service.list_servers(tenant_id="tenant-a") == ()
+        with pytest.raises(NotFoundError):
+            await service.get_server(
+                tenant_id="tenant-a",
+                server_id="local-order-mcp",
+                actor_id="admin-1",
+            )
+        recreated = await service.create(_write(_config(), command_id="cmd-recreate"))
+        assert recreated.result["latest_revision"] == 1
+        listed = await service.list_servers(tenant_id="tenant-a")
+        assert len(listed) == 1
+        assert listed[0].desired_state is McpDesiredState.DISABLED
+
+    asyncio.run(scenario())
+
+
+def test_registry_delete_is_idempotent() -> None:
+    async def scenario() -> None:
+        service = McpServerRegistryService(InMemoryMcpServerRegistryStore())
+        await service.create(_write(_config()))
+        command = _life(command_id="cmd-delete-once", expected_revision=1)
+        first = await service.delete("local-order-mcp", command)
+        second = await service.delete("local-order-mcp", command)
+        assert first.operation_id == second.operation_id
 
     asyncio.run(scenario())
 

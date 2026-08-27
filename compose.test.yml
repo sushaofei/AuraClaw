@@ -27,6 +27,7 @@ x-common-environment: &common-environment
   AURACLAW_TEST_UPLINK_INSECURE_IDENTITY: ${AURACLAW_TEST_UPLINK_INSECURE_IDENTITY:-false}
   AURACLAW_ALLOW_INSECURE_IDENTITY_HEADERS: ${AURACLAW_ALLOW_INSECURE_IDENTITY_HEADERS:-false}
   AURACLAW_CORS_ALLOW_ORIGINS: ${AURACLAW_CORS_ALLOW_ORIGINS:-}
+  AURACLAW_MCP_ALLOW_PRIVATE_AUTH_NONE: ${AURACLAW_MCP_ALLOW_PRIVATE_AUTH_NONE:-false}
   AURACLAW_HOST: 0.0.0.0
   AURACLAW_LOG_LEVEL: ${AURACLAW_LOG_LEVEL:-INFO}
   AURACLAW_STORAGE_BACKEND: ${AURACLAW_STORAGE_BACKEND:-mysql}
@@ -120,6 +121,7 @@ services:
       ]
     command: ["api", "run", "--host", "0.0.0.0", "--port", "8000"]
     expose: ["8000"]
+    ports: ["${AURACLAW_TASK_API_PORT:-8000}:8000"]
     healthcheck: *healthcheck
     labels:
       auraclaw.service-identity: task-api
@@ -304,11 +306,13 @@ services:
       AURACLAW_LEASE_SIGNING_KEY_FILE: /run/secrets/lease_signing_key
       AURACLAW_RUNTIME_WORKLOAD_TOKEN_FILE: /run/secrets/runtime_workload_token
       AURACLAW_ACTION_HANDS_WORKLOAD_TOKEN_FILE: /run/secrets/action_hands_workload_token
+      AURACLAW_TASK_API_WORKLOAD_TOKEN_FILE: /run/secrets/task_api_workload_token
     secrets:
       - database_url
       - lease_signing_key
       - runtime_workload_token
       - action_hands_workload_token
+      - task_api_workload_token
     command: ["hands", "run", "--host", "0.0.0.0", "--port", "8006"]
     expose: ["8006"]
     healthcheck: *healthcheck

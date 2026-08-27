@@ -244,6 +244,28 @@ class PostgresMcpServerRegistryStore(LazyPool, McpServerRegistryStore):
             for row in rows
         )
 
+    async def delete_server(self, server_id: str) -> None:
+        pool = await self.pool()
+        async with pool.acquire() as connection, connection.transaction():
+            existing = await connection.fetchval(
+                "SELECT server_id FROM hands.mcp_server WHERE server_id=$1",
+                server_id,
+            )
+            if existing is None:
+                raise NotFoundError("MCP server was not found")
+            await connection.execute(
+                "DELETE FROM hands.mcp_server_runtime WHERE server_id=$1",
+                server_id,
+            )
+            await connection.execute(
+                "DELETE FROM hands.mcp_server_revision WHERE server_id=$1",
+                server_id,
+            )
+            await connection.execute(
+                "DELETE FROM hands.mcp_server WHERE server_id=$1",
+                server_id,
+            )
+
     async def _hydrate(self, row: dict[str, Any]) -> McpServerRecord:
         server_id = str(row["server_id"])
         latest = await self.get_revision(server_id, int(row["latest_revision"]))

@@ -43,6 +43,7 @@ class McpRegistryOperationKind(StrEnum):
     DISABLE = "disable"
     RECONCILE = "reconcile"
     RETIRE = "retire"
+    DELETE = "delete"
 
 
 class McpRegistryOperationStatus(StrEnum):
