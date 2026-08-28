@@ -200,6 +200,69 @@ def test_purge_is_package_retention_not_publication_status() -> None:
         )
 
 
+def test_source_lease_is_exclusive_and_rejects_stale_fencing() -> None:
+    async def scenario() -> None:
+        store = InMemorySkillLifecycleStore()
+        now = datetime.now(UTC)
+        source = SkillSourceRecord(
+            source_id="sks_external",
+            tenant_id="tenant-a",
+            kind=SkillSourceKind.MCP,
+            desired_state=SkillSourceDesiredState.ENABLED,
+            publisher_allowlist=("platform",),
+            created_by="admin",
+            updated_by="admin",
+            created_at=now,
+            updated_at=now,
+        )
+        await store.put_source(source, expected_revision=0)
+        first = await store.claim_source_lease(
+            tenant_id="tenant-a",
+            source_id=source.source_id,
+            owner="hands-a",
+            ttl=timedelta(minutes=1),
+        )
+        assert first is not None and first.fencing_token == 1
+        assert (
+            await store.claim_source_lease(
+                tenant_id="tenant-a",
+                source_id=source.source_id,
+                owner="hands-b",
+                ttl=timedelta(minutes=1),
+            )
+            is None
+        )
+
+        await store.release_source_lease(first)
+        second = await store.claim_source_lease(
+            tenant_id="tenant-a",
+            source_id=source.source_id,
+            owner="hands-b",
+            ttl=timedelta(minutes=1),
+        )
+        assert second is not None and second.fencing_token == 2
+        stale_state = SkillSourceSyncState(
+            source_id=source.source_id,
+            tenant_id="tenant-a",
+            generation=first.fencing_token,
+            last_attempt_at=now,
+        )
+        with pytest.raises(VersionConflictError, match="lease is stale"):
+            await store.put_sync_state_fenced(stale_state, lease=first)
+
+        current_state = stale_state.model_copy(
+            update={
+                "generation": second.fencing_token,
+                "complete_snapshot": True,
+                "last_success_at": now,
+            }
+        )
+        await store.put_sync_state_fenced(current_state, lease=second)
+        assert await store.get_sync_state("tenant-a", source.source_id) == current_state
+
+    asyncio.run(scenario())
+
+
 def test_source_and_installation_contracts_fail_closed() -> None:
     now = datetime.now(UTC)
     with pytest.raises(ValidationError, match="publisher allowlist"):

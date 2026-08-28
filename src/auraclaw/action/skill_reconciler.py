@@ -3,11 +3,12 @@ from __future__ import annotations
 import base64
 import hashlib
 import re
+import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from auraclaw.action.ports import CapabilityCatalogStore, CapabilityConnector
-from auraclaw.action.skill_lifecycle import SkillLifecycleStore
+from auraclaw.action.skill_lifecycle import SkillLifecycleStore, SkillSourceLease
 from auraclaw.action.skill_packages import SkillPackage, skill_package_digest
 from auraclaw.action.skill_publication import SkillPublicationService
 from auraclaw.action.skill_rebuild import SkillStateRebuilder
@@ -19,10 +20,12 @@ from auraclaw.contracts.skills import (
     SkillSourceDesiredState,
     SkillSourceKind,
     SkillSourceRecord,
+    SkillSourceSyncState,
 )
 
 _SKILL_URI = re.compile(r"^skill://([^/]+)/([^/]+)/([^/]+)/(.+)$")
 _URI_SUFFIX_TO_PATH = {"manifest": "manifest.json"}
+_LEASE_TTL = timedelta(minutes=5)
 
 
 @dataclass(frozen=True)
@@ -43,12 +46,14 @@ class SkillPackageReconciler:
         lifecycle: SkillLifecycleStore,
         publication: SkillPublicationService,
         rebuilder: SkillStateRebuilder,
+        owner: str | None = None,
     ) -> None:
         self._store = store
         self._connectors = connectors
         self._lifecycle = lifecycle
         self._publication = publication
         self._rebuilder = rebuilder
+        self._owner = owner or f"skill-reconciler-{uuid.uuid4().hex}"
 
     async def reconcile_all(self) -> int:
         servers = {
@@ -74,11 +79,32 @@ class SkillPackageReconciler:
                 error="transport_unavailable",
             )
         trusted = _reconcile_context(server)
+        tenant_id = server.tenant_id or "platform"
+        lease: SkillSourceLease | None = None
+        source: SkillSourceRecord | None = None
         try:
-            snapshot = await connector.snapshot(trusted)
-            grouped = _group_skill_resource_uris(snapshot.resources)
-            tenant_id = server.tenant_id or "platform"
             source = await self._ensure_source(server, tenant_id)
+            if source.desired_state is not SkillSourceDesiredState.ENABLED:
+                return SkillReconcileResult(
+                    server_id=server.server_id,
+                    published_count=0,
+                    error="source_not_enabled",
+                )
+            lease = await self._lifecycle.claim_source_lease(
+                tenant_id=tenant_id,
+                source_id=source.source_id,
+                owner=self._owner,
+                ttl=_LEASE_TTL,
+            )
+            if lease is None:
+                return SkillReconcileResult(
+                    server_id=server.server_id,
+                    published_count=0,
+                    error="lease_contended",
+                )
+            snapshot = await connector.snapshot(trusted)
+            lease = await self._renew(lease)
+            grouped = _group_skill_resource_uris(snapshot.resources)
             published = 0
             for (_publisher, _name, _version), uris in grouped.items():
                 if not any(uri.endswith("/manifest") for uri in uris):
@@ -88,6 +114,7 @@ class SkillPackageReconciler:
                     trusted,
                     uris,
                 )
+                lease = await self._renew(lease)
                 digest = skill_package_digest(package)
                 await self._publication.publish(
                     PublishSkillCommand(
@@ -99,19 +126,92 @@ class SkillPackageReconciler:
                         causation_id=f"mcp-snapshot:{server.server_id}",
                     ),
                     package,
+                    source_lease=lease,
                 )
                 published += 1
+            lease = await self._renew(lease)
+            now = datetime.now(UTC)
+            await self._lifecycle.put_sync_state_fenced(
+                SkillSourceSyncState(
+                    source_id=source.source_id,
+                    tenant_id=tenant_id,
+                    generation=lease.fencing_token,
+                    cursor=snapshot.source_revision,
+                    complete_snapshot=True,
+                    last_success_at=now,
+                    last_attempt_at=now,
+                ),
+                lease=lease,
+            )
             await self._rebuilder.rebuild_tenant(tenant_id)
             return SkillReconcileResult(
                 server_id=server.server_id,
                 published_count=published,
             )
         except Exception as exc:
+            if lease is not None and source is not None:
+                lease = await self._record_failure(
+                    source=source,
+                    lease=lease,
+                    safe_error_code=type(exc).__name__,
+                ) or lease
+            if source is not None:
+                try:
+                    await self._rebuilder.rebuild_tenant(tenant_id)
+                except Exception:
+                    pass
             return SkillReconcileResult(
                 server_id=server.server_id,
                 published_count=0,
                 error=type(exc).__name__,
             )
+        finally:
+            if lease is not None:
+                await self._lifecycle.release_source_lease(lease)
+
+    async def _renew(self, lease: SkillSourceLease) -> SkillSourceLease:
+        renewed = await self._lifecycle.renew_source_lease(lease, ttl=_LEASE_TTL)
+        if renewed is None:
+            raise VersionConflictError("Skill Source lease is stale")
+        return renewed
+
+    async def _record_failure(
+        self,
+        *,
+        source: SkillSourceRecord,
+        lease: SkillSourceLease,
+        safe_error_code: str,
+    ) -> SkillSourceLease | None:
+        try:
+            renewed = await self._lifecycle.renew_source_lease(
+                lease, ttl=_LEASE_TTL
+            )
+            if renewed is None:
+                return None
+            previous = await self._lifecycle.get_sync_state(
+                source.tenant_id, source.source_id
+            )
+            await self._lifecycle.put_sync_state_fenced(
+                SkillSourceSyncState(
+                    source_id=source.source_id,
+                    tenant_id=source.tenant_id,
+                    generation=renewed.fencing_token,
+                    cursor=None if previous is None else previous.cursor,
+                    complete_snapshot=False,
+                    last_success_at=(
+                        None if previous is None else previous.last_success_at
+                    ),
+                    last_attempt_at=datetime.now(UTC),
+                    consecutive_failures=(
+                        1 if previous is None else previous.consecutive_failures + 1
+                    ),
+                    safe_error_code=safe_error_code[:128],
+                ),
+                lease=renewed,
+            )
+            return renewed
+        except Exception:
+            return None
 
     async def _ensure_source(
         self,

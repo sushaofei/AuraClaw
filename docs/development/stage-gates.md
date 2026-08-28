@@ -1812,6 +1812,34 @@ ready Skill Artifact 建立带 fencing 的物理回收流程；不把成功命�
 - [x] README、公开 API、架构、数据库参考与阶段门禁同步，剩余治理范围未误标为完成。
 - [x] 本阶段作为一个 intentional commit 提交并 push，不包含 `.env`、Secret、缓存或无关改动。
 
+## 阶段 M14j：Skill Source 多副本对账租约与恢复（Issue #56）
+
+状态：已完成。本阶段让 MCP Skill Source 的周期发现可在多个 Action Hands 副本间安全接管；
+远端缺失版本的自动退役仍需独立确认窗口与审计命令，不能由一次快照直接触发。
+
+### 租约与 fencing
+
+- [x] `(tenant_id, source_id)` 持久租约跨副本互斥，过期接管单调递增 fencing token。
+- [x] snapshot 和每个 Package 下载后续租；租约丢失后停止后续发布。
+- [x] Publication 提交事务验证 owner/token/expiry，旧副本不能用迟到快照写 Package、Publication 或 Installation。
+- [x] 成功与失败 Sync State 使用相同 fencing 校验，旧 generation 不能覆盖新同步证据。
+- [x] disabled/retired Source 不拉取远端内容；租约释放与过期均可恢复下一轮执行。
+
+### 恢复与可观测证据
+
+- [x] 完整快照保存 source revision、generation、成功/尝试时间，并在恢复后清零失败计数。
+- [x] 失败保留最近成功证据，只记录安全错误类型和连续失败次数，不持久化上游响应正文。
+- [x] 部分发布后失败不声称快照完成；下一轮通过不可变版本与 command digest 幂等补齐。
+- [x] 单次快照缺失不会自动撤销版本，避免瞬时上游缺页直接破坏现有 binding。
+
+### 质量与交付
+
+- [x] 0028 正反迁移覆盖 Source lease、fencing token 与过期扫描索引。
+- [x] 内存与真实 PostgreSQL 覆盖双 owner 竞争、过期接管、旧 token 发布/Sync State 拒绝及失败恢复。
+- [x] 全量 Ruff、Mypy、unit、相关 integration 与 import-linter 通过。
+- [x] README、架构、数据库参考与阶段门禁同步，缺失版本自动退役和完整审计未误标完成。
+- [x] 本阶段作为一个 intentional commit 提交并 push，不包含 `.env`、Secret、缓存或无关改动。
+
 ## 阶段 Product Activity：产品级对话执行轨迹（AuraX Issue #2）
 
 状态：代码与定向验证完成；完整基础设施集成门禁受现有 Kafka/MySQL/PostgreSQL/Artifact 环境失败阻塞。

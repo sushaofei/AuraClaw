@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
 from auraclaw.contracts.errors import NotFoundError, VersionConflictError
@@ -34,6 +34,16 @@ class SkillPublishCommit:
     publication: SkillPublicationRecord
     installation: SkillInstallationRecord | None
     occurred_at: datetime
+    source_lease: SkillSourceLease | None = None
+
+
+@dataclass(frozen=True)
+class SkillSourceLease:
+    tenant_id: str
+    source_id: str
+    owner: str
+    fencing_token: int
+    expires_at: datetime
 
 
 @dataclass(frozen=True)
@@ -123,6 +133,20 @@ class SkillLifecycleStore(Protocol):
         self, tenant_id: str, source_id: str
     ) -> SkillSourceSyncState | None: ...
 
+    async def claim_source_lease(
+        self, *, tenant_id: str, source_id: str, owner: str, ttl: timedelta
+    ) -> SkillSourceLease | None: ...
+
+    async def renew_source_lease(
+        self, lease: SkillSourceLease, *, ttl: timedelta
+    ) -> SkillSourceLease | None: ...
+
+    async def release_source_lease(self, lease: SkillSourceLease) -> None: ...
+
+    async def put_sync_state_fenced(
+        self, state: SkillSourceSyncState, *, lease: SkillSourceLease
+    ) -> None: ...
+
 
 @dataclass
 class InMemorySkillLifecycleStore:
@@ -135,6 +159,7 @@ class InMemorySkillLifecycleStore:
     )
     _sources: dict[SourceKey, SkillSourceRecord] = field(default_factory=dict)
     _sync_states: dict[SourceKey, SkillSourceSyncState] = field(default_factory=dict)
+    _source_leases: dict[SourceKey, SkillSourceLease] = field(default_factory=dict)
     _commands: dict[CommandKey, tuple[str, SkillPublishCommitResult]] = field(
         default_factory=dict
     )
@@ -147,6 +172,13 @@ class InMemorySkillLifecycleStore:
     ) -> SkillPublishCommitResult:
         key = (commit.package.tenant_id, commit.command_id)
         async with self._lock:
+            if commit.source_lease is not None:
+                if (
+                    commit.source_lease.tenant_id != commit.package.tenant_id
+                    or commit.source_lease.source_id != commit.source_id
+                ):
+                    raise VersionConflictError("Skill Source lease scope mismatch")
+                self._require_active_lease(commit.source_lease)
             existing_command = self._commands.get(key)
             if existing_command is not None:
                 request_digest, result = existing_command
@@ -427,6 +459,76 @@ class InMemorySkillLifecycleStore:
         self, tenant_id: str, source_id: str
     ) -> SkillSourceSyncState | None:
         return self._sync_states.get((tenant_id, source_id))
+
+    async def claim_source_lease(
+        self, *, tenant_id: str, source_id: str, owner: str, ttl: timedelta
+    ) -> SkillSourceLease | None:
+        key = (tenant_id, source_id)
+        async with self._lock:
+            if key not in self._sources:
+                raise NotFoundError("Skill Source was not found")
+            now = datetime.now(UTC)
+            current = self._source_leases.get(key)
+            if current is not None and current.expires_at > now:
+                return None
+            lease = SkillSourceLease(
+                tenant_id=tenant_id,
+                source_id=source_id,
+                owner=owner,
+                fencing_token=1 if current is None else current.fencing_token + 1,
+                expires_at=now + ttl,
+            )
+            self._source_leases[key] = lease
+            return lease
+
+    async def renew_source_lease(
+        self, lease: SkillSourceLease, *, ttl: timedelta
+    ) -> SkillSourceLease | None:
+        async with self._lock:
+            try:
+                self._require_active_lease(lease)
+            except VersionConflictError:
+                return None
+            renewed = SkillSourceLease(
+                tenant_id=lease.tenant_id,
+                source_id=lease.source_id,
+                owner=lease.owner,
+                fencing_token=lease.fencing_token,
+                expires_at=datetime.now(UTC) + ttl,
+            )
+            self._source_leases[(lease.tenant_id, lease.source_id)] = renewed
+            return renewed
+
+    async def release_source_lease(self, lease: SkillSourceLease) -> None:
+        async with self._lock:
+            key = (lease.tenant_id, lease.source_id)
+            current = self._source_leases.get(key)
+            if current == lease:
+                self._source_leases[key] = lease.__class__(
+                    **{**lease.__dict__, "expires_at": datetime.now(UTC)}
+                )
+
+    async def put_sync_state_fenced(
+        self, state: SkillSourceSyncState, *, lease: SkillSourceLease
+    ) -> None:
+        async with self._lock:
+            self._require_active_lease(lease)
+            key = (state.tenant_id, state.source_id)
+            if key != (lease.tenant_id, lease.source_id):
+                raise VersionConflictError("Skill Source lease scope mismatch")
+            existing = self._sync_states.get(key)
+            if existing is not None and state.generation < existing.generation:
+                raise VersionConflictError("Skill Source generation cannot move backwards")
+            self._sync_states[key] = state
+
+    def _require_active_lease(self, lease: SkillSourceLease) -> None:
+        current = self._source_leases.get((lease.tenant_id, lease.source_id))
+        if (
+            current != lease
+            or current is None
+            or current.expires_at <= datetime.now(UTC)
+        ):
+            raise VersionConflictError("Skill Source lease is stale")
 
 
 def _package_key(record: SkillPackageRecord) -> PackageKey:
