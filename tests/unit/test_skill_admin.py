@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+from datetime import UTC, datetime
 
 from fastapi.testclient import TestClient
 
 import auraclaw.composition.services as services
+from auraclaw.action.skill_lifecycle import InMemorySkillLifecycleStore
 from auraclaw.action.skill_packages import HmacSkillSignatureVerifier, SkillPackage
+from auraclaw.action.skill_publication import SkillPublicationService
 from auraclaw.api.routes.admin_skills import create_skill_admin_router
 from auraclaw.composition.api import create_app
 from auraclaw.composition.providers import (
@@ -19,6 +23,9 @@ from auraclaw.config import Settings, get_settings
 from auraclaw.contracts.skills import (
     SkillManifest,
     SkillResourceRequirement,
+    SkillSourceDesiredState,
+    SkillSourceKind,
+    SkillSourceRecord,
     SkillToolRequirement,
 )
 
@@ -111,3 +118,56 @@ def test_task_api_service_exposes_skill_admin_routes() -> None:
     assert "/v1/admin/skills" in paths
     assert "/v1/admin/skills/{publisher}/{name}:enable" in paths
     assert "/v1/admin/skills/{publisher}/{name}:disable" in paths
+    assert "/v1/admin/skill-publications" in paths
+
+
+def test_skill_admin_publishes_base64_package_through_application_service() -> None:
+    app = create_app(profile="task-api")
+    registry = services._skill_registry_service(get_settings())
+    now = datetime.now(UTC)
+    lifecycle = InMemorySkillLifecycleStore()
+    publication_service = SkillPublicationService(
+        registry=registry,
+        lifecycle=lifecycle,
+        bootstrap_sources=(
+            SkillSourceRecord(
+                source_id="sks_admin_upload",
+                tenant_id="tenant-1",
+                kind=SkillSourceKind.ADMIN_UPLOAD,
+                desired_state=SkillSourceDesiredState.ENABLED,
+                publisher_allowlist=("platform",),
+                created_by="system",
+                updated_by="system",
+                created_at=now,
+                updated_at=now,
+            ),
+        ),
+    )
+    app.include_router(
+        create_skill_admin_router(
+            registry,
+            publication_service=publication_service,
+        )
+    )
+    package = _package()
+    payload = {
+        "source_id": "sks_admin_upload",
+        "activate": True,
+        "files": {
+            path: base64.b64encode(content).decode()
+            for path, content in package.files.items()
+        },
+    }
+    headers = {
+        "X-Tenant-ID": "tenant-1",
+        "X-Actor-ID": "admin-1",
+        "Idempotency-Key": "skill-publish-1",
+        "X-Expected-Revision": "0",
+    }
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/admin/skill-publications", json=payload, headers=headers
+        )
+    assert response.status_code == 201, response.text
+    assert response.json()["status"] == "active"
+    assert response.json()["publisher"] == "platform"

@@ -116,7 +116,53 @@ class SkillPackageRegistry:
     def resources(self) -> McpResourceRegistry | None:
         return self._resources
 
-    async def publish(self, tenant_id: str, package: SkillPackage) -> PublishedSkill:
+    def restore(
+        self,
+        tenant_id: str,
+        package: SkillPackage,
+        publication: PublishedSkill,
+    ) -> PublishedSkill:
+        """Restore validated persisted state without creating another Artifact."""
+        normalized = _validate_package(package, self._max_package_bytes, self._max_files)
+        if not self._signature_verifier.verify(normalized):
+            raise PolicyDeniedError("Skill package signature is invalid")
+        if publication.tenant_id != tenant_id:
+            raise PolicyDeniedError("Skill publication tenant does not match")
+        if publication.manifest != normalized.manifest:
+            raise VersionConflictError("Skill publication manifest mismatch")
+        if publication.package_digest != skill_package_digest(normalized):
+            raise VersionConflictError("Skill publication package digest mismatch")
+        key = _package_key(tenant_id, normalized.manifest)
+        current = self._publications.get(key)
+        if current == publication:
+            return current
+        self._packages[key] = normalized
+        self._publications[key] = publication
+        if (
+            self._resources is not None
+            and publication.status is SkillPublicationStatus.ACTIVE
+        ):
+            for resource in _package_resources(
+                tenant_id, normalized, publication.package_digest
+            ):
+                uri = resource.descriptor.uri
+                if uri is not None:
+                    self._resources.unregister_resource(uri)
+                self._resources.register_resource(resource)
+        return publication
+
+    async def publish(
+        self,
+        tenant_id: str,
+        package: SkillPackage,
+        *,
+        status: SkillPublicationStatus = SkillPublicationStatus.ACTIVE,
+    ) -> PublishedSkill:
+        if status not in {
+            SkillPublicationStatus.STAGED,
+            SkillPublicationStatus.ACTIVE,
+        }:
+            raise ValueError("New Skill packages can only be staged or activated")
         normalized = _validate_package(package, self._max_package_bytes, self._max_files)
         if not self._signature_verifier.verify(normalized):
             raise PolicyDeniedError("Skill package signature is invalid")
@@ -126,7 +172,10 @@ class SkillPackageRegistry:
         if existing is not None:
             if existing.package_digest != digest:
                 raise VersionConflictError("Skill version is immutable")
-            if existing.status == SkillPublicationStatus.REVOKED:
+            if (
+                status is SkillPublicationStatus.ACTIVE
+                and existing.status is SkillPublicationStatus.STAGED
+            ):
                 reactivated = existing.model_copy(
                     update={"status": SkillPublicationStatus.ACTIVE}
                 )
@@ -161,10 +210,14 @@ class SkillPackageRegistry:
             manifest=normalized.manifest,
             package_digest=digest,
             artifact_ref=artifact_ref,
+            status=status,
         )
         self._packages[key] = normalized
         self._publications[key] = publication
-        if self._resources is not None:
+        if (
+            self._resources is not None
+            and status is SkillPublicationStatus.ACTIVE
+        ):
             for resource in _package_resources(tenant_id, normalized, digest):
                 self._resources.register_resource(resource)
         return publication
