@@ -1632,6 +1632,37 @@ Resolver 持久恢复、staged upload、CLI 与完整治理继续独立交付。
 - [x] 架构说明与阶段门禁同步，未把统一 Catalog 或 staged upload 标记为完成。
 - [x] 本阶段作为一个 intentional commit 提交并 push，不包含 `.env`、Secret、缓存或无关改动。
 
+## 阶段 M14d：Skill 持久恢复与统一 Catalog（Issue #56）
+
+状态：已完成。本阶段消除 Skill 搜索/加载双目录，并保证 Action Hands 重启后可从
+Lifecycle + Artifact 恢复 Registry、Resolver 候选和 Catalog 投影；卸载管理 API、staged upload、
+Publisher Registry、Outbox/lease 与 Package GC 继续后续阶段。
+
+### 持久恢复与可见性
+
+- [x] Lifecycle Store 可枚举 tenant 和 Installation，PostgreSQL/KingBase 与内存实现语义一致。
+- [x] Action Hands 通过 workload identity、Policy 和 Artifact 内部下载契约读取包，不接触对象存储凭证。
+- [x] 下载同时限制声明大小、流式实际大小，并校验 Artifact size/hash；Archive、Manifest、digest 和签名
+  在进入 Registry 前重新验证。
+- [x] 启动、发布后和周期对账都可重建 tenant Skill 状态；单包失败只记录安全错误类型，不记录正文。
+- [x] 普通 disable/uninstall 从 Catalog 和 Resolver 候选移除，但 retained active Package 继续支持已有
+  binding 按固定 digest 加载。
+
+### 统一目录与来源收敛
+
+- [x] Skill 以 tenant 专属虚拟 Server 投影到持久 Capability Catalog。
+- [x] `auraclaw.capabilities.search/load` 只查询 Catalog，不再回退到进程内 Skill Registry。
+- [x] Resolver 从相同 Lifecycle 重建出的 Registry 解析，Catalog/Resolver 不再由两个发布入口维护。
+- [x] MCP Skill Reconciler 建立持久 Source 并复用 `SkillPublicationService`，不再直接 publish Registry。
+- [x] MCP Server 必须配置 `skill_publisher_allowlist`；缺失或非法时 fail closed。
+
+### 质量与交付
+
+- [x] 恢复、Artifact reader、MCP Source、统一搜索/加载和旧 binding 保留语义的单元测试通过。
+- [x] 全量 Ruff、全量 Mypy、完整单元测试、相关 PostgreSQL 集成测试和 import-linter 通过。
+- [x] 架构说明与阶段门禁同步，未把卸载 API、安全撤销或物理清理标记为完成。
+- [x] 本阶段作为一个 intentional commit 提交并 push，不包含 `.env`、Secret、缓存或无关改动。
+
 ## 阶段 Product Activity：产品级对话执行轨迹（AuraX Issue #2）
 
 状态：代码与定向验证完成；完整基础设施集成门禁受现有 Kafka/MySQL/PostgreSQL/Artifact 环境失败阻塞。

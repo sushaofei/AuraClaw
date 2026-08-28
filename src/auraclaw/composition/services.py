@@ -57,6 +57,7 @@ from auraclaw.action.skill_packages import (
     SkillResolver,
 )
 from auraclaw.action.skill_publication import SkillPublicationService
+from auraclaw.action.skill_rebuild import SkillStateRebuilder
 from auraclaw.action.skill_reconciler import SkillPackageReconciler
 from auraclaw.action.tool_gateway import ToolGateway, ToolRegistry
 from auraclaw.admin.internal_service import OwnerAdminService
@@ -111,6 +112,7 @@ from auraclaw.gateways.task.commands import TaskCommandGateway
 from auraclaw.gateways.task.invocations import SyncInvocationGateway
 from auraclaw.infrastructure.artifacts.store import ArtifactStore, InMemoryObjectStorage
 from auraclaw.infrastructure.clients.artifact import RemoteArtifactWriter
+from auraclaw.infrastructure.clients.artifact_reader import RemoteArtifactReader
 from auraclaw.infrastructure.clients.credential import RemoteCredentialProxy
 from auraclaw.infrastructure.clients.mcp_egress import RemoteMcpEgressClient
 from auraclaw.infrastructure.clients.mcp_registry import RemoteMcpRegistryClient
@@ -1284,6 +1286,11 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         settings.artifact_base_url,
         bearer_token=_service_bearer_token(settings, ServiceIdentity.ACTION_HANDS),
     )
+    artifact_reader = RemoteArtifactReader(
+        settings.artifact_base_url,
+        bearer_token=_service_bearer_token(settings, ServiceIdentity.ACTION_HANDS),
+        policy=policy,
+    )
     if settings.sql_storage_enabled:
         invocation_store = PostgresInvocationStore(settings.resolved_database_url)
         tool_registry_store = PostgresToolRegistryStore(settings.resolved_database_url)
@@ -1295,6 +1302,7 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
     closeables = (
         *remote_clients,
         artifacts,
+        artifact_reader,
         *((invocation_store,) if invocation_store is not None else ()),
         *((tool_registry_store,) if tool_registry_store is not None else ()),
         *(
@@ -1322,6 +1330,12 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
     skill_registry = _skill_registry_service(settings, artifacts=artifacts)
     skill_publication, _ = _skill_publication_service(
         settings, skill_registry, skill_lifecycle
+    )
+    skill_rebuilder = SkillStateRebuilder(
+        lifecycle=skill_lifecycle,
+        artifacts=artifact_reader,
+        registry=skill_registry,
+        catalog=capability_catalog,
     )
     resources = skill_registry.resources or HandsResourceRegistry()
     resource_gateway = ManagedResourceGateway(
@@ -1391,6 +1405,7 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
                         policy=policy,
                     )
                 )
+        app.state.skill_rebuild_result = await skill_rebuilder.rebuild_all()
 
     app.state.capability_connectors = {}
     app.state.catalog_reconciler = None
@@ -1400,11 +1415,9 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         {
             CAPABILITY_SEARCH_TOOL_NAME: CapabilitySearchExecutor(
                 capability_catalog,
-                skills=skill_registry,
             ),
             CAPABILITY_LOAD_TOOL_NAME: CapabilityLoadExecutor(
                 capability_catalog,
-                skills=skill_registry,
             ),
             SKILL_RESOLVE_TOOL_NAME: SkillResolveExecutor(skill_resolver),
         },
@@ -1444,7 +1457,21 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
     app.state.capability_catalog = capability_catalog
     app.state.resource_gateway = resource_gateway
     app.state.skill_registry = skill_registry
+    app.state.skill_rebuilder = skill_rebuilder
     periodic_jobs: list[tuple[str, float, Callable[[], Awaitable[int | None]]]] = []
+
+    async def rebuild_skill_state() -> int:
+        result = await skill_rebuilder.rebuild_all()
+        app.state.skill_rebuild_result = result
+        return result.publication_count
+
+    periodic_jobs.append(
+        (
+            "skill-state",
+            settings.mcp_reconcile_interval_seconds,
+            rebuild_skill_state,
+        )
+    )
     if credential_proxy is not None and isinstance(policy, RemotePolicyClient):
         reconciler = CapabilityCatalogReconciler(
             catalog=capability_catalog,
@@ -1458,7 +1485,9 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         skill_reconciler = SkillPackageReconciler(
             store=capability_catalog_store,
             connectors=app.state.capability_connectors,
-            registry=skill_registry,
+            lifecycle=skill_lifecycle,
+            publication=skill_publication,
+            rebuilder=skill_rebuilder,
         )
         app.state.catalog_reconciler = reconciler
         app.state.skill_reconciler = skill_reconciler
@@ -1565,7 +1594,10 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         create_contract_app(
             "action-hands-skill-publications",
             skill_publication_routes(
-                SkillPublicationInternalService(skill_publication)
+                SkillPublicationInternalService(
+                    skill_publication,
+                    rebuilder=skill_rebuilder,
+                )
             ),
             workload_identities=_configured_identities(
                 settings, (ServiceIdentity.TASK_API,)

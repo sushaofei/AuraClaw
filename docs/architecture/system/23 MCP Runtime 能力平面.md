@@ -334,6 +334,22 @@ Installation 投影与 Resolver 回查就绪前，不能提前删除 Runtime 的
 Task API 在迁移期可把已确认的发布结果写入本副本只读兼容缓存，以保证同请求副本的旧查询入口立即可见；
 该缓存不是事实源，也不提供跨副本一致性，后续必须由持久查询/统一 Catalog 取代。
 
+Action Hands 启动及周期对账时由 `SkillStateRebuilder` 枚举 Lifecycle tenant，从受 Policy 保护的
+Artifact 下载接口读取不可变包，并再次校验大小、内容 hash、Archive、Manifest、package digest 和
+Publisher 签名。恢复结果同时装入本地执行 Registry，并以 tenant 专属虚拟 Server 投影到持久
+Capability Catalog。`capabilities.search/load` 只查询 Catalog，不再拼接进程内 Skill 目录；Resolver
+只从重建后的 Registry 选择候选，因此 Catalog 与 Resolver 共享同一组 Publication/Installation 事实。
+
+恢复时必须区分“可发现性”和“已绑定内容可读性”：只有 `active Publication + active Installation +
+版本约束/固定 digest 匹配` 才进入 Catalog 和 Resolver 候选；普通 disable/uninstall 只移除新发现和
+新绑定。仍处于 active Publication 且 Package retained 的内容继续按已固定 digest 可读，使既有 binding
+不会因普通停用而隐式失效。安全 revoke、Package purge 和已有 binding 的停止策略仍由后续显式治理
+动作完成。
+
+MCP `skill://` 发现也不能直接写进程 Registry。Reconciler 从 Server 配置读取 fail-closed 的
+`skill_publisher_allowlist`，建立持久 MCP Source，并调用同一 `SkillPublicationService`；缺少 allowlist
+时整个来源拒绝发布。发布完成后触发 tenant 重建，周期重建负责修复短暂 Artifact/Catalog 故障。
+
 ## 4. 发现、加载与调用
 
 ### 4.1 协议发现和目录同步

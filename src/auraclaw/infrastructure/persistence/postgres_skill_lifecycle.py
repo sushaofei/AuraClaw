@@ -167,6 +167,15 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
         )
         return tuple(_publication(dict(row)) for row in rows)
 
+    async def list_tenants(self) -> tuple[str, ...]:
+        pool = await self.pool()
+        rows = await pool.fetch(
+            """SELECT tenant_id FROM hands.skill_publication
+            UNION SELECT tenant_id FROM hands.skill_installation
+            ORDER BY tenant_id"""
+        )
+        return tuple(str(row["tenant_id"]) for row in rows)
+
     async def put_installation(
         self, record: SkillInstallationRecord, *, expected_revision: int
     ) -> SkillInstallationRecord:
@@ -229,6 +238,17 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
             name,
         )
         return None if row is None else _installation(dict(row))
+
+    async def list_installations(
+        self, tenant_id: str
+    ) -> tuple[SkillInstallationRecord, ...]:
+        pool = await self.pool()
+        rows = await pool.fetch(
+            """SELECT * FROM hands.skill_installation
+            WHERE tenant_id=$1 ORDER BY publisher,name""",
+            tenant_id,
+        )
+        return tuple(_installation(dict(row)) for row in rows)
 
     async def put_source(
         self, record: SkillSourceRecord, *, expected_revision: int

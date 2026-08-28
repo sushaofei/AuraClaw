@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from datetime import UTC, datetime
 
 import httpx
 import pytest
 from fastapi import FastAPI
 
+from auraclaw.action.capability_catalog import (
+    CapabilityCatalog,
+    InMemoryCapabilityCatalogStore,
+)
 from auraclaw.action.mcp_primitives import HandsResourceRegistry
 from auraclaw.action.skill_internal_service import SkillPublicationInternalService
 from auraclaw.action.skill_lifecycle import InMemorySkillLifecycleStore
@@ -16,6 +21,8 @@ from auraclaw.action.skill_packages import (
     SkillPackageRegistry,
 )
 from auraclaw.action.skill_publication import SkillPublicationService
+from auraclaw.action.skill_rebuild import SkillStateRebuilder
+from auraclaw.contracts.capabilities import CapabilityKind
 from auraclaw.contracts.errors import SchemaValidationError
 from auraclaw.contracts.internal import ServiceIdentity
 from auraclaw.contracts.skills import (
@@ -38,18 +45,31 @@ _KEY = b"internal-skill-publication-key"
 class _ArtifactWriter:
     def __init__(self) -> None:
         self.calls = 0
+        self.contents: dict[str, bytes] = {}
 
     async def put(self, **kwargs: object) -> ArtifactRef:
         self.calls += 1
         content = kwargs["content"]
         assert isinstance(content, bytes)
+        self.contents["art_persisted_skill"] = content
         return ArtifactRef(
             artifact_id="art_persisted_skill",
             version=1,
-            content_hash="a" * 64,
+            content_hash=hashlib.sha256(content).hexdigest(),
             media_type="application/vnd.auraclaw.skill-package+json",
             size=len(content),
         )
+
+    async def read(
+        self,
+        *,
+        tenant_id: str,
+        artifact_ref: ArtifactRef,
+        actor_id: str,
+        correlation_id: str,
+    ) -> bytes:
+        del tenant_id, actor_id, correlation_id
+        return self.contents[artifact_ref.artifact_id]
 
 
 def _package() -> SkillPackage:
@@ -98,10 +118,21 @@ def test_task_api_client_publishes_through_action_hands_service() -> None:
                 ),
             ),
         )
+        catalog_store = InMemoryCapabilityCatalogStore()
+        catalog = CapabilityCatalog(catalog_store)
+        rebuilder = SkillStateRebuilder(
+            lifecycle=lifecycle,
+            artifacts=artifacts,
+            registry=registry,
+            catalog=catalog,
+        )
         contract = create_contract_app(
             "skill-publication-test",
             skill_publication_routes(
-                SkillPublicationInternalService(publication)
+                SkillPublicationInternalService(
+                    publication,
+                    rebuilder=rebuilder,
+                )
             ),
             workload_identities={"task-token": ServiceIdentity.TASK_API},
         )
@@ -165,5 +196,10 @@ def test_task_api_client_publishes_through_action_hands_service() -> None:
         )
         assert stored is not None
         assert stored.created_by == "admin-a"
+        projected = await catalog.search(
+            tenant_id="tenant-a", kinds=(CapabilityKind.SKILL,)
+        )
+        assert len(projected) == 1
+        assert projected[0].content_digest == result.package_digest
 
     asyncio.run(scenario())

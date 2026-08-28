@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import hmac
 import json
@@ -111,6 +112,7 @@ class SkillPackageRegistry:
         self._max_files = max_files
         self._packages: dict[tuple[str, str, str, str], SkillPackage] = {}
         self._publications: dict[tuple[str, str, str, str], PublishedSkill] = {}
+        self._discoverable: set[tuple[str, str, str, str]] = set()
 
     @property
     def resources(self) -> McpResourceRegistry | None:
@@ -141,9 +143,13 @@ class SkillPackageRegistry:
         key = _package_key(tenant_id, normalized.manifest)
         current = self._publications.get(key)
         if current == publication:
+            if publication.status is SkillPublicationStatus.ACTIVE:
+                self._discoverable.add(key)
             return current
         self._packages[key] = normalized
         self._publications[key] = publication
+        if publication.status is SkillPublicationStatus.ACTIVE:
+            self._discoverable.add(key)
         if (
             self._resources is not None
             and publication.status is SkillPublicationStatus.ACTIVE
@@ -156,6 +162,60 @@ class SkillPackageRegistry:
                     self._resources.unregister_resource(uri)
                 self._resources.register_resource(resource)
         return publication
+
+    def replace_tenant(
+        self,
+        tenant_id: str,
+        entries: tuple[tuple[SkillPackage, PublishedSkill], ...],
+        *,
+        discoverable: frozenset[tuple[str, str, str]] | None = None,
+    ) -> None:
+        normalized_entries: list[tuple[SkillPackage, PublishedSkill]] = []
+        for package, publication in entries:
+            normalized = self.validate(package)
+            if publication.tenant_id != tenant_id:
+                raise PolicyDeniedError("Skill publication tenant does not match")
+            if publication.manifest != normalized.manifest:
+                raise VersionConflictError("Skill publication manifest mismatch")
+            if publication.package_digest != skill_package_digest(normalized):
+                raise VersionConflictError("Skill publication package digest mismatch")
+            normalized_entries.append((normalized, publication))
+        old_keys = [key for key in self._packages if key[0] == tenant_id]
+        if self._resources is not None:
+            for key in old_keys:
+                old_package = self._packages[key]
+                old_publication = self._publications[key]
+                for resource in _package_resources(
+                    tenant_id, old_package, old_publication.package_digest
+                ):
+                    uri = resource.descriptor.uri
+                    if uri is not None:
+                        self._resources.unregister_resource(uri)
+        for key in old_keys:
+            self._packages.pop(key, None)
+            self._publications.pop(key, None)
+            self._discoverable.discard(key)
+        for package, publication in normalized_entries:
+            key = _package_key(tenant_id, package.manifest)
+            self._packages[key] = package
+            self._publications[key] = publication
+            is_discoverable = (
+                publication.status is SkillPublicationStatus.ACTIVE
+                and (
+                    discoverable is None
+                    or key[1:] in discoverable
+                )
+            )
+            if is_discoverable:
+                self._discoverable.add(key)
+            if (
+                self._resources is not None
+                and is_discoverable
+            ):
+                for resource in _package_resources(
+                    tenant_id, package, publication.package_digest
+                ):
+                    self._resources.register_resource(resource)
 
     async def publish(
         self,
@@ -185,6 +245,7 @@ class SkillPackageRegistry:
                 )
                 self._publications[key] = reactivated
                 self._packages[key] = normalized
+                self._discoverable.add(key)
                 if self._resources is not None:
                     for resource in _package_resources(
                         tenant_id,
@@ -218,6 +279,8 @@ class SkillPackageRegistry:
         )
         self._packages[key] = normalized
         self._publications[key] = publication
+        if status is SkillPublicationStatus.ACTIVE:
+            self._discoverable.add(key)
         if (
             self._resources is not None
             and status is SkillPublicationStatus.ACTIVE
@@ -239,6 +302,7 @@ class SkillPackageRegistry:
             raise NotFoundError("Skill publication not found")
         revoked = publication.model_copy(update={"status": SkillPublicationStatus.REVOKED})
         self._publications[key] = revoked
+        self._discoverable.discard(key)
         if self._resources is not None:
             package = self._packages[key]
             for resource in _package_resources(
@@ -270,6 +334,13 @@ class SkillPackageRegistry:
             and candidate_name == name
             and (publisher is None or candidate_publisher == publisher)
             and publication.status == SkillPublicationStatus.ACTIVE
+            and (
+                candidate_tenant,
+                candidate_publisher,
+                candidate_name,
+                _version,
+            )
+            in self._discoverable
         ]
         return tuple(
             sorted(
@@ -283,7 +354,7 @@ class SkillPackageRegistry:
         self, tenant_id: str
     ) -> tuple[CapabilityDescriptor, ...]:
         return tuple(
-            _skill_descriptor(publication)
+            skill_capability_descriptor(publication)
             for publication in sorted(
                 self._publications.values(),
                 key=lambda item: (
@@ -293,6 +364,7 @@ class SkillPackageRegistry:
             )
             if publication.tenant_id == tenant_id
             and publication.status == SkillPublicationStatus.ACTIVE
+            and _package_key(tenant_id, publication.manifest) in self._discoverable
         )
 
     def get_capability(
@@ -372,6 +444,7 @@ class SkillPackageRegistry:
         for key in keys:
             publication = self._publications[key]
             if publication.status == SkillPublicationStatus.ACTIVE:
+                self._discoverable.add(key)
                 enabled.append(publication)
                 continue
             reactivated = publication.model_copy(
@@ -632,6 +705,37 @@ def skill_package_digest(package: SkillPackage) -> str:
     return f"sha256:{hashlib.sha256(_package_archive(package)).hexdigest()}"
 
 
+def skill_package_from_archive(
+    content: bytes,
+    *,
+    max_encoded_bytes: int = 24 * 1024 * 1024,
+    max_files: int = 512,
+) -> SkillPackage:
+    try:
+        payload = json.loads(content)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise SchemaValidationError("Skill package archive is invalid") from exc
+    raw_files = payload.get("files") if isinstance(payload, dict) else None
+    if not isinstance(raw_files, dict) or not raw_files:
+        raise SchemaValidationError("Skill package archive has no files")
+    if len(raw_files) > max_files:
+        raise SchemaValidationError("Skill package contains too many files")
+    if any(not isinstance(path, str) for path in raw_files):
+        raise SchemaValidationError("Skill package archive path is invalid")
+    if any(not isinstance(value, str) for value in raw_files.values()):
+        raise SchemaValidationError("Skill package archive content is invalid")
+    if sum(len(value) for value in raw_files.values()) > max_encoded_bytes:
+        raise SchemaValidationError("Skill package archive is too large")
+    try:
+        files = {
+            path: base64.b64decode(value, validate=True)
+            for path, value in raw_files.items()
+        }
+    except (ValueError, binascii.Error) as exc:
+        raise SchemaValidationError("Skill package archive base64 is invalid") from exc
+    return SkillPackage.from_files(files)
+
+
 def version_satisfies(version: str, constraint: str) -> bool:
     if constraint.strip() in {"", "*"}:
         return True
@@ -728,7 +832,11 @@ def _package_key(tenant_id: str, manifest: SkillManifest) -> tuple[str, str, str
     return tenant_id, manifest.publisher, manifest.name, manifest.version
 
 
-def _skill_descriptor(publication: PublishedSkill) -> CapabilityDescriptor:
+def skill_capability_descriptor(
+    publication: PublishedSkill,
+    *,
+    server_id: str = "auraclaw-skill-registry",
+) -> CapabilityDescriptor:
     manifest = publication.manifest
     return CapabilityDescriptor(
         capability_id=_skill_capability_id(
@@ -738,7 +846,7 @@ def _skill_descriptor(publication: PublishedSkill) -> CapabilityDescriptor:
             manifest.version,
         ),
         kind=CapabilityKind.SKILL,
-        server_id="auraclaw-skill-registry",
+        server_id=server_id,
         canonical_name=manifest.name,
         version=manifest.version,
         content_digest=publication.package_digest,

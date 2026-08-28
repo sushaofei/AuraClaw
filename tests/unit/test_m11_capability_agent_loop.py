@@ -743,6 +743,21 @@ def test_real_mcp_skill_search_load_resolve_and_instruction_activation() -> None
                 },
             ),
         )
+        await catalog.register_server(
+            McpServerDefinition(
+                server_id="auraclaw-skill-registry",
+                tenant_id="tenant-a",
+                title="AuraClaw Skill Registry",
+                endpoint="https://skill-registry.auraclaw.invalid/mcp",
+                trust_level=CapabilityTrustLevel.TENANT_VERIFIED,
+                status=CapabilityStatus.ACTIVE,
+                enabled=True,
+            )
+        )
+        await catalog.replace_server_capabilities(
+            "auraclaw-skill-registry",
+            skills.capability_descriptors("tenant-a"),
+        )
         resolver = SkillResolver(skills, store)
         registry = ToolRegistry(
             (
@@ -755,10 +770,10 @@ def test_real_mcp_skill_search_load_resolve_and_instruction_activation() -> None
             _BusinessHands(),
             {
                 "auraclaw.capabilities.search": CapabilitySearchExecutor(
-                    catalog, skills=skills
+                    catalog
                 ),
                 "auraclaw.capabilities.load": CapabilityLoadExecutor(
-                    catalog, skills=skills
+                    catalog
                 ),
                 "auraclaw.skills.resolve": SkillResolveExecutor(resolver),
             },
