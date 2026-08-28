@@ -6,13 +6,25 @@ from typing import Protocol
 
 import httpx
 
-from auraclaw.action.ports import PolicyEvaluation
+from auraclaw.action.ports import (
+    PolicyEvaluation,
+    SkillArtifactLifecycle,
+    SkillArtifactOrphan,
+)
 from auraclaw.contracts.errors import ArtifactAccessError
 from auraclaw.contracts.internal import (
     ArtifactDeleteRequest,
     ArtifactDeleteResponse,
     ArtifactDownloadRequest,
     ArtifactDownloadResponse,
+    ArtifactSkillOrphanClaimRequest,
+    ArtifactSkillOrphanClaimResponse,
+    ArtifactSkillOrphanResolveRequest,
+    ArtifactSkillOrphanResolveResponse,
+    ArtifactSkillPublicationBindRequest,
+    ArtifactSkillPublicationBindResponse,
+    ArtifactSkillPublicationClaimRequest,
+    ArtifactSkillPublicationClaimResponse,
     InternalRequestContext,
     ServiceIdentity,
 )
@@ -171,3 +183,147 @@ class RemoteArtifactReader:
             ),
             ArtifactDeleteResponse,
         )
+
+
+class RemoteSkillArtifactLifecycle(SkillArtifactLifecycle):
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        bearer_token: str,
+        policy: ArtifactDownloadPolicy,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        self._client = httpx.AsyncClient(base_url=base_url, transport=transport)
+        self._contract = HttpContractClient(self._client, bearer_token=bearer_token)
+        self._policy = policy
+
+    async def aclose(self) -> None:
+        await self._client.aclose()
+
+    async def claim_publication(
+        self,
+        *,
+        tenant_id: str,
+        artifact_ref: ArtifactRef,
+        command_id: str,
+        correlation_id: str,
+    ) -> None:
+        await self._contract.call(
+            "/internal/v1/artifacts/skills/claim-publication",
+            ArtifactSkillPublicationClaimRequest(
+                context=_artifact_context(tenant_id, correlation_id),
+                artifact_id=artifact_ref.artifact_id,
+                version=artifact_ref.version,
+                command_id=command_id,
+            ),
+            ArtifactSkillPublicationClaimResponse,
+        )
+
+    async def bind_publication(
+        self,
+        *,
+        tenant_id: str,
+        artifact_ref: ArtifactRef,
+        command_id: str,
+        package_digest: str,
+        correlation_id: str,
+    ) -> None:
+        await self._contract.call(
+            "/internal/v1/artifacts/skills/bind-publication",
+            ArtifactSkillPublicationBindRequest(
+                context=_artifact_context(tenant_id, correlation_id),
+                artifact_id=artifact_ref.artifact_id,
+                version=artifact_ref.version,
+                claim_token=command_id,
+                package_digest=package_digest,
+            ),
+            ArtifactSkillPublicationBindResponse,
+        )
+
+    async def claim_orphans(
+        self, *, owner: str, limit: int = 100
+    ) -> tuple[SkillArtifactOrphan, ...]:
+        response = await self._contract.call(
+            "/internal/v1/artifacts/skills/orphans/claim",
+            ArtifactSkillOrphanClaimRequest(
+                context=_artifact_context("system", f"skill-orphan:{owner}"),
+                owner=owner,
+                limit=limit,
+            ),
+            ArtifactSkillOrphanClaimResponse,
+        )
+        return tuple(
+            SkillArtifactOrphan(
+                tenant_id=str(item["tenant_id"]),
+                artifact_ref=ArtifactRef(
+                    artifact_id=str(item["artifact_id"]),
+                    version=int(item["version"]),
+                    content_hash=str(item["content_hash"]),
+                    media_type=str(item["media_type"]),
+                    size=int(item["size"]),
+                ),
+                claim_token=str(item["claim_token"]),
+            )
+            for item in response.artifacts
+        )
+
+    async def resolve_orphan(
+        self,
+        *,
+        tenant_id: str,
+        orphan: SkillArtifactOrphan,
+        referenced: bool,
+        package_digest: str | None,
+        correlation_id: str,
+    ) -> str:
+        policy_decision_id = None
+        if not referenced:
+            evaluation = await self._policy.evaluate_action(
+                tenant_id=tenant_id,
+                subject="action-hands-skill-reliability",
+                action="artifact.delete",
+                resource=orphan.artifact_ref.artifact_id,
+                input_digest=orphan.artifact_ref.content_hash,
+                correlation_id=correlation_id,
+                attributes={
+                    "artifact_version": orphan.artifact_ref.version,
+                    "media_type": orphan.artifact_ref.media_type,
+                    "purpose": "skill-staged-orphan-gc",
+                    "reason_code": "unpublished_staged_skill_expired",
+                    "permission": "write-autonomous",
+                    "risk_level": "high",
+                    "runtime_location": "hands",
+                },
+            )
+            if evaluation.decision not in {
+                PolicyDecision.ALLOW,
+                PolicyDecision.ALLOW_WITH_CONSTRAINTS,
+            }:
+                raise ArtifactAccessError("Skill orphan deletion policy denied")
+            policy_decision_id = evaluation.decision_id
+        response = await self._contract.call(
+            "/internal/v1/artifacts/skills/orphans/resolve",
+            ArtifactSkillOrphanResolveRequest(
+                context=_artifact_context(tenant_id, correlation_id),
+                artifact_id=orphan.artifact_ref.artifact_id,
+                version=orphan.artifact_ref.version,
+                claim_token=orphan.claim_token,
+                referenced=referenced,
+                package_digest=package_digest,
+                policy_decision_id=policy_decision_id,
+            ),
+            ArtifactSkillOrphanResolveResponse,
+        )
+        return response.status
+
+
+def _artifact_context(tenant_id: str, correlation_id: str) -> InternalRequestContext:
+    request_id = str(uuid.uuid4())
+    return InternalRequestContext(
+        tenant_id=tenant_id,
+        service_identity=ServiceIdentity.ACTION_HANDS,
+        request_id=request_id,
+        correlation_id=correlation_id,
+        causation_id=request_id,
+    )

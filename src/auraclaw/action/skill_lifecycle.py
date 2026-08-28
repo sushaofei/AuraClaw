@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Protocol
 
 from auraclaw.contracts.errors import NotFoundError, VersionConflictError
@@ -16,9 +18,61 @@ PackageKey = tuple[str, str, str, str]
 PublicationKey = tuple[str, str, str, str]
 InstallationKey = tuple[str, str, str]
 SourceKey = tuple[str, str]
+CommandKey = tuple[str, str]
+
+
+@dataclass(frozen=True)
+class SkillPublishCommit:
+    command_id: str
+    request_digest: str
+    actor_id: str
+    source_id: str
+    correlation_id: str
+    causation_id: str
+    expected_publication_revision: int
+    package: SkillPackageRecord
+    publication: SkillPublicationRecord
+    installation: SkillInstallationRecord | None
+    occurred_at: datetime
+
+
+@dataclass(frozen=True)
+class SkillPublishCommitResult:
+    package: SkillPackageRecord
+    publication: SkillPublicationRecord
+    installation: SkillInstallationRecord | None
+    replayed: bool = False
+
+
+@dataclass(frozen=True)
+class SkillOutboxRecord:
+    outbox_id: str
+    tenant_id: str
+    command_id: str
+    event_type: str
+    payload: dict[str, object]
+    attempt: int = 0
 
 
 class SkillLifecycleStore(Protocol):
+    async def commit_publish(
+        self, commit: SkillPublishCommit
+    ) -> SkillPublishCommitResult: ...
+
+    async def claim_outbox(
+        self, *, owner: str, limit: int = 100
+    ) -> tuple[SkillOutboxRecord, ...]: ...
+
+    async def complete_outbox(self, *, outbox_id: str, owner: str) -> None: ...
+
+    async def fail_outbox(
+        self, *, outbox_id: str, owner: str, safe_error_code: str
+    ) -> None: ...
+
+    async def has_artifact_reference(
+        self, tenant_id: str, artifact_id: str, version: int
+    ) -> bool: ...
+
     async def put_package(self, record: SkillPackageRecord) -> SkillPackageRecord: ...
 
     async def get_package(
@@ -81,6 +135,133 @@ class InMemorySkillLifecycleStore:
     )
     _sources: dict[SourceKey, SkillSourceRecord] = field(default_factory=dict)
     _sync_states: dict[SourceKey, SkillSourceSyncState] = field(default_factory=dict)
+    _commands: dict[CommandKey, tuple[str, SkillPublishCommitResult]] = field(
+        default_factory=dict
+    )
+    _outbox: dict[str, SkillOutboxRecord] = field(default_factory=dict)
+    _claimed_outbox: dict[str, str] = field(default_factory=dict)
+    _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+    async def commit_publish(
+        self, commit: SkillPublishCommit
+    ) -> SkillPublishCommitResult:
+        key = (commit.package.tenant_id, commit.command_id)
+        async with self._lock:
+            existing_command = self._commands.get(key)
+            if existing_command is not None:
+                request_digest, result = existing_command
+                if request_digest != commit.request_digest:
+                    raise VersionConflictError("Skill command id was reused")
+                return SkillPublishCommitResult(
+                    package=result.package,
+                    publication=result.publication,
+                    installation=result.installation,
+                    replayed=True,
+                )
+            packages = dict(self._packages)
+            publications = dict(self._publications)
+            installations = dict(self._installations)
+            try:
+                package = await self.put_package(commit.package)
+                publication_key = _publication_key(commit.publication)
+                current_publication = self._publications.get(publication_key)
+                if (
+                    current_publication is not None
+                    and commit.publication.revision
+                    == commit.expected_publication_revision
+                    and current_publication.package_digest
+                    == commit.publication.package_digest
+                    and current_publication.status is commit.publication.status
+                ):
+                    publication = current_publication
+                else:
+                    publication = await self.put_publication(
+                        commit.publication,
+                        expected_revision=commit.expected_publication_revision,
+                    )
+                installation = None
+                if commit.installation is not None:
+                    current = self._installations.get(_installation_key(commit.installation))
+                    if current is None:
+                        installation = await self.put_installation(
+                            commit.installation, expected_revision=0
+                        )
+                    elif (
+                        current.status is not commit.installation.status
+                        or current.pinned_package_digest
+                        != commit.installation.pinned_package_digest
+                    ):
+                        raise VersionConflictError(
+                            "Skill installation revision conflict"
+                        )
+                    else:
+                        installation = current
+            except Exception:
+                self._packages = packages
+                self._publications = publications
+                self._installations = installations
+                raise
+            result = SkillPublishCommitResult(package, publication, installation)
+            self._commands[key] = (commit.request_digest, result)
+            outbox_id = f"{commit.package.tenant_id}:{commit.command_id}:published"
+            self._outbox[outbox_id] = SkillOutboxRecord(
+                outbox_id=outbox_id,
+                tenant_id=commit.package.tenant_id,
+                command_id=commit.command_id,
+                event_type="skill.publication.committed",
+                payload=_publish_outbox_payload(result),
+            )
+            return result
+
+    async def claim_outbox(
+        self, *, owner: str, limit: int = 100
+    ) -> tuple[SkillOutboxRecord, ...]:
+        claimed: list[SkillOutboxRecord] = []
+        async with self._lock:
+            for outbox_id, record in self._outbox.items():
+                if outbox_id in self._claimed_outbox:
+                    continue
+                self._claimed_outbox[outbox_id] = owner
+                claimed.append(record)
+                if len(claimed) >= limit:
+                    break
+        return tuple(claimed)
+
+    async def complete_outbox(self, *, outbox_id: str, owner: str) -> None:
+        async with self._lock:
+            if self._claimed_outbox.get(outbox_id) == owner:
+                self._outbox.pop(outbox_id, None)
+                self._claimed_outbox.pop(outbox_id, None)
+
+    async def fail_outbox(
+        self, *, outbox_id: str, owner: str, safe_error_code: str
+    ) -> None:
+        del safe_error_code
+        async with self._lock:
+            if self._claimed_outbox.get(outbox_id) != owner:
+                return
+            record = self._outbox.get(outbox_id)
+            if record is not None:
+                self._outbox[outbox_id] = SkillOutboxRecord(
+                    outbox_id=record.outbox_id,
+                    tenant_id=record.tenant_id,
+                    command_id=record.command_id,
+                    event_type=record.event_type,
+                    payload=record.payload,
+                    attempt=record.attempt + 1,
+                )
+            self._claimed_outbox.pop(outbox_id, None)
+
+    async def has_artifact_reference(
+        self, tenant_id: str, artifact_id: str, version: int
+    ) -> bool:
+        return any(
+            package.tenant_id == tenant_id
+            and package.artifact_ref.artifact_id == artifact_id
+            and package.artifact_ref.version == version
+            and package.retention_status.value == "retained"
+            for package in self._packages.values()
+        )
 
     async def put_package(self, record: SkillPackageRecord) -> SkillPackageRecord:
         key = _package_key(record)
@@ -274,3 +455,18 @@ def _validate_revision(
         raise VersionConflictError(f"Skill {label} revision conflict")
     if revision != expected_revision + 1:
         raise VersionConflictError(f"Skill {label} next revision is invalid")
+
+
+def _publish_outbox_payload(
+    result: SkillPublishCommitResult,
+) -> dict[str, object]:
+    package = result.package
+    publication = result.publication
+    return {
+        "publisher": publication.publisher,
+        "name": publication.name,
+        "version": publication.version,
+        "package_digest": publication.package_digest,
+        "publication_status": publication.status.value,
+        "artifact_ref": package.artifact_ref.as_dict(),
+    }

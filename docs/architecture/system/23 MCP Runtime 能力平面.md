@@ -348,10 +348,22 @@ Shell 或二进制；`publish` 仅从指定环境变量读取 bearer token，并
 当前 CLI 只支持平台 HMAC 兼容发布，外部 publisher 必须等 Publisher Registry、Ed25519/key rotation
 落地后接入，不能把开发密钥当生产信任根。
 
-两阶段传输已完成，但 finalized 后、Publication 提交前失败会留下 ready Artifact。当前使用保守的
-90 天 retention，不能由 pending-upload GC 误删；持久命令审计/Outbox、可证明未被 Package 引用的
-ready-orphan GC 及并发幂等记录属于后续独立阶段。Source 多副本租约/对账与 Publisher Registry 也仍未
-完成，不能将本阶段描述为完整供应链治理。
+发布服务先以 command id 在 Artifact metadata 获取有期限的 publication claim，再在一个数据库事务内
+提交不可变 Package、Publication、首个 Installation、成功命令账本和 `skill.publication.committed`
+Outbox。相同 command id 与 request digest 可跨副本重放；相同 command id 的不同可信请求冲突并
+fail closed。事务提交后的即时 Artifact bind 或 Catalog 重建即使失败，也由 Action Hands 启动及周期
+Reliability Worker 重新消费持久 Outbox 修复。Source bootstrap 仍是发布事务之前的独立幂等步骤；命令
+账本记录成功写命令，不替代后续完整的拒绝/安全审计流水。
+
+finalized 后未提交 Publication 的 ready Artifact 由 Artifact Service 和 Action Hands 协同回收。Artifact
+Service 只 claim retention 已到期、无 legal hold、未绑定且 publication claim 已过期的 `skill-upload:*`
+或 `skill-registry` 对象，并先原子切换到 `deleting`，从而阻止迟到 publisher 再取得 claim。Action Hands
+随后以持久 Package 记录作为引用事实源：有引用则校验 digest 并恢复 bind/ready；无引用才请求 Policy
+决策并删除对象及 metadata。删除租约可过期接管，失败仅记录安全错误类型并退避重试，不记录包正文。
+这套 fencing 避免“先查无引用、后并发发布”的误删窗口，也不让 Artifact Service 反向读取 Hands 数据库。
+
+Source 多副本租约/对账与 Publisher Registry、Ed25519/key rotation 仍未完成，不能将当前状态描述为
+完整供应链治理。
 
 Action Hands 启动及周期对账时由 `SkillStateRebuilder` 枚举 Lifecycle tenant，从受 Policy 保护的
 Artifact 下载接口读取不可变包，并再次校验大小、内容 hash、Archive、Manifest、package digest 和

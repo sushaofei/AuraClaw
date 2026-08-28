@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import UTC, datetime, timedelta
 
-from auraclaw.action.ports import ArtifactContentReader
-from auraclaw.action.skill_lifecycle import SkillLifecycleStore
+from auraclaw.action.ports import ArtifactContentReader, SkillArtifactLifecycle
+from auraclaw.action.skill_lifecycle import SkillLifecycleStore, SkillPublishCommit
 from auraclaw.action.skill_packages import (
     SkillPackage,
     SkillPackageRegistry,
@@ -39,11 +40,13 @@ class SkillPublicationService:
         registry: SkillPackageRegistry,
         lifecycle: SkillLifecycleStore,
         artifacts: ArtifactContentReader | None = None,
+        artifact_lifecycle: SkillArtifactLifecycle | None = None,
         bootstrap_sources: tuple[SkillSourceRecord, ...] = (),
     ) -> None:
         self._registry = registry
         self._lifecycle = lifecycle
         self._artifacts = artifacts
+        self._artifact_lifecycle = artifact_lifecycle
         self._bootstrap_sources = {
             (source.tenant_id, source.source_id): source for source in bootstrap_sources
         }
@@ -64,6 +67,13 @@ class SkillPublicationService:
             raise PolicyDeniedError("Staged Artifact is not a Skill package")
         if expected_digest != f"sha256:{artifact_ref.content_hash}":
             raise VersionConflictError("Staged Artifact digest does not match")
+        if self._artifact_lifecycle is not None:
+            await self._artifact_lifecycle.claim_publication(
+                tenant_id=command.tenant_id,
+                artifact_ref=artifact_ref,
+                command_id=command.command_id,
+                correlation_id=command.correlation_id,
+            )
         content = await self._artifacts.read(
             tenant_id=command.tenant_id,
             artifact_ref=artifact_ref,
@@ -73,7 +83,9 @@ class SkillPublicationService:
         package = self._registry.validate(skill_package_from_archive(content))
         if skill_package_digest(package) != expected_digest:
             raise VersionConflictError("Skill package digest does not match")
-        return await self._publish(command, package, artifact_ref=artifact_ref)
+        return await self._publish(
+            command, package, artifact_ref=artifact_ref, artifact_claimed=True
+        )
 
     async def _publish(
         self,
@@ -81,6 +93,7 @@ class SkillPublicationService:
         package: SkillPackage,
         *,
         artifact_ref: ArtifactRef | None = None,
+        artifact_claimed: bool = False,
     ) -> PublishedSkill:
         source = await self._authorized_source(command, package)
         digest = skill_package_digest(package)
@@ -134,18 +147,37 @@ class SkillPublicationService:
                         status=desired_status,
                     ),
                 )
-            await self._lifecycle.put_package(
-                SkillPackageRecord(
-                    tenant_id=command.tenant_id,
-                    manifest=publication.manifest,
-                    package_digest=publication.package_digest,
-                    artifact_ref=publication.artifact_ref,
-                    retention_until=now + timedelta(days=90),
-                    retention_updated_by=command.actor_id,
-                    retention_updated_at=now,
-                    created_at=now,
-                )
+            package_record = SkillPackageRecord(
+                tenant_id=command.tenant_id,
+                manifest=publication.manifest,
+                package_digest=publication.package_digest,
+                artifact_ref=publication.artifact_ref,
+                retention_until=now + timedelta(days=90),
+                retention_updated_by=command.actor_id,
+                retention_updated_at=now,
+                created_at=now,
             )
+        else:
+            persisted_package = await self._lifecycle.get_package(
+                command.tenant_id,
+                manifest.publisher,
+                manifest.name,
+                manifest.version,
+            )
+            if persisted_package is None:
+                raise VersionConflictError(
+                    "Skill publication references a missing package"
+                )
+            package_record = persisted_package
+
+        if self._artifact_lifecycle is not None and not artifact_claimed:
+            await self._artifact_lifecycle.claim_publication(
+                tenant_id=command.tenant_id,
+                artifact_ref=package_record.artifact_ref,
+                command_id=command.command_id,
+                correlation_id=command.correlation_id,
+            )
+
         if existing is None:
             record = SkillPublicationRecord(
                 publication_id=_stable_id(
@@ -168,72 +200,66 @@ class SkillPublicationService:
                 created_at=now,
                 updated_at=now,
             )
-            committed = await self._put_publication_idempotently(record, expected_revision=0)
+            expected_publication_revision = 0
         elif existing.status is not desired_status:
-            committed = await self._put_publication_idempotently(
-                existing.model_copy(
-                    update={
-                        "status": desired_status,
-                        "source_id": source.source_id,
-                        "revision": existing.revision + 1,
-                        "updated_by": command.actor_id,
-                        "updated_at": now,
-                        "reason_code": None,
-                    }
-                ),
-                expected_revision=command.expected_revision,
+            record = existing.model_copy(
+                update={
+                    "status": desired_status,
+                    "source_id": source.source_id,
+                    "revision": existing.revision + 1,
+                    "updated_by": command.actor_id,
+                    "updated_at": now,
+                    "reason_code": None,
+                }
             )
+            expected_publication_revision = command.expected_revision
         else:
-            committed = existing
+            record = existing
+            expected_publication_revision = existing.revision
 
-        persisted_package = await self._lifecycle.get_package(
-            command.tenant_id,
-            manifest.publisher,
-            manifest.name,
-            manifest.version,
+        installation = await self._new_installation(
+            command,
+            source,
+            package_record,
+            now,
         )
-        if persisted_package is None:
-            raise VersionConflictError("Skill publication references a missing package")
+        committed = await self._lifecycle.commit_publish(
+            SkillPublishCommit(
+                command_id=command.command_id,
+                request_digest=_publish_request_digest(
+                    command, digest, artifact_ref
+                ),
+                actor_id=command.actor_id,
+                source_id=source.source_id,
+                correlation_id=command.correlation_id,
+                causation_id=command.causation_id,
+                expected_publication_revision=expected_publication_revision,
+                package=package_record,
+                publication=record,
+                installation=installation,
+                occurred_at=now,
+            )
+        )
+        if self._artifact_lifecycle is not None:
+            await self._artifact_lifecycle.bind_publication(
+                tenant_id=command.tenant_id,
+                artifact_ref=committed.package.artifact_ref,
+                command_id=command.command_id,
+                package_digest=committed.package.package_digest,
+                correlation_id=command.correlation_id,
+            )
         publication = self._registry.restore(
             command.tenant_id,
             package,
             PublishedSkill(
                 tenant_id=command.tenant_id,
-                manifest=persisted_package.manifest,
-                package_digest=persisted_package.package_digest,
-                artifact_ref=persisted_package.artifact_ref,
-                status=committed.status,
+                manifest=committed.package.manifest,
+                package_digest=committed.package.package_digest,
+                artifact_ref=committed.package.artifact_ref,
+                status=committed.publication.status,
             ),
         )
-
-        if command.activate:
-            await self._ensure_installation(command, source, publication, now)
         return publication
-
-    async def _put_publication_idempotently(
-        self,
-        record: SkillPublicationRecord,
-        *,
-        expected_revision: int,
-    ) -> SkillPublicationRecord:
-        try:
-            return await self._lifecycle.put_publication(
-                record, expected_revision=expected_revision
-            )
-        except VersionConflictError:
-            concurrent = await self._lifecycle.get_publication(
-                record.tenant_id,
-                record.publisher,
-                record.name,
-                record.version,
-            )
-            if (
-                concurrent is not None
-                and concurrent.package_digest == record.package_digest
-                and concurrent.status is record.status
-            ):
-                return concurrent
-            raise
 
     async def _authorized_source(
         self, command: PublishSkillCommand, package: SkillPackage
@@ -261,22 +287,24 @@ class SkillPublicationService:
             raise PolicyDeniedError("Skill publisher is not allowed by the Source")
         return source
 
-    async def _ensure_installation(
+    async def _new_installation(
         self,
         command: PublishSkillCommand,
         source: SkillSourceRecord,
-        publication: PublishedSkill,
+        package: SkillPackageRecord,
         now: datetime,
-    ) -> None:
-        manifest = publication.manifest
+    ) -> SkillInstallationRecord | None:
+        if not command.activate:
+            return None
+        manifest = package.manifest
         existing = await self._lifecycle.get_installation(
             command.tenant_id,
             manifest.publisher,
             manifest.name,
         )
         if existing is not None:
-            return
-        record = SkillInstallationRecord(
+            return None
+        return SkillInstallationRecord(
             installation_id=_stable_id(
                 "ski",
                 command.tenant_id,
@@ -287,7 +315,7 @@ class SkillPublicationService:
             publisher=manifest.publisher,
             name=manifest.name,
             version_constraint=f"={manifest.version}",
-            pinned_package_digest=publication.package_digest,
+            pinned_package_digest=package.package_digest,
             status=SkillInstallationStatus.ACTIVE,
             source_id=source.source_id,
             auto_upgrade=False,
@@ -297,20 +325,26 @@ class SkillPublicationService:
             created_at=now,
             updated_at=now,
         )
-        try:
-            await self._lifecycle.put_installation(record, expected_revision=0)
-        except VersionConflictError:
-            concurrent = await self._lifecycle.get_installation(
-                command.tenant_id, manifest.publisher, manifest.name
-            )
-            if (
-                concurrent is None
-                or concurrent.status is not SkillInstallationStatus.ACTIVE
-                or concurrent.pinned_package_digest != publication.package_digest
-            ):
-                raise
 
 
 def _stable_id(prefix: str, *parts: str) -> str:
     digest = hashlib.sha256("\0".join(parts).encode()).hexdigest()[:32]
     return f"{prefix}_{digest}"
+
+
+def _publish_request_digest(
+    command: PublishSkillCommand,
+    package_digest: str,
+    artifact_ref: ArtifactRef | None,
+) -> str:
+    payload = {
+        "tenant_id": command.tenant_id,
+        "actor_id": command.actor_id,
+        "source_id": command.source_id,
+        "activate": command.activate,
+        "expected_revision": command.expected_revision,
+        "package_digest": package_digest,
+        "artifact_ref": None if artifact_ref is None else artifact_ref.as_dict(),
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return f"sha256:{hashlib.sha256(encoded).hexdigest()}"

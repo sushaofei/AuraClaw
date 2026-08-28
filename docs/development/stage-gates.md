@@ -1754,6 +1754,35 @@ uninstall、revoke 和 purge 三种不同语义。
 - [x] README、架构说明和阶段门禁同步，已记录仍未完成的供应链治理范围。
 - [x] 本阶段作为一个 intentional commit 提交并 push，不包含 `.env`、Secret、缓存或无关改动。
 
+## 阶段 M14h：Skill 发布可靠性与安全孤儿回收（Issue #56）
+
+状态：已完成。本阶段修复发布跨存储失败后的可恢复性，并为未引用的
+ready Skill Artifact 建立带 fencing 的物理回收流程；不把成功命令账本描述成完整安全审计。
+
+### 原子发布与恢复
+
+- [x] Package、Publication、首个 Installation、成功命令账本和发布 Outbox 在一个 PostgreSQL 事务内提交。
+- [x] command id + request digest 支持跨副本幂等重放；同 command id 不同请求显式冲突。
+- [x] 发布前取得 Artifact publication claim，事务提交后绑定 package digest；即时绑定失败由持久 Outbox 重试。
+- [x] Action Hands 启动及周期 Reliability Worker 消费 Outbox，修复 Artifact binding 并重建 tenant Registry/Catalog。
+- [x] Outbox 使用可过期 claim、`SKIP LOCKED`、退避重试和安全错误类型，多副本不会同时持有同一记录。
+
+### 安全孤儿回收
+
+- [x] Artifact Service 只 claim retention 到期、无 legal hold、未绑定且无有效 publication claim 的 ready Skill Artifact。
+- [x] GC 先原子切换 Artifact 为 deleting，迟到 publisher 不能越过 claim；过期 GC lease 可被接管。
+- [x] Action Hands 在 claim 后以持久 Package 为权威引用源；有引用修复 bind，无引用经 Policy 后删除。
+- [x] staged `skill-upload:*` 与直接 `skill-registry` 路径均受同一回收规则覆盖，包正文不进入错误日志。
+- [x] Artifact Service 不反向读取 Hands 数据库，Action Hands 不读取对象存储凭证或直接改 Artifact metadata。
+
+### 质量与交付
+
+- [x] 0026 正反迁移覆盖命令账本、Outbox 和 Artifact fencing 字段，PostgreSQL 事务回滚/重放测试通过。
+- [x] 发布恢复、Outbox 多 owner claim、引用修复、未引用删除和 publish/GC 竞态测试通过。
+- [x] 全量 Ruff、Mypy、unit、相关 integration 与 import-linter 通过。
+- [x] 架构、README、数据库参考与阶段门禁同步，剩余供应链治理范围未误标为完成。
+- [x] 本阶段作为一个 intentional commit 提交并 push，不包含 `.env`、Secret、缓存或无关改动。
+
 ## 阶段 Product Activity：产品级对话执行轨迹（AuraX Issue #2）
 
 状态：代码与定向验证完成；完整基础设施集成门禁受现有 Kafka/MySQL/PostgreSQL/Artifact 环境失败阻塞。

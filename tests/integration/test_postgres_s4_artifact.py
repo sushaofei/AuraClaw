@@ -11,10 +11,15 @@ import pytest
 from auraclaw.artifact.internal_service import ArtifactInternalService
 from auraclaw.composition.object_storage import build_object_storage
 from auraclaw.config import get_settings
+from auraclaw.contracts.errors import ArtifactAccessError
 from auraclaw.contracts.internal import (
     ArtifactCreateUploadRequest,
     ArtifactDeleteRequest,
     ArtifactFinalizeRequest,
+    ArtifactSkillOrphanClaimRequest,
+    ArtifactSkillOrphanResolveRequest,
+    ArtifactSkillPublicationBindRequest,
+    ArtifactSkillPublicationClaimRequest,
     InternalRequestContext,
     ServiceIdentity,
 )
@@ -27,6 +32,9 @@ SETTINGS = get_settings()
 DATABASE_URL = asyncpg_url(SETTINGS.resolved_database_url) if SETTINGS.postgres_enabled else None
 ROOT = Path(__file__).resolve().parents[2]
 MIGRATION = (ROOT / "migrations/0013_s4_artifact_lifecycle.sql").read_text()
+RELIABILITY_MIGRATION = (
+    ROOT / "migrations/0026_skill_publication_reliability.sql"
+).read_text()
 pytestmark = pytest.mark.skipif(
     DATABASE_URL is None or not SETTINGS.object_storage_enabled,
     reason="PostgreSQL and object storage are required",
@@ -42,6 +50,7 @@ def test_artifact_multipart_scan_restart_and_gc() -> None:
         assert storage.multipart is not None
         connection = await asyncpg.connect(DATABASE_URL)
         await connection.execute(MIGRATION)
+        await connection.execute(RELIABILITY_MIGRATION)
         suffix = uuid4().hex
         tenant_id = f"tenant-artifact-s4-{suffix}"
         context = InternalRequestContext(
@@ -166,6 +175,9 @@ def test_artifact_multipart_scan_restart_and_gc() -> None:
                     "request_id": f"skill-upload-{suffix}",
                 }
             )
+            hands_skill_context = skill_context.model_copy(
+                update={"service_identity": ServiceIdentity.ACTION_HANDS}
+            )
             skill_upload = await service.create_upload(
                 ArtifactCreateUploadRequest(
                     context=skill_context,
@@ -193,6 +205,30 @@ def test_artifact_multipart_scan_restart_and_gc() -> None:
                 )
             )
             assert skill_finalized.status == "ready"
+            await connection.execute(
+                """UPDATE artifact.metadata SET legal_hold=true
+                   WHERE tenant_id=$1 AND artifact_id=$2 AND version=1""",
+                tenant_id,
+                skill_upload.artifact_id,
+            )
+            skill_claim = await service.claim_skill_publication(
+                ArtifactSkillPublicationClaimRequest(
+                    context=hands_skill_context,
+                    artifact_id=skill_upload.artifact_id,
+                    version=1,
+                    command_id=f"publish-{suffix}",
+                )
+            )
+            assert not skill_claim.already_bound
+            await service.bind_skill_publication(
+                ArtifactSkillPublicationBindRequest(
+                    context=hands_skill_context,
+                    artifact_id=skill_upload.artifact_id,
+                    version=1,
+                    claim_token=f"publish-{suffix}",
+                    package_digest=f"sha256:{skill_checksum}",
+                )
+            )
             assert await service_b.finalize(
                 ArtifactFinalizeRequest(
                     context=skill_context,
@@ -208,6 +244,80 @@ def test_artifact_multipart_scan_restart_and_gc() -> None:
             )
             assert skill_ready is not None
             skill_ready_key = skill_ready.object_key
+            assert skill_ready.skill_bound_digest == f"sha256:{skill_checksum}"
+
+            orphan_content = b"unpublished-skill"
+            orphan_checksum = hashlib.sha256(orphan_content).hexdigest()
+            orphan_upload = await service.create_upload(
+                ArtifactCreateUploadRequest(
+                    context=skill_context,
+                    root_session_id=f"skill-upload:orphan-{suffix}",
+                    session_id=f"skill-upload:orphan-{suffix}",
+                    name="orphan.skill.json",
+                    media_type="application/vnd.auraclaw.skill-package+json",
+                    expected_size=len(orphan_content),
+                    expected_checksum=orphan_checksum,
+                    classification="internal",
+                    retention_until=datetime.now(UTC),
+                )
+            )
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                response = await client.put(
+                    orphan_upload.upload_url, content=orphan_content
+                )
+                assert response.status_code in {200, 201, 204}
+            await service.finalize(
+                ArtifactFinalizeRequest(
+                    context=skill_context,
+                    artifact_id=orphan_upload.artifact_id,
+                    version=1,
+                    upload_id=orphan_upload.upload_id,
+                    size=len(orphan_content),
+                    checksum=orphan_checksum,
+                )
+            )
+            await connection.execute(
+                """UPDATE artifact.metadata
+                   SET root_session_id='skill-registry', session_id='skill-registry'
+                   WHERE tenant_id=$1 AND artifact_id=$2""",
+                tenant_id,
+                orphan_upload.artifact_id,
+            )
+            orphan_claims = await service.claim_skill_orphans(
+                ArtifactSkillOrphanClaimRequest(
+                    context=hands_skill_context,
+                    owner=f"hands-{suffix}",
+                    limit=10,
+                )
+            )
+            claimed = next(
+                item
+                for item in orphan_claims.artifacts
+                if item["artifact_id"] == orphan_upload.artifact_id
+            )
+            with pytest.raises(
+                ArtifactAccessError,
+                match="bound, expired, missing, or claimed",
+            ):
+                await service.claim_skill_publication(
+                    ArtifactSkillPublicationClaimRequest(
+                        context=hands_skill_context,
+                        artifact_id=orphan_upload.artifact_id,
+                        version=1,
+                        command_id=f"late-publish-{suffix}",
+                    )
+                )
+            resolved = await service.resolve_skill_orphan(
+                ArtifactSkillOrphanResolveRequest(
+                    context=hands_skill_context,
+                    artifact_id=orphan_upload.artifact_id,
+                    version=1,
+                    claim_token=str(claimed["claim_token"]),
+                    referenced=False,
+                    policy_decision_id="integration-policy",
+                )
+            )
+            assert resolved.status == "deleted"
 
             expired = await service.create_upload(
                 ArtifactCreateUploadRequest(

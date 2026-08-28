@@ -194,6 +194,111 @@ class PostgresArtifactRepository(LazyPool):
             pending.gc_claim_token,
         )
 
+    async def get_ready_delete_claim(
+        self,
+        tenant_id: str,
+        artifact_id: str,
+        version: int,
+        claim_token: str,
+    ) -> PendingUpload | None:
+        pool = await self.pool()
+        row = await pool.fetchrow(
+            """SELECT * FROM artifact.metadata WHERE tenant_id=$1
+            AND artifact_id=$2 AND version=$3 AND status='deleting'
+            AND deleted_at IS NULL AND gc_claim_token=$4
+            AND gc_claim_expires_at > now()""",
+            tenant_id,
+            artifact_id,
+            version,
+            claim_token,
+        )
+        return self._pending(row) if row is not None else None
+
+    async def claim_skill_publication(
+        self,
+        tenant_id: str,
+        artifact_id: str,
+        version: int,
+        command_id: str,
+    ) -> PendingUpload | None:
+        pool = await self.pool()
+        row = await pool.fetchrow(
+            """UPDATE artifact.metadata SET skill_publish_claim_token=$4,
+            skill_publish_claim_expires_at=now()+interval '15 minutes'
+            WHERE tenant_id=$1 AND artifact_id=$2 AND version=$3
+              AND status='ready' AND deleted_at IS NULL
+              AND media_type='application/vnd.auraclaw.skill-package+json'
+              AND (root_session_id='skill-registry'
+                   OR root_session_id LIKE 'skill-upload:%')
+              AND (skill_bound_at IS NOT NULL OR (
+                   retention_until IS NOT NULL AND retention_until > now()
+                   AND (skill_publish_claim_expires_at IS NULL
+                        OR skill_publish_claim_expires_at <= now()
+                        OR skill_publish_claim_token=$4)))
+            RETURNING *""",
+            tenant_id,
+            artifact_id,
+            version,
+            command_id,
+        )
+        return self._pending(row) if row is not None else None
+
+    async def bind_skill_publication(
+        self, pending: PendingUpload, package_digest: str
+    ) -> bool:
+        content_hash = package_digest.removeprefix("sha256:")
+        if f"sha256:{content_hash}" != package_digest:
+            return False
+        pool = await self.pool()
+        result = await pool.execute(
+            """UPDATE artifact.metadata SET status='ready',skill_bound_at=now(),
+            skill_bound_digest=$5,skill_publish_claim_token=NULL,
+            skill_publish_claim_expires_at=NULL,gc_claim_token=NULL,
+            gc_claim_expires_at=NULL,gc_last_error=NULL
+            WHERE tenant_id=$1 AND artifact_id=$2 AND version=$3
+              AND expected_checksum=$4
+              AND deleted_at IS NULL AND (
+                (status='ready' AND (
+                  skill_publish_claim_token=$6 OR skill_bound_digest=$5))
+                OR (status='deleting' AND gc_claim_token=$7))""",
+            pending.tenant_id,
+            pending.artifact_id,
+            pending.version,
+            content_hash,
+            package_digest,
+            pending.skill_publish_claim_token,
+            pending.gc_claim_token,
+        )
+        return str(result) == "UPDATE 1"
+
+    async def claim_skill_orphans(
+        self, *, owner: str, limit: int = 100
+    ) -> list[PendingUpload]:
+        pool = await self.pool()
+        token = f"skill-orphan:{owner}:{uuid4().hex}"
+        rows = await pool.fetch(
+            """UPDATE artifact.metadata target SET status='deleting',
+                   gc_claim_token=$2,gc_claim_expires_at=now()+interval '30 seconds',
+                   gc_attempt_count=gc_attempt_count+1
+               WHERE (tenant_id,artifact_id) IN (
+                   SELECT tenant_id,artifact_id FROM artifact.metadata
+                   WHERE status='ready' AND deleted_at IS NULL AND NOT legal_hold
+                     AND media_type='application/vnd.auraclaw.skill-package+json'
+                     AND (root_session_id='skill-registry'
+                          OR root_session_id LIKE 'skill-upload:%')
+                     AND skill_bound_at IS NULL
+                     AND retention_until IS NOT NULL AND retention_until <= now()
+                     AND (skill_publish_claim_expires_at IS NULL
+                          OR skill_publish_claim_expires_at <= now())
+                     AND (gc_claim_expires_at IS NULL OR gc_claim_expires_at <= now())
+                   ORDER BY retention_until,artifact_id
+                   FOR UPDATE SKIP LOCKED LIMIT $1
+               ) RETURNING target.*""",
+            limit,
+            token,
+        )
+        return [self._pending(row) for row in rows]
+
     async def cleanup_expired(self) -> int:
         pool = await self.pool()
         result = await pool.execute(
@@ -268,6 +373,7 @@ class PostgresArtifactRepository(LazyPool):
             expected_checksum=str(row["expected_checksum"]),
             classification=str(row["classification"]),
             expires_at=row["upload_expires_at"],
+            version=int(row["version"]),
             upload_mode=str(row["upload_mode"]),
             multipart_upload_id=(
                 str(row["multipart_upload_id"])
@@ -288,6 +394,16 @@ class PostgresArtifactRepository(LazyPool):
             finalize_claim_token=(
                 str(row["finalize_claim_token"])
                 if row["finalize_claim_token"] is not None
+                else None
+            ),
+            skill_bound_digest=(
+                str(row["skill_bound_digest"])
+                if row["skill_bound_digest"] is not None
+                else None
+            ),
+            skill_publish_claim_token=(
+                str(row["skill_publish_claim_token"])
+                if row["skill_publish_claim_token"] is not None
                 else None
             ),
             retention_until=row["retention_until"],

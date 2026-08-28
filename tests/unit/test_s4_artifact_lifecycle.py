@@ -10,6 +10,9 @@ from auraclaw.contracts.internal import (
     ArtifactCreateUploadRequest,
     ArtifactDeleteRequest,
     ArtifactFinalizeRequest,
+    ArtifactSkillOrphanClaimRequest,
+    ArtifactSkillPublicationBindRequest,
+    ArtifactSkillPublicationClaimRequest,
     InternalRequestContext,
     ServiceIdentity,
 )
@@ -33,6 +36,7 @@ class _RecoveryRepository:
         self.gc_released = False
         self.deleted = False
         self.delete_claimed = False
+        self.skill_bound = False
 
     async def get_upload(self, tenant_id: str, artifact_id: str, upload_id: str):
         del tenant_id, artifact_id, upload_id
@@ -92,6 +96,52 @@ class _RecoveryRepository:
     ) -> None:
         del pending, error
         self.delete_claimed = False
+
+    async def claim_skill_publication(
+        self, tenant_id: str, artifact_id: str, version: int, command_id: str
+    ):
+        del tenant_id, artifact_id, version
+        if self.delete_claimed:
+            return None
+        self.pending = replace(
+            self.pending, skill_publish_claim_token=command_id
+        )
+        return self.pending
+
+    async def bind_skill_publication(
+        self, pending: PendingUpload, package_digest: str
+    ) -> bool:
+        del package_digest
+        if pending.gc_claim_token is None and pending.skill_publish_claim_token is None:
+            return False
+        self.skill_bound = True
+        self.delete_claimed = False
+        self.pending = replace(
+            self.pending,
+            skill_bound_digest=f"sha256:{self.pending.expected_checksum}",
+            skill_publish_claim_token=None,
+            gc_claim_token=None,
+        )
+        return True
+
+    async def claim_skill_orphans(self, *, owner: str, limit: int = 100):
+        del owner, limit
+        if self.skill_bound or self.pending.skill_publish_claim_token is not None:
+            return []
+        self.delete_claimed = True
+        return [replace(self.pending, gc_claim_token="skill-orphan")]
+
+    async def get_ready_delete_claim(
+        self,
+        tenant_id: str,
+        artifact_id: str,
+        version: int,
+        claim_token: str,
+    ):
+        del tenant_id, artifact_id, version
+        if not self.delete_claimed or claim_token != "skill-orphan":
+            return None
+        return replace(self.pending, gc_claim_token=claim_token)
 
 
 class _LostCompletionMultipart:
@@ -305,6 +355,71 @@ async def test_ready_artifact_delete_enforces_retention_and_is_idempotent() -> N
     second = await service.delete(request)
     assert first.status == second.status == "deleted"
     assert verifier.deleted == ["tenant/artifact/object"]
+
+
+@pytest.mark.asyncio
+async def test_skill_publication_claim_fences_orphan_gc_and_repairs_reference() -> None:
+    checksum = "a" * 64
+    pending = PendingUpload(
+        tenant_id="tenant-s4",
+        artifact_id="artifact-skill",
+        upload_id="upload-skill",
+        object_key="tenant/artifact/skill",
+        root_session_id="skill-upload:command-s4",
+        session_id="skill-upload:command-s4",
+        name="skill.pkg",
+        media_type="application/vnd.auraclaw.skill-package+json",
+        expected_size=6,
+        expected_checksum=checksum,
+        classification="internal",
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        retention_until=datetime.now(UTC) - timedelta(seconds=1),
+    )
+    repository = _RecoveryRepository(pending)
+    repository.ready = True
+    verifier = _DeleteVerifier()
+    service = ArtifactInternalService(
+        SeaweedFSS3Presigner(
+            "http://seaweed.test:8333",
+            access_key="access",
+            secret_key="secret",
+            bucket="artifacts",
+            region="us-east-1",
+        ),
+        repository=repository,  # type: ignore[arg-type]
+        object_verifier=verifier,  # type: ignore[arg-type]
+    )
+    context = InternalRequestContext(
+        tenant_id="tenant-s4",
+        service_identity=ServiceIdentity.ACTION_HANDS,
+        request_id="reliability-s4",
+        correlation_id="reliability-s4",
+        causation_id="reliability-s4",
+    )
+    await service.claim_skill_publication(
+        ArtifactSkillPublicationClaimRequest(
+            context=context,
+            artifact_id=pending.artifact_id,
+            version=1,
+            command_id="publish-s4",
+        )
+    )
+    orphans = await service.claim_skill_orphans(
+        ArtifactSkillOrphanClaimRequest(
+            context=context, owner="hands-a", limit=10
+        )
+    )
+    assert orphans.artifacts == ()
+    await service.bind_skill_publication(
+        ArtifactSkillPublicationBindRequest(
+            context=context,
+            artifact_id=pending.artifact_id,
+            version=1,
+            claim_token="publish-s4",
+            package_digest=f"sha256:{checksum}",
+        )
+    )
+    assert repository.skill_bound
 
 
 @pytest.mark.asyncio
