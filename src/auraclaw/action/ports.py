@@ -124,6 +124,48 @@ class ArtifactDeleter(Protocol):
     ) -> None: ...
 
 
+@dataclass(frozen=True)
+class SkillArtifactOrphan:
+    tenant_id: str
+    artifact_ref: ArtifactRef
+    claim_token: str
+
+
+class SkillArtifactLifecycle(Protocol):
+    async def claim_publication(
+        self,
+        *,
+        tenant_id: str,
+        artifact_ref: ArtifactRef,
+        command_id: str,
+        correlation_id: str,
+    ) -> None: ...
+
+    async def bind_publication(
+        self,
+        *,
+        tenant_id: str,
+        artifact_ref: ArtifactRef,
+        command_id: str,
+        package_digest: str,
+        correlation_id: str,
+    ) -> None: ...
+
+    async def claim_orphans(
+        self, *, owner: str, limit: int = 100
+    ) -> tuple[SkillArtifactOrphan, ...]: ...
+
+    async def resolve_orphan(
+        self,
+        *,
+        tenant_id: str,
+        orphan: SkillArtifactOrphan,
+        referenced: bool,
+        package_digest: str | None,
+        correlation_id: str,
+    ) -> str: ...
+
+
 class SkillBindingReferenceReader(Protocol):
     async def has_reference(
         self,

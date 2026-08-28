@@ -17,10 +17,12 @@ UP = "\n".join(
         (ROOT / "migrations/0023_skill_lifecycle.sql").read_text(),
         (ROOT / "migrations/0024_skill_publication_actor.sql").read_text(),
         (ROOT / "migrations/0025_skill_package_retention.sql").read_text(),
+        (ROOT / "migrations/0026_skill_publication_reliability.sql").read_text(),
     )
 )
 DOWN = "\n".join(
     (
+        (ROOT / "migrations/0026_skill_publication_reliability.down.sql").read_text(),
         (ROOT / "migrations/0025_skill_package_retention.down.sql").read_text(),
         (ROOT / "migrations/0024_skill_publication_actor.down.sql").read_text(),
         (ROOT / "migrations/0023_skill_lifecycle.down.sql").read_text(),
@@ -59,6 +61,8 @@ def test_skill_lifecycle_migration_roundtrip_in_isolated_postgres() -> None:
                 "skill_installation",
                 "skill_source",
                 "skill_source_sync_state",
+                "skill_command",
+                "skill_outbox",
             ):
                 assert await connection.fetchval(
                     "SELECT to_regclass($1) IS NOT NULL", f"hands.{relation}"
@@ -88,6 +92,8 @@ def test_skill_lifecycle_migration_roundtrip_in_isolated_postgres() -> None:
                 "skill_installation",
                 "skill_source",
                 "skill_source_sync_state",
+                "skill_command",
+                "skill_outbox",
             ):
                 assert not await connection.fetchval(
                     "SELECT to_regclass($1) IS NOT NULL", f"hands.{relation}"

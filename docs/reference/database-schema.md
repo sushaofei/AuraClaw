@@ -60,6 +60,7 @@ uv run auraclaw migrate up
 | `0023` | Skill Package、Publication、Installation 与 Source 生命周期 |
 | `0024` | Skill Publication 更新 actor |
 | `0025` | Skill Package retention、legal hold 与 optimistic revision |
+| `0026` | Skill 发布命令账本、事务 Outbox 与 Artifact 发布/孤儿回收 fencing |
 
 PostgreSQL / Kingbase 序列未使用 `0017`；MySQL 方言的 `0017` 用于扩大 Task View 文本字段。
 不要为了填补编号而重命名已经发布的迁移。

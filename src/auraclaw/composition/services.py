@@ -44,7 +44,11 @@ from auraclaw.action.mcp_registry import (
     InMemoryMcpServerRegistryStore,
     McpServerRegistryService,
 )
-from auraclaw.action.ports import ArtifactContentReader, ArtifactWriter
+from auraclaw.action.ports import (
+    ArtifactContentReader,
+    ArtifactWriter,
+    SkillArtifactLifecycle,
+)
 from auraclaw.action.resource_gateway import ManagedResourceGateway
 from auraclaw.action.skill_internal_service import SkillPublicationInternalService
 from auraclaw.action.skill_lifecycle import (
@@ -63,6 +67,7 @@ from auraclaw.action.skill_packages import (
 from auraclaw.action.skill_publication import SkillPublicationService
 from auraclaw.action.skill_rebuild import SkillStateRebuilder
 from auraclaw.action.skill_reconciler import SkillPackageReconciler
+from auraclaw.action.skill_reliability import SkillPublicationReliabilityWorker
 from auraclaw.action.tool_gateway import ToolGateway, ToolRegistry
 from auraclaw.admin.internal_service import OwnerAdminService
 from auraclaw.api.dependencies import (
@@ -119,7 +124,10 @@ from auraclaw.infrastructure.clients.artifact import (
     RemoteArtifactWriter,
     RemoteSkillPackageUploadClient,
 )
-from auraclaw.infrastructure.clients.artifact_reader import RemoteArtifactReader
+from auraclaw.infrastructure.clients.artifact_reader import (
+    RemoteArtifactReader,
+    RemoteSkillArtifactLifecycle,
+)
 from auraclaw.infrastructure.clients.credential import RemoteCredentialProxy
 from auraclaw.infrastructure.clients.mcp_egress import RemoteMcpEgressClient
 from auraclaw.infrastructure.clients.mcp_registry import RemoteMcpRegistryClient
@@ -313,6 +321,7 @@ def _skill_publication_service(
     registry: SkillPackageRegistry,
     lifecycle: SkillLifecycleStore | None = None,
     artifact_reader: ArtifactContentReader | None = None,
+    artifact_lifecycle: SkillArtifactLifecycle | None = None,
 ) -> tuple[SkillPublicationService, SkillLifecycleStore]:
     selected_lifecycle = lifecycle
     if selected_lifecycle is None:
@@ -339,6 +348,7 @@ def _skill_publication_service(
             registry=registry,
             lifecycle=selected_lifecycle,
             artifacts=artifact_reader,
+            artifact_lifecycle=artifact_lifecycle,
             bootstrap_sources=(admin_upload,),
         ),
         selected_lifecycle,
@@ -1322,6 +1332,13 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         bearer_token=_service_bearer_token(settings, ServiceIdentity.ACTION_HANDS),
         policy=policy,
     )
+    skill_artifacts = RemoteSkillArtifactLifecycle(
+        settings.artifact_base_url,
+        bearer_token=_service_bearer_token(
+            settings, ServiceIdentity.ACTION_HANDS
+        ),
+        policy=policy,
+    )
     skill_binding_references = RemoteSkillBindingReferenceReader(
         settings.session_base_url,
         bearer_token=hands_token,
@@ -1338,6 +1355,7 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         *remote_clients,
         artifacts,
         artifact_reader,
+        skill_artifacts,
         skill_binding_references,
         *((invocation_store,) if invocation_store is not None else ()),
         *((tool_registry_store,) if tool_registry_store is not None else ()),
@@ -1369,12 +1387,19 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         skill_registry,
         skill_lifecycle,
         artifact_reader=artifact_reader,
+        artifact_lifecycle=skill_artifacts,
     )
     skill_rebuilder = SkillStateRebuilder(
         lifecycle=skill_lifecycle,
         artifacts=artifact_reader,
         registry=skill_registry,
         catalog=capability_catalog,
+    )
+    skill_reliability = SkillPublicationReliabilityWorker(
+        lifecycle=skill_lifecycle,
+        artifacts=skill_artifacts,
+        rebuilder=skill_rebuilder,
+        owner=f"action-hands-{secrets.token_hex(8)}",
     )
     skill_management = SkillManagementService(
         lifecycle=skill_lifecycle,
@@ -1451,6 +1476,7 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
                     )
                 )
         app.state.skill_rebuild_result = await skill_rebuilder.rebuild_all()
+        app.state.skill_reliability_result = await skill_reliability.run_once()
 
     app.state.capability_connectors = {}
     app.state.catalog_reconciler = None
@@ -1515,6 +1541,19 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
             "skill-state",
             settings.mcp_reconcile_interval_seconds,
             rebuild_skill_state,
+        )
+    )
+
+    async def reconcile_skill_reliability() -> int:
+        result = await skill_reliability.run_once()
+        app.state.skill_reliability_result = result
+        return result.outbox_completed + result.orphans_deleted
+
+    periodic_jobs.append(
+        (
+            "skill-reliability",
+            settings.mcp_reconcile_interval_seconds,
+            reconcile_skill_reliability,
         )
     )
     if credential_proxy is not None and isinstance(policy, RemotePolicyClient):

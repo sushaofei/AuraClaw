@@ -584,6 +584,61 @@ class ArtifactDeleteResponse(ContractModel):
     status: Literal["deleted"] = "deleted"
 
 
+class ArtifactSkillPublicationClaimRequest(ContractModel):
+    context: InternalRequestContext
+    artifact_id: str
+    version: int = Field(ge=1)
+    command_id: str = Field(min_length=1, max_length=256)
+
+
+class ArtifactSkillPublicationClaimResponse(ContractModel):
+    api_version: str = INTERNAL_API_VERSION
+    artifact_ref: dict[str, Any]
+    claim_token: str
+    already_bound: bool = False
+
+
+class ArtifactSkillPublicationBindRequest(ContractModel):
+    context: InternalRequestContext
+    artifact_id: str
+    version: int = Field(ge=1)
+    claim_token: str = Field(min_length=1, max_length=256)
+    package_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+
+
+class ArtifactSkillPublicationBindResponse(ContractModel):
+    api_version: str = INTERNAL_API_VERSION
+    status: Literal["bound"] = "bound"
+
+
+class ArtifactSkillOrphanClaimRequest(ContractModel):
+    context: InternalRequestContext
+    owner: str = Field(min_length=1, max_length=256)
+    limit: int = Field(default=100, ge=1, le=1000)
+
+
+class ArtifactSkillOrphanClaimResponse(ContractModel):
+    api_version: str = INTERNAL_API_VERSION
+    artifacts: tuple[dict[str, Any], ...] = ()
+
+
+class ArtifactSkillOrphanResolveRequest(ContractModel):
+    context: InternalRequestContext
+    artifact_id: str
+    version: int = Field(ge=1)
+    claim_token: str = Field(min_length=1, max_length=256)
+    referenced: bool
+    package_digest: str | None = Field(
+        default=None, pattern=r"^sha256:[0-9a-f]{64}$"
+    )
+    policy_decision_id: str | None = Field(default=None, max_length=256)
+
+
+class ArtifactSkillOrphanResolveResponse(ContractModel):
+    api_version: str = INTERNAL_API_VERSION
+    status: Literal["retained", "deleted"]
+
+
 class SkillPublishInternalRequest(ContractModel):
     context: InternalRequestContext
     actor_id: str = Field(min_length=1, max_length=256)

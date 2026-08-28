@@ -8,6 +8,7 @@ from uuid import uuid4
 import asyncpg
 import pytest
 
+from auraclaw.action.skill_lifecycle import SkillPublishCommit
 from auraclaw.config import get_settings
 from auraclaw.contracts.errors import VersionConflictError
 from auraclaw.contracts.skills import (
@@ -36,6 +37,7 @@ MIGRATION = "\n".join(
         (ROOT / "migrations/0023_skill_lifecycle.sql").read_text(),
         (ROOT / "migrations/0024_skill_publication_actor.sql").read_text(),
         (ROOT / "migrations/0025_skill_package_retention.sql").read_text(),
+        (ROOT / "migrations/0026_skill_publication_reliability.sql").read_text(),
     )
 )
 pytestmark = pytest.mark.skipif(DATABASE_URL is None, reason="PostgreSQL test URL not configured")
@@ -149,6 +151,103 @@ def test_postgres_skill_lifecycle_is_persistent_and_tenant_scoped() -> None:
             assert await store_b.get_source(tenant_id, source.source_id) == source
             assert await store_b.get_sync_state(tenant_id, source.source_id) == sync_state
 
+            transactional_package = package.model_copy(
+                update={
+                    "manifest": package.manifest.model_copy(update={"version": "2.0.0"}),
+                    "package_digest": f"sha256:{'b' * 64}",
+                    "artifact_ref": ArtifactRef(
+                        artifact_id=f"art-transaction-{suffix}",
+                        version=1,
+                        content_hash="b" * 64,
+                        media_type="application/vnd.auraclaw.skill-package+json",
+                        size=200,
+                    ),
+                }
+            )
+            transactional_publication = publication.model_copy(
+                update={
+                    "publication_id": f"skp_transaction_{suffix}",
+                    "version": "2.0.0",
+                    "package_digest": transactional_package.package_digest,
+                    "status": SkillPublicationStatus.STAGED,
+                    "source_id": source.source_id,
+                }
+            )
+            publish_commit = SkillPublishCommit(
+                command_id=f"publish-transaction-{suffix}",
+                request_digest=f"sha256:{'c' * 64}",
+                actor_id="integration-test",
+                source_id=source.source_id,
+                correlation_id=f"correlation-{suffix}",
+                causation_id=f"publish-transaction-{suffix}",
+                expected_publication_revision=0,
+                package=transactional_package,
+                publication=transactional_publication,
+                installation=None,
+                occurred_at=now,
+            )
+            committed = await store_a.commit_publish(publish_commit)
+            replayed = await store_b.commit_publish(publish_commit)
+            assert committed.publication == replayed.publication
+            assert replayed.replayed
+            with pytest.raises(VersionConflictError, match="command id was reused"):
+                await store_b.commit_publish(
+                    publish_commit.__class__(
+                        **{
+                            **publish_commit.__dict__,
+                            "request_digest": f"sha256:{'d' * 64}",
+                        }
+                    )
+                )
+            outbox = await store_a.claim_outbox(owner="integration-a")
+            assert len(outbox) == 1
+            assert outbox[0].payload["package_digest"] == (
+                transactional_package.package_digest
+            )
+            assert await store_b.claim_outbox(owner="integration-b") == ()
+            await store_a.complete_outbox(
+                outbox_id=outbox[0].outbox_id, owner="integration-a"
+            )
+
+            rollback_package = transactional_package.model_copy(
+                update={
+                    "manifest": transactional_package.manifest.model_copy(
+                        update={"version": "3.0.0"}
+                    ),
+                    "package_digest": f"sha256:{'e' * 64}",
+                    "artifact_ref": ArtifactRef(
+                        artifact_id=f"art-rollback-{suffix}",
+                        version=1,
+                        content_hash="e" * 64,
+                        media_type="application/vnd.auraclaw.skill-package+json",
+                        size=300,
+                    ),
+                }
+            )
+            with pytest.raises(VersionConflictError, match="revision"):
+                await store_a.commit_publish(
+                    publish_commit.__class__(
+                        **{
+                            **publish_commit.__dict__,
+                            "command_id": f"publish-rollback-{suffix}",
+                            "request_digest": f"sha256:{'f' * 64}",
+                            "expected_publication_revision": 1,
+                            "package": rollback_package,
+                            "publication": transactional_publication.model_copy(
+                                update={
+                                "publication_id": f"skp_rollback_{suffix}",
+                                    "version": "3.0.0",
+                                    "package_digest": rollback_package.package_digest,
+                                    "revision": 2,
+                                }
+                            ),
+                        }
+                    )
+                )
+            assert await store_b.get_package(
+                tenant_id, "platform", "release.prepare", "3.0.0"
+            ) is None
+
             revoked = await store_b.put_publication(
                 publication.model_copy(
                     update={
@@ -207,17 +306,23 @@ def test_postgres_skill_lifecycle_is_persistent_and_tenant_scoped() -> None:
             await store_a.close()
             await store_b.close()
             await connection.execute(
-                "DELETE FROM hands.skill_source_sync_state WHERE tenant_id=$1",
-                tenant_id,
+                "DELETE FROM hands.skill_outbox WHERE tenant_id=$1", tenant_id
             )
             await connection.execute(
-                "DELETE FROM hands.skill_source WHERE tenant_id=$1", tenant_id
+                "DELETE FROM hands.skill_command WHERE tenant_id=$1", tenant_id
+            )
+            await connection.execute(
+                "DELETE FROM hands.skill_source_sync_state WHERE tenant_id=$1",
+                tenant_id,
             )
             await connection.execute(
                 "DELETE FROM hands.skill_installation WHERE tenant_id=$1", tenant_id
             )
             await connection.execute(
                 "DELETE FROM hands.skill_publication WHERE tenant_id=$1", tenant_id
+            )
+            await connection.execute(
+                "DELETE FROM hands.skill_source WHERE tenant_id=$1", tenant_id
             )
             await connection.execute(
                 "DELETE FROM hands.skill_package WHERE tenant_id=$1", tenant_id

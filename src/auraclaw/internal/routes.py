@@ -16,6 +16,14 @@ from auraclaw.contracts.internal import (
     ArtifactDownloadResponse,
     ArtifactFinalizeRequest,
     ArtifactFinalizeResponse,
+    ArtifactSkillOrphanClaimRequest,
+    ArtifactSkillOrphanClaimResponse,
+    ArtifactSkillOrphanResolveRequest,
+    ArtifactSkillOrphanResolveResponse,
+    ArtifactSkillPublicationBindRequest,
+    ArtifactSkillPublicationBindResponse,
+    ArtifactSkillPublicationClaimRequest,
+    ArtifactSkillPublicationClaimResponse,
     ArtifactUploadResponse,
     AssignmentAbandonRequest,
     AssignmentAbandonResponse,
@@ -257,6 +265,26 @@ def artifact_routes(service: ArtifactInternalService) -> dict[str, ContractRoute
         ),
         "/internal/v1/artifacts/delete": contract_route(
             ArtifactDeleteRequest, ArtifactDeleteResponse, service.delete
+        ),
+        "/internal/v1/artifacts/skills/claim-publication": contract_route(
+            ArtifactSkillPublicationClaimRequest,
+            ArtifactSkillPublicationClaimResponse,
+            service.claim_skill_publication,
+        ),
+        "/internal/v1/artifacts/skills/bind-publication": contract_route(
+            ArtifactSkillPublicationBindRequest,
+            ArtifactSkillPublicationBindResponse,
+            service.bind_skill_publication,
+        ),
+        "/internal/v1/artifacts/skills/orphans/claim": contract_route(
+            ArtifactSkillOrphanClaimRequest,
+            ArtifactSkillOrphanClaimResponse,
+            service.claim_skill_orphans,
+        ),
+        "/internal/v1/artifacts/skills/orphans/resolve": contract_route(
+            ArtifactSkillOrphanResolveRequest,
+            ArtifactSkillOrphanResolveResponse,
+            service.resolve_skill_orphan,
         ),
     }
 

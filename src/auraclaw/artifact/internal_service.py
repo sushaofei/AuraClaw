@@ -19,6 +19,14 @@ from auraclaw.contracts.internal import (
     ArtifactDownloadResponse,
     ArtifactFinalizeRequest,
     ArtifactFinalizeResponse,
+    ArtifactSkillOrphanClaimRequest,
+    ArtifactSkillOrphanClaimResponse,
+    ArtifactSkillOrphanResolveRequest,
+    ArtifactSkillOrphanResolveResponse,
+    ArtifactSkillPublicationBindRequest,
+    ArtifactSkillPublicationBindResponse,
+    ArtifactSkillPublicationClaimRequest,
+    ArtifactSkillPublicationClaimResponse,
     ArtifactUploadResponse,
     ServiceIdentity,
 )
@@ -38,6 +46,7 @@ class PendingUpload:
     expected_checksum: str
     classification: str
     expires_at: datetime
+    version: int = 1
     retention_until: datetime | None = None
     legal_hold: bool = False
     upload_mode: str = "single"
@@ -46,6 +55,8 @@ class PendingUpload:
     multipart_completed: bool = False
     gc_claim_token: str | None = None
     finalize_claim_token: str | None = None
+    skill_bound_digest: str | None = None
+    skill_publish_claim_token: str | None = None
 
 
 class ArtifactMetadataRepository(Protocol):
@@ -90,6 +101,30 @@ class ArtifactMetadataRepository(Protocol):
     async def release_ready_delete(
         self, pending: PendingUpload, error: str
     ) -> None: ...
+
+    async def get_ready_delete_claim(
+        self,
+        tenant_id: str,
+        artifact_id: str,
+        version: int,
+        claim_token: str,
+    ) -> PendingUpload | None: ...
+
+    async def claim_skill_publication(
+        self,
+        tenant_id: str,
+        artifact_id: str,
+        version: int,
+        command_id: str,
+    ) -> PendingUpload | None: ...
+
+    async def bind_skill_publication(
+        self, pending: PendingUpload, package_digest: str
+    ) -> bool: ...
+
+    async def claim_skill_orphans(
+        self, *, owner: str, limit: int = 100
+    ) -> list[PendingUpload]: ...
 
 
 class ArtifactPolicyValidator(Protocol):
@@ -437,3 +472,118 @@ class ArtifactInternalService:
             artifact_id=request.artifact_id,
             version=request.version,
         )
+
+    async def claim_skill_publication(
+        self, request: ArtifactSkillPublicationClaimRequest
+    ) -> ArtifactSkillPublicationClaimResponse:
+        if request.context.service_identity is not ServiceIdentity.ACTION_HANDS:
+            raise ArtifactAccessError("workload may not claim Skill Artifacts")
+        if self._repository is None:
+            raise ArtifactAccessError("Skill Artifact claims are unavailable")
+        pending = await self._repository.claim_skill_publication(
+            request.context.tenant_id,
+            request.artifact_id,
+            request.version,
+            request.command_id,
+        )
+        if pending is None:
+            raise ArtifactAccessError(
+                "Skill Artifact is bound, expired, missing, or claimed"
+            )
+        return ArtifactSkillPublicationClaimResponse(
+            artifact_ref=_artifact_ref(pending, request.version),
+            claim_token=request.command_id,
+            already_bound=pending.skill_bound_digest is not None,
+        )
+
+    async def bind_skill_publication(
+        self, request: ArtifactSkillPublicationBindRequest
+    ) -> ArtifactSkillPublicationBindResponse:
+        if request.context.service_identity is not ServiceIdentity.ACTION_HANDS:
+            raise ArtifactAccessError("workload may not bind Skill Artifacts")
+        if self._repository is None:
+            raise ArtifactAccessError("Skill Artifact binding is unavailable")
+        pending = await self._repository.get_ready(
+            request.context.tenant_id, request.artifact_id, request.version
+        )
+        if pending is None or pending.skill_publish_claim_token != request.claim_token:
+            if pending is not None and pending.skill_bound_digest == request.package_digest:
+                return ArtifactSkillPublicationBindResponse()
+            raise ArtifactAccessError("Skill Artifact publication claim was lost")
+        if not await self._repository.bind_skill_publication(
+            pending, request.package_digest
+        ):
+            raise ArtifactAccessError("Skill Artifact publication claim was lost")
+        return ArtifactSkillPublicationBindResponse()
+
+    async def claim_skill_orphans(
+        self, request: ArtifactSkillOrphanClaimRequest
+    ) -> ArtifactSkillOrphanClaimResponse:
+        if request.context.service_identity is not ServiceIdentity.ACTION_HANDS:
+            raise ArtifactAccessError("workload may not claim Skill orphans")
+        if self._repository is None:
+            raise ArtifactAccessError("Skill orphan collection is unavailable")
+        pending = await self._repository.claim_skill_orphans(
+            owner=request.owner, limit=request.limit
+        )
+        return ArtifactSkillOrphanClaimResponse(
+            artifacts=tuple(
+                {
+                    **_artifact_ref(item, item.version),
+                    "tenant_id": item.tenant_id,
+                    "claim_token": item.gc_claim_token,
+                }
+                for item in pending
+            )
+        )
+
+    async def resolve_skill_orphan(
+        self, request: ArtifactSkillOrphanResolveRequest
+    ) -> ArtifactSkillOrphanResolveResponse:
+        if request.context.service_identity is not ServiceIdentity.ACTION_HANDS:
+            raise ArtifactAccessError("workload may not resolve Skill orphans")
+        if self._repository is None or self._object_verifier is None:
+            raise ArtifactAccessError("Skill orphan collection is unavailable")
+        pending = await self._repository.get_ready_delete_claim(
+            request.context.tenant_id,
+            request.artifact_id,
+            request.version,
+            request.claim_token,
+        )
+        if pending is None:
+            raise ArtifactAccessError("Skill orphan claim was lost")
+        if request.referenced:
+            if request.package_digest is None:
+                raise ArtifactAccessError("referenced Skill requires package digest")
+            if not await self._repository.bind_skill_publication(
+                pending, request.package_digest
+            ):
+                raise ArtifactAccessError("Skill orphan claim was lost")
+            return ArtifactSkillOrphanResolveResponse(status="retained")
+        if not request.policy_decision_id:
+            raise ArtifactAccessError("Skill orphan deletion requires policy decision")
+        if self._policy is not None and not await self._policy.validate_decision(
+            tenant_id=request.context.tenant_id,
+            decision_id=request.policy_decision_id,
+            action="artifact.delete",
+            resource=request.artifact_id,
+        ):
+            raise ArtifactAccessError("artifact policy decision is invalid or expired")
+        if not await self._object_verifier.delete(pending):
+            await self._repository.release_ready_delete(
+                pending, "Skill orphan object deletion failed"
+            )
+            raise ArtifactAccessError("Skill orphan object deletion failed")
+        if not await self._repository.mark_ready_deleted(pending):
+            raise ArtifactAccessError("Skill orphan deletion claim was lost")
+        return ArtifactSkillOrphanResolveResponse(status="deleted")
+
+
+def _artifact_ref(pending: PendingUpload, version: int) -> dict[str, object]:
+    return {
+        "artifact_id": pending.artifact_id,
+        "version": version,
+        "content_hash": pending.expected_checksum,
+        "media_type": pending.media_type,
+        "size": pending.expected_size,
+    }

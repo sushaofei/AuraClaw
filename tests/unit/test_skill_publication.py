@@ -68,13 +68,18 @@ def _source(*, publishers: tuple[str, ...] = ("acme",)) -> SkillSourceRecord:
     )
 
 
-def _command(*, activate: bool = True, expected_revision: int = 0) -> PublishSkillCommand:
+def _command(
+    *,
+    activate: bool = True,
+    expected_revision: int = 0,
+    command_id: str = "publish-1",
+) -> PublishSkillCommand:
     return PublishSkillCommand(
         tenant_id="tenant-a",
         actor_id="admin-a",
         source_id="sks_admin_upload",
         activate=activate,
-        command_id="publish-1",
+        command_id=command_id,
         expected_revision=expected_revision,
         correlation_id="corr-1",
         causation_id="publish-1",
@@ -118,6 +123,19 @@ def test_publish_service_persists_package_publication_and_installation() -> None
         assert installation.status is SkillInstallationStatus.ACTIVE
         assert installation.pinned_package_digest == first.package_digest
         assert installation.auto_upgrade is False
+        outbox = await lifecycle.claim_outbox(owner="worker-a")
+        assert len(outbox) == 1
+        assert outbox[0].payload["package_digest"] == first.package_digest
+        await lifecycle.complete_outbox(
+            outbox_id=outbox[0].outbox_id, owner="worker-a"
+        )
+        assert await lifecycle.claim_outbox(owner="worker-a") == ()
+
+        with pytest.raises(VersionConflictError, match="command id was reused"):
+            await service.publish(
+                _command().model_copy(update={"actor_id": "other-admin"}),
+                _package(),
+            )
 
         with pytest.raises(VersionConflictError, match="immutable"):
             await service.publish(_command(), _package(markdown=b"# Changed\n"))
@@ -128,13 +146,24 @@ def test_publish_service_persists_package_publication_and_installation() -> None
 def test_staged_publication_requires_revision_to_activate() -> None:
     async def scenario() -> None:
         service, lifecycle = _service(_source())
-        staged = await service.publish(_command(activate=False), _package())
+        staged = await service.publish(
+            _command(activate=False, command_id="publish-staged"), _package()
+        )
         assert staged.status is SkillPublicationStatus.STAGED
         assert await lifecycle.get_installation("tenant-a", "acme", "release.prepare") is None
 
         with pytest.raises(VersionConflictError, match="revision conflict"):
-            await service.publish(_command(activate=True), _package())
-        active = await service.publish(_command(activate=True, expected_revision=1), _package())
+            await service.publish(
+                _command(activate=True, command_id="publish-invalid"), _package()
+            )
+        active = await service.publish(
+            _command(
+                activate=True,
+                expected_revision=1,
+                command_id="publish-active",
+            ),
+            _package(),
+        )
         assert active.status is SkillPublicationStatus.ACTIVE
         publication = await lifecycle.get_publication(
             "tenant-a", "acme", "release.prepare", "1.0.0"
@@ -184,6 +213,8 @@ def test_staged_artifact_publish_reuses_validated_immutable_artifact() -> None:
         def __init__(self, content: bytes) -> None:
             self.content = content
             self.reads = 0
+            self.claims = 0
+            self.binds = 0
 
         async def put(self, **kwargs: object) -> ArtifactRef:
             del kwargs
@@ -193,6 +224,22 @@ def test_staged_artifact_publish_reuses_validated_immutable_artifact() -> None:
             del kwargs
             self.reads += 1
             return self.content
+
+        async def claim_publication(self, **kwargs: object) -> None:
+            del kwargs
+            self.claims += 1
+
+        async def bind_publication(self, **kwargs: object) -> None:
+            del kwargs
+            self.binds += 1
+
+        async def claim_orphans(self, **kwargs: object) -> tuple[object, ...]:
+            del kwargs
+            return ()
+
+        async def resolve_orphan(self, **kwargs: object) -> str:
+            del kwargs
+            return "deleted"
 
     async def scenario() -> None:
         package = _package()
@@ -207,6 +254,7 @@ def test_staged_artifact_publish_reuses_validated_immutable_artifact() -> None:
             registry=registry,
             lifecycle=lifecycle,
             artifacts=artifacts,
+            artifact_lifecycle=artifacts,  # type: ignore[arg-type]
             bootstrap_sources=(_source(),),
         )
         artifact_ref = ArtifactRef(
@@ -221,6 +269,7 @@ def test_staged_artifact_publish_reuses_validated_immutable_artifact() -> None:
         )
         assert published.artifact_ref == artifact_ref
         assert artifacts.reads == 1
+        assert artifacts.claims == artifacts.binds == 1
         stored = await lifecycle.get_package(
             "tenant-a", "acme", "release.prepare", "1.0.0"
         )

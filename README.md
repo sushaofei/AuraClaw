@@ -409,6 +409,9 @@ AURACLAW_API_TOKEN=... uv run auraclaw skills publish path/to/skill \
 `tests/*.json` 声明式向量，不执行包内代码；`skills publish` 从
 `AURACLAW_API_TOKEN`（或 `--token-env` 指定的环境变量）读取令牌，不接受命令行明文令牌。
 当前开发者 CLI 仅支持平台 HMAC 兼容包，外部 publisher 待 Publisher Registry 与非对称签名阶段接入。
+发布的 Package、Publication、首个 Installation、成功命令账本和 Outbox 在 Action Hands 中原子提交；
+周期可靠性任务修复 Artifact binding 与 Catalog，并在 retention 到期后对未引用的 ready Skill Artifact
+执行带 Policy 和并发 fencing 的孤儿回收。
 
 重建只读取 Canonical Event Log；Read Model 和 checkpoint 可以删除后恢复。真实
 PostgreSQL 集成测试使用独立测试库：
