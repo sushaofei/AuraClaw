@@ -111,6 +111,7 @@ class SkillPublicationService:
                 source_id=source.source_id,
                 revision=1,
                 created_by=command.actor_id,
+                updated_by=command.actor_id,
                 created_at=now,
                 updated_at=now,
             )
@@ -122,6 +123,7 @@ class SkillPublicationService:
                         "status": desired_status,
                         "source_id": source.source_id,
                         "revision": existing.revision + 1,
+                        "updated_by": command.actor_id,
                         "updated_at": now,
                         "reason_code": None,
                     }

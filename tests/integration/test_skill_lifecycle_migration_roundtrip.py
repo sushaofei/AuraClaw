@@ -12,8 +12,18 @@ import asyncpg
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
-UP = (ROOT / "migrations/0023_skill_lifecycle.sql").read_text()
-DOWN = (ROOT / "migrations/0023_skill_lifecycle.down.sql").read_text()
+UP = "\n".join(
+    (
+        (ROOT / "migrations/0023_skill_lifecycle.sql").read_text(),
+        (ROOT / "migrations/0024_skill_publication_actor.sql").read_text(),
+    )
+)
+DOWN = "\n".join(
+    (
+        (ROOT / "migrations/0024_skill_publication_actor.down.sql").read_text(),
+        (ROOT / "migrations/0023_skill_lifecycle.down.sql").read_text(),
+    )
+)
 
 
 def _free_port() -> int:
@@ -51,6 +61,11 @@ def test_skill_lifecycle_migration_roundtrip_in_isolated_postgres() -> None:
                 assert await connection.fetchval(
                     "SELECT to_regclass($1) IS NOT NULL", f"hands.{relation}"
                 )
+            assert await connection.fetchval(
+                """SELECT is_nullable = 'NO' FROM information_schema.columns
+                WHERE table_schema='hands' AND table_name='skill_publication'
+                  AND column_name='updated_by'"""
+            )
             await connection.execute(DOWN)
             for relation in (
                 "skill_package",

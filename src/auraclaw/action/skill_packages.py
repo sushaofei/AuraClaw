@@ -379,6 +379,46 @@ class SkillPackageRegistry:
             None,
         )
 
+    def set_skill_discoverable(
+        self,
+        tenant_id: str,
+        publisher: str,
+        name: str,
+        *,
+        discoverable: bool,
+    ) -> None:
+        keys = [
+            key
+            for key in self._publications
+            if key[0] == tenant_id and key[1] == publisher and key[2] == name
+        ]
+        if not keys:
+            raise NotFoundError("Skill publication not found")
+        for key in keys:
+            publication = self._publications[key]
+            package = self._packages[key]
+            should_expose = (
+                discoverable
+                and publication.status is SkillPublicationStatus.ACTIVE
+            )
+            if should_expose:
+                self._discoverable.add(key)
+            else:
+                self._discoverable.discard(key)
+            if self._resources is None:
+                continue
+            for resource in _package_resources(
+                tenant_id,
+                package,
+                publication.package_digest,
+            ):
+                uri = resource.descriptor.uri
+                if uri is None:
+                    continue
+                self._resources.unregister_resource(uri)
+                if should_expose:
+                    self._resources.register_resource(resource)
+
     def list_publications(self, tenant_id: str) -> tuple[PublishedSkill, ...]:
         return tuple(
             sorted(
@@ -431,49 +471,6 @@ class SkillPackageRegistry:
         if raw is None:
             return None
         return raw.decode()
-
-    def enable_skill(self, tenant_id: str, publisher: str, name: str) -> tuple[PublishedSkill, ...]:
-        keys = [
-            key
-            for key in self._publications
-            if key[0] == tenant_id and key[1] == publisher and key[2] == name
-        ]
-        if not keys:
-            raise NotFoundError("Skill publication not found")
-        enabled: list[PublishedSkill] = []
-        for key in keys:
-            publication = self._publications[key]
-            if publication.status == SkillPublicationStatus.ACTIVE:
-                self._discoverable.add(key)
-                enabled.append(publication)
-                continue
-            reactivated = publication.model_copy(
-                update={"status": SkillPublicationStatus.ACTIVE}
-            )
-            self._publications[key] = reactivated
-            package = self._packages[key]
-            if self._resources is not None:
-                for resource in _package_resources(
-                    tenant_id, package, reactivated.package_digest
-                ):
-                    self._resources.register_resource(resource)
-            enabled.append(reactivated)
-        return tuple(enabled)
-
-    def disable_skill(
-        self, tenant_id: str, publisher: str, name: str
-    ) -> tuple[PublishedSkill, ...]:
-        keys = [
-            key
-            for key in self._publications
-            if key[0] == tenant_id and key[1] == publisher and key[2] == name
-        ]
-        if not keys:
-            raise NotFoundError("Skill publication not found")
-        return tuple(
-            self.revoke(tenant_id, publisher, name, version)
-            for (_tenant, _publisher, _name, version) in keys
-        )
 
     def load_part(
         self,

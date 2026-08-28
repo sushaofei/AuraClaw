@@ -51,6 +51,10 @@ from auraclaw.action.skill_lifecycle import (
     InMemorySkillLifecycleStore,
     SkillLifecycleStore,
 )
+from auraclaw.action.skill_management import (
+    InProcessSkillStateProjector,
+    SkillManagementService,
+)
 from auraclaw.action.skill_packages import (
     HmacSkillSignatureVerifier,
     SkillPackageRegistry,
@@ -719,6 +723,7 @@ def _task_api_app(settings: Settings) -> FastAPI:
     skill_registry = _skill_registry_service(settings)
     skill_lifecycle: SkillLifecycleStore | None = None
     skill_publication: SkillPublicationService | RemoteSkillPublicationClient
+    skill_management: SkillManagementService | RemoteSkillPublicationClient
     if settings.sql_storage_enabled:
         skill_publication = RemoteSkillPublicationClient(
             settings.hands_url,
@@ -727,14 +732,23 @@ def _task_api_app(settings: Settings) -> FastAPI:
             ),
             compatibility_cache=skill_registry,
         )
+        skill_management = skill_publication
     else:
         skill_publication, skill_lifecycle = _skill_publication_service(
             settings, skill_registry
+        )
+        skill_management = SkillManagementService(
+            lifecycle=skill_lifecycle,
+            projector=InProcessSkillStateProjector(
+                lifecycle=skill_lifecycle,
+                registry=skill_registry,
+            ),
         )
     app.include_router(
         create_skill_admin_router(
             skill_registry,
             publication_service=skill_publication,
+            management_service=skill_management,
         )
     )
     extra_closeables: list[Any] = [mcp_lifecycle]
@@ -1337,6 +1351,10 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         registry=skill_registry,
         catalog=capability_catalog,
     )
+    skill_management = SkillManagementService(
+        lifecycle=skill_lifecycle,
+        projector=skill_rebuilder,
+    )
     resources = skill_registry.resources or HandsResourceRegistry()
     resource_gateway = ManagedResourceGateway(
         resources,
@@ -1596,6 +1614,7 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
             skill_publication_routes(
                 SkillPublicationInternalService(
                     skill_publication,
+                    management=skill_management,
                     rebuilder=skill_rebuilder,
                 )
             ),

@@ -68,6 +68,7 @@ def _publication(
         status=status,
         revision=revision,
         created_by="admin",
+        updated_by="admin",
         created_at=now,
         updated_at=now,
     )
@@ -244,6 +245,7 @@ def test_source_and_installation_contracts_fail_closed() -> None:
             package_digest=DIGEST_A,
             status=SkillPublicationStatus.REVOKED,
             created_by="admin",
+            updated_by="admin",
             created_at=now,
             updated_at=now,
         )

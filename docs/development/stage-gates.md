@@ -1663,6 +1663,38 @@ Publisher Registry、Outbox/lease 与 Package GC 继续后续阶段。
 - [x] 架构说明与阶段门禁同步，未把卸载 API、安全撤销或物理清理标记为完成。
 - [x] 本阶段作为一个 intentional commit 提交并 push，不包含 `.env`、Secret、缓存或无关改动。
 
+## 阶段 M14e：Skill 安装管理与安全撤销（Issue #56）
+
+状态：已完成。本阶段交付 tenant 逻辑删除和 Publication 安全撤销，不开放尚不安全的
+物理 Artifact purge。
+
+### 状态机与命令
+
+- [x] disable/enable 只改变 Installation，不再把普通停用误写成 Publication revoke。
+- [x] uninstall 表示 tenant 逻辑删除，保留 Package、Publication、Artifact 和历史 binding 解释能力。
+- [x] install 只允许 uninstalled -> active；enable 只允许 disabled -> active，非法迁移 fail closed。
+- [x] revoke 独立更新指定版本 Publication，并立即从 Registry/Catalog 移除，使旧 binding 不能继续加载。
+- [x] 所有命令携带 tenant、actor、command、expected revision、correlation 和 causation；停用、卸载与撤销
+  必须带 reason code。
+- [x] Publication 新增持久 `updated_by`，migration 对历史行以 `created_by` 回填后设为 NOT NULL。
+
+### API 与服务边界
+
+- [x] Admin API 提供 `:install`、`:enable`、`:disable`、`:uninstall` 和版本级 `:revoke`。
+- [x] Admin API 可读取持久 Installation/Publication revision、reason 和 updated actor，支持安全的
+  If-Match 式写入流程。
+- [x] SQL profile 经 Task API -> workload-authenticated internal contract -> Action Hands 执行管理动作。
+- [x] Action Hands 使用持久 Lifecycle Store 和 SkillStateRebuilder；Task API 不直接选择数据库或 Artifact。
+- [x] 目标状态幂等重试会再次触发投影修复；revision 冲突和非法迁移保持显式错误。
+- [x] 不提供伪 purge：Artifact 删除、retention/legal hold、引用检查和 GC 对账必须后续单独验收。
+
+### 质量与交付
+
+- [x] 状态机、API、内部跨服务契约、Catalog 可见性和 revoke 旧 binding 行为测试通过。
+- [x] migration roundtrip、PostgreSQL 集成、全量 Ruff/Mypy/unit/import-linter 通过。
+- [x] 架构与阶段门禁说明同步，uninstall、revoke 与物理 purge 语义明确分离。
+- [x] 本阶段作为一个 intentional commit 提交并 push，不包含 `.env`、Secret、缓存或无关改动。
+
 ## 阶段 Product Activity：产品级对话执行轨迹（AuraX Issue #2）
 
 状态：代码与定向验证完成；完整基础设施集成门禁受现有 Kafka/MySQL/PostgreSQL/Artifact 环境失败阻塞。

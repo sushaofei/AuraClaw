@@ -60,8 +60,14 @@ from auraclaw.contracts.internal import (
     SessionFeedResponse,
     SessionRootFeedRequest,
     SessionRootFeedResponse,
+    SkillInstallationInternalRequest,
+    SkillInstallationInternalResponse,
     SkillPublishInternalRequest,
     SkillPublishInternalResponse,
+    SkillRevokeInternalRequest,
+    SkillRevokeInternalResponse,
+    SkillStateInternalRequest,
+    SkillStateInternalResponse,
     ValidateLeaseRequest,
     ValidateLeaseResponse,
 )
@@ -246,7 +252,22 @@ def skill_publication_routes(
             SkillPublishInternalRequest,
             SkillPublishInternalResponse,
             service.publish,
-        )
+        ),
+        "/installation": contract_route(
+            SkillInstallationInternalRequest,
+            SkillInstallationInternalResponse,
+            service.change_installation,
+        ),
+        "/revoke": contract_route(
+            SkillRevokeInternalRequest,
+            SkillRevokeInternalResponse,
+            service.revoke,
+        ),
+        "/state": contract_route(
+            SkillStateInternalRequest,
+            SkillStateInternalResponse,
+            service.state,
+        ),
     }
 
 

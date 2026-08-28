@@ -31,7 +31,12 @@ from auraclaw.infrastructure.persistence.postgres_skill_lifecycle import (
 SETTINGS = get_settings()
 DATABASE_URL = asyncpg_url(SETTINGS.resolved_database_url) if SETTINGS.postgres_enabled else None
 ROOT = Path(__file__).resolve().parents[2]
-MIGRATION = (ROOT / "migrations/0023_skill_lifecycle.sql").read_text()
+MIGRATION = "\n".join(
+    (
+        (ROOT / "migrations/0023_skill_lifecycle.sql").read_text(),
+        (ROOT / "migrations/0024_skill_publication_actor.sql").read_text(),
+    )
+)
 pytestmark = pytest.mark.skipif(DATABASE_URL is None, reason="PostgreSQL test URL not configured")
 
 
@@ -77,6 +82,7 @@ def test_postgres_skill_lifecycle_is_persistent_and_tenant_scoped() -> None:
                 status=SkillPublicationStatus.ACTIVE,
                 revision=1,
                 created_by="integration-test",
+                updated_by="integration-test",
                 created_at=now,
                 updated_at=now,
             )
@@ -138,6 +144,35 @@ def test_postgres_skill_lifecycle_is_persistent_and_tenant_scoped() -> None:
             assert await store_b.list_publications(f"other-{tenant_id}") == ()
             assert await store_b.get_source(tenant_id, source.source_id) == source
             assert await store_b.get_sync_state(tenant_id, source.source_id) == sync_state
+
+            revoked = await store_b.put_publication(
+                publication.model_copy(
+                    update={
+                        "status": SkillPublicationStatus.REVOKED,
+                        "revision": 2,
+                        "updated_by": "security-test",
+                        "updated_at": datetime.now(UTC),
+                        "reason_code": "publisher_key_compromised",
+                    }
+                ),
+                expected_revision=1,
+            )
+            assert revoked.updated_by == "security-test"
+            assert revoked.status is SkillPublicationStatus.REVOKED
+
+            disabled = await store_b.put_installation(
+                installation.model_copy(
+                    update={
+                        "status": SkillInstallationStatus.DISABLED,
+                        "revision": 2,
+                        "updated_by": "admin-test",
+                        "updated_at": datetime.now(UTC),
+                        "reason_code": "tenant_disabled",
+                    }
+                ),
+                expected_revision=1,
+            )
+            assert disabled.updated_by == "admin-test"
 
             with pytest.raises(VersionConflictError, match="revision conflict"):
                 await store_b.put_installation(

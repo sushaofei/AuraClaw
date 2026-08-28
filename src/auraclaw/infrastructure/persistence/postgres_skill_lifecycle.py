@@ -112,8 +112,9 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
                 row = await connection.fetchrow(
                     """INSERT INTO hands.skill_publication
                     (publication_id,tenant_id,publisher,name,version,package_digest,
-                     status,source_id,revision,created_by,created_at,updated_at,reason_code)
-                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+                     status,source_id,revision,created_by,updated_by,created_at,
+                     updated_at,reason_code)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
                     ON CONFLICT (tenant_id,publisher,name,version) DO NOTHING
                     RETURNING *""",
                     *_publication_values(record),
@@ -121,13 +122,15 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
             else:
                 row = await connection.fetchrow(
                     """UPDATE hands.skill_publication SET
-                    status=$1,source_id=$2,revision=$3,updated_at=$4,reason_code=$5
-                    WHERE tenant_id=$6 AND publisher=$7 AND name=$8 AND version=$9
-                      AND publication_id=$10 AND package_digest=$11 AND revision=$12
+                    status=$1,source_id=$2,revision=$3,updated_by=$4,updated_at=$5,
+                    reason_code=$6
+                    WHERE tenant_id=$7 AND publisher=$8 AND name=$9 AND version=$10
+                      AND publication_id=$11 AND package_digest=$12 AND revision=$13
                     RETURNING *""",
                     record.status.value,
                     record.source_id,
                     record.revision,
+                    record.updated_by,
                     record.updated_at,
                     record.reason_code,
                     record.tenant_id,
@@ -401,6 +404,7 @@ def _publication_values(record: SkillPublicationRecord) -> tuple[object, ...]:
         record.source_id,
         record.revision,
         record.created_by,
+        record.updated_by,
         record.created_at,
         record.updated_at,
         record.reason_code,
@@ -419,6 +423,7 @@ def _publication(row: dict[str, Any]) -> SkillPublicationRecord:
         source_id=row["source_id"],
         revision=int(row["revision"]),
         created_by=str(row["created_by"]),
+        updated_by=str(row["updated_by"]),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         reason_code=row["reason_code"],
