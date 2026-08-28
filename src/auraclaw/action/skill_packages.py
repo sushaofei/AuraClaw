@@ -116,6 +116,14 @@ class SkillPackageRegistry:
     def resources(self) -> McpResourceRegistry | None:
         return self._resources
 
+    def validate(self, package: SkillPackage) -> SkillPackage:
+        normalized = _validate_package(
+            package, self._max_package_bytes, self._max_files
+        )
+        if not self._signature_verifier.verify(normalized):
+            raise PolicyDeniedError("Skill package signature is invalid")
+        return normalized
+
     def restore(
         self,
         tenant_id: str,
@@ -123,9 +131,7 @@ class SkillPackageRegistry:
         publication: PublishedSkill,
     ) -> PublishedSkill:
         """Restore validated persisted state without creating another Artifact."""
-        normalized = _validate_package(package, self._max_package_bytes, self._max_files)
-        if not self._signature_verifier.verify(normalized):
-            raise PolicyDeniedError("Skill package signature is invalid")
+        normalized = self.validate(package)
         if publication.tenant_id != tenant_id:
             raise PolicyDeniedError("Skill publication tenant does not match")
         if publication.manifest != normalized.manifest:
@@ -163,9 +169,7 @@ class SkillPackageRegistry:
             SkillPublicationStatus.ACTIVE,
         }:
             raise ValueError("New Skill packages can only be staged or activated")
-        normalized = _validate_package(package, self._max_package_bytes, self._max_files)
-        if not self._signature_verifier.verify(normalized):
-            raise PolicyDeniedError("Skill package signature is invalid")
+        normalized = self.validate(package)
         key = _package_key(tenant_id, normalized.manifest)
         digest = skill_package_digest(normalized)
         existing = self._publications.get(key)

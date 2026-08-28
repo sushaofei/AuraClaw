@@ -21,6 +21,7 @@ from auraclaw.contracts.errors import (
     LeaseConflictError,
     NotFoundError,
     PolicyDeniedError,
+    SchemaValidationError,
     VersionConflictError,
 )
 from auraclaw.contracts.internal import (
@@ -91,6 +92,7 @@ def _error_code(exc: AuraClawError) -> InternalErrorCode:
         "credential_access_denied": InternalErrorCode.CREDENTIAL_DENIED,
         "artifact_access_denied": InternalErrorCode.ARTIFACT_DENIED,
         "invalid_transition": InternalErrorCode.INVALID_TRANSITION,
+        "tool_schema_invalid": InternalErrorCode.INVALID_REQUEST,
     }
     try:
         return InternalErrorCode(exc.code)
@@ -124,6 +126,7 @@ def _raise_contract_error(response: httpx.Response) -> NoReturn:
         InternalErrorCode.APPROVAL_INVALID: ApprovalValidationError,
         InternalErrorCode.CREDENTIAL_DENIED: CredentialAccessError,
         InternalErrorCode.ARTIFACT_DENIED: ArtifactAccessError,
+        InternalErrorCode.INVALID_REQUEST: SchemaValidationError,
     }
     exc_type = mapping.get(error.code, AuraClawError)
     raise exc_type(error.message, detail=detail)

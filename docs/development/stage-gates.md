@@ -1598,6 +1598,40 @@ Artifact Upload、统一 Catalog、Source Worker、CLI、Outbox 或完整安全�
 - [x] 架构说明与阶段门禁同步，未把后续 Phase 标记为完成。
 - [x] 本阶段作为一个 intentional commit 提交并 push，不包含 `.env`、Secret、缓存或无关改动。
 
+## 阶段 M14c：Skill 生产发布能力平面（Issue #56）
+
+状态：已完成。本阶段修复生产 Artifact 所有权和多进程发布边界；统一 Catalog、
+Resolver 持久恢复、staged upload、CLI 与完整治理继续独立交付。
+
+### 服务边界与生产装配
+
+- [x] SQL profile 的 Admin API 通过 `RemoteSkillPublicationClient` 调用 Action Hands，不在 Task API
+  进程内写 Skill Artifact。
+- [x] Action Hands 装配 production `ArtifactWriter`、持久 Lifecycle Store、统一
+  `SkillPublicationService` 和内部发布服务。
+- [x] memory profile 保留进程内适配器，测试不依赖远端基础设施。
+- [x] Action Hands readiness 要求 Task API workload identity；内部契约同时校验 bearer identity 与
+  `context.service_identity`。
+- [x] Task API 只传递已验证 tenant/actor 和命令上下文，不传对象存储凭证。
+- [x] 返回结果可刷新 Task API 本副本的只读兼容缓存；明确不把该缓存当作跨副本事实源。
+
+### 准入与错误语义
+
+- [x] 内部请求限制文件数和 base64 编码总量，拒绝非法 base64。
+- [x] 包路径、Manifest 和签名在不可变版本冲突判断前完成验证。
+- [x] 内部 `INVALID_REQUEST` 与公开 `SchemaValidationError` 双向映射，非法包不会退化为 500。
+- [x] Action Hands 返回持久 Artifact Ref，Package/Publication/Installation 由同一服务写入。
+- [x] 本阶段不删除 Runtime 双目录；必须等持久包读取、Catalog projection 和 Resolver 回查同时就绪。
+
+### 质量与交付
+
+- [x] Task API client -> workload-authenticated internal route -> Action Hands publication -> Artifact/Lifecycle
+  端到端单元测试通过。
+- [x] 覆盖非法路径的跨服务 422 映射、actor 保存和 Artifact writer 唯一调用。
+- [x] 全量 Ruff、全量 Mypy、完整单元测试、Skill/Capability 回归和 import-linter 通过。
+- [x] 架构说明与阶段门禁同步，未把统一 Catalog 或 staged upload 标记为完成。
+- [x] 本阶段作为一个 intentional commit 提交并 push，不包含 `.env`、Secret、缓存或无关改动。
+
 ## 阶段 Product Activity：产品级对话执行轨迹（AuraX Issue #2）
 
 状态：代码与定向验证完成；完整基础设施集成门禁受现有 Kafka/MySQL/PostgreSQL/Artifact 环境失败阻塞。

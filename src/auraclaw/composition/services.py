@@ -44,7 +44,9 @@ from auraclaw.action.mcp_registry import (
     InMemoryMcpServerRegistryStore,
     McpServerRegistryService,
 )
+from auraclaw.action.ports import ArtifactWriter
 from auraclaw.action.resource_gateway import ManagedResourceGateway
+from auraclaw.action.skill_internal_service import SkillPublicationInternalService
 from auraclaw.action.skill_lifecycle import (
     InMemorySkillLifecycleStore,
     SkillLifecycleStore,
@@ -129,6 +131,9 @@ from auraclaw.infrastructure.clients.session import (
     RemoteSessionEventStore,
     RemoteSessionOutboxSource,
 )
+from auraclaw.infrastructure.clients.skill_publication import (
+    RemoteSkillPublicationClient,
+)
 from auraclaw.infrastructure.clients.worker_wake import (
     HttpWorkerWakeClient,
     OutboxWakeNotifier,
@@ -208,6 +213,7 @@ from auraclaw.internal.routes import (
     model_stream_routes,
     policy_routes,
     session_routes,
+    skill_publication_routes,
 )
 from auraclaw.internal.security import (
     InMemoryFencingTokenLedger,
@@ -263,9 +269,13 @@ def _capability_catalog_store(
     return InMemoryCapabilityCatalogStore()
 
 
-def _skill_registry_service(settings: Settings) -> SkillPackageRegistry:
+def _skill_registry_service(
+    settings: Settings,
+    *,
+    artifacts: ArtifactWriter | None = None,
+) -> SkillPackageRegistry:
     global _SKILL_PACKAGE_REGISTRY
-    if _SKILL_PACKAGE_REGISTRY is not None:
+    if artifacts is None and _SKILL_PACKAGE_REGISTRY is not None:
         return _SKILL_PACKAGE_REGISTRY
     configured_signing_key = (
         settings.skill_signing_key.get_secret_value().encode()
@@ -275,23 +285,32 @@ def _skill_registry_service(settings: Settings) -> SkillPackageRegistry:
     signing_key = (
         configured_signing_key or b"auraclaw-development-platform-skill-key"
     )
-    _SKILL_PACKAGE_REGISTRY = SkillPackageRegistry(
-        artifacts=ArtifactStore(InMemoryObjectStorage(), signing_key=signing_key),
+    registry = SkillPackageRegistry(
+        artifacts=(
+            artifacts
+            or ArtifactStore(InMemoryObjectStorage(), signing_key=signing_key)
+        ),
         signature_verifier=HmacSkillSignatureVerifier({"platform": signing_key}),
         resources=HandsResourceRegistry(),
     )
-    return _SKILL_PACKAGE_REGISTRY
+    if artifacts is None:
+        _SKILL_PACKAGE_REGISTRY = registry
+    return registry
 
 
 def _skill_publication_service(
     settings: Settings,
     registry: SkillPackageRegistry,
+    lifecycle: SkillLifecycleStore | None = None,
 ) -> tuple[SkillPublicationService, SkillLifecycleStore]:
-    lifecycle: SkillLifecycleStore
-    if settings.sql_storage_enabled:
-        lifecycle = PostgresSkillLifecycleStore(settings.resolved_database_url)
-    else:
-        lifecycle = InMemorySkillLifecycleStore()
+    selected_lifecycle = lifecycle
+    if selected_lifecycle is None:
+        if settings.sql_storage_enabled:
+            selected_lifecycle = PostgresSkillLifecycleStore(
+                settings.resolved_database_url
+            )
+        else:
+            selected_lifecycle = InMemorySkillLifecycleStore()
     now = datetime.now(UTC)
     admin_upload = SkillSourceRecord(
         source_id="sks_admin_upload",
@@ -307,10 +326,10 @@ def _skill_publication_service(
     return (
         SkillPublicationService(
             registry=registry,
-            lifecycle=lifecycle,
+            lifecycle=selected_lifecycle,
             bootstrap_sources=(admin_upload,),
         ),
-        lifecycle,
+        selected_lifecycle,
     )
 
 
@@ -696,9 +715,20 @@ def _task_api_app(settings: Settings) -> FastAPI:
         )
     )
     skill_registry = _skill_registry_service(settings)
-    skill_publication, skill_lifecycle = _skill_publication_service(
-        settings, skill_registry
-    )
+    skill_lifecycle: SkillLifecycleStore | None = None
+    skill_publication: SkillPublicationService | RemoteSkillPublicationClient
+    if settings.sql_storage_enabled:
+        skill_publication = RemoteSkillPublicationClient(
+            settings.hands_url,
+            bearer_token=_service_bearer_token(
+                settings, ServiceIdentity.TASK_API
+            ),
+            compatibility_cache=skill_registry,
+        )
+    else:
+        skill_publication, skill_lifecycle = _skill_publication_service(
+            settings, skill_registry
+        )
     app.include_router(
         create_skill_admin_router(
             skill_registry,
@@ -712,6 +742,8 @@ def _task_api_app(settings: Settings) -> FastAPI:
         extra_closeables.append(capability_catalog_store)
     if isinstance(skill_lifecycle, PostgresSkillLifecycleStore):
         extra_closeables.append(skill_lifecycle)
+    if isinstance(skill_publication, RemoteSkillPublicationClient):
+        extra_closeables.append(skill_publication)
     app.state.closeables = (*app.state.closeables, *extra_closeables)
     app.state.config_ready = config_ready
     app.state.storage_label = "projection-read-only"
@@ -863,7 +895,19 @@ def _readiness(name: str, settings: Settings) -> tuple[bool, dict[str, str]]:
         dependencies["downstream_workload_identity"] = (
             "ready" if downstream_identity_ready else "missing"
         )
-        ready = ready and identity_ready and lease_ready and downstream_identity_ready
+        publish_identity_ready = bool(
+            settings.workload_token_value(ServiceIdentity.TASK_API.value)
+        )
+        dependencies["skill_publish_workload_identity"] = (
+            "ready" if publish_identity_ready else "missing"
+        )
+        ready = (
+            ready
+            and identity_ready
+            and lease_ready
+            and downstream_identity_ready
+            and publish_identity_ready
+        )
     if name == "policy":
         identities = (
             ServiceIdentity.TASK_API,
@@ -1243,11 +1287,21 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
     if settings.sql_storage_enabled:
         invocation_store = PostgresInvocationStore(settings.resolved_database_url)
         tool_registry_store = PostgresToolRegistryStore(settings.resolved_database_url)
+        skill_lifecycle: SkillLifecycleStore = PostgresSkillLifecycleStore(
+            settings.resolved_database_url
+        )
+    else:
+        skill_lifecycle = InMemorySkillLifecycleStore()
     closeables = (
         *remote_clients,
         artifacts,
         *((invocation_store,) if invocation_store is not None else ()),
         *((tool_registry_store,) if tool_registry_store is not None else ()),
+        *(
+            (skill_lifecycle,)
+            if isinstance(skill_lifecycle, PostgresSkillLifecycleStore)
+            else ()
+        ),
         *(
             (capability_catalog_store,)
             if isinstance(capability_catalog_store, PostgresCapabilityCatalogStore)
@@ -1265,7 +1319,10 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         closeables=closeables,
     )
     capability_catalog = CapabilityCatalog(capability_catalog_store)
-    skill_registry = _skill_registry_service(settings)
+    skill_registry = _skill_registry_service(settings, artifacts=artifacts)
+    skill_publication, _ = _skill_publication_service(
+        settings, skill_registry, skill_lifecycle
+    )
     resources = skill_registry.resources or HandsResourceRegistry()
     resource_gateway = ManagedResourceGateway(
         resources,
@@ -1501,6 +1558,19 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
             "action-hands-mcp-registry",
             mcp_registry_routes(McpRegistryInternalService(mcp_registry)),
             workload_identities=mcp_identities or None,
+        ),
+    )
+    app.mount(
+        "/internal/v1/skill-publications",
+        create_contract_app(
+            "action-hands-skill-publications",
+            skill_publication_routes(
+                SkillPublicationInternalService(skill_publication)
+            ),
+            workload_identities=_configured_identities(
+                settings, (ServiceIdentity.TASK_API,)
+            )
+            or None,
         ),
     )
     app.mount("/", hands_http_app)

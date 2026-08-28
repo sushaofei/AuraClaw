@@ -2,13 +2,12 @@ from __future__ import annotations
 
 import base64
 import binascii
-from typing import Annotated, Any
+from typing import Annotated, Any, Protocol
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
 from pydantic import Field
 
 from auraclaw.action.skill_packages import SkillPackage, SkillPackageRegistry
-from auraclaw.action.skill_publication import SkillPublicationService
 from auraclaw.api.dependencies import RequestIdentity, request_identity
 from auraclaw.contracts.internal import ContractModel
 from auraclaw.contracts.skills import PublishedSkill, PublishSkillCommand
@@ -23,6 +22,12 @@ class PublishSkillRequest(ContractModel):
     source_id: str = Field(min_length=1, max_length=128)
     activate: bool = True
     files: dict[str, str] = Field(min_length=1, max_length=_MAX_UPLOAD_FILES)
+
+
+class SkillPublisher(Protocol):
+    async def publish(
+        self, command: PublishSkillCommand, package: SkillPackage
+    ) -> PublishedSkill: ...
 
 
 def _summary(publication: PublishedSkill, *, skill_markdown: str | None = None) -> dict[str, Any]:
@@ -49,7 +54,7 @@ def _summary(publication: PublishedSkill, *, skill_markdown: str | None = None) 
 def create_skill_admin_router(
     registry: SkillPackageRegistry,
     *,
-    publication_service: SkillPublicationService | None = None,
+    publication_service: SkillPublisher | None = None,
 ) -> APIRouter:
     router = APIRouter(prefix="/v1/admin", tags=["skill-admin"])
 

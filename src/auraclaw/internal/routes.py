@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from auraclaw.action.mcp_internal_service import McpRegistryInternalService
+from auraclaw.action.skill_internal_service import SkillPublicationInternalService
 from auraclaw.admin.internal_service import OwnerAdminService
 from auraclaw.artifact.internal_service import ArtifactInternalService
 from auraclaw.contracts.internal import (
@@ -59,6 +60,8 @@ from auraclaw.contracts.internal import (
     SessionFeedResponse,
     SessionRootFeedRequest,
     SessionRootFeedResponse,
+    SkillPublishInternalRequest,
+    SkillPublishInternalResponse,
     ValidateLeaseRequest,
     ValidateLeaseResponse,
 )
@@ -232,6 +235,18 @@ def artifact_routes(service: ArtifactInternalService) -> dict[str, ContractRoute
         "/internal/v1/artifacts/download": contract_route(
             ArtifactDownloadRequest, ArtifactDownloadResponse, service.download
         ),
+    }
+
+
+def skill_publication_routes(
+    service: SkillPublicationInternalService,
+) -> dict[str, ContractRoute]:
+    return {
+        "/publish": contract_route(
+            SkillPublishInternalRequest,
+            SkillPublishInternalResponse,
+            service.publish,
+        )
     }
 
 
