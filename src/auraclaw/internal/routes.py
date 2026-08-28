@@ -87,6 +87,8 @@ from auraclaw.contracts.internal import (
     SkillPublishInternalResponse,
     SkillPurgeInternalRequest,
     SkillPurgeInternalResponse,
+    SkillRestoreInternalRequest,
+    SkillRestoreInternalResponse,
     SkillRevokeInternalRequest,
     SkillRevokeInternalResponse,
     SkillStateInternalRequest,
@@ -318,6 +320,11 @@ def skill_publication_routes(
             SkillRevokeInternalRequest,
             SkillRevokeInternalResponse,
             service.revoke,
+        ),
+        "/restore": contract_route(
+            SkillRestoreInternalRequest,
+            SkillRestoreInternalResponse,
+            service.restore,
         ),
         "/package": contract_route(
             SkillPackageStateInternalRequest,

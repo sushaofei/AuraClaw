@@ -514,6 +514,7 @@ class SkillPackageRegistry:
             raise NotFoundError("Skill package not found")
         if publication.status not in {
             SkillPublicationStatus.ACTIVE,
+            SkillPublicationStatus.RESTORING,
             SkillPublicationStatus.RETIRED,
         }:
             raise PolicyDeniedError("Skill package is revoked")

@@ -697,6 +697,22 @@ class SkillRevokeInternalResponse(ContractModel):
     publication: dict[str, Any]
 
 
+class SkillRestoreInternalRequest(ContractModel):
+    context: InternalRequestContext
+    actor_id: str = Field(min_length=1, max_length=256)
+    publisher: str = Field(min_length=1, max_length=128)
+    name: str = Field(min_length=1, max_length=256)
+    version: str = Field(min_length=1, max_length=128)
+    reason_code: str = Field(min_length=1, max_length=128)
+    command_id: str = Field(min_length=1, max_length=256)
+    expected_revision: int = Field(ge=1)
+
+
+class SkillRestoreInternalResponse(ContractModel):
+    api_version: str = INTERNAL_API_VERSION
+    publication: dict[str, Any]
+
+
 class SkillStateInternalRequest(ContractModel):
     context: InternalRequestContext
     publisher: str = Field(min_length=1, max_length=128)

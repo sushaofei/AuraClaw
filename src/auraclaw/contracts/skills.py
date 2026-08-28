@@ -19,6 +19,7 @@ class SkillPublicationStatus(StrEnum):
     STAGED = "staged"
     VALIDATING = "validating"
     ACTIVE = "active"
+    RESTORING = "restoring"
     QUARANTINED = "quarantined"
     RETIRED = "retired"
     REVOKED = "revoked"
@@ -112,6 +113,19 @@ class ChangeSkillInstallationCommand(ContractModel):
 
 
 class RevokeSkillPublicationCommand(ContractModel):
+    tenant_id: str = Field(min_length=1, max_length=128)
+    actor_id: str = Field(min_length=1, max_length=256)
+    publisher: str = Field(min_length=1, max_length=128, pattern=_SKILL_NAME)
+    name: str = Field(min_length=1, max_length=256, pattern=_SKILL_NAME)
+    version: str = Field(pattern=_SEMVER)
+    reason_code: str = Field(min_length=1, max_length=128)
+    command_id: str = Field(min_length=1, max_length=256)
+    expected_revision: int = Field(ge=1)
+    correlation_id: str = Field(min_length=1, max_length=256)
+    causation_id: str = Field(min_length=1, max_length=256)
+
+
+class RestoreSkillPublicationCommand(ContractModel):
     tenant_id: str = Field(min_length=1, max_length=128)
     actor_id: str = Field(min_length=1, max_length=256)
     publisher: str = Field(min_length=1, max_length=128, pattern=_SKILL_NAME)
@@ -402,12 +416,13 @@ class SkillPublicationRecord(ContractModel):
     @model_validator(mode="after")
     def validate_status_reason(self) -> SkillPublicationRecord:
         if self.status in {
+            SkillPublicationStatus.RESTORING,
             SkillPublicationStatus.QUARANTINED,
             SkillPublicationStatus.RETIRED,
             SkillPublicationStatus.REVOKED,
         } and not self.reason_code:
             raise ValueError(
-                "Quarantined, retired, or revoked Skill publication requires a reason"
+                "Restoring, quarantined, retired, or revoked Skill publication requires a reason"
             )
         return self
 

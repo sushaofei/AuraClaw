@@ -235,6 +235,8 @@ Secret 只允许引用 `credential_ref`，响应里不会出现明文。写命�
 | `GET` | `/v1/admin/skills/{publisher}/{name}/versions/{version}` | 指定版本详情 |
 | `POST` | `/v1/admin/skills/{publisher}/{name}:enable` | 租户级启用（不改进行中 Run 的 binding） |
 | `POST` | `/v1/admin/skills/{publisher}/{name}:disable` | 租户级停用 |
+| `POST` | `/v1/admin/skill-publications/{publisher}/{name}/versions/{version}:restore` | 审核后恢复普通退役版本；要求 revision、reason 与幂等键 |
+| `POST` | `/v1/admin/skill-publications/{publisher}/{name}/versions/{version}:revoke` | 安全撤销版本；不可通过 restore 复活 |
 | `GET` | `/v1/admin/skill-publishers/{publisher}` | Publisher 与公钥状态 |
 | `POST` | `/v1/admin/skill-publishers/{publisher}` | 注册 tenant Publisher |
 | `POST` | `/v1/admin/skill-publishers/{publisher}/keys:rotate` | 原子轮换 Ed25519 公钥 |
@@ -771,6 +773,9 @@ prompt、Skill/Resource 正文或 Chain-of-Thought。Tool 参数/结果递归脱
 Skill 启停是租户级目录状态，**不改**进行中 Run 的 Skill binding。Publisher Registry 只保存
 Ed25519 公钥，不接收或生成私钥；新发布只接受 active key，retiring key 仅用于恢复历史包，revoked key
 立即 fail closed。相关入口挂在 task-api 的 `/v1/admin/skills*` 与 `/v1/admin/skill-publishers*`。
+普通来源下架产生的 `retired` Publication 只能经显式 restore 恢复。restore 先持久化 reviewer、reason、
+correlation/causation 和 revision 证据，再复验原 Artifact 与当前 Source/Publisher/key 信任；失败保持
+`restoring` 且不进入新发现，同一 Idempotency-Key 可在修复信任条件后重试。
 
 ```bash
 curl -sS http://127.0.0.1:8000/v1/admin/skills \

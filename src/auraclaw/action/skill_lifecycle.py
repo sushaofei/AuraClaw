@@ -74,6 +74,19 @@ class SkillSourceSnapshotResult:
 
 
 @dataclass(frozen=True)
+class SkillRestoreCommit:
+    command_id: str
+    request_digest: str
+    actor_id: str
+    reason_code: str
+    correlation_id: str
+    causation_id: str
+    expected_revision: int
+    publication: SkillPublicationRecord
+    occurred_at: datetime
+
+
+@dataclass(frozen=True)
 class SkillPublishCommitResult:
     package: SkillPackageRecord
     publication: SkillPublicationRecord
@@ -178,6 +191,10 @@ class SkillLifecycleStore(Protocol):
         self, commit: SkillSourceSnapshotCommit
     ) -> SkillSourceSnapshotResult: ...
 
+    async def commit_restore(
+        self, commit: SkillRestoreCommit
+    ) -> SkillPublicationRecord: ...
+
 
 @dataclass
 class InMemorySkillLifecycleStore:
@@ -195,6 +212,7 @@ class InMemorySkillLifecycleStore:
         tuple[str, str, str, str, str], tuple[int, int]
     ] = field(default_factory=dict)
     _source_retirement_commands: set[tuple[str, str]] = field(default_factory=set)
+    _restore_commands: dict[CommandKey, str] = field(default_factory=dict)
     _commands: dict[CommandKey, tuple[str, SkillPublishCommitResult]] = field(
         default_factory=dict
     )
@@ -627,6 +645,44 @@ class InMemorySkillLifecycleStore:
                 retired.append(updated)
             self._sync_states[(state.tenant_id, state.source_id)] = state
             return SkillSourceSnapshotResult(tuple(retired))
+
+    async def commit_restore(
+        self, commit: SkillRestoreCommit
+    ) -> SkillPublicationRecord:
+        tenant_id = commit.publication.tenant_id
+        command_key = (tenant_id, commit.command_id)
+        publication_key = _publication_key(commit.publication)
+        async with self._lock:
+            replay = self._restore_commands.get(command_key)
+            if replay is not None:
+                if replay != commit.request_digest:
+                    raise VersionConflictError(
+                        "Skill restore command id was reused"
+                    )
+                current = self._publications.get(publication_key)
+                if current is None:
+                    raise VersionConflictError(
+                        "Skill restore command result is incomplete"
+                    )
+                return current
+            current = self._publications.get(publication_key)
+            if current is None:
+                raise NotFoundError("Skill publication was not found")
+            if current.revision != commit.expected_revision:
+                raise VersionConflictError("Skill publication revision conflict")
+            if current.status is not SkillPublicationStatus.RETIRED:
+                raise VersionConflictError("Skill publication is not retired")
+            updated = commit.publication
+            if (
+                updated.status is not SkillPublicationStatus.RESTORING
+                or updated.revision != current.revision + 1
+                or updated.package_digest != current.package_digest
+                or updated.publication_id != current.publication_id
+            ):
+                raise VersionConflictError("Skill restore transition is invalid")
+            self._publications[publication_key] = updated
+            self._restore_commands[command_key] = commit.request_digest
+            return updated
 
     def _require_active_lease(self, lease: SkillSourceLease) -> None:
         current = self._source_leases.get((lease.tenant_id, lease.source_id))

@@ -83,6 +83,7 @@ class SkillStateRebuilder:
         for record in await self._lifecycle.list_publications(tenant_id):
             if record.status not in {
                 SkillPublicationStatus.ACTIVE,
+                SkillPublicationStatus.RESTORING,
                 SkillPublicationStatus.RETIRED,
             }:
                 continue

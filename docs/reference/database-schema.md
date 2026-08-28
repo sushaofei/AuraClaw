@@ -65,6 +65,7 @@ uv run auraclaw migrate up
 | `0028` | Skill Source 对账租约、单调 fencing token 与过期接管索引 |
 | `0029` | Skill Source 连续缺失清单、审计化自动退役命令与 `retired` Publication 状态 |
 | `0030` | Publisher suspend/resume 状态证据与管理命令账本扩展 |
+| `0031` | 退役 Skill Publication 显式恢复状态、review 命令账本与回滚约束 |
 
 PostgreSQL / Kingbase 序列未使用 `0017`；MySQL 方言的 `0017` 用于扩大 Task View 文本字段。
 不要为了填补编号而重命名已经发布的迁移。
