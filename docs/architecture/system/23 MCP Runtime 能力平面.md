@@ -345,8 +345,16 @@ Task API 在迁移期可把已确认的发布结果写入本副本只读兼容�
 开发者 CLI 提供 `auraclaw skills validate|test|publish`。`validate` 使用与服务端相同的包解析、路径、
 Manifest、digest 和签名规则；`test` 只验证 `tests/*.json` 声明式向量，绝不加载或执行包内 Python、
 Shell 或二进制；`publish` 仅从指定环境变量读取 bearer token，并始终使用 staged Artifact 路径。
-当前 CLI 只支持平台 HMAC 兼容发布，外部 publisher 必须等 Publisher Registry、Ed25519/key rotation
-落地后接入，不能把开发密钥当生产信任根。
+本地 CLI 仍只离线校验平台 HMAC 兼容包；服务端使用 tenant 隔离的 Publisher Registry 接受外部
+Ed25519 包。Manifest 必须同时声明 `signature_key_id` 与 `ed25519:<base64url-signature>`；Registry 只保存
+32-byte Ed25519 公钥，私钥不得进入 AuraClaw 配置、数据库、Artifact 或日志。
+
+Publisher 管理通过 `POST /v1/admin/skill-publishers/{publisher}` 注册，再以
+`POST .../keys:rotate` 原子加入新 active key 并把旧 active key 切到 retiring；`POST .../keys/{key}:revoke`
+用于安全撤销。所有写入携带 command/correlation/causation、expected revision 和 actor，并由持久命令
+账本支持跨副本幂等。新包 admission 只接受 active key；retiring key 只允许恢复已经持久化且
+`SkillPackage.signature_key_id` 相同的包；revoked key 在 admission 和 restore 都 fail closed。撤销所在
+Action Hands 立即重建 tenant，其他副本由周期全量重建收敛，从 Catalog/Resolver 移除受影响包。
 
 发布服务先以 command id 在 Artifact metadata 获取有期限的 publication claim，再在一个数据库事务内
 提交不可变 Package、Publication、首个 Installation、成功命令账本和 `skill.publication.committed`
@@ -362,8 +370,8 @@ Service 只 claim retention 已到期、无 legal hold、未绑定且 publicatio
 决策并删除对象及 metadata。删除租约可过期接管，失败仅记录安全错误类型并退避重试，不记录包正文。
 这套 fencing 避免“先查无引用、后并发发布”的误删窗口，也不让 Artifact Service 反向读取 Hands 数据库。
 
-Source 多副本租约/对账与 Publisher Registry、Ed25519/key rotation 仍未完成，不能将当前状态描述为
-完整供应链治理。
+Source 多副本租约/对账、外部签名 CLI、publisher suspension 和完整拒绝/安全审计仍未完成，不能将
+当前状态描述为完整供应链治理。平台 HMAC 仅保留为兼容入口，不作为外部 publisher 信任根。
 
 Action Hands 启动及周期对账时由 `SkillStateRebuilder` 枚举 Lifecycle tenant，从受 Policy 保护的
 Artifact 下载接口读取不可变包，并再次校验大小、内容 hash、Archive、Manifest、package digest 和

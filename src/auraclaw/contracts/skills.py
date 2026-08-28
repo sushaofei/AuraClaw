@@ -49,6 +49,17 @@ class SkillSourceDesiredState(StrEnum):
     RETIRED = "retired"
 
 
+class SkillPublisherStatus(StrEnum):
+    ACTIVE = "active"
+    SUSPENDED = "suspended"
+
+
+class SkillPublisherKeyStatus(StrEnum):
+    ACTIVE = "active"
+    RETIRING = "retiring"
+    REVOKED = "revoked"
+
+
 class SkillInstallationOperation(StrEnum):
     INSTALL = "install"
     ENABLE = "enable"
@@ -120,6 +131,41 @@ class PurgeSkillPackageCommand(ContractModel):
     causation_id: str = Field(min_length=1, max_length=256)
 
 
+class RegisterSkillPublisherCommand(ContractModel):
+    tenant_id: str = Field(min_length=1, max_length=128)
+    actor_id: str = Field(min_length=1, max_length=256)
+    publisher: str = Field(min_length=1, max_length=128, pattern=_SKILL_NAME)
+    display_name: str = Field(min_length=1, max_length=256)
+    command_id: str = Field(min_length=1, max_length=256)
+    expected_revision: int = Field(default=0, ge=0)
+    correlation_id: str = Field(min_length=1, max_length=256)
+    causation_id: str = Field(min_length=1, max_length=256)
+
+
+class RotateSkillPublisherKeyCommand(ContractModel):
+    tenant_id: str = Field(min_length=1, max_length=128)
+    actor_id: str = Field(min_length=1, max_length=256)
+    publisher: str = Field(min_length=1, max_length=128, pattern=_SKILL_NAME)
+    key_id: str = Field(min_length=1, max_length=128, pattern=_SKILL_NAME)
+    public_key: str = Field(min_length=43, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
+    command_id: str = Field(min_length=1, max_length=256)
+    expected_revision: int = Field(ge=1)
+    correlation_id: str = Field(min_length=1, max_length=256)
+    causation_id: str = Field(min_length=1, max_length=256)
+
+
+class RevokeSkillPublisherKeyCommand(ContractModel):
+    tenant_id: str = Field(min_length=1, max_length=128)
+    actor_id: str = Field(min_length=1, max_length=256)
+    publisher: str = Field(min_length=1, max_length=128, pattern=_SKILL_NAME)
+    key_id: str = Field(min_length=1, max_length=128, pattern=_SKILL_NAME)
+    reason_code: str = Field(min_length=1, max_length=128)
+    command_id: str = Field(min_length=1, max_length=256)
+    expected_revision: int = Field(ge=1)
+    correlation_id: str = Field(min_length=1, max_length=256)
+    causation_id: str = Field(min_length=1, max_length=256)
+
+
 class SkillToolRequirement(ContractModel):
     name: str = Field(min_length=1, max_length=256)
     version: str = Field(default="*", min_length=1, max_length=128)
@@ -157,6 +203,9 @@ class SkillManifest(ContractModel):
     max_steps: int = Field(default=20, ge=1, le=1000)
     timeout_seconds: int = Field(default=900, ge=1, le=86400)
     publisher: str = Field(min_length=1, max_length=128, pattern=_SKILL_NAME)
+    signature_key_id: str | None = Field(
+        default=None, min_length=1, max_length=128, pattern=_SKILL_NAME
+    )
     signature: str = Field(pattern=r"^[a-z0-9-]+:[A-Za-z0-9_-]+$")
 
     @field_validator("required_tools")
@@ -219,6 +268,48 @@ class SkillManifest(ContractModel):
         for schema in (self.input_schema, self.output_schema):
             if schema.get("type") != "object":
                 raise ValueError("Skill input and output schemas must describe objects")
+        return self
+
+
+class SkillPublisherRecord(ContractModel):
+    tenant_id: str = Field(min_length=1, max_length=128)
+    publisher: str = Field(min_length=1, max_length=128, pattern=_SKILL_NAME)
+    display_name: str = Field(min_length=1, max_length=256)
+    status: SkillPublisherStatus = SkillPublisherStatus.ACTIVE
+    revision: int = Field(default=1, ge=1)
+    created_by: str = Field(min_length=1, max_length=256)
+    updated_by: str = Field(min_length=1, max_length=256)
+    created_at: datetime
+    updated_at: datetime
+
+
+class SkillPublisherKeyRecord(ContractModel):
+    tenant_id: str = Field(min_length=1, max_length=128)
+    publisher: str = Field(min_length=1, max_length=128, pattern=_SKILL_NAME)
+    key_id: str = Field(min_length=1, max_length=128, pattern=_SKILL_NAME)
+    algorithm: str = Field(default="ed25519", pattern=r"^ed25519$")
+    public_key: str = Field(min_length=43, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
+    status: SkillPublisherKeyStatus = SkillPublisherKeyStatus.ACTIVE
+    revision: int = Field(default=1, ge=1)
+    activated_at: datetime
+    retired_at: datetime | None = None
+    revoked_at: datetime | None = None
+    reason_code: str | None = Field(default=None, max_length=128)
+    created_by: str = Field(min_length=1, max_length=256)
+    updated_by: str = Field(min_length=1, max_length=256)
+    created_at: datetime
+    updated_at: datetime
+
+    @model_validator(mode="after")
+    def validate_state(self) -> SkillPublisherKeyRecord:
+        if self.status is SkillPublisherKeyStatus.ACTIVE:
+            if self.retired_at is not None or self.revoked_at is not None:
+                raise ValueError("Active Publisher key cannot be retired or revoked")
+        elif self.status is SkillPublisherKeyStatus.RETIRING:
+            if self.retired_at is None or self.revoked_at is not None:
+                raise ValueError("Retiring Publisher key requires retired_at")
+        elif self.revoked_at is None or not self.reason_code:
+            raise ValueError("Revoked Publisher key requires time and reason")
         return self
 
 

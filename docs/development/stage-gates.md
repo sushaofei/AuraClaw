@@ -1783,6 +1783,35 @@ ready Skill Artifact 建立带 fencing 的物理回收流程；不把成功命�
 - [x] 架构、README、数据库参考与阶段门禁同步，剩余供应链治理范围未误标为完成。
 - [x] 本阶段作为一个 intentional commit 提交并 push，不包含 `.env`、Secret、缓存或无关改动。
 
+## 阶段 M14i：Skill Publisher Registry 与 Ed25519 轮换（Issue #56）
+
+状态：已完成。本阶段把外部 publisher 信任根从平台 HMAC 中分离；
+本地 CLI、publisher suspension、Source 多副本租约和完整拒绝审计仍留待后续。
+
+### 信任模型与发布准入
+
+- [x] Publisher 与 Key 均按 tenant 隔离持久化，Registry 只保存 Ed25519 公钥，不接触私钥。
+- [x] Manifest 声明 `signature_key_id`；签名覆盖规范化 Manifest 与所有包文件 digest。
+- [x] 新发布只接受 active key；retiring key 仅恢复已持久化包；revoked key 对发布和恢复都 fail closed。
+- [x] Package 持久化实际验签 key id，恢复时同时校验 Manifest、Package record 与 Registry key identity。
+- [x] Admin Upload 的外部 publisher 必须先通过 tenant Registry 验签；其他 Source 仍要求显式 publisher allowlist。
+
+### 管理、轮换与恢复
+
+- [x] Admin API 支持 Publisher 注册、状态读取、Ed25519 key rotation 与 key revoke。
+- [x] Task API 通过 workload-authenticated internal contract 调用 Action Hands，不直接访问 Hands 数据库。
+- [x] rotation 原子地将旧 active key 改为 retiring 并创建唯一新 active key；revision 冲突 fail closed。
+- [x] 管理命令携带 tenant、actor、command、expected revision、correlation、causation，并可跨副本幂等重放。
+- [x] revoke 在当前副本立即重建 tenant，其他副本通过周期全量重建移除 Catalog/Resolver 可发现性。
+
+### 质量与交付
+
+- [x] 0027 正反迁移覆盖 Publisher、Key 与命令账本；真实 PostgreSQL rotation/rollback/重放验证通过。
+- [x] Ed25519 tenant 隔离、篡改拒绝、active/retiring/revoked 语义与 Admin API 测试通过。
+- [x] 全量 Ruff、Mypy、unit、相关 integration 与 import-linter 通过。
+- [x] README、公开 API、架构、数据库参考与阶段门禁同步，剩余治理范围未误标为完成。
+- [x] 本阶段作为一个 intentional commit 提交并 push，不包含 `.env`、Secret、缓存或无关改动。
+
 ## 阶段 Product Activity：产品级对话执行轨迹（AuraX Issue #2）
 
 状态：代码与定向验证完成；完整基础设施集成门禁受现有 Kafka/MySQL/PostgreSQL/Artifact 环境失败阻塞。

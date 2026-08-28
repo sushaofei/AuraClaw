@@ -16,6 +16,11 @@ from auraclaw.contracts.internal import (
     SkillPackageStateInternalRequest,
     SkillPackageStateInternalResponse,
     SkillPublishArtifactInternalRequest,
+    SkillPublisherInternalResponse,
+    SkillPublisherRegisterInternalRequest,
+    SkillPublisherRevokeKeyInternalRequest,
+    SkillPublisherRotateKeyInternalRequest,
+    SkillPublisherStateInternalRequest,
     SkillPublishInternalRequest,
     SkillPublishInternalResponse,
     SkillPurgeInternalRequest,
@@ -30,11 +35,16 @@ from auraclaw.contracts.skills import (
     PublishedSkill,
     PublishSkillCommand,
     PurgeSkillPackageCommand,
+    RegisterSkillPublisherCommand,
     RevokeSkillPublicationCommand,
+    RevokeSkillPublisherKeyCommand,
+    RotateSkillPublisherKeyCommand,
     SkillInstallationRecord,
     SkillInstallationStatus,
     SkillPackageRecord,
     SkillPublicationRecord,
+    SkillPublisherKeyRecord,
+    SkillPublisherRecord,
 )
 from auraclaw.contracts.tools import ArtifactRef
 from auraclaw.internal.http import HttpContractClient
@@ -253,6 +263,79 @@ class RemoteSkillPublicationClient:
             raise NotFoundError("Skill publication not found")
         return SkillPublicationRecord.model_validate(response.publication)
 
+    async def register_publisher(
+        self, command: RegisterSkillPublisherCommand
+    ) -> tuple[SkillPublisherRecord, tuple[SkillPublisherKeyRecord, ...]]:
+        response = await self._contract.call(
+            "/internal/v1/skill-publications/publishers/register",
+            SkillPublisherRegisterInternalRequest(
+                context=_context(command),
+                actor_id=command.actor_id,
+                publisher=command.publisher,
+                display_name=command.display_name,
+                command_id=command.command_id,
+                expected_revision=command.expected_revision,
+            ),
+            SkillPublisherInternalResponse,
+        )
+        return _publisher_state(response)
+
+    async def rotate_publisher_key(
+        self, command: RotateSkillPublisherKeyCommand
+    ) -> tuple[SkillPublisherRecord, tuple[SkillPublisherKeyRecord, ...]]:
+        response = await self._contract.call(
+            "/internal/v1/skill-publications/publishers/rotate-key",
+            SkillPublisherRotateKeyInternalRequest(
+                context=_context(command),
+                actor_id=command.actor_id,
+                publisher=command.publisher,
+                key_id=command.key_id,
+                public_key=command.public_key,
+                command_id=command.command_id,
+                expected_revision=command.expected_revision,
+            ),
+            SkillPublisherInternalResponse,
+        )
+        return _publisher_state(response)
+
+    async def revoke_publisher_key(
+        self, command: RevokeSkillPublisherKeyCommand
+    ) -> tuple[SkillPublisherRecord, tuple[SkillPublisherKeyRecord, ...]]:
+        response = await self._contract.call(
+            "/internal/v1/skill-publications/publishers/revoke-key",
+            SkillPublisherRevokeKeyInternalRequest(
+                context=_context(command),
+                actor_id=command.actor_id,
+                publisher=command.publisher,
+                key_id=command.key_id,
+                reason_code=command.reason_code,
+                command_id=command.command_id,
+                expected_revision=command.expected_revision,
+            ),
+            SkillPublisherInternalResponse,
+        )
+        return _publisher_state(response)
+
+    async def get_publisher(
+        self, tenant_id: str, publisher: str
+    ) -> tuple[SkillPublisherRecord, tuple[SkillPublisherKeyRecord, ...]]:
+        request_id = f"skill-publisher-state-{uuid4().hex}"
+        response = await self._contract.call(
+            "/internal/v1/skill-publications/publishers/state",
+            SkillPublisherStateInternalRequest(
+                context=InternalRequestContext(
+                    tenant_id=tenant_id,
+                    service_identity=ServiceIdentity.TASK_API,
+                    request_id=request_id,
+                    correlation_id=request_id,
+                    causation_id=request_id,
+                ),
+                publisher=publisher,
+            ),
+            SkillPublisherInternalResponse,
+        )
+        return _publisher_state(response)
+
     async def _state(
         self,
         *,
@@ -287,6 +370,9 @@ def _context(
         ChangeSkillInstallationCommand
         | RevokeSkillPublicationCommand
         | PurgeSkillPackageCommand
+        | RegisterSkillPublisherCommand
+        | RotateSkillPublisherKeyCommand
+        | RevokeSkillPublisherKeyCommand
     ),
 ) -> InternalRequestContext:
     return InternalRequestContext(
@@ -295,4 +381,13 @@ def _context(
         request_id=command.command_id,
         correlation_id=command.correlation_id,
         causation_id=command.causation_id,
+    )
+
+
+def _publisher_state(
+    response: SkillPublisherInternalResponse,
+) -> tuple[SkillPublisherRecord, tuple[SkillPublisherKeyRecord, ...]]:
+    return (
+        SkillPublisherRecord.model_validate(response.publisher),
+        tuple(SkillPublisherKeyRecord.model_validate(key) for key in response.keys),
     )

@@ -65,6 +65,11 @@ from auraclaw.action.skill_packages import (
     SkillResolver,
 )
 from auraclaw.action.skill_publication import SkillPublicationService
+from auraclaw.action.skill_publishers import (
+    InMemorySkillPublisherStore,
+    SkillPublisherService,
+    SkillPublisherTrustService,
+)
 from auraclaw.action.skill_rebuild import SkillStateRebuilder
 from auraclaw.action.skill_reconciler import SkillPackageReconciler
 from auraclaw.action.skill_reliability import SkillPublicationReliabilityWorker
@@ -207,6 +212,9 @@ from auraclaw.infrastructure.persistence.postgres_policy_store import (
 from auraclaw.infrastructure.persistence.postgres_skill_lifecycle import (
     PostgresSkillLifecycleStore,
 )
+from auraclaw.infrastructure.persistence.postgres_skill_publishers import (
+    PostgresSkillPublisherStore,
+)
 from auraclaw.infrastructure.persistence.postgres_tool_registry import (
     PostgresToolRegistryStore,
 )
@@ -322,6 +330,7 @@ def _skill_publication_service(
     lifecycle: SkillLifecycleStore | None = None,
     artifact_reader: ArtifactContentReader | None = None,
     artifact_lifecycle: SkillArtifactLifecycle | None = None,
+    publisher_trust: SkillPublisherTrustService | None = None,
 ) -> tuple[SkillPublicationService, SkillLifecycleStore]:
     selected_lifecycle = lifecycle
     if selected_lifecycle is None:
@@ -349,6 +358,7 @@ def _skill_publication_service(
             lifecycle=selected_lifecycle,
             artifacts=artifact_reader,
             artifact_lifecycle=artifact_lifecycle,
+            publisher_trust=publisher_trust,
             bootstrap_sources=(admin_upload,),
         ),
         selected_lifecycle,
@@ -741,6 +751,7 @@ def _task_api_app(settings: Settings) -> FastAPI:
     skill_publication: SkillPublicationService | RemoteSkillPublicationClient
     skill_management: SkillManagementService | RemoteSkillPublicationClient
     skill_uploads: RemoteSkillPackageUploadClient | None = None
+    publisher_management: SkillPublisherService | RemoteSkillPublicationClient
     if settings.sql_storage_enabled:
         skill_publication = RemoteSkillPublicationClient(
             settings.hands_url,
@@ -750,6 +761,7 @@ def _task_api_app(settings: Settings) -> FastAPI:
             compatibility_cache=skill_registry,
         )
         skill_management = skill_publication
+        publisher_management = skill_publication
         skill_uploads = RemoteSkillPackageUploadClient(
             settings.artifact_base_url,
             bearer_token=_service_bearer_token(
@@ -757,8 +769,12 @@ def _task_api_app(settings: Settings) -> FastAPI:
             ),
         )
     else:
+        publisher_store = InMemorySkillPublisherStore()
+        publisher_management = SkillPublisherService(publisher_store)
         skill_publication, skill_lifecycle = _skill_publication_service(
-            settings, skill_registry
+            settings,
+            skill_registry,
+            publisher_trust=SkillPublisherTrustService(publisher_store),
         )
         skill_management = SkillManagementService(
             lifecycle=skill_lifecycle,
@@ -773,6 +789,7 @@ def _task_api_app(settings: Settings) -> FastAPI:
             publication_service=skill_publication,
             management_service=skill_management,
             upload_service=skill_uploads,
+            publisher_service=publisher_management,
         )
     )
     extra_closeables: list[Any] = [mcp_lifecycle]
@@ -1343,14 +1360,23 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         settings.session_base_url,
         bearer_token=hands_token,
     )
+    skill_publisher_store: (
+        PostgresSkillPublisherStore | InMemorySkillPublisherStore
+    )
     if settings.sql_storage_enabled:
         invocation_store = PostgresInvocationStore(settings.resolved_database_url)
         tool_registry_store = PostgresToolRegistryStore(settings.resolved_database_url)
         skill_lifecycle: SkillLifecycleStore = PostgresSkillLifecycleStore(
             settings.resolved_database_url
         )
+        skill_publisher_store = PostgresSkillPublisherStore(
+            settings.resolved_database_url
+        )
     else:
         skill_lifecycle = InMemorySkillLifecycleStore()
+        skill_publisher_store = InMemorySkillPublisherStore()
+    skill_publishers = SkillPublisherService(skill_publisher_store)
+    publisher_trust = SkillPublisherTrustService(skill_publisher_store)
     closeables = (
         *remote_clients,
         artifacts,
@@ -1362,6 +1388,11 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         *(
             (skill_lifecycle,)
             if isinstance(skill_lifecycle, PostgresSkillLifecycleStore)
+            else ()
+        ),
+        *(
+            (skill_publisher_store,)
+            if isinstance(skill_publisher_store, PostgresSkillPublisherStore)
             else ()
         ),
         *(
@@ -1388,12 +1419,14 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         skill_lifecycle,
         artifact_reader=artifact_reader,
         artifact_lifecycle=skill_artifacts,
+        publisher_trust=publisher_trust,
     )
     skill_rebuilder = SkillStateRebuilder(
         lifecycle=skill_lifecycle,
         artifacts=artifact_reader,
         registry=skill_registry,
         catalog=capability_catalog,
+        publisher_trust=publisher_trust,
     )
     skill_reliability = SkillPublicationReliabilityWorker(
         lifecycle=skill_lifecycle,
@@ -1682,6 +1715,7 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
                     skill_publication,
                     management=skill_management,
                     rebuilder=skill_rebuilder,
+                    publishers=skill_publishers,
                 )
             ),
             workload_identities=_configured_identities(

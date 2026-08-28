@@ -408,7 +408,8 @@ AURACLAW_API_TOKEN=... uv run auraclaw skills publish path/to/skill \
 目录必须包含已签名的 `manifest.json` 与 `SKILL.md`。`skills test` 只接受并校验
 `tests/*.json` 声明式向量，不执行包内代码；`skills publish` 从
 `AURACLAW_API_TOKEN`（或 `--token-env` 指定的环境变量）读取令牌，不接受命令行明文令牌。
-当前开发者 CLI 仅支持平台 HMAC 兼容包，外部 publisher 待 Publisher Registry 与非对称签名阶段接入。
+当前本地 CLI 仍只离线校验平台 HMAC 兼容包；服务端可通过 tenant Publisher Registry 接受
+Ed25519 签名的外部 publisher 包。Registry 只保存公钥，私钥必须留在 publisher 的签名环境。
 发布的 Package、Publication、首个 Installation、成功命令账本和 Outbox 在 Action Hands 中原子提交；
 周期可靠性任务修复 Artifact binding 与 Catalog，并在 retention 到期后对未引用的 ready Skill Artifact
 执行带 Policy 和并发 fencing 的孤儿回收。
