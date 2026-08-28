@@ -45,11 +45,16 @@ from auraclaw.action.mcp_registry import (
     McpServerRegistryService,
 )
 from auraclaw.action.resource_gateway import ManagedResourceGateway
+from auraclaw.action.skill_lifecycle import (
+    InMemorySkillLifecycleStore,
+    SkillLifecycleStore,
+)
 from auraclaw.action.skill_packages import (
     HmacSkillSignatureVerifier,
     SkillPackageRegistry,
     SkillResolver,
 )
+from auraclaw.action.skill_publication import SkillPublicationService
 from auraclaw.action.skill_reconciler import SkillPackageReconciler
 from auraclaw.action.tool_gateway import ToolGateway, ToolRegistry
 from auraclaw.admin.internal_service import OwnerAdminService
@@ -82,6 +87,11 @@ from auraclaw.contracts.internal import (
     ServiceIdentity,
 )
 from auraclaw.contracts.mcp_registry import McpActiveSnapshotEntry
+from auraclaw.contracts.skills import (
+    SkillSourceDesiredState,
+    SkillSourceKind,
+    SkillSourceRecord,
+)
 from auraclaw.contracts.tools import CredentialReference
 from auraclaw.control.internal_service import ControlInternalService
 from auraclaw.control.orchestrator import (
@@ -170,6 +180,9 @@ from auraclaw.infrastructure.persistence.postgres_model_store import (
 )
 from auraclaw.infrastructure.persistence.postgres_policy_store import (
     PostgresPolicyStateStore,
+)
+from auraclaw.infrastructure.persistence.postgres_skill_lifecycle import (
+    PostgresSkillLifecycleStore,
 )
 from auraclaw.infrastructure.persistence.postgres_tool_registry import (
     PostgresToolRegistryStore,
@@ -268,6 +281,37 @@ def _skill_registry_service(settings: Settings) -> SkillPackageRegistry:
         resources=HandsResourceRegistry(),
     )
     return _SKILL_PACKAGE_REGISTRY
+
+
+def _skill_publication_service(
+    settings: Settings,
+    registry: SkillPackageRegistry,
+) -> tuple[SkillPublicationService, SkillLifecycleStore]:
+    lifecycle: SkillLifecycleStore
+    if settings.sql_storage_enabled:
+        lifecycle = PostgresSkillLifecycleStore(settings.resolved_database_url)
+    else:
+        lifecycle = InMemorySkillLifecycleStore()
+    now = datetime.now(UTC)
+    admin_upload = SkillSourceRecord(
+        source_id="sks_admin_upload",
+        tenant_id="*",
+        kind=SkillSourceKind.ADMIN_UPLOAD,
+        desired_state=SkillSourceDesiredState.ENABLED,
+        publisher_allowlist=("platform",),
+        created_by="system",
+        updated_by="system",
+        created_at=now,
+        updated_at=now,
+    )
+    return (
+        SkillPublicationService(
+            registry=registry,
+            lifecycle=lifecycle,
+            bootstrap_sources=(admin_upload,),
+        ),
+        lifecycle,
+    )
 
 
 async def _hands_mcp_snapshot(
@@ -651,12 +695,23 @@ def _task_api_app(settings: Settings) -> FastAPI:
             catalog=CapabilityCatalog(capability_catalog_store),
         )
     )
-    app.include_router(create_skill_admin_router(_skill_registry_service(settings)))
+    skill_registry = _skill_registry_service(settings)
+    skill_publication, skill_lifecycle = _skill_publication_service(
+        settings, skill_registry
+    )
+    app.include_router(
+        create_skill_admin_router(
+            skill_registry,
+            publication_service=skill_publication,
+        )
+    )
     extra_closeables: list[Any] = [mcp_lifecycle]
     if isinstance(mcp_store, PostgresMcpServerRegistryStore):
         extra_closeables.append(mcp_store)
     if isinstance(capability_catalog_store, PostgresCapabilityCatalogStore):
         extra_closeables.append(capability_catalog_store)
+    if isinstance(skill_lifecycle, PostgresSkillLifecycleStore):
+        extra_closeables.append(skill_lifecycle)
     app.state.closeables = (*app.state.closeables, *extra_closeables)
     app.state.config_ready = config_ready
     app.state.storage_label = "projection-read-only"

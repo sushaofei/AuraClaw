@@ -1,14 +1,28 @@
 from __future__ import annotations
 
+import base64
+import binascii
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Header, status
+from fastapi import APIRouter, Depends, Header, HTTPException, status
+from pydantic import Field
 
-from auraclaw.action.skill_packages import SkillPackageRegistry
+from auraclaw.action.skill_packages import SkillPackage, SkillPackageRegistry
+from auraclaw.action.skill_publication import SkillPublicationService
 from auraclaw.api.dependencies import RequestIdentity, request_identity
-from auraclaw.contracts.skills import PublishedSkill
+from auraclaw.contracts.internal import ContractModel
+from auraclaw.contracts.skills import PublishedSkill, PublishSkillCommand
 
 Identity = Annotated[RequestIdentity, Depends(request_identity)]
+
+_MAX_UPLOAD_FILES = 512
+_MAX_ENCODED_UPLOAD_BYTES = 24 * 1024 * 1024
+
+
+class PublishSkillRequest(ContractModel):
+    source_id: str = Field(min_length=1, max_length=128)
+    activate: bool = True
+    files: dict[str, str] = Field(min_length=1, max_length=_MAX_UPLOAD_FILES)
 
 
 def _summary(publication: PublishedSkill, *, skill_markdown: str | None = None) -> dict[str, Any]:
@@ -32,7 +46,11 @@ def _summary(publication: PublishedSkill, *, skill_markdown: str | None = None) 
     return payload
 
 
-def create_skill_admin_router(registry: SkillPackageRegistry) -> APIRouter:
+def create_skill_admin_router(
+    registry: SkillPackageRegistry,
+    *,
+    publication_service: SkillPublicationService | None = None,
+) -> APIRouter:
     router = APIRouter(prefix="/v1/admin", tags=["skill-admin"])
 
     @router.get("/skills")
@@ -76,6 +94,52 @@ def create_skill_admin_router(registry: SkillPackageRegistry) -> APIRouter:
             identity.tenant_id, publisher, name, version
         )
         return _summary(publication, skill_markdown=markdown)
+
+    @router.post(
+        "/skill-publications",
+        status_code=status.HTTP_201_CREATED,
+    )
+    async def publish_skill(
+        payload: PublishSkillRequest,
+        identity: Identity,
+        command_id: str = Header(alias="Idempotency-Key"),
+        expected_revision: int = Header(
+            default=0, alias="X-Expected-Revision", ge=0
+        ),
+    ) -> dict[str, Any]:
+        if publication_service is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Skill publication service is not configured",
+            )
+        encoded_size = sum(len(value) for value in payload.files.values())
+        if encoded_size > _MAX_ENCODED_UPLOAD_BYTES:
+            raise HTTPException(status_code=413, detail="Skill package is too large")
+        try:
+            files = {
+                path: base64.b64decode(content, validate=True)
+                for path, content in payload.files.items()
+            }
+        except (binascii.Error, ValueError) as exc:
+            raise HTTPException(
+                status_code=422,
+                detail="Skill package files must use valid base64",
+            ) from exc
+        package = SkillPackage.from_files(files)
+        publication = await publication_service.publish(
+            PublishSkillCommand(
+                tenant_id=identity.tenant_id,
+                actor_id=identity.actor.id,
+                source_id=payload.source_id,
+                activate=payload.activate,
+                command_id=command_id,
+                expected_revision=expected_revision,
+                correlation_id=identity.correlation_id,
+                causation_id=command_id,
+            ),
+            package,
+        )
+        return _summary(publication)
 
     @router.post(
         "/skills/{publisher}/{name}:enable",

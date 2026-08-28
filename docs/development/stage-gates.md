@@ -1565,6 +1565,39 @@ Catalog 切换或 Runtime 撤销动作；后续能力必须分别建立 M14b+ �
 - [x] MySQL 服务未部署、PostgreSQL 可选 Role 未安装的环境测试不纳入本地完成判定，失败原因已记录。
 - [x] 本阶段作为一个 intentional commit 提交并 push，不包含 `.env`、Secret、缓存或无关改动。
 
+## 阶段 M14b：统一 Skill 发布服务与管理入口（Issue #56）
+
+状态：已完成。本阶段建立唯一发布应用服务和小包管理入口，不宣称完成两阶段
+Artifact Upload、统一 Catalog、Source Worker、CLI、Outbox 或完整安全准入。
+
+### 发布应用服务
+
+- [x] `PublishSkillCommand` 携带 tenant、actor、source、command、expected revision、correlation 和
+  causation context。
+- [x] `SkillPublicationService` 统一执行 Source enabled/publisher allowlist、包校验、签名验证、
+  Artifact 写入、Package/Publication 持久化和激活 Installation 创建。
+- [x] 新包只允许 `staged` 或 `active`；仅允许 `staged -> active` 且使用 Publication revision 乐观
+  并发，publish 不能恢复 quarantined/revoked Publication。
+- [x] 相同版本相同 digest 幂等恢复；相同版本不同 digest 拒绝；SQL 重启路径复用持久 Artifact Ref。
+- [x] 并发相同发布可收敛到同一权威记录；Artifact 写成功但事务失败的回收仍由后续 staged GC 完成。
+
+### 管理入口与安全边界
+
+- [x] 新增 `POST /v1/admin/skill-publications` 小包便捷入口，文件使用校验型 base64、文件数和编码总量上限。
+- [x] tenant/actor 只来自已验证 Identity；command/correlation/causation 来自可信 Header/Identity，Body
+  不能覆盖。
+- [x] Composition 在 SQL 部署选择 PostgreSQL/KingBase Lifecycle Store，在 memory 配置选择测试适配器。
+- [x] 平台 HMAC 仍仅为兼容迁移；外部 Publisher Registry、非对称签名和 key rotation 不在本阶段冒充完成。
+- [x] 最终两阶段 staged upload、持久命令审计/Outbox、CLI、Source API/Worker 和统一 Catalog 单独验收。
+
+### 质量与交付
+
+- [x] 发布服务覆盖成功、幂等、不可变冲突、staged 激活、revision 冲突和 Source allowlist。
+- [x] 管理 API 通过真实 FastAPI Identity 路径验证发布，并出现在 Task API OpenAPI。
+- [x] 全量 Ruff、全量 Mypy、完整单元测试、Skill/Capability 回归和 import-linter 通过。
+- [x] 架构说明与阶段门禁同步，未把后续 Phase 标记为完成。
+- [x] 本阶段作为一个 intentional commit 提交并 push，不包含 `.env`、Secret、缓存或无关改动。
+
 ## 阶段 Product Activity：产品级对话执行轨迹（AuraX Issue #2）
 
 状态：代码与定向验证完成；完整基础设施集成门禁受现有 Kafka/MySQL/PostgreSQL/Artifact 环境失败阻塞。

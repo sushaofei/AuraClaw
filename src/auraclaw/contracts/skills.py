@@ -49,6 +49,17 @@ class SkillSourceDesiredState(StrEnum):
     RETIRED = "retired"
 
 
+class PublishSkillCommand(ContractModel):
+    tenant_id: str = Field(min_length=1, max_length=128)
+    actor_id: str = Field(min_length=1, max_length=256)
+    source_id: str = Field(min_length=1, max_length=128)
+    activate: bool = True
+    command_id: str = Field(min_length=1, max_length=256)
+    expected_revision: int = Field(default=0, ge=0)
+    correlation_id: str = Field(min_length=1, max_length=256)
+    causation_id: str = Field(min_length=1, max_length=256)
+
+
 class SkillToolRequirement(ContractModel):
     name: str = Field(min_length=1, max_length=256)
     version: str = Field(default="*", min_length=1, max_length=128)

@@ -307,6 +307,16 @@ Python、Shell、二进制或其他代码。
 和 causation context。生产跨信任域使用 Publisher Registry 与非对称签名；现有 HMAC 只作为平台
 兼容和开发测试适配器。
 
+首个迁移入口由 `SkillPublicationService` 承担。它在写 Artifact 前校验受信 Source 的启用状态和
+publisher allowlist，调用既有确定性包校验与签名验证，只允许新包进入 `staged` 或 `active`，随后写
+不可变 Package、带 revision 的 Publication，并在激活时创建 tenant Installation。相同 identity 和
+digest 是幂等成功，相同 identity 不同 digest 必须冲突；`staged -> active` 必须携带当前 revision。
+
+`POST /v1/admin/skill-publications` 是迁移期的小包便捷入口：正文使用受限数量和总大小的 base64
+文件映射，tenant/actor 只取服务端 Identity，命令上下文只取可信请求头。它不是最终的大包上传协议；
+后续两阶段 staged Artifact upload、持久审计/Outbox、Publisher Registry、CLI 和 Source Worker 仍须
+复用同一服务，而不是复制发布逻辑。SQL 部署使用持久 Lifecycle Store；内存 Store 只用于开发测试。
+
 ## 4. 发现、加载与调用
 
 ### 4.1 协议发现和目录同步
