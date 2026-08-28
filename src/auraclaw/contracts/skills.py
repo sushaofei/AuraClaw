@@ -107,6 +107,19 @@ class RevokeSkillPublicationCommand(ContractModel):
     causation_id: str = Field(min_length=1, max_length=256)
 
 
+class PurgeSkillPackageCommand(ContractModel):
+    tenant_id: str = Field(min_length=1, max_length=128)
+    actor_id: str = Field(min_length=1, max_length=256)
+    publisher: str = Field(min_length=1, max_length=128, pattern=_SKILL_NAME)
+    name: str = Field(min_length=1, max_length=256, pattern=_SKILL_NAME)
+    version: str = Field(pattern=_SEMVER)
+    reason_code: str = Field(min_length=1, max_length=128)
+    command_id: str = Field(min_length=1, max_length=256)
+    expected_revision: int = Field(ge=1)
+    correlation_id: str = Field(min_length=1, max_length=256)
+    causation_id: str = Field(min_length=1, max_length=256)
+
+
 class SkillToolRequirement(ContractModel):
     name: str = Field(min_length=1, max_length=256)
     version: str = Field(default="*", min_length=1, max_length=128)
@@ -226,6 +239,11 @@ class SkillPackageRecord(ContractModel):
     retention_status: SkillPackageRetentionStatus = (
         SkillPackageRetentionStatus.RETAINED
     )
+    retention_until: datetime
+    legal_hold: bool = False
+    retention_revision: int = Field(default=1, ge=1)
+    retention_updated_by: str = Field(min_length=1, max_length=256)
+    retention_updated_at: datetime
     created_at: datetime
     purged_at: datetime | None = None
 

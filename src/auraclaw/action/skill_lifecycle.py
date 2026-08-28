@@ -25,6 +25,10 @@ class SkillLifecycleStore(Protocol):
         self, tenant_id: str, publisher: str, name: str, version: str
     ) -> SkillPackageRecord | None: ...
 
+    async def update_package_retention(
+        self, record: SkillPackageRecord, *, expected_revision: int
+    ) -> SkillPackageRecord: ...
+
     async def put_publication(
         self, record: SkillPublicationRecord, *, expected_revision: int
     ) -> SkillPublicationRecord: ...
@@ -103,6 +107,22 @@ class InMemorySkillLifecycleStore:
         self, tenant_id: str, publisher: str, name: str, version: str
     ) -> SkillPackageRecord | None:
         return self._packages.get((tenant_id, publisher, name, version))
+
+    async def update_package_retention(
+        self, record: SkillPackageRecord, *, expected_revision: int
+    ) -> SkillPackageRecord:
+        key = _package_key(record)
+        existing = self._packages.get(key)
+        if existing is None:
+            raise NotFoundError("Skill package was not found")
+        if existing.package_digest != record.package_digest:
+            raise VersionConflictError("Skill version is immutable")
+        if existing.retention_revision != expected_revision:
+            raise VersionConflictError("Skill package retention revision conflict")
+        if record.retention_revision != expected_revision + 1:
+            raise VersionConflictError("Skill package retention next revision is invalid")
+        self._packages[key] = record
+        return record
 
     async def put_publication(
         self, record: SkillPublicationRecord, *, expected_revision: int

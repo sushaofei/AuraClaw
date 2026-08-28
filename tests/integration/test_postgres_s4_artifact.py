@@ -13,6 +13,7 @@ from auraclaw.composition.object_storage import build_object_storage
 from auraclaw.config import get_settings
 from auraclaw.contracts.internal import (
     ArtifactCreateUploadRequest,
+    ArtifactDeleteRequest,
     ArtifactFinalizeRequest,
     InternalRequestContext,
     ServiceIdentity,
@@ -84,6 +85,7 @@ def test_artifact_multipart_scan_restart_and_gc() -> None:
                     media_type="application/octet-stream",
                     expected_size=len(content),
                     expected_checksum=checksum,
+                    retention_until=datetime.now(UTC),
                 )
             )
             assert upload.upload_mode == "multipart"
@@ -127,6 +129,32 @@ def test_artifact_multipart_scan_restart_and_gc() -> None:
             assert restarted is not None
             assert restarted.multipart_completed
             ready_key = restarted.object_key
+
+            deleted = await service_b.delete(
+                ArtifactDeleteRequest(
+                    context=context,
+                    artifact_id=upload.artifact_id,
+                    version=1,
+                    actor_id="integration-admin",
+                    reason_code="retention_elapsed",
+                    policy_decision_id="integration-decision",
+                )
+            )
+            assert deleted.status == "deleted"
+            assert await repository_a.is_deleted(
+                tenant_id, upload.artifact_id, 1
+            )
+            assert await service.delete(
+                ArtifactDeleteRequest(
+                    context=context,
+                    artifact_id=upload.artifact_id,
+                    version=1,
+                    actor_id="integration-admin",
+                    reason_code="idempotent_retry",
+                    policy_decision_id="integration-decision",
+                )
+            ) == deleted
+            ready_key = None
 
             expired = await service.create_upload(
                 ArtifactCreateUploadRequest(

@@ -10,6 +10,8 @@ from auraclaw.contracts.internal import (
     ApprovalCommandRequest,
     ApprovalValidationResponse,
     ArtifactCreateUploadRequest,
+    ArtifactDeleteRequest,
+    ArtifactDeleteResponse,
     ArtifactDownloadRequest,
     ArtifactDownloadResponse,
     ArtifactFinalizeRequest,
@@ -60,10 +62,16 @@ from auraclaw.contracts.internal import (
     SessionFeedResponse,
     SessionRootFeedRequest,
     SessionRootFeedResponse,
+    SkillBindingReferenceRequest,
+    SkillBindingReferenceResponse,
     SkillInstallationInternalRequest,
     SkillInstallationInternalResponse,
+    SkillPackageStateInternalRequest,
+    SkillPackageStateInternalResponse,
     SkillPublishInternalRequest,
     SkillPublishInternalResponse,
+    SkillPurgeInternalRequest,
+    SkillPurgeInternalResponse,
     SkillRevokeInternalRequest,
     SkillRevokeInternalResponse,
     SkillStateInternalRequest,
@@ -95,6 +103,11 @@ def session_routes(service: SessionInternalService) -> dict[str, ContractRoute]:
         ),
         "/internal/v1/session/root-feed": contract_route(
             SessionRootFeedRequest, SessionRootFeedResponse, service.root_feed
+        ),
+        "/internal/v1/session/skill-bindings/reference": contract_route(
+            SkillBindingReferenceRequest,
+            SkillBindingReferenceResponse,
+            service.skill_binding_reference,
         ),
         "/internal/v1/session/outbox/claim": contract_route(
             OutboxClaimRequest, OutboxClaimResponse, service.claim_outbox
@@ -241,6 +254,9 @@ def artifact_routes(service: ArtifactInternalService) -> dict[str, ContractRoute
         "/internal/v1/artifacts/download": contract_route(
             ArtifactDownloadRequest, ArtifactDownloadResponse, service.download
         ),
+        "/internal/v1/artifacts/delete": contract_route(
+            ArtifactDeleteRequest, ArtifactDeleteResponse, service.delete
+        ),
     }
 
 
@@ -262,6 +278,16 @@ def skill_publication_routes(
             SkillRevokeInternalRequest,
             SkillRevokeInternalResponse,
             service.revoke,
+        ),
+        "/package": contract_route(
+            SkillPackageStateInternalRequest,
+            SkillPackageStateInternalResponse,
+            service.package_state,
+        ),
+        "/purge": contract_route(
+            SkillPurgeInternalRequest,
+            SkillPurgeInternalResponse,
+            service.purge,
         ),
         "/state": contract_route(
             SkillStateInternalRequest,

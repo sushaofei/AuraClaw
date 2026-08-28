@@ -8,7 +8,7 @@ import json
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import PurePosixPath
 from typing import Protocol, TypeVar
 
@@ -104,12 +104,14 @@ class SkillPackageRegistry:
         resources: McpResourceRegistry | None = None,
         max_package_bytes: int = 16 * 1024 * 1024,
         max_files: int = 512,
+        package_retention: timedelta = timedelta(days=90),
     ) -> None:
         self._artifacts = artifacts
         self._signature_verifier = signature_verifier
         self._resources = resources
         self._max_package_bytes = max_package_bytes
         self._max_files = max_files
+        self._package_retention = package_retention
         self._packages: dict[tuple[str, str, str, str], SkillPackage] = {}
         self._publications: dict[tuple[str, str, str, str], PublishedSkill] = {}
         self._discoverable: set[tuple[str, str, str, str]] = set()
@@ -269,6 +271,7 @@ class SkillPackageRegistry:
             ),
             producer="skill-registry",
             classification=normalized.manifest.data_classification,
+            retention_until=datetime.now(UTC) + self._package_retention,
         )
         publication = PublishedSkill(
             tenant_id=tenant_id,

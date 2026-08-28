@@ -57,6 +57,9 @@ uv run auraclaw migrate up
 | `0020` | MCP Server 热配置 Registry |
 | `0021` | Task Source 与列表查询 |
 | `0022` | MCP Server 删除操作状态 |
+| `0023` | Skill Package、Publication、Installation 与 Source 生命周期 |
+| `0024` | Skill Publication 更新 actor |
+| `0025` | Skill Package retention、legal hold 与 optimistic revision |
 
 PostgreSQL / Kingbase 序列未使用 `0017`；MySQL 方言的 `0017` 用于扩大 Task View 文本字段。
 不要为了填补编号而重命名已经发布的迁移。

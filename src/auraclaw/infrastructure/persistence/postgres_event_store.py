@@ -90,6 +90,23 @@ class PostgresEventStore(LazyPool):
             )
         return [event_from_record(row) for row in rows]
 
+    async def has_skill_package_reference(
+        self, tenant_id: str, package_digest: str
+    ) -> bool:
+        pool = await self.pool()
+        if self.dialect == "mysql":
+            query = """SELECT EXISTS(SELECT 1 FROM session_core.canonical_event
+                WHERE tenant_id=$1 AND event_type='skill.activated'
+                  AND (JSON_UNQUOTE(JSON_EXTRACT(payload, '$.package_digest'))=$2
+                    OR JSON_UNQUOTE(JSON_EXTRACT(
+                        payload, '$.activation.binding.package_digest'))=$2))"""
+        else:
+            query = """SELECT EXISTS(SELECT 1 FROM session_core.canonical_event
+                WHERE tenant_id=$1 AND event_type='skill.activated'
+                  AND (payload->>'package_digest'=$2
+                    OR payload#>>'{activation,binding,package_digest}'=$2))"""
+        return bool(await pool.fetchval(query, tenant_id, package_digest))
+
     async def load_root(
         self,
         tenant_id: str,

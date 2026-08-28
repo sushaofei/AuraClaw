@@ -12,8 +12,12 @@ from auraclaw.contracts.internal import (
     ServiceIdentity,
     SkillInstallationInternalRequest,
     SkillInstallationInternalResponse,
+    SkillPackageStateInternalRequest,
+    SkillPackageStateInternalResponse,
     SkillPublishInternalRequest,
     SkillPublishInternalResponse,
+    SkillPurgeInternalRequest,
+    SkillPurgeInternalResponse,
     SkillRevokeInternalRequest,
     SkillRevokeInternalResponse,
     SkillStateInternalRequest,
@@ -22,6 +26,7 @@ from auraclaw.contracts.internal import (
 from auraclaw.contracts.skills import (
     ChangeSkillInstallationCommand,
     PublishSkillCommand,
+    PurgeSkillPackageCommand,
     RevokeSkillPublicationCommand,
     SkillInstallationOperation,
 )
@@ -137,6 +142,49 @@ class SkillPublicationInternalService:
         return SkillRevokeInternalResponse(
             publication=result.model_dump(mode="json")
         )
+
+    async def package_state(
+        self, request: SkillPackageStateInternalRequest
+    ) -> SkillPackageStateInternalResponse:
+        if request.context.service_identity is not ServiceIdentity.TASK_API:
+            raise AuthorizationError("workload may not query Skill package state")
+        if self._management is None:
+            raise SchemaValidationError("Skill management service is not configured")
+        package = await self._management.get_package(
+            request.context.tenant_id,
+            request.publisher,
+            request.name,
+            request.version,
+        )
+        return SkillPackageStateInternalResponse(
+            package=package.model_dump(mode="json")
+        )
+
+    async def purge(
+        self, request: SkillPurgeInternalRequest
+    ) -> SkillPurgeInternalResponse:
+        self._validate_management_request(
+            request.context.service_identity,
+            request.context.request_id,
+            request.command_id,
+        )
+        if self._management is None:
+            raise SchemaValidationError("Skill management service is not configured")
+        package = await self._management.purge_package(
+            PurgeSkillPackageCommand(
+                tenant_id=request.context.tenant_id,
+                actor_id=request.actor_id,
+                publisher=request.publisher,
+                name=request.name,
+                version=request.version,
+                reason_code=request.reason_code,
+                command_id=request.command_id,
+                expected_revision=request.expected_revision,
+                correlation_id=request.context.correlation_id,
+                causation_id=request.context.causation_id,
+            )
+        )
+        return SkillPurgeInternalResponse(package=package.model_dump(mode="json"))
 
     @staticmethod
     def _validate_management_request(

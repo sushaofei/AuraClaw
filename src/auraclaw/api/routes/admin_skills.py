@@ -14,9 +14,11 @@ from auraclaw.contracts.skills import (
     ChangeSkillInstallationCommand,
     PublishedSkill,
     PublishSkillCommand,
+    PurgeSkillPackageCommand,
     RevokeSkillPublicationCommand,
     SkillInstallationOperation,
     SkillInstallationRecord,
+    SkillPackageRecord,
     SkillPublicationRecord,
 )
 
@@ -39,6 +41,14 @@ class SkillPublisher(Protocol):
 
 
 class SkillManager(Protocol):
+    async def get_package(
+        self,
+        tenant_id: str,
+        publisher: str,
+        name: str,
+        version: str,
+    ) -> SkillPackageRecord: ...
+
     async def get_installation(
         self, tenant_id: str, publisher: str, name: str
     ) -> SkillInstallationRecord: ...
@@ -58,6 +68,10 @@ class SkillManager(Protocol):
     async def revoke_publication(
         self, command: RevokeSkillPublicationCommand
     ) -> SkillPublicationRecord: ...
+
+    async def purge_package(
+        self, command: PurgeSkillPackageCommand
+    ) -> SkillPackageRecord: ...
 
 
 def _summary(publication: PublishedSkill, *, skill_markdown: str | None = None) -> dict[str, Any]:
@@ -170,6 +184,23 @@ def create_skill_admin_router(
             version,
         )
         return {"publication": _publication_state_summary(publication)}
+
+    @router.get("/skill-packages/{publisher}/{name}/versions/{version}")
+    async def get_skill_package_state(
+        publisher: str,
+        name: str,
+        version: str,
+        identity: Identity,
+    ) -> dict[str, Any]:
+        if management_service is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Skill management service is not configured",
+            )
+        package = await management_service.get_package(
+            identity.tenant_id, publisher, name, version
+        )
+        return {"package": _package_state_summary(package)}
 
     @router.post(
         "/skill-publications",
@@ -341,6 +372,40 @@ def create_skill_admin_router(
             "publication": _publication_state_summary(publication)
         }
 
+    @router.post(
+        "/skill-packages/{publisher}/{name}/versions/{version}:purge",
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    async def purge_skill_package(
+        publisher: str,
+        name: str,
+        version: str,
+        identity: Identity,
+        command_id: str = Header(alias="Idempotency-Key"),
+        expected_revision: int = Header(alias="X-Expected-Revision", ge=1),
+        reason_code: str = Header(alias="X-Reason-Code", min_length=1, max_length=128),
+    ) -> dict[str, Any]:
+        if management_service is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Skill management service is not configured",
+            )
+        package = await management_service.purge_package(
+            PurgeSkillPackageCommand(
+                tenant_id=identity.tenant_id,
+                actor_id=identity.actor.id,
+                publisher=publisher,
+                name=name,
+                version=version,
+                reason_code=reason_code,
+                command_id=command_id,
+                expected_revision=expected_revision,
+                correlation_id=identity.correlation_id,
+                causation_id=command_id,
+            )
+        )
+        return {"package": _package_state_summary(package)}
+
     return router
 
 
@@ -407,4 +472,22 @@ def _publication_state_summary(
         "reason_code": publication.reason_code,
         "updated_by": publication.updated_by,
         "updated_at": publication.updated_at.isoformat(),
+    }
+
+
+def _package_state_summary(package: SkillPackageRecord) -> dict[str, Any]:
+    return {
+        "publisher": package.manifest.publisher,
+        "name": package.manifest.name,
+        "version": package.manifest.version,
+        "package_digest": package.package_digest,
+        "retention_status": package.retention_status.value,
+        "retention_until": package.retention_until.isoformat(),
+        "legal_hold": package.legal_hold,
+        "retention_revision": package.retention_revision,
+        "retention_updated_by": package.retention_updated_by,
+        "retention_updated_at": package.retention_updated_at.isoformat(),
+        "purged_at": (
+            None if package.purged_at is None else package.purged_at.isoformat()
+        ),
     }

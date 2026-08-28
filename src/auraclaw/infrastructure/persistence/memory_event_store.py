@@ -88,6 +88,26 @@ class InMemoryEventStore:
             key=lambda event: (event.tenant_id, event.session_id, event.aggregate_version),
         )
 
+    async def has_skill_package_reference(
+        self, tenant_id: str, package_digest: str
+    ) -> bool:
+        for event in await self.load_all(tenant_id):
+            if event.type != "skill.activated":
+                continue
+            direct = event.payload.get("package_digest")
+            activation = event.payload.get("activation")
+            binding = (
+                activation.get("binding")
+                if isinstance(activation, dict)
+                else None
+            )
+            nested = (
+                binding.get("package_digest") if isinstance(binding, dict) else None
+            )
+            if direct == package_digest or nested == package_digest:
+                return True
+        return False
+
     async def load_root(
         self,
         tenant_id: str,

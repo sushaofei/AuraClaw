@@ -136,6 +136,7 @@ from auraclaw.infrastructure.clients.session import (
     RemoteSessionDeliveryOutboxSource,
     RemoteSessionEventStore,
     RemoteSessionOutboxSource,
+    RemoteSkillBindingReferenceReader,
 )
 from auraclaw.infrastructure.clients.skill_publication import (
     RemoteSkillPublicationClient,
@@ -1172,6 +1173,7 @@ def _session_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
             ServiceIdentity.POLICY,
             ServiceIdentity.DELIVERY_WORKER,
             ServiceIdentity.STREAMING_GATEWAY,
+            ServiceIdentity.ACTION_HANDS,
         ),
     )
     contract_app = create_contract_app(
@@ -1305,6 +1307,10 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         bearer_token=_service_bearer_token(settings, ServiceIdentity.ACTION_HANDS),
         policy=policy,
     )
+    skill_binding_references = RemoteSkillBindingReferenceReader(
+        settings.session_base_url,
+        bearer_token=hands_token,
+    )
     if settings.sql_storage_enabled:
         invocation_store = PostgresInvocationStore(settings.resolved_database_url)
         tool_registry_store = PostgresToolRegistryStore(settings.resolved_database_url)
@@ -1317,6 +1323,7 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         *remote_clients,
         artifacts,
         artifact_reader,
+        skill_binding_references,
         *((invocation_store,) if invocation_store is not None else ()),
         *((tool_registry_store,) if tool_registry_store is not None else ()),
         *(
@@ -1354,6 +1361,8 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
     skill_management = SkillManagementService(
         lifecycle=skill_lifecycle,
         projector=skill_rebuilder,
+        artifacts=artifact_reader,
+        binding_references=skill_binding_references,
     )
     resources = skill_registry.resources or HandsResourceRegistry()
     resource_gateway = ManagedResourceGateway(

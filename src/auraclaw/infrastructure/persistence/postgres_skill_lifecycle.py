@@ -35,8 +35,11 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
             row = await pool.fetchrow(
                 """INSERT INTO hands.skill_package
                 (tenant_id,publisher,name,version,package_digest,manifest_json,
-                 artifact_ref,signature_key_id,retention_status,created_at,purged_at)
-                VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8,$9,$10,$11)
+                 artifact_ref,signature_key_id,retention_status,retention_until,
+                 legal_hold,retention_revision,retention_updated_by,
+                 retention_updated_at,created_at,purged_at)
+                VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8,$9,$10,$11,$12,
+                        $13,$14,$15,$16)
                 ON CONFLICT (tenant_id,publisher,name,version) DO NOTHING
                 RETURNING *""",
                 record.tenant_id,
@@ -48,6 +51,11 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
                 json_dumps(_artifact_payload(record.artifact_ref)),
                 record.signature_key_id,
                 record.retention_status.value,
+                record.retention_until,
+                record.legal_hold,
+                record.retention_revision,
+                record.retention_updated_by,
+                record.retention_updated_at,
                 record.created_at,
                 record.purged_at,
             )
@@ -80,6 +88,40 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
             version,
         )
         return None if row is None else _package(dict(row))
+
+    async def update_package_retention(
+        self, record: SkillPackageRecord, *, expected_revision: int
+    ) -> SkillPackageRecord:
+        if record.retention_revision != expected_revision + 1:
+            raise VersionConflictError(
+                "Skill package retention next revision is invalid"
+            )
+        pool = await self.pool()
+        row = await pool.fetchrow(
+            """UPDATE hands.skill_package SET
+            retention_status=$1,retention_until=$2,legal_hold=$3,
+            retention_revision=$4,retention_updated_by=$5,
+            retention_updated_at=$6,purged_at=$7
+            WHERE tenant_id=$8 AND publisher=$9 AND name=$10 AND version=$11
+              AND package_digest=$12 AND retention_revision=$13
+            RETURNING *""",
+            record.retention_status.value,
+            record.retention_until,
+            record.legal_hold,
+            record.retention_revision,
+            record.retention_updated_by,
+            record.retention_updated_at,
+            record.purged_at,
+            record.tenant_id,
+            record.manifest.publisher,
+            record.manifest.name,
+            record.manifest.version,
+            record.package_digest,
+            expected_revision,
+        )
+        if row is None:
+            raise VersionConflictError("Skill package retention revision conflict")
+        return _package(dict(row))
 
     async def put_publication(
         self, record: SkillPublicationRecord, *, expected_revision: int
@@ -387,6 +429,11 @@ def _package(row: dict[str, Any]) -> SkillPackageRecord:
         artifact_ref=_artifact(row["artifact_ref"]),
         signature_key_id=row["signature_key_id"],
         retention_status=SkillPackageRetentionStatus(str(row["retention_status"])),
+        retention_until=row["retention_until"],
+        legal_hold=bool(row["legal_hold"]),
+        retention_revision=int(row["retention_revision"]),
+        retention_updated_by=str(row["retention_updated_by"]),
+        retention_updated_at=row["retention_updated_at"],
         created_at=row["created_at"],
         purged_at=row["purged_at"],
     )

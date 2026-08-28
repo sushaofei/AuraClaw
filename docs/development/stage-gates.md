@@ -1695,6 +1695,35 @@ Publisher Registry、Outbox/lease 与 Package GC 继续后续阶段。
 - [x] 架构与阶段门禁说明同步，uninstall、revoke 与物理 purge 语义明确分离。
 - [x] 本阶段作为一个 intentional commit 提交并 push，不包含 `.env`、Secret、缓存或无关改动。
 
+## 阶段 M14f：Skill Package 安全物理清理（Issue #56）
+
+状态：已完成。本阶段开放版本级物理 purge，同时保留
+uninstall、revoke 和 purge 三种不同语义。
+
+### 保留与引用安全
+
+- [x] Package 持久化 retention deadline、legal hold、retention revision、updated actor/time 和 purge tombstone。
+- [x] 新发布 Package 的 retention 同时传入 Artifact Service；历史行由 migration 以创建时间加 90 天回填。
+- [x] Purge 只允许已 revoke、已 uninstall、超过 revoke 静默窗口、retention 到期且无 legal hold 的版本。
+- [x] Session binding 引用检查在 Canonical Event Store 执行 tenant 级 `EXISTS`，并兼容两种已发布载荷。
+- [x] 任一历史 binding 都 fail closed；不使用 Projection、Registry 或进程缓存代替事实源。
+
+### 物理删除与恢复
+
+- [x] Action Hands 通过 Policy 和 Artifact 内部契约删除对象，不读取对象存储凭证或直接写 Artifact metadata。
+- [x] Artifact Service 独立复核 retention/legal hold，并使用可过期 delete lease 防止并发重复删除。
+- [x] 对象 DELETE 404、已 deleted metadata 和 Package purge 重试均幂等；过期 deleting lease 可被接管。
+- [x] 物理对象与 Artifact metadata 删除成功后才写 Package `purged` tombstone；optimistic revision 冲突显式返回。
+- [x] Admin API 提供 Package retention 状态查询和版本级 `:purge`，要求 reason、idempotency key 与 expected revision。
+
+### 质量与交付
+
+- [x] Purge 前置条件、历史 binding、retention/legal hold、Artifact 删除幂等和 Session 权威查询单元测试通过。
+- [x] 0025 正反迁移在隔离 PostgreSQL 验证通过，PostgreSQL Store 覆盖 retention optimistic update。
+- [x] 全量 Ruff、Mypy、unit、相关 integration 与 import-linter 通过。
+- [x] 架构、数据库参考与阶段门禁同步，明确删除恢复和竞态边界。
+- [x] 本阶段作为一个 intentional commit 提交并 push，不包含 `.env`、Secret、缓存或无关改动。
+
 ## 阶段 Product Activity：产品级对话执行轨迹（AuraX Issue #2）
 
 状态：代码与定向验证完成；完整基础设施集成门禁受现有 Kafka/MySQL/PostgreSQL/Artifact 环境失败阻塞。

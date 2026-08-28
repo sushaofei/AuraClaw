@@ -136,6 +136,16 @@ class SessionRootFeedResponse(ContractModel):
     events: tuple[dict[str, Any], ...]
 
 
+class SkillBindingReferenceRequest(ContractModel):
+    context: InternalRequestContext
+    package_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+
+
+class SkillBindingReferenceResponse(ContractModel):
+    api_version: str = INTERNAL_API_VERSION
+    referenced: bool
+
+
 class CollaborationCommandRequest(ContractModel):
     context: InternalRequestContext
     lease_assertion: LeaseAssertion
@@ -513,6 +523,7 @@ class ArtifactCreateUploadRequest(ContractModel):
     expected_size: int = Field(ge=0)
     expected_checksum: str
     classification: str = "internal"
+    retention_until: datetime | None = None
 
 
 class ArtifactUploadResponse(ContractModel):
@@ -555,6 +566,22 @@ class ArtifactDownloadResponse(ContractModel):
     api_version: str = INTERNAL_API_VERSION
     download_url: str
     expires_at: datetime
+
+
+class ArtifactDeleteRequest(ContractModel):
+    context: InternalRequestContext
+    artifact_id: str
+    version: int = Field(ge=1)
+    actor_id: str = Field(min_length=1, max_length=256)
+    reason_code: str = Field(min_length=1, max_length=128)
+    policy_decision_id: str = Field(min_length=1, max_length=256)
+
+
+class ArtifactDeleteResponse(ContractModel):
+    api_version: str = INTERNAL_API_VERSION
+    artifact_id: str
+    version: int
+    status: Literal["deleted"] = "deleted"
 
 
 class SkillPublishInternalRequest(ContractModel):
@@ -615,6 +642,34 @@ class SkillStateInternalResponse(ContractModel):
     api_version: str = INTERNAL_API_VERSION
     installation: dict[str, Any] | None = None
     publication: dict[str, Any] | None = None
+
+
+class SkillPackageStateInternalRequest(ContractModel):
+    context: InternalRequestContext
+    publisher: str = Field(min_length=1, max_length=128)
+    name: str = Field(min_length=1, max_length=256)
+    version: str = Field(min_length=1, max_length=128)
+
+
+class SkillPackageStateInternalResponse(ContractModel):
+    api_version: str = INTERNAL_API_VERSION
+    package: dict[str, Any]
+
+
+class SkillPurgeInternalRequest(ContractModel):
+    context: InternalRequestContext
+    actor_id: str = Field(min_length=1, max_length=256)
+    publisher: str = Field(min_length=1, max_length=128)
+    name: str = Field(min_length=1, max_length=256)
+    version: str = Field(min_length=1, max_length=128)
+    reason_code: str = Field(min_length=1, max_length=128)
+    command_id: str = Field(min_length=1, max_length=256)
+    expected_revision: int = Field(ge=1)
+
+
+class SkillPurgeInternalResponse(ContractModel):
+    api_version: str = INTERNAL_API_VERSION
+    package: dict[str, Any]
 
 
 class AdminOperationRequest(ContractModel):

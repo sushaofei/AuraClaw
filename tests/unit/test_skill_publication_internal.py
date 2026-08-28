@@ -231,6 +231,11 @@ def test_task_api_client_publishes_through_action_hands_service() -> None:
             )
             assert publication_state.revision == 2
             assert publication_state.updated_by == "security-a"
+            package_state = await client.get_package(
+                "tenant-a", "platform", "release.prepare", "2.0.0"
+            )
+            assert package_state.retention_revision == 1
+            assert package_state.retention_updated_by == "admin-a"
         finally:
             await client.aclose()
 
