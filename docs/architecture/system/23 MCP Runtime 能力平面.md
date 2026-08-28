@@ -342,12 +342,15 @@ Installation 投影与 Resolver 回查就绪前，不能提前删除 Runtime 的
 Task API 在迁移期可把已确认的发布结果写入本副本只读兼容缓存，以保证同请求副本的旧查询入口立即可见；
 该缓存不是事实源，也不提供跨副本一致性，后续必须由持久查询/统一 Catalog 取代。
 
-开发者 CLI 提供 `auraclaw skills validate|test|publish`。`validate` 使用与服务端相同的包解析、路径、
+开发者 CLI 提供 `auraclaw skills sign|validate|test|publish`。`validate` 使用与服务端相同的包解析、路径、
 Manifest、digest 和签名规则；`test` 只验证 `tests/*.json` 声明式向量，绝不加载或执行包内 Python、
 Shell 或二进制；`publish` 仅从指定环境变量读取 bearer token，并始终使用 staged Artifact 路径。
-本地 CLI 仍只离线校验平台 HMAC 兼容包；服务端使用 tenant 隔离的 Publisher Registry 接受外部
-Ed25519 包。Manifest 必须同时声明 `signature_key_id` 与 `ed25519:<base64url-signature>`；Registry 只保存
-32-byte Ed25519 公钥，私钥不得进入 AuraClaw 配置、数据库、Artifact 或日志。
+外部 Publisher 的 `sign` 仅从指定 Secret 环境变量读取 base64url 编码的 32-byte raw Ed25519 private
+key，拒绝命令行私钥、`platform` 身份冒用和 Manifest publisher 不一致，并原子替换 `manifest.json`。
+命令只输出公钥、key id、identity 和 digest；validate/test/publish 用显式公钥做离线验签，服务端仍使用
+tenant 隔离的 Publisher Registry 独立权威验签。Manifest 必须同时声明 `signature_key_id` 与
+`ed25519:<base64url-signature>`；Registry 只保存 32-byte Ed25519 公钥，私钥不得进入 AuraClaw 配置、
+数据库、Artifact、命令参数或日志。
 
 Publisher 管理通过 `POST /v1/admin/skill-publishers/{publisher}` 注册，再以
 `POST .../keys:rotate` 原子加入新 active key 并把旧 active key 切到 retiring；`POST .../keys/{key}:revoke`
@@ -401,8 +404,8 @@ actor、correlation、causation、fencing token、前后 revision 与固定 reas
 Publication 置为不可发现的 `restoring`；第二阶段从原 Artifact 重读内容，重新校验 Artifact/package digest、
 Source allowlist/状态、Publisher suspension、签名 key 状态和签名，再复用发布准入转换为 `active`。
 任一复验失败都不会回滚审计证据或误激活；状态保持 `restoring`，既有固定 digest 内容仍可读，同一恢复
-命令可在信任条件修复后幂等重试。`revoked` 不允许进入该路径。外部签名 CLI 和完整拒绝/安全审计仍未
-完成，不能将当前状态描述为完整供应链治理。平台 HMAC 仅保留为兼容入口，不作为外部 publisher 信任根。
+命令可在信任条件修复后幂等重试。`revoked` 不允许进入该路径。完整拒绝/安全审计仍未完成，不能将当前
+状态描述为完整供应链治理。平台 HMAC 仅保留为兼容入口，不作为外部 publisher 信任根。
 
 Action Hands 启动及周期对账时由 `SkillStateRebuilder` 枚举 Lifecycle tenant，从受 Policy 保护的
 Artifact 下载接口读取不可变包，并再次校验大小、内容 hash、Archive、Manifest、package digest 和

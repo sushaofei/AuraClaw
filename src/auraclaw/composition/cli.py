@@ -1,5 +1,7 @@
 import argparse
 import asyncio
+import base64
+import binascii
 import hashlib
 import json
 import multiprocessing
@@ -11,13 +13,18 @@ from typing import Any
 
 import httpx
 import uvicorn
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from auraclaw.action.skill_packages import (
+    Ed25519SkillSignatureVerifier,
     HmacSkillSignatureVerifier,
     SkillPackage,
     SkillPackageRegistry,
+    SkillSignatureVerifier,
     skill_package_archive,
     skill_package_digest,
+    skill_signing_payload,
     validate_skill_test_vectors,
 )
 from auraclaw.composition.local_ingress import (
@@ -27,6 +34,7 @@ from auraclaw.composition.local_ingress import (
 from auraclaw.composition.services import SERVICE_BY_COMMAND, create_service_app, service_spec
 from auraclaw.config import Settings, get_settings
 from auraclaw.contracts.internal import ServiceIdentity
+from auraclaw.contracts.skills import SkillManifest
 from auraclaw.infrastructure.clients.admin import RemoteAdminClient
 from auraclaw.infrastructure.persistence.migration_runner import (
     create_migration_runner,
@@ -177,7 +185,7 @@ class _ValidationArtifactWriter:
         raise RuntimeError("validation must not write Artifacts")
 
 
-def _load_skill_directory(directory: str) -> SkillPackage:
+def _read_skill_directory(directory: str) -> tuple[Path, dict[str, bytes]]:
     root = Path(directory).resolve()
     if not root.is_dir():
         raise SystemExit(f"Skill directory does not exist: {directory}")
@@ -193,26 +201,132 @@ def _load_skill_directory(directory: str) -> SkillPackage:
         total_size += len(files[relative])
         if len(files) > 512 or total_size > 16 * 1024 * 1024:
             raise SystemExit("Skill package exceeds local validation limits")
+    return root, files
+
+
+def _load_skill_directory(directory: str) -> SkillPackage:
+    _root, files = _read_skill_directory(directory)
     return SkillPackage.from_files(files)
 
 
-def _validate_local_skill(package: SkillPackage, settings: Settings) -> SkillPackage:
-    if package.manifest.publisher != "platform":
-        raise SystemExit(
-            "Non-platform publishers require the production Publisher Registry"
+def _validate_local_skill(
+    package: SkillPackage,
+    settings: Settings,
+    *,
+    external_public_key: bytes | None = None,
+) -> SkillPackage:
+    verifier: SkillSignatureVerifier
+    if package.manifest.publisher == "platform":
+        signing_key = (
+            settings.skill_signing_key.get_secret_value().encode()
+            if settings.skill_signing_key is not None
+            else b"auraclaw-development-platform-skill-key"
         )
-    signing_key = (
-        settings.skill_signing_key.get_secret_value().encode()
-        if settings.skill_signing_key is not None
-        else b"auraclaw-development-platform-skill-key"
-    )
+        verifier = HmacSkillSignatureVerifier(
+            {package.manifest.publisher: signing_key}
+        )
+    else:
+        key_id = package.manifest.signature_key_id
+        if external_public_key is None or key_id is None:
+            raise SystemExit(
+                "External Skill validation requires signature_key_id and public key"
+            )
+        verifier = Ed25519SkillSignatureVerifier(
+            {(package.manifest.publisher, key_id): external_public_key}
+        )
     registry = SkillPackageRegistry(
         artifacts=_ValidationArtifactWriter(),
-        signature_verifier=HmacSkillSignatureVerifier(
-            {package.manifest.publisher: signing_key}
-        ),
+        signature_verifier=verifier,
     )
     return registry.validate(package)
+
+
+def _decode_ed25519_key(value: str, *, kind: str) -> bytes:
+    if not value or any(
+        character not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+        for character in value
+    ):
+        raise SystemExit(f"Ed25519 {kind} key is not valid base64url")
+    try:
+        decoded = base64.b64decode(
+            value + "=" * (-len(value) % 4),
+            altchars=b"-_",
+            validate=True,
+        )
+    except (ValueError, binascii.Error) as exc:
+        raise SystemExit(f"Ed25519 {kind} key is not valid base64url") from exc
+    if len(decoded) != 32:
+        raise SystemExit(f"Ed25519 {kind} key must contain exactly 32 bytes")
+    return decoded
+
+
+def _key_from_environment(variable: str, *, kind: str) -> bytes:
+    value = os.environ.get(variable)
+    if not value:
+        raise SystemExit(f"Ed25519 {kind} key is required in {variable}")
+    return _decode_ed25519_key(value, kind=kind)
+
+
+def _sign_external_skill_directory(
+    directory: str,
+    *,
+    publisher: str,
+    key_id: str,
+    private_key: bytes,
+) -> tuple[SkillPackage, str]:
+    if publisher == "platform":
+        raise SystemExit("External signing cannot claim the platform publisher")
+    root, files = _read_skill_directory(directory)
+    manifest_content = files.get("manifest.json")
+    if manifest_content is None:
+        raise SystemExit("Skill package is missing manifest.json")
+    try:
+        raw_manifest = json.loads(manifest_content)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise SystemExit("Skill manifest is invalid JSON") from exc
+    if not isinstance(raw_manifest, dict):
+        raise SystemExit("Skill manifest must be a JSON object")
+    if raw_manifest.get("publisher") != publisher:
+        raise SystemExit("--publisher must match manifest publisher")
+    raw_manifest["signature_key_id"] = key_id
+    raw_manifest["signature"] = "ed25519:unsigned"
+    try:
+        unsigned_manifest = SkillManifest.model_validate(raw_manifest)
+        signing_key = Ed25519PrivateKey.from_private_bytes(private_key)
+    except ValueError as exc:
+        raise SystemExit("Skill manifest or Ed25519 private key is invalid") from exc
+    unsigned = SkillPackage(manifest=unsigned_manifest, files=files)
+    signature = signing_key.sign(skill_signing_payload(unsigned))
+    encoded_signature = base64.urlsafe_b64encode(signature).rstrip(b"=").decode()
+    signed_manifest = unsigned_manifest.model_copy(
+        update={"signature": f"ed25519:{encoded_signature}"}
+    )
+    signed_files = {
+        **files,
+        "manifest.json": signed_manifest.model_dump_json().encode(),
+    }
+    package = SkillPackage.from_files(signed_files)
+    public_key = signing_key.public_key().public_bytes(
+        serialization.Encoding.Raw,
+        serialization.PublicFormat.Raw,
+    )
+    _validate_local_skill(
+        package,
+        Settings(_env_file=None),
+        external_public_key=public_key,
+    )
+    target = root / "manifest.json"
+    temporary = root / f".manifest.json.{uuid.uuid4().hex}.tmp"
+    try:
+        with temporary.open("xb") as stream:
+            stream.write(signed_files["manifest.json"])
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
+    encoded_public_key = base64.urlsafe_b64encode(public_key).rstrip(b"=").decode()
+    return package, encoded_public_key
 
 
 def _identity_headers(
@@ -334,7 +448,39 @@ def _require_cli_success(response: httpx.Response, operation: str) -> None:
 
 async def _run_skills_command(args: argparse.Namespace) -> None:
     settings = get_settings()
-    package = _validate_local_skill(_load_skill_directory(args.directory), settings)
+    if args.action == "sign":
+        private_key = _key_from_environment(args.private_key_env, kind="private")
+        package, public_key = _sign_external_skill_directory(
+            args.directory,
+            publisher=args.publisher,
+            key_id=args.key_id,
+            private_key=private_key,
+        )
+        print(
+            json.dumps(
+                {
+                    "publisher": package.manifest.publisher,
+                    "name": package.manifest.name,
+                    "version": package.manifest.version,
+                    "signature_key_id": package.manifest.signature_key_id,
+                    "public_key": public_key,
+                    "package_digest": skill_package_digest(package),
+                },
+                sort_keys=True,
+            )
+        )
+        return
+    package = _load_skill_directory(args.directory)
+    external_public_key = None
+    if package.manifest.publisher != "platform":
+        external_public_key = _key_from_environment(
+            args.public_key_env, kind="public"
+        )
+    package = _validate_local_skill(
+        package,
+        settings,
+        external_public_key=external_public_key,
+    )
     if args.action == "validate":
         print(
             json.dumps(
@@ -409,6 +555,16 @@ def build_parser() -> argparse.ArgumentParser:
     for action in ("validate", "test"):
         skill_command_parser = skill_commands.add_parser(action)
         skill_command_parser.add_argument("directory")
+        skill_command_parser.add_argument(
+            "--public-key-env", default="AURACLAW_SKILL_PUBLIC_KEY"
+        )
+    sign = skill_commands.add_parser("sign")
+    sign.add_argument("directory")
+    sign.add_argument("--publisher", required=True)
+    sign.add_argument("--key-id", required=True)
+    sign.add_argument(
+        "--private-key-env", default="AURACLAW_SKILL_SIGNING_KEY"
+    )
     publish = skill_commands.add_parser("publish")
     publish.add_argument("directory")
     publish.add_argument("--tenant", required=True)
@@ -417,6 +573,9 @@ def build_parser() -> argparse.ArgumentParser:
     publish.add_argument("--source", default="sks_admin_upload")
     publish.add_argument("--api-url")
     publish.add_argument("--token-env", default="AURACLAW_API_TOKEN")
+    publish.add_argument(
+        "--public-key-env", default="AURACLAW_SKILL_PUBLIC_KEY"
+    )
     publish.add_argument("--command-id")
     publish.add_argument("--expected-revision", type=int, default=0)
     publish.add_argument("--staged", action="store_true")
