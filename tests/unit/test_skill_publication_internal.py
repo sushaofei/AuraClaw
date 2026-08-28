@@ -35,6 +35,7 @@ from auraclaw.contracts.errors import SchemaValidationError
 from auraclaw.contracts.internal import ServiceIdentity
 from auraclaw.contracts.skills import (
     ChangeSkillInstallationCommand,
+    ChangeSkillPublisherStatusCommand,
     PublishSkillCommand,
     RegisterSkillPublisherCommand,
     RevokeSkillPublicationCommand,
@@ -42,6 +43,7 @@ from auraclaw.contracts.skills import (
     RotateSkillPublisherKeyCommand,
     SkillInstallationOperation,
     SkillManifest,
+    SkillPublisherStatusOperation,
     SkillSourceDesiredState,
     SkillSourceKind,
     SkillSourceRecord,
@@ -203,6 +205,34 @@ def test_task_api_client_publishes_through_action_hands_service() -> None:
                 )
             )
             assert (await client.get_publisher("tenant-a", "acme"))[1] == keys
+            suspended, _ = await client.change_publisher_status(
+                ChangeSkillPublisherStatusCommand(
+                    tenant_id="tenant-a",
+                    actor_id="security-admin",
+                    publisher="acme",
+                    operation=SkillPublisherStatusOperation.SUSPEND,
+                    reason_code="publisher_under_review",
+                    command_id="publisher-suspend-1",
+                    expected_revision=registered.revision,
+                    correlation_id="corr-publisher",
+                    causation_id="publisher-suspend-1",
+                )
+            )
+            assert suspended.status.value == "suspended"
+            resumed, _ = await client.change_publisher_status(
+                ChangeSkillPublisherStatusCommand(
+                    tenant_id="tenant-a",
+                    actor_id="security-admin",
+                    publisher="acme",
+                    operation=SkillPublisherStatusOperation.RESUME,
+                    reason_code="review_completed",
+                    command_id="publisher-resume-1",
+                    expected_revision=suspended.revision,
+                    correlation_id="corr-publisher",
+                    causation_id="publisher-resume-1",
+                )
+            )
+            assert resumed.status.value == "active"
             _registered, keys = await client.revoke_publisher_key(
                 RevokeSkillPublisherKeyCommand(
                     tenant_id="tenant-a",

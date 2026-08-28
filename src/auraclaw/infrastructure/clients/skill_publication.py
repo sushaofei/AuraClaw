@@ -21,6 +21,7 @@ from auraclaw.contracts.internal import (
     SkillPublisherRevokeKeyInternalRequest,
     SkillPublisherRotateKeyInternalRequest,
     SkillPublisherStateInternalRequest,
+    SkillPublisherStatusInternalRequest,
     SkillPublishInternalRequest,
     SkillPublishInternalResponse,
     SkillPurgeInternalRequest,
@@ -32,6 +33,7 @@ from auraclaw.contracts.internal import (
 )
 from auraclaw.contracts.skills import (
     ChangeSkillInstallationCommand,
+    ChangeSkillPublisherStatusCommand,
     PublishedSkill,
     PublishSkillCommand,
     PurgeSkillPackageCommand,
@@ -316,6 +318,24 @@ class RemoteSkillPublicationClient:
         )
         return _publisher_state(response)
 
+    async def change_publisher_status(
+        self, command: ChangeSkillPublisherStatusCommand
+    ) -> tuple[SkillPublisherRecord, tuple[SkillPublisherKeyRecord, ...]]:
+        response = await self._contract.call(
+            "/internal/v1/skill-publications/publishers/status",
+            SkillPublisherStatusInternalRequest(
+                context=_context(command),
+                actor_id=command.actor_id,
+                publisher=command.publisher,
+                operation=command.operation.value,
+                reason_code=command.reason_code,
+                command_id=command.command_id,
+                expected_revision=command.expected_revision,
+            ),
+            SkillPublisherInternalResponse,
+        )
+        return _publisher_state(response)
+
     async def get_publisher(
         self, tenant_id: str, publisher: str
     ) -> tuple[SkillPublisherRecord, tuple[SkillPublisherKeyRecord, ...]]:
@@ -373,6 +393,7 @@ def _context(
         | RegisterSkillPublisherCommand
         | RotateSkillPublisherKeyCommand
         | RevokeSkillPublisherKeyCommand
+        | ChangeSkillPublisherStatusCommand
     ),
 ) -> InternalRequestContext:
     return InternalRequestContext(

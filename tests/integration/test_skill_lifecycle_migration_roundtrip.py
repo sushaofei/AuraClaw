@@ -21,10 +21,12 @@ UP = "\n".join(
         (ROOT / "migrations/0027_skill_publisher_registry.sql").read_text(),
         (ROOT / "migrations/0028_skill_source_reconcile_lease.sql").read_text(),
         (ROOT / "migrations/0029_skill_source_inventory_retirement.sql").read_text(),
+        (ROOT / "migrations/0030_skill_publisher_suspension.sql").read_text(),
     )
 )
 DOWN = "\n".join(
     (
+        (ROOT / "migrations/0030_skill_publisher_suspension.down.sql").read_text(),
         (ROOT / "migrations/0029_skill_source_inventory_retirement.down.sql").read_text(),
         (ROOT / "migrations/0028_skill_source_reconcile_lease.down.sql").read_text(),
         (ROOT / "migrations/0027_skill_publisher_registry.down.sql").read_text(),
@@ -94,6 +96,13 @@ def test_skill_lifecycle_migration_roundtrip_in_isolated_postgres() -> None:
                 assert await connection.fetchval(
                     """SELECT EXISTS(SELECT 1 FROM information_schema.columns
                     WHERE table_schema='hands' AND table_name='skill_package'
+                      AND column_name=$1)""",
+                    column,
+                )
+            for column in ("status_reason_code", "status_changed_at"):
+                assert await connection.fetchval(
+                    """SELECT EXISTS(SELECT 1 FROM information_schema.columns
+                    WHERE table_schema='hands' AND table_name='skill_publisher'
                       AND column_name=$1)""",
                     column,
                 )

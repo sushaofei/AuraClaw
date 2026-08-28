@@ -410,6 +410,8 @@ AURACLAW_API_TOKEN=... uv run auraclaw skills publish path/to/skill \
 `AURACLAW_API_TOKEN`（或 `--token-env` 指定的环境变量）读取令牌，不接受命令行明文令牌。
 当前本地 CLI 仍只离线校验平台 HMAC 兼容包；服务端可通过 tenant Publisher Registry 接受
 Ed25519 签名的外部 publisher 包。Registry 只保存公钥，私钥必须留在 publisher 的签名环境。
+Publisher 可通过带 expected revision、reason 和幂等命令的 suspend/resume 管理入口充当租户级信任断路器；
+suspend 同时拒绝新发布和持久包恢复，resume 只恢复仍处于 active/retiring 的有效 key。
 发布的 Package、Publication、首个 Installation、成功命令账本和 Outbox 在 Action Hands 中原子提交；
 周期可靠性任务修复 Artifact binding 与 Catalog，并在 retention 到期后对未引用的 ready Skill Artifact
 执行带 Policy 和并发 fencing 的孤儿回收。MCP Skill Source 的周期发现使用 tenant/source 级持久租约；

@@ -239,6 +239,8 @@ Secret 只允许引用 `credential_ref`，响应里不会出现明文。写命�
 | `POST` | `/v1/admin/skill-publishers/{publisher}` | 注册 tenant Publisher |
 | `POST` | `/v1/admin/skill-publishers/{publisher}/keys:rotate` | 原子轮换 Ed25519 公钥 |
 | `POST` | `/v1/admin/skill-publishers/{publisher}/keys/{key_id}:revoke` | 撤销泄露或不再可信的公钥 |
+| `POST` | `/v1/admin/skill-publishers/{publisher}/status:suspend` | 暂停 Publisher 信任并移除其可发现 Skill |
+| `POST` | `/v1/admin/skill-publishers/{publisher}/status:resume` | 恢复 Publisher；已撤销 key 不会恢复 |
 
 ---
 

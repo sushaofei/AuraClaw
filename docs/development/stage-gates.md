@@ -1868,6 +1868,34 @@ ready Skill Artifact 建立带 fencing 的物理回收流程；不把成功命�
 - [x] README、架构、数据库参考与阶段门禁同步，剩余恢复与完整审计范围未误标完成。
 - [x] 本阶段作为一个 intentional commit 提交并 push，不包含 `.env`、Secret、缓存或无关改动。
 
+## 阶段 M14l：Skill Publisher Suspension 信任断路器（Issue #56）
+
+状态：已完成。本阶段提供 tenant Publisher 的可逆紧急停止；永久 key revoke 与普通 Source retired
+继续保持独立语义。
+
+### 状态与信任边界
+
+- [x] Publisher 支持 active/suspended 显式转换，suspended 状态要求 reason 与变更时间证据。
+- [x] suspend 后 key rotation、新包 admission 和持久包 restore 全部 fail closed。
+- [x] resume 不修改 key 状态，只恢复仍为 active/retiring 且签名有效的包；revoked key 不会复活。
+- [x] tenant 隔离保持不变，一个 tenant 的 suspension 不改变其他 tenant 的同名 Publisher。
+
+### 命令、API 与恢复
+
+- [x] suspend/resume 命令携带 actor、reason、expected revision、command、correlation 和 causation。
+- [x] Publisher 命令账本支持跨副本幂等重放，同 command id 不同可信请求显式冲突。
+- [x] Admin API、Task API 远程客户端和 workload-authenticated 内部合约全部贯通。
+- [x] 状态变更后立即重建 tenant Registry/Catalog；即时失败可由命令重放和周期全量重建恢复。
+
+### 质量与交付
+
+- [x] 0030 正反迁移覆盖状态 reason/time 证据及 suspend/resume 命令类型。
+- [x] 单测覆盖 admission/restore/rotation 拒绝、resume、Admin API 与内部远程契约。
+- [x] PostgreSQL 覆盖 revision、跨 Store 幂等、状态证据、rotation 拒绝及迁移回滚。
+- [x] 全量 Ruff、Mypy、unit、相关 integration 与 import-linter 通过。
+- [x] README、公开 API、架构、数据库参考与阶段门禁同步。
+- [x] 本阶段作为一个 intentional commit 提交并 push，不包含 `.env`、Secret、缓存或无关改动。
+
 ## 阶段 Product Activity：产品级对话执行轨迹（AuraX Issue #2）
 
 状态：代码与定向验证完成；完整基础设施集成门禁受现有 Kafka/MySQL/PostgreSQL/Artifact 环境失败阻塞。

@@ -5,13 +5,20 @@ import hashlib
 import asyncpg  # type: ignore[import-untyped]
 
 from auraclaw.action.skill_publishers import SkillPublisherStore
-from auraclaw.contracts.errors import NotFoundError, VersionConflictError
+from auraclaw.contracts.errors import (
+    NotFoundError,
+    PolicyDeniedError,
+    VersionConflictError,
+)
 from auraclaw.contracts.skills import (
+    ChangeSkillPublisherStatusCommand,
     RegisterSkillPublisherCommand,
     RevokeSkillPublisherKeyCommand,
     RotateSkillPublisherKeyCommand,
     SkillPublisherKeyRecord,
     SkillPublisherRecord,
+    SkillPublisherStatus,
+    SkillPublisherStatusOperation,
 )
 from auraclaw.infrastructure.persistence.postgres_common import LazyPool
 
@@ -86,7 +93,7 @@ class PostgresSkillPublisherStore(LazyPool, SkillPublisherStore):
             if row is None:
                 raise NotFoundError("Skill Publisher not found")
             if row["status"] != "active":
-                raise VersionConflictError("Skill Publisher is not active")
+                raise PolicyDeniedError("Skill Publisher is not active")
             if int(row["revision"]) != command.expected_revision:
                 raise VersionConflictError("Skill Publisher revision conflict")
             await connection.execute(
@@ -177,6 +184,84 @@ class PostgresSkillPublisherStore(LazyPool, SkillPublisherStore):
             await _record_command(connection, command, "revoke", digest, command.key_id)
             return _key_record(row)
 
+    async def change_status(
+        self, command: ChangeSkillPublisherStatusCommand
+    ) -> SkillPublisherRecord:
+        digest = _digest(
+            "status",
+            command.publisher,
+            command.operation.value,
+            command.reason_code,
+            str(command.expected_revision),
+        )
+        pool = await self.pool()
+        async with pool.acquire() as connection, connection.transaction():
+            await _lock(connection, command.tenant_id, command.command_id)
+            replay = await _command_replay(
+                connection, command.tenant_id, command.command_id, digest
+            )
+            if replay is not None:
+                record = await _publisher(
+                    connection, command.tenant_id, command.publisher
+                )
+                if record is None:
+                    raise VersionConflictError(
+                        "Skill Publisher command result is incomplete"
+                    )
+                return record
+            target = (
+                SkillPublisherStatus.SUSPENDED
+                if command.operation is SkillPublisherStatusOperation.SUSPEND
+                else SkillPublisherStatus.ACTIVE
+            )
+            row = await connection.fetchrow(
+                """SELECT * FROM hands.skill_publisher
+                WHERE tenant_id=$1 AND publisher=$2 FOR UPDATE""",
+                command.tenant_id,
+                command.publisher,
+            )
+            if row is None:
+                raise NotFoundError("Skill Publisher not found")
+            current = _publisher_record(row)
+            if current.revision != command.expected_revision:
+                raise VersionConflictError("Skill Publisher revision conflict")
+            if current.status is target:
+                await _record_command(
+                    connection,
+                    command,
+                    command.operation.value,
+                    digest,
+                    None,
+                )
+                return current
+            updated_row = await connection.fetchrow(
+                """UPDATE hands.skill_publisher SET status=$3,
+                status_reason_code=$4,status_changed_at=now(),revision=revision+1,
+                updated_by=$5,updated_at=now()
+                WHERE tenant_id=$1 AND publisher=$2 AND revision=$6
+                RETURNING *""",
+                command.tenant_id,
+                command.publisher,
+                target.value,
+                (
+                    command.reason_code
+                    if target is SkillPublisherStatus.SUSPENDED
+                    else None
+                ),
+                command.actor_id,
+                command.expected_revision,
+            )
+            if updated_row is None:
+                raise VersionConflictError("Skill Publisher revision conflict")
+            await _record_command(
+                connection,
+                command,
+                command.operation.value,
+                digest,
+                None,
+            )
+            return _publisher_record(updated_row)
+
     async def get_publisher(
         self, tenant_id: str, publisher: str
     ) -> SkillPublisherRecord | None:
@@ -231,6 +316,7 @@ async def _record_command(
         RegisterSkillPublisherCommand
         | RotateSkillPublisherKeyCommand
         | RevokeSkillPublisherKeyCommand
+        | ChangeSkillPublisherStatusCommand
     ),
     command_type: str,
     digest: str,

@@ -82,6 +82,7 @@ from auraclaw.contracts.internal import (
     SkillPublisherRevokeKeyInternalRequest,
     SkillPublisherRotateKeyInternalRequest,
     SkillPublisherStateInternalRequest,
+    SkillPublisherStatusInternalRequest,
     SkillPublishInternalRequest,
     SkillPublishInternalResponse,
     SkillPurgeInternalRequest,
@@ -347,6 +348,11 @@ def skill_publication_routes(
             SkillPublisherRevokeKeyInternalRequest,
             SkillPublisherInternalResponse,
             service.revoke_publisher_key,
+        ),
+        "/publishers/status": contract_route(
+            SkillPublisherStatusInternalRequest,
+            SkillPublisherInternalResponse,
+            service.change_publisher_status,
         ),
         "/publishers/state": contract_route(
             SkillPublisherStateInternalRequest,

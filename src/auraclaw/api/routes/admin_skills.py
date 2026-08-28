@@ -16,6 +16,7 @@ from auraclaw.contracts.internal import (
 )
 from auraclaw.contracts.skills import (
     ChangeSkillInstallationCommand,
+    ChangeSkillPublisherStatusCommand,
     PublishedSkill,
     PublishSkillCommand,
     PurgeSkillPackageCommand,
@@ -29,6 +30,7 @@ from auraclaw.contracts.skills import (
     SkillPublicationRecord,
     SkillPublisherKeyRecord,
     SkillPublisherRecord,
+    SkillPublisherStatusOperation,
 )
 from auraclaw.contracts.tools import ArtifactRef
 
@@ -170,6 +172,10 @@ class SkillPublisherManager(Protocol):
         self, command: RevokeSkillPublisherKeyCommand
     ) -> tuple[SkillPublisherRecord, tuple[SkillPublisherKeyRecord, ...]]: ...
 
+    async def change_publisher_status(
+        self, command: ChangeSkillPublisherStatusCommand
+    ) -> tuple[SkillPublisherRecord, tuple[SkillPublisherKeyRecord, ...]]: ...
+
     async def get_publisher(
         self, tenant_id: str, publisher: str
     ) -> tuple[SkillPublisherRecord, tuple[SkillPublisherKeyRecord, ...]]: ...
@@ -302,6 +308,70 @@ def create_skill_admin_router(
             )
         )
         return _publisher_summary(record, keys)
+
+    async def _change_publisher_status(
+        publisher: str,
+        operation: SkillPublisherStatusOperation,
+        identity: Identity,
+        command_id: str,
+        expected_revision: int,
+        reason_code: str,
+    ) -> dict[str, Any]:
+        service = _require_publisher_service(publisher_service)
+        record, keys = await service.change_publisher_status(
+            ChangeSkillPublisherStatusCommand(
+                tenant_id=identity.tenant_id,
+                actor_id=identity.actor.id,
+                publisher=publisher,
+                operation=operation,
+                reason_code=reason_code,
+                command_id=command_id,
+                expected_revision=expected_revision,
+                correlation_id=identity.correlation_id,
+                causation_id=command_id,
+            )
+        )
+        return _publisher_summary(record, keys)
+
+    @router.post(
+        "/skill-publishers/{publisher}/status:suspend",
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    async def suspend_skill_publisher(
+        publisher: str,
+        identity: Identity,
+        command_id: str = Header(alias="Idempotency-Key"),
+        expected_revision: int = Header(alias="X-Expected-Revision", ge=1),
+        reason_code: str = Header(alias="X-Reason-Code", min_length=1, max_length=128),
+    ) -> dict[str, Any]:
+        return await _change_publisher_status(
+            publisher,
+            SkillPublisherStatusOperation.SUSPEND,
+            identity,
+            command_id,
+            expected_revision,
+            reason_code,
+        )
+
+    @router.post(
+        "/skill-publishers/{publisher}/status:resume",
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    async def resume_skill_publisher(
+        publisher: str,
+        identity: Identity,
+        command_id: str = Header(alias="Idempotency-Key"),
+        expected_revision: int = Header(alias="X-Expected-Revision", ge=1),
+        reason_code: str = Header(alias="X-Reason-Code", min_length=1, max_length=128),
+    ) -> dict[str, Any]:
+        return await _change_publisher_status(
+            publisher,
+            SkillPublisherStatusOperation.RESUME,
+            identity,
+            command_id,
+            expected_revision,
+            reason_code,
+        )
 
     @router.get("/skills/{publisher}/{name}")
     async def get_skill(
