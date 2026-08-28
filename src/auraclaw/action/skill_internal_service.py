@@ -5,6 +5,7 @@ import binascii
 
 from auraclaw.action.skill_packages import SkillPackage
 from auraclaw.action.skill_publication import SkillPublicationService
+from auraclaw.action.skill_rebuild import SkillStateRebuilder
 from auraclaw.contracts.errors import AuthorizationError, SchemaValidationError
 from auraclaw.contracts.internal import (
     ServiceIdentity,
@@ -17,8 +18,14 @@ _MAX_ENCODED_PACKAGE_BYTES = 24 * 1024 * 1024
 
 
 class SkillPublicationInternalService:
-    def __init__(self, publication: SkillPublicationService) -> None:
+    def __init__(
+        self,
+        publication: SkillPublicationService,
+        *,
+        rebuilder: SkillStateRebuilder | None = None,
+    ) -> None:
         self._publication = publication
+        self._rebuilder = rebuilder
 
     async def publish(
         self, request: SkillPublishInternalRequest
@@ -53,6 +60,8 @@ class SkillPublicationInternalService:
             ),
             SkillPackage.from_files(files),
         )
+        if self._rebuilder is not None:
+            await self._rebuilder.rebuild_tenant(request.context.tenant_id)
         return SkillPublishInternalResponse(
             publication=result.model_dump(mode="json")
         )

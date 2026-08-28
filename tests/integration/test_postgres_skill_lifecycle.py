@@ -133,6 +133,8 @@ def test_postgres_skill_lifecycle_is_persistent_and_tenant_scoped() -> None:
             assert await store_b.get_installation(
                 tenant_id, "platform", "release.prepare"
             ) == installation
+            assert await store_b.list_installations(tenant_id) == (installation,)
+            assert tenant_id in await store_b.list_tenants()
             assert await store_b.list_publications(f"other-{tenant_id}") == ()
             assert await store_b.get_source(tenant_id, source.source_id) == source
             assert await store_b.get_sync_state(tenant_id, source.source_id) == sync_state

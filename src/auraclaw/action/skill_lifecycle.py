@@ -37,6 +37,8 @@ class SkillLifecycleStore(Protocol):
         self, tenant_id: str
     ) -> tuple[SkillPublicationRecord, ...]: ...
 
+    async def list_tenants(self) -> tuple[str, ...]: ...
+
     async def put_installation(
         self, record: SkillInstallationRecord, *, expected_revision: int
     ) -> SkillInstallationRecord: ...
@@ -44,6 +46,10 @@ class SkillLifecycleStore(Protocol):
     async def get_installation(
         self, tenant_id: str, publisher: str, name: str
     ) -> SkillInstallationRecord | None: ...
+
+    async def list_installations(
+        self, tenant_id: str
+    ) -> tuple[SkillInstallationRecord, ...]: ...
 
     async def put_source(
         self, record: SkillSourceRecord, *, expected_revision: int
@@ -140,6 +146,22 @@ class InMemorySkillLifecycleStore:
             )
         )
 
+    async def list_tenants(self) -> tuple[str, ...]:
+        return tuple(
+            sorted(
+                {
+                    *(
+                        record.tenant_id
+                        for record in self._publications.values()
+                    ),
+                    *(
+                        record.tenant_id
+                        for record in self._installations.values()
+                    ),
+                }
+            )
+        )
+
     async def put_installation(
         self, record: SkillInstallationRecord, *, expected_revision: int
     ) -> SkillInstallationRecord:
@@ -160,6 +182,20 @@ class InMemorySkillLifecycleStore:
         self, tenant_id: str, publisher: str, name: str
     ) -> SkillInstallationRecord | None:
         return self._installations.get((tenant_id, publisher, name))
+
+    async def list_installations(
+        self, tenant_id: str
+    ) -> tuple[SkillInstallationRecord, ...]:
+        return tuple(
+            sorted(
+                (
+                    record
+                    for record in self._installations.values()
+                    if record.tenant_id == tenant_id
+                ),
+                key=lambda item: (item.publisher, item.name),
+            )
+        )
 
     async def put_source(
         self, record: SkillSourceRecord, *, expected_revision: int

@@ -1,15 +1,24 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+from typing import Any
 
+from auraclaw.action.capability_catalog import (
+    CapabilityCatalog,
+    InMemoryCapabilityCatalogStore,
+)
+from auraclaw.action.skill_lifecycle import InMemorySkillLifecycleStore
 from auraclaw.action.skill_packages import (
     HmacSkillSignatureVerifier,
     SkillPackage,
     SkillPackageRegistry,
 )
+from auraclaw.action.skill_publication import SkillPublicationService
+from auraclaw.action.skill_rebuild import SkillStateRebuilder
 from auraclaw.action.skill_reconciler import SkillPackageReconciler
-from auraclaw.contracts.capabilities import McpServerDefinition
+from auraclaw.contracts.capabilities import CapabilityKind, McpServerDefinition
 from auraclaw.contracts.hands import (
     CapabilitySnapshot,
     HandsResourceContent,
@@ -17,7 +26,7 @@ from auraclaw.contracts.hands import (
     HandsTrustedContext,
 )
 from auraclaw.contracts.skills import SkillManifest
-from auraclaw.infrastructure.artifacts.store import ArtifactStore, InMemoryObjectStorage
+from auraclaw.contracts.tools import ArtifactRef
 
 _PUBLISHER_KEY = b"platform-skill-signing-key-v1"
 
@@ -100,6 +109,35 @@ class _Store:
         return None
 
 
+class _Artifacts:
+    def __init__(self) -> None:
+        self.contents: dict[str, bytes] = {}
+
+    async def put(self, **kwargs: Any) -> ArtifactRef:
+        content = kwargs["content"]
+        assert isinstance(content, bytes)
+        artifact_id = f"art_{len(self.contents) + 1}"
+        self.contents[artifact_id] = content
+        return ArtifactRef(
+            artifact_id=artifact_id,
+            version=1,
+            content_hash=hashlib.sha256(content).hexdigest(),
+            media_type=str(kwargs["media_type"]),
+            size=len(content),
+        )
+
+    async def read(
+        self,
+        *,
+        tenant_id: str,
+        artifact_ref: ArtifactRef,
+        actor_id: str,
+        correlation_id: str,
+    ) -> bytes:
+        del tenant_id, actor_id, correlation_id
+        return self.contents[artifact_ref.artifact_id]
+
+
 def _package(verifier: HmacSkillSignatureVerifier) -> SkillPackage:
     unsigned = SkillManifest(
         name="release.prepare",
@@ -141,18 +179,32 @@ def test_skill_reconciler_downloads_signed_package_from_mcp_resources() -> None:
             endpoint="https://skills.example/mcp",
             allowed_resource_schemes=("skill",),
             enabled=True,
+            metadata={"skill_publisher_allowlist": ["platform"]},
         )
+        artifacts = _Artifacts()
+        lifecycle = InMemorySkillLifecycleStore()
         registry = SkillPackageRegistry(
-            artifacts=ArtifactStore(
-                InMemoryObjectStorage(),
-                signing_key=b"skill-reconciler-artifact-key",
-            ),
+            artifacts=artifacts,
             signature_verifier=verifier,
+        )
+        catalog_store = InMemoryCapabilityCatalogStore()
+        catalog = CapabilityCatalog(catalog_store)
+        publication = SkillPublicationService(
+            registry=registry,
+            lifecycle=lifecycle,
+        )
+        rebuilder = SkillStateRebuilder(
+            lifecycle=lifecycle,
+            artifacts=artifacts,
+            registry=registry,
+            catalog=catalog,
         )
         reconciler = SkillPackageReconciler(
             store=_Store(server),
             connectors={"skill-server": _SkillMcpConnector(resources)},
-            registry=registry,
+            lifecycle=lifecycle,
+            publication=publication,
+            rebuilder=rebuilder,
         )
 
         published = await reconciler.reconcile_all()
@@ -175,5 +227,63 @@ def test_skill_reconciler_downloads_signed_package_from_mcp_resources() -> None:
             ).decode()
         )
         assert manifest["name"] == package.manifest.name
+        matches = await catalog.search(
+            tenant_id="tenant-a",
+            query="release",
+            kinds=(CapabilityKind.SKILL,),
+        )
+        assert len(matches) == 1
+        publications = await lifecycle.list_publications("tenant-a")
+        assert len(publications) == 1
+        source = await lifecycle.get_source(
+            "tenant-a", publications[0].source_id
+        )
+        assert source is not None
+        assert source.publisher_allowlist == ("platform",)
+
+    asyncio.run(scenario())
+
+
+def test_skill_reconciler_requires_configured_publisher_allowlist() -> None:
+    async def scenario() -> None:
+        verifier = HmacSkillSignatureVerifier({"platform": _PUBLISHER_KEY})
+        artifacts = _Artifacts()
+        lifecycle = InMemorySkillLifecycleStore()
+        registry = SkillPackageRegistry(
+            artifacts=artifacts,
+            signature_verifier=verifier,
+        )
+        catalog = CapabilityCatalog(InMemoryCapabilityCatalogStore())
+        publication = SkillPublicationService(
+            registry=registry,
+            lifecycle=lifecycle,
+        )
+        server = McpServerDefinition(
+            server_id="untrusted-skill-server",
+            tenant_id="tenant-a",
+            title="Untrusted Skill MCP",
+            endpoint="https://skills.example/mcp",
+            enabled=True,
+        )
+        reconciler = SkillPackageReconciler(
+            store=_Store(server),
+            connectors={
+                server.server_id: _SkillMcpConnector(())
+            },
+            lifecycle=lifecycle,
+            publication=publication,
+            rebuilder=SkillStateRebuilder(
+                lifecycle=lifecycle,
+                artifacts=artifacts,
+                registry=registry,
+                catalog=catalog,
+            ),
+        )
+
+        result = await reconciler.reconcile_server(server)
+
+        assert result.published_count == 0
+        assert result.error == "ValueError"
+        assert await lifecycle.list_publications("tenant-a") == ()
 
     asyncio.run(scenario())

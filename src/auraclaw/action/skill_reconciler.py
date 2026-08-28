@@ -1,14 +1,25 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from auraclaw.action.ports import CapabilityCatalogStore, CapabilityConnector
-from auraclaw.action.skill_packages import SkillPackage, SkillPackageRegistry
+from auraclaw.action.skill_lifecycle import SkillLifecycleStore
+from auraclaw.action.skill_packages import SkillPackage, skill_package_digest
+from auraclaw.action.skill_publication import SkillPublicationService
+from auraclaw.action.skill_rebuild import SkillStateRebuilder
 from auraclaw.contracts.capabilities import McpServerDefinition
+from auraclaw.contracts.errors import VersionConflictError
 from auraclaw.contracts.hands import HandsResourceDescriptor, HandsTrustedContext
+from auraclaw.contracts.skills import (
+    PublishSkillCommand,
+    SkillSourceDesiredState,
+    SkillSourceKind,
+    SkillSourceRecord,
+)
 
 _SKILL_URI = re.compile(r"^skill://([^/]+)/([^/]+)/([^/]+)/(.+)$")
 _URI_SUFFIX_TO_PATH = {"manifest": "manifest.json"}
@@ -29,11 +40,15 @@ class SkillPackageReconciler:
         *,
         store: CapabilityCatalogStore,
         connectors: dict[str, CapabilityConnector],
-        registry: SkillPackageRegistry,
+        lifecycle: SkillLifecycleStore,
+        publication: SkillPublicationService,
+        rebuilder: SkillStateRebuilder,
     ) -> None:
         self._store = store
         self._connectors = connectors
-        self._registry = registry
+        self._lifecycle = lifecycle
+        self._publication = publication
+        self._rebuilder = rebuilder
 
     async def reconcile_all(self) -> int:
         servers = {
@@ -63,6 +78,7 @@ class SkillPackageReconciler:
             snapshot = await connector.snapshot(trusted)
             grouped = _group_skill_resource_uris(snapshot.resources)
             tenant_id = server.tenant_id or "platform"
+            source = await self._ensure_source(server, tenant_id)
             published = 0
             for (_publisher, _name, _version), uris in grouped.items():
                 if not any(uri.endswith("/manifest") for uri in uris):
@@ -72,8 +88,20 @@ class SkillPackageReconciler:
                     trusted,
                     uris,
                 )
-                await self._registry.publish(tenant_id, package)
+                digest = skill_package_digest(package)
+                await self._publication.publish(
+                    PublishSkillCommand(
+                        tenant_id=tenant_id,
+                        actor_id="action-hands-skill-reconciler",
+                        source_id=source.source_id,
+                        command_id=f"mcp-skill:{server.server_id}:{digest}",
+                        correlation_id=f"skill-reconcile:{server.server_id}",
+                        causation_id=f"mcp-snapshot:{server.server_id}",
+                    ),
+                    package,
+                )
                 published += 1
+            await self._rebuilder.rebuild_tenant(tenant_id)
             return SkillReconcileResult(
                 server_id=server.server_id,
                 published_count=published,
@@ -84,6 +112,44 @@ class SkillPackageReconciler:
                 published_count=0,
                 error=type(exc).__name__,
             )
+
+    async def _ensure_source(
+        self,
+        server: McpServerDefinition,
+        tenant_id: str,
+    ) -> SkillSourceRecord:
+        source_id = _source_id(server.server_id)
+        existing = await self._lifecycle.get_source(tenant_id, source_id)
+        if existing is not None:
+            return existing
+        allowlist_value = server.metadata.get("skill_publisher_allowlist", ())
+        if not isinstance(allowlist_value, (list, tuple)) or not all(
+            isinstance(value, str) for value in allowlist_value
+        ):
+            raise ValueError("MCP Skill publisher allowlist is invalid")
+        allowlist = tuple(dict.fromkeys(allowlist_value))
+        if not allowlist:
+            raise ValueError("MCP Skill publisher allowlist is required")
+        now = datetime.now(UTC)
+        source = SkillSourceRecord(
+            source_id=source_id,
+            tenant_id=tenant_id,
+            kind=SkillSourceKind.MCP,
+            desired_state=SkillSourceDesiredState.ENABLED,
+            publisher_allowlist=allowlist,
+            config_metadata={"server_id": server.server_id},
+            created_by="action-hands-skill-reconciler",
+            updated_by="action-hands-skill-reconciler",
+            created_at=now,
+            updated_at=now,
+        )
+        try:
+            return await self._lifecycle.put_source(source, expected_revision=0)
+        except VersionConflictError:
+            concurrent = await self._lifecycle.get_source(tenant_id, source_id)
+            if concurrent is None:
+                raise
+            return concurrent
 
 
 def _group_skill_resource_uris(
@@ -144,3 +210,8 @@ def _reconcile_context(server: McpServerDefinition) -> HandsTrustedContext:
         fencing_token=1,
         deadline=now + timedelta(minutes=5),
     )
+
+
+def _source_id(server_id: str) -> str:
+    digest = hashlib.sha256(server_id.encode()).hexdigest()[:32]
+    return f"sks_mcp_{digest}"

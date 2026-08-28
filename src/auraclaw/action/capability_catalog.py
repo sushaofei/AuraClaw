@@ -27,16 +27,6 @@ _LATIN_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_.-]+")
 _CJK_RUN_PATTERN = re.compile(r"[\u3400-\u9FFF\uF900-\uFAFF]+")
 
 
-class SkillCatalogSource(Protocol):
-    def capability_descriptors(
-        self, tenant_id: str
-    ) -> tuple[CapabilityDescriptor, ...]: ...
-
-    def get_capability(
-        self, tenant_id: str, capability_id: str
-    ) -> CapabilityDescriptor | None: ...
-
-
 class SkillResolverPort(Protocol):
     async def resolve(
         self,
@@ -233,7 +223,6 @@ class CapabilityCatalog:
 @dataclass(frozen=True)
 class CapabilitySearchExecutor:
     catalog: CapabilityCatalog
-    skills: SkillCatalogSource | None = None
 
     async def execute(
         self,
@@ -256,18 +245,6 @@ class CapabilitySearchExecutor:
                 limit=50,
             )
         )
-        if self.skills is not None and (
-            not kinds or CapabilityKind.SKILL in kinds
-        ):
-            query_tokens = _tokens(query)
-            for descriptor in self.skills.capability_descriptors(
-                invocation.tenant_id
-            ):
-                if permissions and descriptor.permission not in permissions:
-                    continue
-                if query_tokens and _score(descriptor, query_tokens) == 0:
-                    continue
-                results.append(descriptor)
         query_tokens = _tokens(query)
         results.sort(
             key=lambda item: (
@@ -291,7 +268,6 @@ class CapabilitySearchExecutor:
 @dataclass(frozen=True)
 class CapabilityLoadExecutor:
     catalog: CapabilityCatalog
-    skills: SkillCatalogSource | None = None
 
     async def execute(
         self,
@@ -309,10 +285,6 @@ class CapabilityLoadExecutor:
                 tenant_id=invocation.tenant_id,
                 capability_id=capability_id,
             )
-            if descriptor is None and self.skills is not None:
-                descriptor = self.skills.get_capability(
-                    invocation.tenant_id, capability_id
-                )
             if descriptor is not None:
                 loaded.append(_load_result(descriptor))
         return {"capabilities": loaded}

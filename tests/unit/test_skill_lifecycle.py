@@ -139,6 +139,8 @@ def test_installation_and_source_state_are_independent_from_publication() -> Non
             updated_at=now,
         )
         await store.put_installation(installation, expected_revision=0)
+        assert await store.list_installations("tenant-a") == (installation,)
+        assert await store.list_tenants() == ("tenant-a",)
         uninstalled = installation.model_copy(
             update={
                 "status": SkillInstallationStatus.UNINSTALLED,

@@ -101,6 +101,17 @@ class ArtifactWriter(Protocol):
     ) -> ArtifactRef: ...
 
 
+class ArtifactContentReader(Protocol):
+    async def read(
+        self,
+        *,
+        tenant_id: str,
+        artifact_ref: ArtifactRef,
+        actor_id: str,
+        correlation_id: str,
+    ) -> bytes: ...
+
+
 class CredentialInvoker(Protocol):
     async def invoke(
         self,
