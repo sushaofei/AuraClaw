@@ -433,6 +433,9 @@ suspend 同时拒绝新发布和持久包恢复，resume 只恢复仍处于 acti
 退役版本不会因来源重新出现而自动复活；管理员必须提交带 expected revision、reason 和幂等键的显式
 restore。服务先审计化进入不可发现的 `restoring`，再从原 Artifact 重读并复验 digest、Source、Publisher
 及签名信任，全部通过后才恢复 `active`；验证失败会停留在 `restoring`，同一命令可安全重试。
+每次统一发布准入还会写入 tenant 隔离的 `skill_admission_audit`：记录 operation、actor、Source、
+command/correlation/causation、可用的 Skill identity/digest、验证阶段、结果、稳定 error code 与耗时，
+但不记录包正文、异常消息、Secret 或私钥。该表是内部安全审计面，不作为公开包内容查询接口。
 
 重建只读取 Canonical Event Log；Read Model 和 checkpoint 可以删除后恢复。真实
 PostgreSQL 集成测试使用独立测试库：

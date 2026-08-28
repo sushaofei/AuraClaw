@@ -139,6 +139,17 @@ def test_publish_service_persists_package_publication_and_installation() -> None
 
         with pytest.raises(VersionConflictError, match="immutable"):
             await service.publish(_command(), _package(markdown=b"# Changed\n"))
+        audits = await lifecycle.list_admissions("tenant-a")
+        assert [record.outcome for record in audits] == [
+            "rejected",
+            "rejected",
+            "accepted",
+            "accepted",
+        ]
+        assert audits[0].safe_error_code == "version_conflict"
+        assert audits[0].stage == "lifecycle_commit"
+        assert audits[-1].stage == "completed"
+        assert all(record.actor_id for record in audits)
 
     asyncio.run(scenario())
 
@@ -175,9 +186,77 @@ def test_staged_publication_requires_revision_to_activate() -> None:
 
 def test_publish_service_enforces_source_publisher_allowlist() -> None:
     async def scenario() -> None:
-        service, _ = _service(_source(publishers=("other",)))
+        service, lifecycle = _service(_source(publishers=("other",)))
         with pytest.raises(PolicyDeniedError, match="publisher"):
             await service.publish(_command(), _package())
+        audit = (await lifecycle.list_admissions("tenant-a"))[0]
+        assert audit.outcome == "rejected"
+        assert audit.stage == "source_authorization"
+        assert audit.safe_error_code == "policy_denied"
+        assert audit.publisher == "acme"
+        assert audit.package_digest == skill_package_digest(_package())
+
+    asyncio.run(scenario())
+
+
+def test_invalid_signature_is_audited_without_signature_material() -> None:
+    async def scenario() -> None:
+        service, lifecycle = _service(_source())
+        valid = _package()
+        invalid_manifest = valid.manifest.model_copy(
+            update={"signature": f"hmac-sha256:{'0' * 64}"}
+        )
+        invalid = SkillPackage(
+            manifest=invalid_manifest,
+            files={
+                **valid.files,
+                "manifest.json": invalid_manifest.model_dump_json().encode(),
+            },
+        )
+        with pytest.raises(PolicyDeniedError, match="signature is invalid"):
+            await service.publish(_command(), invalid)
+        audit = (await lifecycle.list_admissions("tenant-a"))[0]
+        assert audit.stage == "signature_validation"
+        assert audit.safe_error_code == "policy_denied"
+        assert invalid_manifest.signature not in repr(audit)
+
+    asyncio.run(scenario())
+
+
+def test_artifact_read_failure_audit_does_not_persist_sensitive_error() -> None:
+    class FailingArtifacts:
+        async def read(self, **kwargs: object) -> bytes:
+            del kwargs
+            raise RuntimeError("secret package body must not be audited")
+
+    async def scenario() -> None:
+        lifecycle = InMemorySkillLifecycleStore()
+        registry = SkillPackageRegistry(
+            artifacts=ArtifactStore(InMemoryObjectStorage(), signing_key=_KEY),
+            signature_verifier=HmacSkillSignatureVerifier({"acme": _KEY}),
+        )
+        service = SkillPublicationService(
+            registry=registry,
+            lifecycle=lifecycle,
+            artifacts=FailingArtifacts(),
+            bootstrap_sources=(_source(),),
+        )
+        artifact_ref = ArtifactRef(
+            artifact_id="art_sensitive",
+            version=1,
+            content_hash="a" * 64,
+            media_type="application/vnd.auraclaw.skill-package+json",
+            size=10,
+        )
+        with pytest.raises(RuntimeError, match="secret package body"):
+            await service.publish_artifact(
+                _command(), artifact_ref, f"sha256:{'a' * 64}"
+            )
+        audit = (await lifecycle.list_admissions("tenant-a"))[0]
+        assert audit.operation == "publish_artifact"
+        assert audit.stage == "artifact_read"
+        assert audit.safe_error_code == "internal_error"
+        assert "secret package body" not in repr(audit)
 
     asyncio.run(scenario())
 

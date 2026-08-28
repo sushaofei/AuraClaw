@@ -23,10 +23,12 @@ UP = "\n".join(
         (ROOT / "migrations/0029_skill_source_inventory_retirement.sql").read_text(),
         (ROOT / "migrations/0030_skill_publisher_suspension.sql").read_text(),
         (ROOT / "migrations/0031_skill_publication_restore.sql").read_text(),
+        (ROOT / "migrations/0032_skill_admission_audit.sql").read_text(),
     )
 )
 DOWN = "\n".join(
     (
+        (ROOT / "migrations/0032_skill_admission_audit.down.sql").read_text(),
         (ROOT / "migrations/0031_skill_publication_restore.down.sql").read_text(),
         (ROOT / "migrations/0030_skill_publisher_suspension.down.sql").read_text(),
         (ROOT / "migrations/0029_skill_source_inventory_retirement.down.sql").read_text(),
@@ -75,6 +77,7 @@ def test_skill_lifecycle_migration_roundtrip_in_isolated_postgres() -> None:
                 "skill_source_inventory",
                 "skill_source_retirement_command",
                 "skill_publication_restore_command",
+                "skill_admission_audit",
                 "skill_command",
                 "skill_outbox",
                 "skill_publisher",
@@ -123,6 +126,7 @@ def test_skill_lifecycle_migration_roundtrip_in_isolated_postgres() -> None:
                 "skill_source_inventory",
                 "skill_source_retirement_command",
                 "skill_publication_restore_command",
+                "skill_admission_audit",
                 "skill_command",
                 "skill_outbox",
             ):

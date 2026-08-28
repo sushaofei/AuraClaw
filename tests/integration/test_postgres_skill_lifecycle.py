@@ -9,6 +9,7 @@ import asyncpg
 import pytest
 
 from auraclaw.action.skill_lifecycle import (
+    SkillAdmissionAuditRecord,
     SkillPublishCommit,
     SkillRestoreCommit,
     SkillSourcePackageIdentity,
@@ -47,6 +48,7 @@ MIGRATION = "\n".join(
         (ROOT / "migrations/0029_skill_source_inventory_retirement.sql").read_text(),
         (ROOT / "migrations/0030_skill_publisher_suspension.sql").read_text(),
         (ROOT / "migrations/0031_skill_publication_restore.sql").read_text(),
+        (ROOT / "migrations/0032_skill_admission_audit.sql").read_text(),
     )
 )
 pytestmark = pytest.mark.skipif(DATABASE_URL is None, reason="PostgreSQL test URL not configured")
@@ -64,6 +66,29 @@ def test_postgres_skill_lifecycle_is_persistent_and_tenant_scoped() -> None:
         store_b = PostgresSkillLifecycleStore(DATABASE_URL)
         now = datetime.now(UTC)
         try:
+            admission = SkillAdmissionAuditRecord(
+                admission_id=f"skad_{suffix}",
+                tenant_id=tenant_id,
+                command_id=f"admission-{suffix}",
+                operation="publish_artifact",
+                actor_id="integration-test",
+                source_id="sks_admin_upload",
+                correlation_id=f"corr-{suffix}",
+                causation_id=f"cause-{suffix}",
+                publisher=None,
+                name=None,
+                version=None,
+                package_digest=digest,
+                artifact_id=f"art-{suffix}",
+                outcome="rejected",
+                stage="artifact_read",
+                safe_error_code="artifact_access_denied",
+                duration_ms=7,
+                occurred_at=now,
+            )
+            await store_a.record_admission(admission)
+            assert await store_b.list_admissions(tenant_id) == (admission,)
+            assert await store_b.list_admissions(f"other-{tenant_id}") == ()
             package = SkillPackageRecord(
                 tenant_id=tenant_id,
                 manifest=SkillManifest(
@@ -512,6 +537,9 @@ def test_postgres_skill_lifecycle_is_persistent_and_tenant_scoped() -> None:
         finally:
             await store_a.close()
             await store_b.close()
+            await connection.execute(
+                "DELETE FROM hands.skill_admission_audit WHERE tenant_id=$1", tenant_id
+            )
             await connection.execute(
                 "DELETE FROM hands.skill_outbox WHERE tenant_id=$1", tenant_id
             )

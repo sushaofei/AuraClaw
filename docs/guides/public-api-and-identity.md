@@ -782,6 +782,10 @@ private key 只从 `AURACLAW_SKILL_SIGNING_KEY`（或指定 Secret 环境变量�
 需通过 Publisher key rotation API 登记；后续 validate/test/publish 用显式公钥本地验签，而服务端仍以
 tenant Registry 的 active key 独立验签。CLI 不接受命令行私钥，也不允许外部签名声明 `platform`。
 
+每次 Skill publish/publish-artifact 的成功或拒绝都会进入内部 tenant 审计账本。账本包含可信身份、命令
+上下文、验证阶段、稳定错误码和耗时，不包含 Skill 正文或异常消息。它不是公开 API；产品端不得把内部
+审计详情或原始拒绝原因直接返回给非安全运维角色。
+
 ```bash
 curl -sS http://127.0.0.1:8000/v1/admin/skills \
   -H 'X-Tenant-ID: local' \
