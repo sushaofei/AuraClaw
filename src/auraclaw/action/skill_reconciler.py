@@ -8,7 +8,12 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from auraclaw.action.ports import CapabilityCatalogStore, CapabilityConnector
-from auraclaw.action.skill_lifecycle import SkillLifecycleStore, SkillSourceLease
+from auraclaw.action.skill_lifecycle import (
+    SkillLifecycleStore,
+    SkillSourceLease,
+    SkillSourcePackageIdentity,
+    SkillSourceSnapshotCommit,
+)
 from auraclaw.action.skill_packages import SkillPackage, skill_package_digest
 from auraclaw.action.skill_publication import SkillPublicationService
 from auraclaw.action.skill_rebuild import SkillStateRebuilder
@@ -26,6 +31,7 @@ from auraclaw.contracts.skills import (
 _SKILL_URI = re.compile(r"^skill://([^/]+)/([^/]+)/([^/]+)/(.+)$")
 _URI_SUFFIX_TO_PATH = {"manifest": "manifest.json"}
 _LEASE_TTL = timedelta(minutes=5)
+_MISSING_SNAPSHOT_THRESHOLD = 2
 
 
 @dataclass(frozen=True)
@@ -106,7 +112,8 @@ class SkillPackageReconciler:
             lease = await self._renew(lease)
             grouped = _group_skill_resource_uris(snapshot.resources)
             published = 0
-            for (_publisher, _name, _version), uris in grouped.items():
+            observed: list[SkillSourcePackageIdentity] = []
+            for (publisher, name, version), uris in grouped.items():
                 if not any(uri.endswith("/manifest") for uri in uris):
                     continue
                 package = await _download_skill_package(
@@ -129,19 +136,29 @@ class SkillPackageReconciler:
                     source_lease=lease,
                 )
                 published += 1
+                observed.append(SkillSourcePackageIdentity(publisher, name, version))
             lease = await self._renew(lease)
             now = datetime.now(UTC)
-            await self._lifecycle.put_sync_state_fenced(
-                SkillSourceSyncState(
-                    source_id=source.source_id,
-                    tenant_id=tenant_id,
-                    generation=lease.fencing_token,
-                    cursor=snapshot.source_revision,
-                    complete_snapshot=True,
-                    last_success_at=now,
-                    last_attempt_at=now,
-                ),
-                lease=lease,
+            await self._lifecycle.commit_source_snapshot(
+                SkillSourceSnapshotCommit(
+                    state=SkillSourceSyncState(
+                        source_id=source.source_id,
+                        tenant_id=tenant_id,
+                        generation=lease.fencing_token,
+                        cursor=snapshot.source_revision,
+                        complete_snapshot=True,
+                        last_success_at=now,
+                        last_attempt_at=now,
+                    ),
+                    lease=lease,
+                    observed=tuple(sorted(observed)),
+                    missing_snapshot_threshold=_MISSING_SNAPSHOT_THRESHOLD,
+                    actor_id="action-hands-skill-reconciler",
+                    command_prefix=f"skill-source-retire:{source.source_id}",
+                    correlation_id=f"skill-reconcile:{server.server_id}",
+                    causation_id=f"mcp-snapshot:{server.server_id}",
+                    occurred_at=now,
+                )
             )
             await self._rebuilder.rebuild_tenant(tenant_id)
             return SkillReconcileResult(

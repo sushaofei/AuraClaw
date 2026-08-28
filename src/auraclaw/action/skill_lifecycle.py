@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
@@ -10,6 +11,7 @@ from auraclaw.contracts.skills import (
     SkillInstallationRecord,
     SkillPackageRecord,
     SkillPublicationRecord,
+    SkillPublicationStatus,
     SkillSourceRecord,
     SkillSourceSyncState,
 )
@@ -44,6 +46,31 @@ class SkillSourceLease:
     owner: str
     fencing_token: int
     expires_at: datetime
+
+
+@dataclass(frozen=True, order=True)
+class SkillSourcePackageIdentity:
+    publisher: str
+    name: str
+    version: str
+
+
+@dataclass(frozen=True)
+class SkillSourceSnapshotCommit:
+    state: SkillSourceSyncState
+    lease: SkillSourceLease
+    observed: tuple[SkillSourcePackageIdentity, ...]
+    missing_snapshot_threshold: int
+    actor_id: str
+    command_prefix: str
+    correlation_id: str
+    causation_id: str
+    occurred_at: datetime
+
+
+@dataclass(frozen=True)
+class SkillSourceSnapshotResult:
+    retired: tuple[SkillPublicationRecord, ...]
 
 
 @dataclass(frozen=True)
@@ -147,6 +174,10 @@ class SkillLifecycleStore(Protocol):
         self, state: SkillSourceSyncState, *, lease: SkillSourceLease
     ) -> None: ...
 
+    async def commit_source_snapshot(
+        self, commit: SkillSourceSnapshotCommit
+    ) -> SkillSourceSnapshotResult: ...
+
 
 @dataclass
 class InMemorySkillLifecycleStore:
@@ -160,6 +191,10 @@ class InMemorySkillLifecycleStore:
     _sources: dict[SourceKey, SkillSourceRecord] = field(default_factory=dict)
     _sync_states: dict[SourceKey, SkillSourceSyncState] = field(default_factory=dict)
     _source_leases: dict[SourceKey, SkillSourceLease] = field(default_factory=dict)
+    _source_inventory: dict[
+        tuple[str, str, str, str, str], tuple[int, int]
+    ] = field(default_factory=dict)
+    _source_retirement_commands: set[tuple[str, str]] = field(default_factory=set)
     _commands: dict[CommandKey, tuple[str, SkillPublishCommitResult]] = field(
         default_factory=dict
     )
@@ -521,6 +556,78 @@ class InMemorySkillLifecycleStore:
                 raise VersionConflictError("Skill Source generation cannot move backwards")
             self._sync_states[key] = state
 
+    async def commit_source_snapshot(
+        self, commit: SkillSourceSnapshotCommit
+    ) -> SkillSourceSnapshotResult:
+        if commit.missing_snapshot_threshold < 2:
+            raise ValueError("Skill Source missing snapshot threshold must be at least two")
+        async with self._lock:
+            self._require_active_lease(commit.lease)
+            state = commit.state
+            if (state.tenant_id, state.source_id) != (
+                commit.lease.tenant_id,
+                commit.lease.source_id,
+            ):
+                raise VersionConflictError("Skill Source lease scope mismatch")
+            existing_state = self._sync_states.get(
+                (state.tenant_id, state.source_id)
+            )
+            if existing_state is not None and state.generation <= existing_state.generation:
+                raise VersionConflictError(
+                    "Skill Source complete snapshot generation must advance"
+                )
+            observed = set(commit.observed)
+            retired: list[SkillPublicationRecord] = []
+            now = commit.occurred_at
+            for key, publication in tuple(self._publications.items()):
+                if (
+                    publication.tenant_id != state.tenant_id
+                    or publication.source_id != state.source_id
+                    or publication.status in {
+                        SkillPublicationStatus.RETIRED,
+                        SkillPublicationStatus.REVOKED,
+                    }
+                ):
+                    continue
+                identity = SkillSourcePackageIdentity(
+                    publication.publisher,
+                    publication.name,
+                    publication.version,
+                )
+                inventory_key = (
+                    state.tenant_id,
+                    state.source_id,
+                    identity.publisher,
+                    identity.name,
+                    identity.version,
+                )
+                if identity in observed:
+                    self._source_inventory[inventory_key] = (state.generation, 0)
+                    continue
+                previous = self._source_inventory.get(inventory_key)
+                missing = 1 if previous is None else previous[1] + 1
+                self._source_inventory[inventory_key] = (state.generation, missing)
+                if missing < commit.missing_snapshot_threshold:
+                    continue
+                command_id = _retirement_command_id(commit.command_prefix, identity)
+                command_key = (state.tenant_id, command_id)
+                if command_key in self._source_retirement_commands:
+                    continue
+                updated = publication.model_copy(
+                    update={
+                        "status": SkillPublicationStatus.RETIRED,
+                        "revision": publication.revision + 1,
+                        "updated_by": commit.actor_id,
+                        "updated_at": now,
+                        "reason_code": "source_missing_confirmed",
+                    }
+                )
+                self._publications[key] = updated
+                self._source_retirement_commands.add(command_key)
+                retired.append(updated)
+            self._sync_states[(state.tenant_id, state.source_id)] = state
+            return SkillSourceSnapshotResult(tuple(retired))
+
     def _require_active_lease(self, lease: SkillSourceLease) -> None:
         current = self._source_leases.get((lease.tenant_id, lease.source_id))
         if (
@@ -534,6 +641,13 @@ class InMemorySkillLifecycleStore:
 def _package_key(record: SkillPackageRecord) -> PackageKey:
     manifest = record.manifest
     return record.tenant_id, manifest.publisher, manifest.name, manifest.version
+
+
+def _retirement_command_id(
+    prefix: str, identity: SkillSourcePackageIdentity
+) -> str:
+    value = f"{identity.publisher}\0{identity.name}\0{identity.version}"
+    return f"{prefix}:{hashlib.sha256(value.encode()).hexdigest()}"
 
 
 def _publication_key(record: SkillPublicationRecord) -> PublicationKey:

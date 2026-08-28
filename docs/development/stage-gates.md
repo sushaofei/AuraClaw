@@ -1840,6 +1840,34 @@ ready Skill Artifact 建立带 fencing 的物理回收流程；不把成功命�
 - [x] README、架构、数据库参考与阶段门禁同步，缺失版本自动退役和完整审计未误标完成。
 - [x] 本阶段作为一个 intentional commit 提交并 push，不包含 `.env`、Secret、缓存或无关改动。
 
+## 阶段 M14k：Skill Source 连续缺失确认与审计化退役（Issue #56）
+
+状态：已完成。本阶段只对连续完整快照确认的来源下架执行普通退役；安全撤销仍保持独立语义。
+
+### 缺失确认与事务
+
+- [x] Source inventory 持久记录 last seen generation、连续完整快照缺失次数、首次缺失与检查时间。
+- [x] 首次缺失不改变 Publication；连续第二个严格递增 generation 的完整快照仍缺失才触发退役。
+- [x] 中间重新观察到版本会清零缺失计数；失败、不完整快照、同 generation 重放和旧 lease 不推进计数。
+- [x] inventory、退役命令账本、Publication revision/status 与成功 Sync State 在同一 fenced 事务提交。
+- [x] 退役命令记录 tenant、source、actor、correlation、causation、fencing token、reason 与前后 revision。
+
+### Binding 与安全语义
+
+- [x] 新增 `retired` Publication 状态并从 Catalog/Resolver 新候选移除。
+- [x] retained 的 retired Package 仍按固定 digest 可读，既有 binding 不因普通来源下架静默漂移。
+- [x] `revoked` 继续 fail closed；安全撤销可以从 retired 状态继续执行，不与普通退役混用。
+- [x] 同一不可变版本重新出现不会自动激活，避免远端抖动绕过显式恢复治理。
+
+### 质量与交付
+
+- [x] 0029 正反迁移覆盖 inventory、退役命令账本和 Publication 状态约束。
+- [x] 单测覆盖首次缺失、重新出现清零、连续缺失退役、Catalog 隐藏与固定内容可读。
+- [x] PostgreSQL 覆盖同 generation 拒绝、连续缺失、命令审计及迁移回滚。
+- [x] 全量 Ruff、Mypy、unit、相关 integration 与 import-linter 通过。
+- [x] README、架构、数据库参考与阶段门禁同步，剩余恢复与完整审计范围未误标完成。
+- [x] 本阶段作为一个 intentional commit 提交并 push，不包含 `.env`、Secret、缓存或无关改动。
+
 ## 阶段 Product Activity：产品级对话执行轨迹（AuraX Issue #2）
 
 状态：代码与定向验证完成；完整基础设施集成门禁受现有 Kafka/MySQL/PostgreSQL/Artifact 环境失败阻塞。

@@ -20,6 +20,7 @@ class SkillPublicationStatus(StrEnum):
     VALIDATING = "validating"
     ACTIVE = "active"
     QUARANTINED = "quarantined"
+    RETIRED = "retired"
     REVOKED = "revoked"
 
 
@@ -373,9 +374,12 @@ class SkillPublicationRecord(ContractModel):
     def validate_status_reason(self) -> SkillPublicationRecord:
         if self.status in {
             SkillPublicationStatus.QUARANTINED,
+            SkillPublicationStatus.RETIRED,
             SkillPublicationStatus.REVOKED,
         } and not self.reason_code:
-            raise ValueError("Quarantined or revoked Skill publication requires a reason")
+            raise ValueError(
+                "Quarantined, retired, or revoked Skill publication requires a reason"
+            )
         return self
 
 

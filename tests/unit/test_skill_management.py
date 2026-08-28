@@ -236,6 +236,46 @@ def test_management_enforces_revision_and_revoke_is_separate() -> None:
     asyncio.run(scenario())
 
 
+def test_security_revoke_can_override_ordinary_retirement() -> None:
+    async def scenario() -> None:
+        service, lifecycle, _projector = await _service()
+        current = await service.get_publication(
+            "tenant-a", "platform", "release.prepare", "1.0.0"
+        )
+        await lifecycle.put_publication(
+            current.model_copy(
+                update={
+                    "status": SkillPublicationStatus.RETIRED,
+                    "revision": 2,
+                    "updated_by": "source-reconciler",
+                    "updated_at": datetime.now(UTC),
+                    "reason_code": "source_missing_confirmed",
+                }
+            ),
+            expected_revision=1,
+        )
+
+        revoked = await service.revoke_publication(
+            RevokeSkillPublicationCommand(
+                tenant_id="tenant-a",
+                actor_id="security-a",
+                publisher="platform",
+                name="release.prepare",
+                version="1.0.0",
+                reason_code="publisher_key_compromised",
+                command_id="revoke-retired",
+                expected_revision=2,
+                correlation_id="corr-revoke-retired",
+                causation_id="revoke-retired",
+            )
+        )
+        assert revoked.status is SkillPublicationStatus.REVOKED
+        assert revoked.revision == 3
+        assert revoked.reason_code == "publisher_key_compromised"
+
+    asyncio.run(scenario())
+
+
 def test_purge_requires_expired_uninstalled_revoked_unreferenced_package() -> None:
     async def scenario() -> None:
         _unused, lifecycle, projector = await _service()

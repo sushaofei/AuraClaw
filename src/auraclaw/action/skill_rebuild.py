@@ -81,7 +81,10 @@ class SkillStateRebuilder:
         discoverable: set[tuple[str, str, str]] = set()
         failures: list[str] = []
         for record in await self._lifecycle.list_publications(tenant_id):
-            if record.status is not SkillPublicationStatus.ACTIVE:
+            if record.status not in {
+                SkillPublicationStatus.ACTIVE,
+                SkillPublicationStatus.RETIRED,
+            }:
                 continue
             package_record = await self._lifecycle.get_package(
                 tenant_id, record.publisher, record.name, record.version

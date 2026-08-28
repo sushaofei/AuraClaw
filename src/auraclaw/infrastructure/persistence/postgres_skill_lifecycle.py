@@ -11,7 +11,11 @@ from auraclaw.action.skill_lifecycle import (
     SkillPublishCommit,
     SkillPublishCommitResult,
     SkillSourceLease,
+    SkillSourcePackageIdentity,
+    SkillSourceSnapshotCommit,
+    SkillSourceSnapshotResult,
     _publish_outbox_payload,
+    _retirement_command_id,
 )
 from auraclaw.contracts.errors import NotFoundError, VersionConflictError
 from auraclaw.contracts.skills import (
@@ -635,6 +639,182 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
                 raise VersionConflictError(
                     "Skill Source generation cannot move backwards"
                 )
+
+    async def commit_source_snapshot(
+        self, commit: SkillSourceSnapshotCommit
+    ) -> SkillSourceSnapshotResult:
+        if commit.missing_snapshot_threshold < 2:
+            raise ValueError("Skill Source missing snapshot threshold must be at least two")
+        state = commit.state
+        lease = commit.lease
+        if (state.tenant_id, state.source_id) != (
+            lease.tenant_id,
+            lease.source_id,
+        ):
+            raise VersionConflictError("Skill Source lease scope mismatch")
+        observed = set(commit.observed)
+        retired: list[SkillPublicationRecord] = []
+        pool = await self.pool()
+        async with pool.acquire() as connection, connection.transaction():
+            await _require_active_source_lease(connection, lease)
+            previous_generation = await connection.fetchval(
+                """SELECT generation FROM hands.skill_source_sync_state
+                WHERE tenant_id=$1 AND source_id=$2 FOR UPDATE""",
+                state.tenant_id,
+                state.source_id,
+            )
+            if (
+                previous_generation is not None
+                and state.generation <= int(previous_generation)
+            ):
+                raise VersionConflictError(
+                    "Skill Source complete snapshot generation must advance"
+                )
+            rows = await connection.fetch(
+                """SELECT * FROM hands.skill_publication
+                WHERE tenant_id=$1 AND source_id=$2
+                  AND status NOT IN ('retired','revoked')
+                ORDER BY publisher,name,version FOR UPDATE""",
+                state.tenant_id,
+                state.source_id,
+            )
+            for row in rows:
+                publication = _publication(dict(row))
+                identity = SkillSourcePackageIdentity(
+                    publication.publisher,
+                    publication.name,
+                    publication.version,
+                )
+                if identity in observed:
+                    await connection.execute(
+                        """INSERT INTO hands.skill_source_inventory
+                        (tenant_id,source_id,publisher,name,version,
+                         last_seen_generation,missing_complete_snapshots,
+                         first_missing_at,last_checked_at,retired_at)
+                        VALUES ($1,$2,$3,$4,$5,$6,0,NULL,$7,NULL)
+                        ON CONFLICT (tenant_id,source_id,publisher,name,version)
+                        DO UPDATE SET last_seen_generation=EXCLUDED.last_seen_generation,
+                          missing_complete_snapshots=0,first_missing_at=NULL,
+                          last_checked_at=EXCLUDED.last_checked_at,retired_at=NULL""",
+                        state.tenant_id,
+                        state.source_id,
+                        identity.publisher,
+                        identity.name,
+                        identity.version,
+                        state.generation,
+                        commit.occurred_at,
+                    )
+                    continue
+                missing = await connection.fetchval(
+                    """INSERT INTO hands.skill_source_inventory
+                    (tenant_id,source_id,publisher,name,version,
+                     last_seen_generation,missing_complete_snapshots,
+                     first_missing_at,last_checked_at)
+                    VALUES ($1,$2,$3,$4,$5,NULL,1,$6,$6)
+                    ON CONFLICT (tenant_id,source_id,publisher,name,version)
+                    DO UPDATE SET missing_complete_snapshots=
+                        hands.skill_source_inventory.missing_complete_snapshots+1,
+                      first_missing_at=COALESCE(
+                        hands.skill_source_inventory.first_missing_at,$6),
+                      last_checked_at=$6
+                    RETURNING missing_complete_snapshots""",
+                    state.tenant_id,
+                    state.source_id,
+                    identity.publisher,
+                    identity.name,
+                    identity.version,
+                    commit.occurred_at,
+                )
+                if int(missing) < commit.missing_snapshot_threshold:
+                    continue
+                command_id = _retirement_command_id(
+                    commit.command_prefix, identity
+                )
+                command_row = await connection.fetchrow(
+                    """INSERT INTO hands.skill_source_retirement_command
+                    (tenant_id,command_id,source_id,publisher,name,version,
+                     actor_id,correlation_id,causation_id,fencing_token,
+                     reason_code,previous_revision,resulting_revision,created_at)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
+                            'source_missing_confirmed',$11,$12,$13)
+                    ON CONFLICT (tenant_id,command_id) DO NOTHING
+                    RETURNING command_id""",
+                    state.tenant_id,
+                    command_id,
+                    state.source_id,
+                    identity.publisher,
+                    identity.name,
+                    identity.version,
+                    commit.actor_id,
+                    commit.correlation_id,
+                    commit.causation_id,
+                    lease.fencing_token,
+                    publication.revision,
+                    publication.revision + 1,
+                    commit.occurred_at,
+                )
+                if command_row is None:
+                    continue
+                updated_row = await connection.fetchrow(
+                    """UPDATE hands.skill_publication SET status='retired',
+                    revision=revision+1,updated_by=$6,updated_at=$7,
+                    reason_code='source_missing_confirmed'
+                    WHERE tenant_id=$1 AND publisher=$2 AND name=$3 AND version=$4
+                      AND revision=$5 RETURNING *""",
+                    state.tenant_id,
+                    identity.publisher,
+                    identity.name,
+                    identity.version,
+                    publication.revision,
+                    commit.actor_id,
+                    commit.occurred_at,
+                )
+                if updated_row is None:
+                    raise VersionConflictError(
+                        "Skill publication revision conflict"
+                    )
+                await connection.execute(
+                    """UPDATE hands.skill_source_inventory SET retired_at=$6
+                    WHERE tenant_id=$1 AND source_id=$2 AND publisher=$3
+                      AND name=$4 AND version=$5""",
+                    state.tenant_id,
+                    state.source_id,
+                    identity.publisher,
+                    identity.name,
+                    identity.version,
+                    commit.occurred_at,
+                )
+                retired.append(_publication(dict(updated_row)))
+            sync_row = await connection.fetchrow(
+                """INSERT INTO hands.skill_source_sync_state
+                (source_id,tenant_id,generation,cursor,complete_snapshot,
+                 last_success_at,last_attempt_at,consecutive_failures,
+                 safe_error_code,updated_at)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,now())
+                ON CONFLICT (tenant_id,source_id) DO UPDATE SET
+                  generation=EXCLUDED.generation,cursor=EXCLUDED.cursor,
+                  complete_snapshot=EXCLUDED.complete_snapshot,
+                  last_success_at=EXCLUDED.last_success_at,
+                  last_attempt_at=EXCLUDED.last_attempt_at,
+                  consecutive_failures=EXCLUDED.consecutive_failures,
+                  safe_error_code=EXCLUDED.safe_error_code,updated_at=now()
+                WHERE EXCLUDED.generation > hands.skill_source_sync_state.generation
+                RETURNING source_id""",
+                state.source_id,
+                state.tenant_id,
+                state.generation,
+                state.cursor,
+                state.complete_snapshot,
+                state.last_success_at,
+                state.last_attempt_at,
+                state.consecutive_failures,
+                state.safe_error_code,
+            )
+            if sync_row is None:
+                raise VersionConflictError(
+                    "Skill Source generation cannot move backwards"
+                )
+        return SkillSourceSnapshotResult(tuple(retired))
 
 
 async def _put_package_transaction(

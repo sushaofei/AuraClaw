@@ -414,6 +414,8 @@ Ed25519 签名的外部 publisher 包。Registry 只保存公钥，私钥必须�
 周期可靠性任务修复 Artifact binding 与 Catalog，并在 retention 到期后对未引用的 ready Skill Artifact
 执行带 Policy 和并发 fencing 的孤儿回收。MCP Skill Source 的周期发现使用 tenant/source 级持久租约；
 租约 fencing token 同时约束 Publication 事务与 Sync State，过期 Hands 副本不能提交迟到快照。
+某版本只有在连续两个完整快照中缺失才自动转为 `retired`；任一完整快照重新观察到它都会清零缺失计数。
+`retired` 不再参与新发现，但保留不可变内容供既有固定 binding 读取，并与安全 `revoked` 明确区分。
 
 重建只读取 Canonical Event Log；Read Model 和 checkpoint 可以删除后恢复。真实
 PostgreSQL 集成测试使用独立测试库：

@@ -317,6 +317,97 @@ def test_skill_reconciler_persists_safe_failure_and_recovers() -> None:
     asyncio.run(scenario())
 
 
+def test_skill_reconciler_retires_only_after_two_complete_missing_snapshots() -> None:
+    async def scenario() -> None:
+        verifier = HmacSkillSignatureVerifier({"platform": _PUBLISHER_KEY})
+        package = _package(verifier)
+        prefix = (
+            f"skill://{package.manifest.publisher}/"
+            f"{package.manifest.name}/{package.manifest.version}"
+        )
+        resources = (
+            (f"{prefix}/manifest", package.files["manifest.json"].decode()),
+            (f"{prefix}/SKILL.md", package.files["SKILL.md"].decode()),
+        )
+        connector = _SkillMcpConnector(resources)
+        server = McpServerDefinition(
+            server_id="retiring-skill-server",
+            tenant_id="tenant-a",
+            title="Retiring Skill MCP",
+            endpoint="https://skills.example/mcp",
+            enabled=True,
+            metadata={"skill_publisher_allowlist": ["platform"]},
+        )
+        lifecycle = InMemorySkillLifecycleStore()
+        artifacts = _Artifacts()
+        registry = SkillPackageRegistry(
+            artifacts=artifacts,
+            signature_verifier=verifier,
+        )
+        catalog = CapabilityCatalog(InMemoryCapabilityCatalogStore())
+        reconciler = SkillPackageReconciler(
+            store=_Store(server),
+            connectors={server.server_id: connector},
+            lifecycle=lifecycle,
+            publication=SkillPublicationService(
+                registry=registry,
+                lifecycle=lifecycle,
+            ),
+            rebuilder=SkillStateRebuilder(
+                lifecycle=lifecycle,
+                artifacts=artifacts,
+                registry=registry,
+                catalog=catalog,
+            ),
+            owner="hands-a",
+        )
+
+        assert (await reconciler.reconcile_server(server)).published_count == 1
+        connector._package_resources = ()
+        first_missing = await reconciler.reconcile_server(server)
+        publication = await lifecycle.get_publication(
+            "tenant-a", "platform", "release.prepare", "1.4.0"
+        )
+        assert first_missing.error is None
+        assert publication is not None
+        assert publication.status.value == "active"
+
+        connector._package_resources = resources
+        assert (await reconciler.reconcile_server(server)).error is None
+        connector._package_resources = ()
+        reset_missing = await reconciler.reconcile_server(server)
+        reset_publication = await lifecycle.get_publication(
+            "tenant-a", "platform", "release.prepare", "1.4.0"
+        )
+        assert reset_missing.error is None
+        assert reset_publication is not None
+        assert reset_publication.status.value == "active"
+
+        second_missing = await reconciler.reconcile_server(server)
+        retired = await lifecycle.get_publication(
+            "tenant-a", "platform", "release.prepare", "1.4.0"
+        )
+        assert second_missing.error is None
+        assert retired is not None
+        assert retired.status.value == "retired"
+        assert retired.reason_code == "source_missing_confirmed"
+        assert retired.updated_by == "action-hands-skill-reconciler"
+        assert len(lifecycle._source_retirement_commands) == 1
+        assert registry.candidates(
+            "tenant-a", "release.prepare", publisher="platform"
+        ) == ()
+        assert registry.load_part(
+            "tenant-a",
+            publisher="platform",
+            name="release.prepare",
+            version="1.4.0",
+            package_digest=retired.package_digest,
+            path="SKILL.md",
+        ).startswith(b"# Release")
+
+    asyncio.run(scenario())
+
+
 def test_skill_reconciler_requires_configured_publisher_allowlist() -> None:
     async def scenario() -> None:
         verifier = HmacSkillSignatureVerifier({"platform": _PUBLISHER_KEY})
