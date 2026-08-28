@@ -599,6 +599,17 @@ class SkillPublishInternalResponse(ContractModel):
     publication: dict[str, Any]
 
 
+class SkillPublishArtifactInternalRequest(ContractModel):
+    context: InternalRequestContext
+    actor_id: str = Field(min_length=1, max_length=256)
+    source_id: str = Field(min_length=1, max_length=128)
+    activate: bool = True
+    command_id: str = Field(min_length=1, max_length=256)
+    expected_revision: int = Field(default=0, ge=0)
+    expected_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    artifact_ref: dict[str, Any]
+
+
 class SkillInstallationInternalRequest(ContractModel):
     context: InternalRequestContext
     actor_id: str = Field(min_length=1, max_length=256)

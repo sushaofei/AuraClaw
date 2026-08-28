@@ -312,19 +312,27 @@ publisher allowlist，调用既有确定性包校验与签名验证，只允许�
 不可变 Package、带 revision 的 Publication，并在激活时创建 tenant Installation。相同 identity 和
 digest 是幂等成功，相同 identity 不同 digest 必须冲突；`staged -> active` 必须携带当前 revision。
 
-`POST /v1/admin/skill-publications` 是迁移期的小包便捷入口：正文使用受限数量和总大小的 base64
-文件映射，tenant/actor 只取服务端 Identity，命令上下文只取可信请求头。它不是最终的大包上传协议；
-后续两阶段 staged Artifact upload、持久审计/Outbox、Publisher Registry、CLI 和 Source Worker 仍须
-复用同一服务，而不是复制发布逻辑。SQL 部署使用持久 Lifecycle Store；内存 Store 只用于开发测试。
+`POST /v1/admin/skill-publications` 保留小包兼容入口：正文使用受限数量和总大小的 base64 文件映射。
+较大包和 CLI 使用两阶段 Artifact 协议：先通过 `POST /v1/admin/skill-package-uploads` 获取单段或分段
+预签名 URL，直传对象存储并 finalize，再用 `artifact_ref + expected_digest` 调用同一个 Publication
+入口。两条路径最终都进入 `SkillPublicationService` 的 Source、allowlist、Archive、Manifest、声明式
+测试向量、digest 与签名准入；staged 路径复用既有 Artifact Ref，不产生第二份对象。tenant/actor 只取
+服务端 Identity，所有控制面写入均携带可信请求头中的 command/correlation context。
+
+Task API 到 Artifact Service 的 workload 权限只允许 `internal` 分类、24 MiB 以内、具有 retention 且
+作用域为 `skill-upload:*` 的 Skill media type；finalize 重新验证相同约束。Task API 不持有对象存储
+凭证，调用方也不能借该身份创建或完成通用 Artifact。SQL 部署使用持久 Lifecycle Store；内存 Store
+只用于开发测试。
 
 生产部署中，Task API 只负责验证外部 Identity 和构造发布命令，不持有对象存储凭证，也不在自身
 进程内落 Skill Artifact。它通过带 workload identity 的内部契约调用 Action Hands：
 
 ```text
-Admin API -> Task API RemoteSkillPublicationClient
+CLI/Admin -> Task API -> Artifact Service create/finalize -> immutable Artifact Ref
+          -> Task API RemoteSkillPublicationClient
           -> Action Hands SkillPublicationInternalService
-          -> SkillPublicationService
-          -> production ArtifactWriter + persistent Lifecycle Store
+          -> SkillPublicationService admission
+          -> persistent Lifecycle Store + existing Artifact Ref
 ```
 
 内部服务重新校验调用方身份、command/request id、base64 与包大小，包路径/Manifest/签名验证必须先于
@@ -333,6 +341,17 @@ SQL profile 必须走 Action Hands。该链路解决 Artifact 所有权，不代
 Installation 投影与 Resolver 回查就绪前，不能提前删除 Runtime 的兼容目录。
 Task API 在迁移期可把已确认的发布结果写入本副本只读兼容缓存，以保证同请求副本的旧查询入口立即可见；
 该缓存不是事实源，也不提供跨副本一致性，后续必须由持久查询/统一 Catalog 取代。
+
+开发者 CLI 提供 `auraclaw skills validate|test|publish`。`validate` 使用与服务端相同的包解析、路径、
+Manifest、digest 和签名规则；`test` 只验证 `tests/*.json` 声明式向量，绝不加载或执行包内 Python、
+Shell 或二进制；`publish` 仅从指定环境变量读取 bearer token，并始终使用 staged Artifact 路径。
+当前 CLI 只支持平台 HMAC 兼容发布，外部 publisher 必须等 Publisher Registry、Ed25519/key rotation
+落地后接入，不能把开发密钥当生产信任根。
+
+两阶段传输已完成，但 finalized 后、Publication 提交前失败会留下 ready Artifact。当前使用保守的
+90 天 retention，不能由 pending-upload GC 误删；持久命令审计/Outbox、可证明未被 Package 引用的
+ready-orphan GC 及并发幂等记录属于后续独立阶段。Source 多副本租约/对账与 Publisher Registry 也仍未
+完成，不能将本阶段描述为完整供应链治理。
 
 Action Hands 启动及周期对账时由 `SkillStateRebuilder` 枚举 Lifecycle tenant，从受 Policy 保护的
 Artifact 下载接口读取不可变包，并再次校验大小、内容 hash、Archive、Manifest、package digest 和

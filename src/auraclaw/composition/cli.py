@@ -1,12 +1,25 @@
 import argparse
 import asyncio
+import hashlib
+import json
 import multiprocessing
+import os
+import uuid
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
+import httpx
 import uvicorn
 
+from auraclaw.action.skill_packages import (
+    HmacSkillSignatureVerifier,
+    SkillPackage,
+    SkillPackageRegistry,
+    skill_package_archive,
+    skill_package_digest,
+    validate_skill_test_vectors,
+)
 from auraclaw.composition.local_ingress import (
     create_local_ingress_app,
     loopback_connect_host,
@@ -158,6 +171,207 @@ async def _run_migration_command(
         print(name)
 
 
+class _ValidationArtifactWriter:
+    async def put(self, **kwargs: object) -> Any:
+        del kwargs
+        raise RuntimeError("validation must not write Artifacts")
+
+
+def _load_skill_directory(directory: str) -> SkillPackage:
+    root = Path(directory).resolve()
+    if not root.is_dir():
+        raise SystemExit(f"Skill directory does not exist: {directory}")
+    files: dict[str, bytes] = {}
+    total_size = 0
+    for item in sorted(root.rglob("*")):
+        if item.is_symlink():
+            raise SystemExit(f"Skill directory contains a symlink: {item.relative_to(root)}")
+        if not item.is_file():
+            continue
+        relative = item.relative_to(root).as_posix()
+        files[relative] = item.read_bytes()
+        total_size += len(files[relative])
+        if len(files) > 512 or total_size > 16 * 1024 * 1024:
+            raise SystemExit("Skill package exceeds local validation limits")
+    return SkillPackage.from_files(files)
+
+
+def _validate_local_skill(package: SkillPackage, settings: Settings) -> SkillPackage:
+    if package.manifest.publisher != "platform":
+        raise SystemExit(
+            "Non-platform publishers require the production Publisher Registry"
+        )
+    signing_key = (
+        settings.skill_signing_key.get_secret_value().encode()
+        if settings.skill_signing_key is not None
+        else b"auraclaw-development-platform-skill-key"
+    )
+    registry = SkillPackageRegistry(
+        artifacts=_ValidationArtifactWriter(),
+        signature_verifier=HmacSkillSignatureVerifier(
+            {package.manifest.publisher: signing_key}
+        ),
+    )
+    return registry.validate(package)
+
+
+def _identity_headers(
+    *, tenant_id: str, actor_id: str, token: str | None, command_id: str | None = None
+) -> dict[str, str]:
+    headers = {
+        "X-Tenant-ID": tenant_id,
+        "X-Actor-ID": actor_id,
+        "X-Correlation-ID": command_id or f"skill-cli-{uuid.uuid4().hex}",
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    if command_id:
+        headers["Idempotency-Key"] = command_id
+    return headers
+
+
+def _skill_subcommand_id(command_id: str, operation: str) -> str:
+    digest = hashlib.sha256(f"{command_id}:{operation}".encode()).hexdigest()
+    return f"skill-cli-{operation}-{digest}"
+
+
+async def _publish_skill_archive(
+    *,
+    client: httpx.AsyncClient,
+    package: SkillPackage,
+    tenant_id: str,
+    actor_id: str,
+    publisher: str,
+    source_id: str,
+    activate: bool,
+    expected_revision: int,
+    command_id: str,
+    token: str | None,
+) -> dict[str, Any]:
+    if publisher != package.manifest.publisher:
+        raise SystemExit("--publisher must match manifest publisher")
+    archive = skill_package_archive(package)
+    checksum = hashlib.sha256(archive).hexdigest()
+    headers = _identity_headers(
+        tenant_id=tenant_id,
+        actor_id=actor_id,
+        token=token,
+        command_id=command_id,
+    )
+    create = await client.post(
+        "/v1/admin/skill-package-uploads",
+        headers={
+            **headers,
+            "Idempotency-Key": _skill_subcommand_id(command_id, "upload"),
+        },
+        json={
+            "name": (
+                f"{package.manifest.publisher}.{package.manifest.name}-"
+                f"{package.manifest.version}.skill.json"
+            ),
+            "expected_size": len(archive),
+            "expected_checksum": checksum,
+        },
+    )
+    _require_cli_success(create, "create staged upload")
+    upload = create.json()
+    parts: list[dict[str, object]] = []
+    if upload.get("upload_mode") == "multipart":
+        part_size = int(upload["part_size"])
+        for number, url in enumerate(upload.get("part_urls", ()), start=1):
+            offset = (number - 1) * part_size
+            response = await client.put(
+                str(url),
+                content=archive[offset : offset + part_size],
+                headers={"Content-Type": "application/vnd.auraclaw.skill-package+json"},
+            )
+            _require_cli_success(response, f"upload part {number}")
+            etag = response.headers.get("ETag")
+            if not etag:
+                raise SystemExit(f"upload part {number} did not return ETag")
+            parts.append({"part_number": number, "etag": etag})
+    else:
+        response = await client.put(
+            str(upload["upload_url"]),
+            content=archive,
+            headers={"Content-Type": "application/vnd.auraclaw.skill-package+json"},
+        )
+        _require_cli_success(response, "upload Skill package")
+    finalized = await client.post(
+        f"/v1/admin/skill-package-uploads/{upload['artifact_id']}:finalize",
+        headers={
+            **headers,
+            "Idempotency-Key": _skill_subcommand_id(command_id, "finalize"),
+        },
+        json={
+            "upload_id": upload["upload_id"],
+            "version": upload["version"],
+            "size": len(archive),
+            "checksum": checksum,
+            "parts": parts,
+        },
+    )
+    _require_cli_success(finalized, "finalize staged upload")
+    artifact_ref = finalized.json()["artifact_ref"]
+    published = await client.post(
+        "/v1/admin/skill-publications",
+        headers={**headers, "X-Expected-Revision": str(expected_revision)},
+        json={
+            "source_id": source_id,
+            "activate": activate,
+            "artifact_ref": artifact_ref,
+            "expected_digest": skill_package_digest(package),
+        },
+    )
+    _require_cli_success(published, "publish Skill package")
+    return dict(published.json())
+
+
+def _require_cli_success(response: httpx.Response, operation: str) -> None:
+    if response.is_error:
+        raise SystemExit(f"Unable to {operation}: HTTP {response.status_code}")
+
+
+async def _run_skills_command(args: argparse.Namespace) -> None:
+    settings = get_settings()
+    package = _validate_local_skill(_load_skill_directory(args.directory), settings)
+    if args.action == "validate":
+        print(
+            json.dumps(
+                {
+                    "publisher": package.manifest.publisher,
+                    "name": package.manifest.name,
+                    "version": package.manifest.version,
+                    "package_digest": skill_package_digest(package),
+                },
+                sort_keys=True,
+            )
+        )
+        return
+    if args.action == "test":
+        print(json.dumps({"declarative_test_vectors": validate_skill_test_vectors(package)}))
+        return
+    token = os.environ.get(args.token_env)
+    if not token:
+        raise SystemExit(f"Skill publication requires bearer token in {args.token_env}")
+    api_url = args.api_url or f"http://127.0.0.1:{settings.task_api_port}"
+    command_id = args.command_id or f"skill-publish-{uuid.uuid4().hex}"
+    async with httpx.AsyncClient(base_url=api_url, timeout=120.0) as client:
+        result = await _publish_skill_archive(
+            client=client,
+            package=package,
+            tenant_id=args.tenant,
+            actor_id=args.actor,
+            publisher=args.publisher,
+            source_id=args.source,
+            activate=not args.staged,
+            expected_revision=args.expected_revision,
+            command_id=command_id,
+            token=token,
+        )
+    print(json.dumps(result, sort_keys=True))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="auraclaw")
     subcommands = parser.add_subparsers(dest="command")
@@ -190,6 +404,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="Migration directory (default: migrations/ or migrations/mysql/ by dialect)",
     )
     migrate.add_argument("--confirm-existing-schema", action="store_true")
+    skills = subcommands.add_parser("skills")
+    skill_commands = skills.add_subparsers(dest="action", required=True)
+    for action in ("validate", "test"):
+        skill_command_parser = skill_commands.add_parser(action)
+        skill_command_parser.add_argument("directory")
+    publish = skill_commands.add_parser("publish")
+    publish.add_argument("directory")
+    publish.add_argument("--tenant", required=True)
+    publish.add_argument("--publisher", required=True)
+    publish.add_argument("--actor", default="skill-cli")
+    publish.add_argument("--source", default="sks_admin_upload")
+    publish.add_argument("--api-url")
+    publish.add_argument("--token-env", default="AURACLAW_API_TOKEN")
+    publish.add_argument("--command-id")
+    publish.add_argument("--expected-revision", type=int, default=0)
+    publish.add_argument("--staged", action="store_true")
     for command in SERVICE_BY_COMMAND:
         if command == "projection":
             continue
@@ -373,6 +603,9 @@ def main(
                 confirm_existing_schema=args.confirm_existing_schema,
             )
         )
+        return
+    if args.command == "skills":
+        asyncio.run(_run_skills_command(args))
         return
     if args.command in SERVICE_BY_COMMAND and args.command != "projection":
         settings = get_settings()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from datetime import UTC, datetime
 
 import pytest
@@ -11,6 +12,8 @@ from auraclaw.action.skill_packages import (
     HmacSkillSignatureVerifier,
     SkillPackage,
     SkillPackageRegistry,
+    skill_package_archive,
+    skill_package_digest,
 )
 from auraclaw.action.skill_publication import SkillPublicationService
 from auraclaw.contracts.errors import (
@@ -27,6 +30,7 @@ from auraclaw.contracts.skills import (
     SkillSourceKind,
     SkillSourceRecord,
 )
+from auraclaw.contracts.tools import ArtifactRef
 from auraclaw.infrastructure.artifacts.store import ArtifactStore, InMemoryObjectStorage
 
 _KEY = b"skill-publication-test-key"
@@ -171,5 +175,62 @@ def test_publish_service_cannot_reactivate_revoked_publication() -> None:
 
         with pytest.raises(InvalidTransitionError, match="staged to active"):
             await service.publish(_command(activate=True, expected_revision=2), _package())
+
+    asyncio.run(scenario())
+
+
+def test_staged_artifact_publish_reuses_validated_immutable_artifact() -> None:
+    class StagedArtifacts:
+        def __init__(self, content: bytes) -> None:
+            self.content = content
+            self.reads = 0
+
+        async def put(self, **kwargs: object) -> ArtifactRef:
+            del kwargs
+            raise AssertionError("staged publication must not duplicate the Artifact")
+
+        async def read(self, **kwargs: object) -> bytes:
+            del kwargs
+            self.reads += 1
+            return self.content
+
+    async def scenario() -> None:
+        package = _package()
+        archive = skill_package_archive(package)
+        artifacts = StagedArtifacts(archive)
+        lifecycle = InMemorySkillLifecycleStore()
+        registry = SkillPackageRegistry(
+            artifacts=artifacts,
+            signature_verifier=HmacSkillSignatureVerifier({"acme": _KEY}),
+        )
+        service = SkillPublicationService(
+            registry=registry,
+            lifecycle=lifecycle,
+            artifacts=artifacts,
+            bootstrap_sources=(_source(),),
+        )
+        artifact_ref = ArtifactRef(
+            artifact_id="art_staged",
+            version=1,
+            content_hash=hashlib.sha256(archive).hexdigest(),
+            media_type="application/vnd.auraclaw.skill-package+json",
+            size=len(archive),
+        )
+        published = await service.publish_artifact(
+            _command(), artifact_ref, skill_package_digest(package)
+        )
+        assert published.artifact_ref == artifact_ref
+        assert artifacts.reads == 1
+        stored = await lifecycle.get_package(
+            "tenant-a", "acme", "release.prepare", "1.0.0"
+        )
+        assert stored is not None and stored.artifact_ref == artifact_ref
+
+        with pytest.raises(VersionConflictError, match="Artifact digest"):
+            await service.publish_artifact(
+                _command(),
+                artifact_ref,
+                f"sha256:{'0' * 64}",
+            )
 
     asyncio.run(scenario())

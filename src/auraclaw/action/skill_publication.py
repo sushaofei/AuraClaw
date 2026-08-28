@@ -3,11 +3,13 @@ from __future__ import annotations
 import hashlib
 from datetime import UTC, datetime, timedelta
 
+from auraclaw.action.ports import ArtifactContentReader
 from auraclaw.action.skill_lifecycle import SkillLifecycleStore
 from auraclaw.action.skill_packages import (
     SkillPackage,
     SkillPackageRegistry,
     skill_package_digest,
+    skill_package_from_archive,
 )
 from auraclaw.contracts.errors import (
     InvalidTransitionError,
@@ -25,6 +27,7 @@ from auraclaw.contracts.skills import (
     SkillSourceDesiredState,
     SkillSourceRecord,
 )
+from auraclaw.contracts.tools import ArtifactRef
 
 
 class SkillPublicationService:
@@ -35,16 +38,50 @@ class SkillPublicationService:
         *,
         registry: SkillPackageRegistry,
         lifecycle: SkillLifecycleStore,
+        artifacts: ArtifactContentReader | None = None,
         bootstrap_sources: tuple[SkillSourceRecord, ...] = (),
     ) -> None:
         self._registry = registry
         self._lifecycle = lifecycle
+        self._artifacts = artifacts
         self._bootstrap_sources = {
             (source.tenant_id, source.source_id): source for source in bootstrap_sources
         }
 
     async def publish(self, command: PublishSkillCommand, package: SkillPackage) -> PublishedSkill:
         package = self._registry.validate(package)
+        return await self._publish(command, package)
+
+    async def publish_artifact(
+        self,
+        command: PublishSkillCommand,
+        artifact_ref: ArtifactRef,
+        expected_digest: str,
+    ) -> PublishedSkill:
+        if self._artifacts is None:
+            raise PolicyDeniedError("Staged Skill publication is not configured")
+        if artifact_ref.media_type != "application/vnd.auraclaw.skill-package+json":
+            raise PolicyDeniedError("Staged Artifact is not a Skill package")
+        if expected_digest != f"sha256:{artifact_ref.content_hash}":
+            raise VersionConflictError("Staged Artifact digest does not match")
+        content = await self._artifacts.read(
+            tenant_id=command.tenant_id,
+            artifact_ref=artifact_ref,
+            actor_id=command.actor_id,
+            correlation_id=command.correlation_id,
+        )
+        package = self._registry.validate(skill_package_from_archive(content))
+        if skill_package_digest(package) != expected_digest:
+            raise VersionConflictError("Skill package digest does not match")
+        return await self._publish(command, package, artifact_ref=artifact_ref)
+
+    async def _publish(
+        self,
+        command: PublishSkillCommand,
+        package: SkillPackage,
+        *,
+        artifact_ref: ArtifactRef | None = None,
+    ) -> PublishedSkill:
         source = await self._authorized_source(command, package)
         digest = skill_package_digest(package)
         manifest = package.manifest
@@ -79,11 +116,24 @@ class SkillPublicationService:
 
         now = datetime.now(UTC)
         if existing is None:
-            publication = await self._registry.publish(
-                command.tenant_id,
-                package,
-                status=desired_status,
-            )
+            if artifact_ref is None:
+                publication = await self._registry.publish(
+                    command.tenant_id,
+                    package,
+                    status=desired_status,
+                )
+            else:
+                publication = self._registry.restore(
+                    command.tenant_id,
+                    package,
+                    PublishedSkill(
+                        tenant_id=command.tenant_id,
+                        manifest=manifest,
+                        package_digest=digest,
+                        artifact_ref=artifact_ref,
+                        status=desired_status,
+                    ),
+                )
             await self._lifecycle.put_package(
                 SkillPackageRecord(
                     tenant_id=command.tenant_id,

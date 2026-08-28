@@ -68,6 +68,7 @@ from auraclaw.contracts.internal import (
     SkillInstallationInternalResponse,
     SkillPackageStateInternalRequest,
     SkillPackageStateInternalResponse,
+    SkillPublishArtifactInternalRequest,
     SkillPublishInternalRequest,
     SkillPublishInternalResponse,
     SkillPurgeInternalRequest,
@@ -268,6 +269,11 @@ def skill_publication_routes(
             SkillPublishInternalRequest,
             SkillPublishInternalResponse,
             service.publish,
+        ),
+        "/publish-artifact": contract_route(
+            SkillPublishArtifactInternalRequest,
+            SkillPublishInternalResponse,
+            service.publish_artifact,
         ),
         "/installation": contract_route(
             SkillInstallationInternalRequest,

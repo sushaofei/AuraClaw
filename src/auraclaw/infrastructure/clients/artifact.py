@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 
 import httpx
 
@@ -117,3 +117,88 @@ class RemoteArtifactWriter:
             ArtifactFinalizeResponse,
         )
         return ArtifactRef(**finalized.artifact_ref)
+
+
+class RemoteSkillPackageUploadClient:
+    """Task API adapter for presigned, staged Skill package uploads."""
+
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        bearer_token: str,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        self._client = httpx.AsyncClient(base_url=base_url, transport=transport)
+        self._contract = HttpContractClient(self._client, bearer_token=bearer_token)
+
+    async def aclose(self) -> None:
+        await self._client.aclose()
+
+    async def create(
+        self,
+        *,
+        tenant_id: str,
+        name: str,
+        expected_size: int,
+        expected_checksum: str,
+        correlation_id: str,
+        command_id: str,
+    ) -> ArtifactUploadResponse:
+        request_id = command_id
+        scope = f"skill-upload:{request_id}"
+        return await self._contract.call(
+            "/internal/v1/artifacts/uploads/create",
+            ArtifactCreateUploadRequest(
+                context=InternalRequestContext(
+                    tenant_id=tenant_id,
+                    service_identity=ServiceIdentity.TASK_API,
+                    request_id=request_id,
+                    correlation_id=correlation_id,
+                    causation_id=request_id,
+                ),
+                root_session_id=scope,
+                session_id=scope,
+                name=name,
+                media_type="application/vnd.auraclaw.skill-package+json",
+                expected_size=expected_size,
+                expected_checksum=expected_checksum,
+                classification="internal",
+                retention_until=datetime.now(UTC) + timedelta(days=90),
+            ),
+            ArtifactUploadResponse,
+        )
+
+    async def finalize(
+        self,
+        *,
+        tenant_id: str,
+        artifact_id: str,
+        version: int,
+        upload_id: str,
+        size: int,
+        checksum: str,
+        parts: tuple[dict[str, object], ...],
+        correlation_id: str,
+        command_id: str,
+    ) -> ArtifactFinalizeResponse:
+        request_id = command_id
+        return await self._contract.call(
+            "/internal/v1/artifacts/uploads/finalize",
+            ArtifactFinalizeRequest(
+                context=InternalRequestContext(
+                    tenant_id=tenant_id,
+                    service_identity=ServiceIdentity.TASK_API,
+                    request_id=request_id,
+                    correlation_id=correlation_id,
+                    causation_id=request_id,
+                ),
+                artifact_id=artifact_id,
+                version=version,
+                upload_id=upload_id,
+                size=size,
+                checksum=checksum,
+                parts=parts,
+            ),
+            ArtifactFinalizeResponse,
+        )

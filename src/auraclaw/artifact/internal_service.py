@@ -102,6 +102,17 @@ class ArtifactPolicyValidator(Protocol):
         resource: str,
     ) -> bool: ...
 
+
+def _is_task_api_skill_upload(pending: PendingUpload) -> bool:
+    return (
+        pending.media_type == "application/vnd.auraclaw.skill-package+json"
+        and pending.root_session_id == pending.session_id
+        and pending.root_session_id.startswith("skill-upload:")
+        and pending.retention_until is not None
+        and pending.classification == "internal"
+    )
+
+
 class ArtifactInternalService:
     def __init__(
         self,
@@ -127,11 +138,22 @@ class ArtifactInternalService:
     async def create_upload(
         self, request: ArtifactCreateUploadRequest
     ) -> ArtifactUploadResponse:
-        if request.context.service_identity not in {
+        identity = request.context.service_identity
+        if identity not in {
             ServiceIdentity.ACTION_HANDS,
             ServiceIdentity.DELIVERY_WORKER,
+            ServiceIdentity.TASK_API,
         }:
             raise ArtifactAccessError("workload may not create Artifact uploads")
+        if identity is ServiceIdentity.TASK_API and (
+            request.media_type != "application/vnd.auraclaw.skill-package+json"
+            or request.root_session_id != request.session_id
+            or not request.root_session_id.startswith("skill-upload:")
+            or request.retention_until is None
+            or request.classification != "internal"
+            or request.expected_size > 24 * 1024 * 1024
+        ):
+            raise ArtifactAccessError("Task API may only stage governed Skill packages")
         artifact_id = f"art_{uuid.uuid4().hex}"
         upload_id = f"upl_{uuid.uuid4().hex}"
         object_key = (
@@ -186,9 +208,11 @@ class ArtifactInternalService:
     async def finalize(
         self, request: ArtifactFinalizeRequest
     ) -> ArtifactFinalizeResponse:
-        if request.context.service_identity not in {
+        identity = request.context.service_identity
+        if identity not in {
             ServiceIdentity.ACTION_HANDS,
             ServiceIdentity.DELIVERY_WORKER,
+            ServiceIdentity.TASK_API,
         }:
             raise ArtifactAccessError("workload may not finalize Artifact uploads")
         pending = self._uploads.get(request.upload_id)
@@ -201,6 +225,12 @@ class ArtifactInternalService:
                     request.context.tenant_id, request.artifact_id, request.version
                 )
                 if ready is not None:
+                    if identity is ServiceIdentity.TASK_API and not _is_task_api_skill_upload(
+                        ready
+                    ):
+                        raise ArtifactAccessError(
+                            "Task API may only finalize Skill packages"
+                        )
                     return ArtifactFinalizeResponse(
                         artifact_ref={
                             "artifact_id": ready.artifact_id,
@@ -213,6 +243,10 @@ class ArtifactInternalService:
                     )
         if pending is None or pending.artifact_id != request.artifact_id:
             raise NotFoundError("artifact upload was not found")
+        if identity is ServiceIdentity.TASK_API and not _is_task_api_skill_upload(
+            pending
+        ):
+            raise ArtifactAccessError("Task API may only finalize Skill packages")
         if pending.tenant_id != request.context.tenant_id:
             raise ArtifactAccessError("artifact upload tenant mismatch")
         if datetime.now(UTC) >= pending.expires_at:
@@ -229,6 +263,12 @@ class ArtifactInternalService:
                     request.context.tenant_id, request.artifact_id, request.version
                 )
                 if ready is not None:
+                    if identity is ServiceIdentity.TASK_API and not _is_task_api_skill_upload(
+                        ready
+                    ):
+                        raise ArtifactAccessError(
+                            "Task API may only finalize Skill packages"
+                        )
                     return ArtifactFinalizeResponse(
                         artifact_ref={
                             "artifact_id": ready.artifact_id,

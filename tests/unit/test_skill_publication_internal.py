@@ -108,6 +108,7 @@ def test_task_api_client_publishes_through_action_hands_service() -> None:
         publication = SkillPublicationService(
             registry=registry,
             lifecycle=lifecycle,
+            artifacts=artifacts,
             bootstrap_sources=(
                 SkillSourceRecord(
                     source_id="sks_admin_upload",
@@ -171,6 +172,20 @@ def test_task_api_client_publishes_through_action_hands_service() -> None:
                 ),
                 _package(),
             )
+            staged_retry = await client.publish_artifact(
+                PublishSkillCommand(
+                    tenant_id="tenant-a",
+                    actor_id="admin-a",
+                    source_id="sks_admin_upload",
+                    command_id="publish-internal-staged-retry",
+                    expected_revision=1,
+                    correlation_id="corr-staged-retry",
+                    causation_id="publish-internal-staged-retry",
+                ),
+                result.artifact_ref,
+                result.package_digest,
+            )
+            assert staged_retry == result
             valid = _package()
             unsafe = SkillPackage(
                 manifest=valid.manifest,

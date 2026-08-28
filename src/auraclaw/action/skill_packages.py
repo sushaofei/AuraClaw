@@ -126,6 +126,7 @@ class SkillPackageRegistry:
         )
         if not self._signature_verifier.verify(normalized):
             raise PolicyDeniedError("Skill package signature is invalid")
+        validate_skill_test_vectors(normalized)
         return normalized
 
     def restore(
@@ -703,6 +704,40 @@ def skill_signing_payload(package: SkillPackage) -> bytes:
 
 def skill_package_digest(package: SkillPackage) -> str:
     return f"sha256:{hashlib.sha256(_package_archive(package)).hexdigest()}"
+
+
+def skill_package_archive(package: SkillPackage) -> bytes:
+    """Return the canonical immutable archive used for digest and Artifact storage."""
+    return _package_archive(package)
+
+
+def validate_skill_test_vectors(package: SkillPackage) -> int:
+    """Validate declarative fixtures without executing package-supplied code."""
+    count = 0
+    for path, content in package.files.items():
+        if not path.startswith("tests/"):
+            continue
+        if not path.endswith(".json"):
+            raise SchemaValidationError("Skill tests may only contain JSON vectors")
+        try:
+            vector = json.loads(content)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise SchemaValidationError("Skill test vector is invalid JSON") from exc
+        if not isinstance(vector, dict):
+            raise SchemaValidationError("Skill test vector must be an object")
+        if set(vector) - {"name", "input", "expected_output"}:
+            raise SchemaValidationError("Skill test vector contains unsupported fields")
+        if not isinstance(vector.get("name"), str) or not vector["name"].strip():
+            raise SchemaValidationError("Skill test vector requires a name")
+        if not isinstance(vector.get("input"), dict):
+            raise SchemaValidationError("Skill test vector input must be an object")
+        expected = vector.get("expected_output")
+        if expected is not None and not isinstance(expected, dict):
+            raise SchemaValidationError(
+                "Skill test vector expected_output must be an object"
+            )
+        count += 1
+    return count
 
 
 def skill_package_from_archive(
