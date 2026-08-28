@@ -15,6 +15,7 @@ from auraclaw.action.capability_catalog import (
 from auraclaw.action.mcp_primitives import HandsResourceRegistry
 from auraclaw.action.skill_internal_service import SkillPublicationInternalService
 from auraclaw.action.skill_lifecycle import InMemorySkillLifecycleStore
+from auraclaw.action.skill_management import SkillManagementService
 from auraclaw.action.skill_packages import (
     HmacSkillSignatureVerifier,
     SkillPackage,
@@ -26,7 +27,10 @@ from auraclaw.contracts.capabilities import CapabilityKind
 from auraclaw.contracts.errors import SchemaValidationError
 from auraclaw.contracts.internal import ServiceIdentity
 from auraclaw.contracts.skills import (
+    ChangeSkillInstallationCommand,
     PublishSkillCommand,
+    RevokeSkillPublicationCommand,
+    SkillInstallationOperation,
     SkillManifest,
     SkillSourceDesiredState,
     SkillSourceKind,
@@ -126,11 +130,16 @@ def test_task_api_client_publishes_through_action_hands_service() -> None:
             registry=registry,
             catalog=catalog,
         )
+        management = SkillManagementService(
+            lifecycle=lifecycle,
+            projector=rebuilder,
+        )
         contract = create_contract_app(
             "skill-publication-test",
             skill_publication_routes(
                 SkillPublicationInternalService(
                     publication,
+                    management=management,
                     rebuilder=rebuilder,
                 )
             ),
@@ -180,26 +189,67 @@ def test_task_api_client_publishes_through_action_hands_service() -> None:
                     ),
                     unsafe,
                 )
+            installation_state = await client.get_installation(
+                "tenant-a", "platform", "release.prepare"
+            )
+            assert installation_state.revision == 1
+            disabled = await client.change_installation(
+                ChangeSkillInstallationCommand(
+                    tenant_id="tenant-a",
+                    actor_id="admin-b",
+                    publisher="platform",
+                    name="release.prepare",
+                    operation=SkillInstallationOperation.DISABLE,
+                    reason_code="tenant_disabled",
+                    command_id="disable-internal-1",
+                    expected_revision=1,
+                    correlation_id="corr-disable",
+                    causation_id="disable-internal-1",
+                )
+            )
+            assert disabled.status.value == "disabled"
+            assert await catalog.search(
+                tenant_id="tenant-a", kinds=(CapabilityKind.SKILL,)
+            ) == ()
+            revoked = await client.revoke_publication(
+                RevokeSkillPublicationCommand(
+                    tenant_id="tenant-a",
+                    actor_id="security-a",
+                    publisher="platform",
+                    name="release.prepare",
+                    version="2.0.0",
+                    reason_code="publisher_key_compromised",
+                    command_id="revoke-internal-1",
+                    expected_revision=1,
+                    correlation_id="corr-revoke",
+                    causation_id="revoke-internal-1",
+                )
+            )
+            assert revoked.status.value == "revoked"
+            publication_state = await client.get_publication(
+                "tenant-a", "platform", "release.prepare", "2.0.0"
+            )
+            assert publication_state.revision == 2
+            assert publication_state.updated_by == "security-a"
         finally:
             await client.aclose()
 
         assert result.artifact_ref.artifact_id == "art_persisted_skill"
         assert artifacts.calls == 1
-        assert (
-            compatibility_registry.get_publication(
-                "tenant-a", "platform", "release.prepare", "2.0.0"
-            )
-            == result
+        cached = compatibility_registry.get_publication(
+            "tenant-a", "platform", "release.prepare", "2.0.0"
         )
+        assert cached.status.value == "revoked"
+        assert cached.package_digest == result.package_digest
         stored = await lifecycle.get_publication(
             "tenant-a", "platform", "release.prepare", "2.0.0"
         )
         assert stored is not None
         assert stored.created_by == "admin-a"
+        assert stored.updated_by == "security-a"
         projected = await catalog.search(
             tenant_id="tenant-a", kinds=(CapabilityKind.SKILL,)
         )
-        assert len(projected) == 1
-        assert projected[0].content_digest == result.package_digest
+        assert projected == ()
 
     asyncio.run(scenario())

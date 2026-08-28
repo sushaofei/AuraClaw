@@ -4,12 +4,15 @@ import asyncio
 import hashlib
 from datetime import UTC, datetime
 
+import pytest
+
 from auraclaw.action.capability_catalog import (
     CapabilityCatalog,
     InMemoryCapabilityCatalogStore,
 )
 from auraclaw.action.mcp_primitives import HandsResourceRegistry
 from auraclaw.action.skill_lifecycle import InMemorySkillLifecycleStore
+from auraclaw.action.skill_management import SkillManagementService
 from auraclaw.action.skill_packages import (
     HmacSkillSignatureVerifier,
     SkillPackage,
@@ -19,8 +22,10 @@ from auraclaw.action.skill_packages import (
 from auraclaw.action.skill_publication import SkillPublicationService
 from auraclaw.action.skill_rebuild import SkillStateRebuilder
 from auraclaw.contracts.capabilities import CapabilityKind
+from auraclaw.contracts.errors import NotFoundError
 from auraclaw.contracts.skills import (
     PublishSkillCommand,
+    RevokeSkillPublicationCommand,
     SkillInstallationStatus,
     SkillManifest,
     SkillSourceDesiredState,
@@ -184,5 +189,33 @@ def test_rebuild_restores_registry_catalog_and_installation_visibility() -> None
             package_digest=published.package_digest,
             path="SKILL.md",
         ) == b"# Release\n\nPrepare the release."
+
+        revoked = await SkillManagementService(
+            lifecycle=lifecycle,
+            projector=rebuilder,
+        ).revoke_publication(
+            RevokeSkillPublicationCommand(
+                tenant_id="tenant-a",
+                actor_id="security-a",
+                publisher=published.manifest.publisher,
+                name=published.manifest.name,
+                version=published.manifest.version,
+                reason_code="publisher_key_compromised",
+                command_id="revoke-rebuild-1",
+                expected_revision=1,
+                correlation_id="corr-revoke",
+                causation_id="revoke-rebuild-1",
+            )
+        )
+        assert revoked.status.value == "revoked"
+        with pytest.raises(NotFoundError):
+            restored_registry.load_part(
+                "tenant-a",
+                publisher=published.manifest.publisher,
+                name=published.manifest.name,
+                version=published.manifest.version,
+                package_digest=published.package_digest,
+                path="SKILL.md",
+            )
 
     asyncio.run(scenario())

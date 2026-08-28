@@ -350,6 +350,27 @@ MCP `skill://` 发现也不能直接写进程 Registry。Reconciler 从 Server �
 `skill_publisher_allowlist`，建立持久 MCP Source，并调用同一 `SkillPublicationService`；缺少 allowlist
 时整个来源拒绝发布。发布完成后触发 tenant 重建，周期重建负责修复短暂 Artifact/Catalog 故障。
 
+管理动作必须区分租户意图和全局安全状态：
+
+- `disable`：Installation `active -> disabled`，停止新发现/新绑定；
+- `enable`：Installation `disabled -> active`；
+- `uninstall`：Installation `active|disabled -> uninstalled`，表示租户逻辑删除；
+- `install`：仅允许 `uninstalled -> active`，避免 enable 隐式重装；
+- `revoke`：Publication 任一非 revoked 状态进入 `revoked`，用于安全事件并立即使固定包不可加载。
+
+这些命令携带 tenant、actor、command/correlation/causation、expected revision；disable、uninstall 和
+revoke 还必须带非空 reason code。Task API 只负责外部 Identity 与 HTTP 映射，SQL profile 经 workload
+identity 调用 Action Hands，后者原子更新 Lifecycle 后触发 tenant rebuild。Publication 保存
+`updated_by`，由 migration 回填历史记录的 `created_by`。重复到达且目标状态已满足时返回当前记录并再次
+投影，以修复“事实已提交、投影响应失败”的重试场景。
+
+Admin 同时提供持久 Installation 和指定 Publication 的状态查询，返回 revision、reason、updated actor
+和时间；调用方先读 revision 再提交 `X-Expected-Revision`，不能依赖本地 Registry 缓存猜测并发版本。
+
+`uninstall` 是面向租户的删除能力，不删除不可变 Package/Artifact，也不改变 Publication；因此可审计、
+可重装且不破坏已有 binding。物理 `purge` 必须等待 Artifact 删除端口、保留期限、legal hold、跨 binding
+引用检查和 tombstone 对账全部具备后才能开放，不能把数据库 retention 标记伪装成已删除对象。
+
 ## 4. 发现、加载与调用
 
 ### 4.1 协议发现和目录同步

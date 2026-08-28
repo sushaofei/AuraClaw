@@ -49,6 +49,13 @@ class SkillSourceDesiredState(StrEnum):
     RETIRED = "retired"
 
 
+class SkillInstallationOperation(StrEnum):
+    INSTALL = "install"
+    ENABLE = "enable"
+    DISABLE = "disable"
+    UNINSTALL = "uninstall"
+
+
 class PublishSkillCommand(ContractModel):
     tenant_id: str = Field(min_length=1, max_length=128)
     actor_id: str = Field(min_length=1, max_length=256)
@@ -56,6 +63,46 @@ class PublishSkillCommand(ContractModel):
     activate: bool = True
     command_id: str = Field(min_length=1, max_length=256)
     expected_revision: int = Field(default=0, ge=0)
+    correlation_id: str = Field(min_length=1, max_length=256)
+    causation_id: str = Field(min_length=1, max_length=256)
+
+
+class ChangeSkillInstallationCommand(ContractModel):
+    tenant_id: str = Field(min_length=1, max_length=128)
+    actor_id: str = Field(min_length=1, max_length=256)
+    publisher: str = Field(min_length=1, max_length=128, pattern=_SKILL_NAME)
+    name: str = Field(min_length=1, max_length=256, pattern=_SKILL_NAME)
+    operation: SkillInstallationOperation
+    reason_code: str | None = Field(default=None, min_length=1, max_length=128)
+    command_id: str = Field(min_length=1, max_length=256)
+    expected_revision: int = Field(ge=1)
+    correlation_id: str = Field(min_length=1, max_length=256)
+    causation_id: str = Field(min_length=1, max_length=256)
+
+    @model_validator(mode="after")
+    def validate_reason(self) -> ChangeSkillInstallationCommand:
+        if self.operation in {
+            SkillInstallationOperation.DISABLE,
+            SkillInstallationOperation.UNINSTALL,
+        } and self.reason_code is None:
+            raise ValueError("Disable or uninstall requires a reason")
+        if self.operation in {
+            SkillInstallationOperation.INSTALL,
+            SkillInstallationOperation.ENABLE,
+        } and self.reason_code is not None:
+            raise ValueError("Install or enable cannot carry a reason")
+        return self
+
+
+class RevokeSkillPublicationCommand(ContractModel):
+    tenant_id: str = Field(min_length=1, max_length=128)
+    actor_id: str = Field(min_length=1, max_length=256)
+    publisher: str = Field(min_length=1, max_length=128, pattern=_SKILL_NAME)
+    name: str = Field(min_length=1, max_length=256, pattern=_SKILL_NAME)
+    version: str = Field(pattern=_SEMVER)
+    reason_code: str = Field(min_length=1, max_length=128)
+    command_id: str = Field(min_length=1, max_length=256)
+    expected_revision: int = Field(ge=1)
     correlation_id: str = Field(min_length=1, max_length=256)
     causation_id: str = Field(min_length=1, max_length=256)
 
@@ -208,6 +255,7 @@ class SkillPublicationRecord(ContractModel):
     source_id: str | None = Field(default=None, max_length=128)
     revision: int = Field(default=1, ge=1)
     created_by: str = Field(min_length=1, max_length=256)
+    updated_by: str = Field(min_length=1, max_length=256)
     created_at: datetime
     updated_at: datetime
     reason_code: str | None = Field(default=None, max_length=128)
