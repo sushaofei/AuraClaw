@@ -19,11 +19,16 @@ from auraclaw.contracts.skills import (
     PublishedSkill,
     PublishSkillCommand,
     PurgeSkillPackageCommand,
+    RegisterSkillPublisherCommand,
     RevokeSkillPublicationCommand,
+    RevokeSkillPublisherKeyCommand,
+    RotateSkillPublisherKeyCommand,
     SkillInstallationOperation,
     SkillInstallationRecord,
     SkillPackageRecord,
     SkillPublicationRecord,
+    SkillPublisherKeyRecord,
+    SkillPublisherRecord,
 )
 from auraclaw.contracts.tools import ArtifactRef
 
@@ -67,6 +72,15 @@ class FinalizeSkillPackageUploadRequest(ContractModel):
     size: int = Field(ge=1, le=_MAX_ENCODED_UPLOAD_BYTES)
     checksum: str = Field(pattern=r"^[0-9a-f]{64}$")
     parts: tuple[dict[str, object], ...] = Field(default=(), max_length=10_000)
+
+
+class RegisterSkillPublisherRequest(ContractModel):
+    display_name: str = Field(min_length=1, max_length=256)
+
+
+class RotateSkillPublisherKeyRequest(ContractModel):
+    key_id: str = Field(min_length=1, max_length=128)
+    public_key: str = Field(min_length=43, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
 
 
 class SkillPublisher(Protocol):
@@ -143,6 +157,23 @@ class SkillManager(Protocol):
     ) -> SkillPackageRecord: ...
 
 
+class SkillPublisherManager(Protocol):
+    async def register_publisher(
+        self, command: RegisterSkillPublisherCommand
+    ) -> tuple[SkillPublisherRecord, tuple[SkillPublisherKeyRecord, ...]]: ...
+
+    async def rotate_publisher_key(
+        self, command: RotateSkillPublisherKeyCommand
+    ) -> tuple[SkillPublisherRecord, tuple[SkillPublisherKeyRecord, ...]]: ...
+
+    async def revoke_publisher_key(
+        self, command: RevokeSkillPublisherKeyCommand
+    ) -> tuple[SkillPublisherRecord, tuple[SkillPublisherKeyRecord, ...]]: ...
+
+    async def get_publisher(
+        self, tenant_id: str, publisher: str
+    ) -> tuple[SkillPublisherRecord, tuple[SkillPublisherKeyRecord, ...]]: ...
+
 def _summary(publication: PublishedSkill, *, skill_markdown: str | None = None) -> dict[str, Any]:
     manifest = publication.manifest
     payload = {
@@ -170,6 +201,7 @@ def create_skill_admin_router(
     publication_service: SkillPublisher | None = None,
     management_service: SkillManager | None = None,
     upload_service: SkillPackageUploadManager | None = None,
+    publisher_service: SkillPublisherManager | None = None,
 ) -> APIRouter:
     router = APIRouter(prefix="/v1/admin", tags=["skill-admin"])
 
@@ -182,6 +214,94 @@ def create_skill_admin_router(
             if current is None or publication.manifest.version > current.manifest.version:
                 latest[key] = publication
         return {"skills": [_summary(item) for item in latest.values()]}
+
+    @router.get("/skill-publishers/{publisher}")
+    async def get_skill_publisher(
+        publisher: str, identity: Identity
+    ) -> dict[str, Any]:
+        service = _require_publisher_service(publisher_service)
+        record, keys = await service.get_publisher(identity.tenant_id, publisher)
+        return _publisher_summary(record, keys)
+
+    @router.post("/skill-publishers/{publisher}", status_code=status.HTTP_201_CREATED)
+    async def register_skill_publisher(
+        publisher: str,
+        payload: RegisterSkillPublisherRequest,
+        identity: Identity,
+        command_id: str = Header(alias="Idempotency-Key"),
+        expected_revision: int = Header(
+            default=0, alias="X-Expected-Revision", ge=0
+        ),
+    ) -> dict[str, Any]:
+        service = _require_publisher_service(publisher_service)
+        record, keys = await service.register_publisher(
+            RegisterSkillPublisherCommand(
+                tenant_id=identity.tenant_id,
+                actor_id=identity.actor.id,
+                publisher=publisher,
+                display_name=payload.display_name,
+                command_id=command_id,
+                expected_revision=expected_revision,
+                correlation_id=identity.correlation_id,
+                causation_id=command_id,
+            )
+        )
+        return _publisher_summary(record, keys)
+
+    @router.post(
+        "/skill-publishers/{publisher}/keys:rotate",
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    async def rotate_skill_publisher_key(
+        publisher: str,
+        payload: RotateSkillPublisherKeyRequest,
+        identity: Identity,
+        command_id: str = Header(alias="Idempotency-Key"),
+        expected_revision: int = Header(alias="X-Expected-Revision", ge=1),
+    ) -> dict[str, Any]:
+        service = _require_publisher_service(publisher_service)
+        record, keys = await service.rotate_publisher_key(
+            RotateSkillPublisherKeyCommand(
+                tenant_id=identity.tenant_id,
+                actor_id=identity.actor.id,
+                publisher=publisher,
+                key_id=payload.key_id,
+                public_key=payload.public_key,
+                command_id=command_id,
+                expected_revision=expected_revision,
+                correlation_id=identity.correlation_id,
+                causation_id=command_id,
+            )
+        )
+        return _publisher_summary(record, keys)
+
+    @router.post(
+        "/skill-publishers/{publisher}/keys/{key_id}:revoke",
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    async def revoke_skill_publisher_key(
+        publisher: str,
+        key_id: str,
+        identity: Identity,
+        command_id: str = Header(alias="Idempotency-Key"),
+        expected_revision: int = Header(alias="X-Expected-Revision", ge=1),
+        reason_code: str = Header(alias="X-Reason-Code", min_length=1, max_length=128),
+    ) -> dict[str, Any]:
+        service = _require_publisher_service(publisher_service)
+        record, keys = await service.revoke_publisher_key(
+            RevokeSkillPublisherKeyCommand(
+                tenant_id=identity.tenant_id,
+                actor_id=identity.actor.id,
+                publisher=publisher,
+                key_id=key_id,
+                reason_code=reason_code,
+                command_id=command_id,
+                expected_revision=expected_revision,
+                correlation_id=identity.correlation_id,
+                causation_id=command_id,
+            )
+        )
+        return _publisher_summary(record, keys)
 
     @router.get("/skills/{publisher}/{name}")
     async def get_skill(
@@ -542,6 +662,27 @@ def create_skill_admin_router(
         return {"package": _package_state_summary(package)}
 
     return router
+
+
+def _require_publisher_service(
+    service: SkillPublisherManager | None,
+) -> SkillPublisherManager:
+    if service is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Skill Publisher Registry is not configured",
+        )
+    return service
+
+
+def _publisher_summary(
+    publisher: SkillPublisherRecord,
+    keys: tuple[SkillPublisherKeyRecord, ...],
+) -> dict[str, Any]:
+    return {
+        "publisher": publisher.model_dump(mode="json"),
+        "keys": [key.model_dump(mode="json") for key in keys],
+    }
 
 
 async def _change_installation(

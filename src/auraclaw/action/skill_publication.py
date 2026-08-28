@@ -12,6 +12,7 @@ from auraclaw.action.skill_packages import (
     skill_package_digest,
     skill_package_from_archive,
 )
+from auraclaw.action.skill_publishers import SkillPublisherTrustService
 from auraclaw.contracts.errors import (
     InvalidTransitionError,
     PolicyDeniedError,
@@ -26,6 +27,7 @@ from auraclaw.contracts.skills import (
     SkillPublicationRecord,
     SkillPublicationStatus,
     SkillSourceDesiredState,
+    SkillSourceKind,
     SkillSourceRecord,
 )
 from auraclaw.contracts.tools import ArtifactRef
@@ -41,19 +43,28 @@ class SkillPublicationService:
         lifecycle: SkillLifecycleStore,
         artifacts: ArtifactContentReader | None = None,
         artifact_lifecycle: SkillArtifactLifecycle | None = None,
+        publisher_trust: SkillPublisherTrustService | None = None,
         bootstrap_sources: tuple[SkillSourceRecord, ...] = (),
     ) -> None:
         self._registry = registry
         self._lifecycle = lifecycle
         self._artifacts = artifacts
         self._artifact_lifecycle = artifact_lifecycle
+        self._publisher_trust = publisher_trust
         self._bootstrap_sources = {
             (source.tenant_id, source.source_id): source for source in bootstrap_sources
         }
 
     async def publish(self, command: PublishSkillCommand, package: SkillPackage) -> PublishedSkill:
-        package = self._registry.validate(package)
-        return await self._publish(command, package)
+        package, key_id, externally_verified = await self._validate_signature(
+            command.tenant_id, package
+        )
+        return await self._publish(
+            command,
+            package,
+            signature_key_id=key_id,
+            signature_verified=externally_verified,
+        )
 
     async def publish_artifact(
         self,
@@ -80,11 +91,18 @@ class SkillPublicationService:
             actor_id=command.actor_id,
             correlation_id=command.correlation_id,
         )
-        package = self._registry.validate(skill_package_from_archive(content))
+        package, key_id, externally_verified = await self._validate_signature(
+            command.tenant_id, skill_package_from_archive(content)
+        )
         if skill_package_digest(package) != expected_digest:
             raise VersionConflictError("Skill package digest does not match")
         return await self._publish(
-            command, package, artifact_ref=artifact_ref, artifact_claimed=True
+            command,
+            package,
+            artifact_ref=artifact_ref,
+            artifact_claimed=True,
+            signature_key_id=key_id,
+            signature_verified=externally_verified,
         )
 
     async def _publish(
@@ -94,6 +112,8 @@ class SkillPublicationService:
         *,
         artifact_ref: ArtifactRef | None = None,
         artifact_claimed: bool = False,
+        signature_key_id: str | None = None,
+        signature_verified: bool = False,
     ) -> PublishedSkill:
         source = await self._authorized_source(command, package)
         digest = skill_package_digest(package)
@@ -134,6 +154,7 @@ class SkillPublicationService:
                     command.tenant_id,
                     package,
                     status=desired_status,
+                    signature_verified=signature_verified,
                 )
             else:
                 publication = self._registry.restore(
@@ -146,12 +167,14 @@ class SkillPublicationService:
                         artifact_ref=artifact_ref,
                         status=desired_status,
                     ),
+                    signature_verified=signature_verified,
                 )
             package_record = SkillPackageRecord(
                 tenant_id=command.tenant_id,
                 manifest=publication.manifest,
                 package_digest=publication.package_digest,
                 artifact_ref=publication.artifact_ref,
+                signature_key_id=signature_key_id,
                 retention_until=now + timedelta(days=90),
                 retention_updated_by=command.actor_id,
                 retention_updated_at=now,
@@ -258,8 +281,22 @@ class SkillPublicationService:
                 artifact_ref=committed.package.artifact_ref,
                 status=committed.publication.status,
             ),
+            signature_verified=signature_verified,
         )
         return publication
+
+    async def _validate_signature(
+        self, tenant_id: str, package: SkillPackage
+    ) -> tuple[SkillPackage, str | None, bool]:
+        if not package.manifest.signature.startswith("ed25519:"):
+            return self._registry.validate(package), None, False
+        if self._publisher_trust is None:
+            raise PolicyDeniedError("External Skill Publisher Registry is unavailable")
+        normalized = self._registry.validate_content(package)
+        key_id = await self._publisher_trust.verify_for_admission(
+            tenant_id, normalized
+        )
+        return normalized, key_id, True
 
     async def _authorized_source(
         self, command: PublishSkillCommand, package: SkillPackage
@@ -283,7 +320,15 @@ class SkillPublicationService:
             raise PolicyDeniedError("Skill Source is not configured")
         if source.desired_state is not SkillSourceDesiredState.ENABLED:
             raise PolicyDeniedError("Skill Source is not enabled")
-        if package.manifest.publisher not in source.publisher_allowlist:
+        registry_authorized_admin = (
+            source.kind is SkillSourceKind.ADMIN_UPLOAD
+            and package.manifest.signature.startswith("ed25519:")
+            and self._publisher_trust is not None
+        )
+        if (
+            package.manifest.publisher not in source.publisher_allowlist
+            and not registry_authorized_admin
+        ):
             raise PolicyDeniedError("Skill publisher is not allowed by the Source")
         return source
 

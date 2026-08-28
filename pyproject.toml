@@ -12,6 +12,7 @@ license = { text = "MIT" }
 dependencies = [
   "aiokafka>=0.12,<1",
   "asyncpg>=0.30,<1",
+  "cryptography>=45,<50",
   "fastapi>=0.115,<1",
   "httpx>=0.27,<1",
   "pymysql[rsa]>=1.1,<2",

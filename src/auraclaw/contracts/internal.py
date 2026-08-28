@@ -738,6 +738,46 @@ class SkillPurgeInternalResponse(ContractModel):
     package: dict[str, Any]
 
 
+class SkillPublisherRegisterInternalRequest(ContractModel):
+    context: InternalRequestContext
+    actor_id: str = Field(min_length=1, max_length=256)
+    publisher: str = Field(min_length=1, max_length=128)
+    display_name: str = Field(min_length=1, max_length=256)
+    command_id: str = Field(min_length=1, max_length=256)
+    expected_revision: int = Field(default=0, ge=0)
+
+
+class SkillPublisherRotateKeyInternalRequest(ContractModel):
+    context: InternalRequestContext
+    actor_id: str = Field(min_length=1, max_length=256)
+    publisher: str = Field(min_length=1, max_length=128)
+    key_id: str = Field(min_length=1, max_length=128)
+    public_key: str = Field(min_length=43, max_length=64)
+    command_id: str = Field(min_length=1, max_length=256)
+    expected_revision: int = Field(ge=1)
+
+
+class SkillPublisherRevokeKeyInternalRequest(ContractModel):
+    context: InternalRequestContext
+    actor_id: str = Field(min_length=1, max_length=256)
+    publisher: str = Field(min_length=1, max_length=128)
+    key_id: str = Field(min_length=1, max_length=128)
+    reason_code: str = Field(min_length=1, max_length=128)
+    command_id: str = Field(min_length=1, max_length=256)
+    expected_revision: int = Field(ge=1)
+
+
+class SkillPublisherStateInternalRequest(ContractModel):
+    context: InternalRequestContext
+    publisher: str = Field(min_length=1, max_length=128)
+
+
+class SkillPublisherInternalResponse(ContractModel):
+    api_version: str = INTERNAL_API_VERSION
+    publisher: dict[str, Any]
+    keys: tuple[dict[str, Any], ...] = ()
+
+
 class AdminOperationRequest(ContractModel):
     context: InternalRequestContext
     operation_id: str

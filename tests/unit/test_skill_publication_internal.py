@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 from datetime import UTC, datetime
 
 import httpx
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi import FastAPI
 
 from auraclaw.action.capability_catalog import (
@@ -22,6 +25,10 @@ from auraclaw.action.skill_packages import (
     SkillPackageRegistry,
 )
 from auraclaw.action.skill_publication import SkillPublicationService
+from auraclaw.action.skill_publishers import (
+    InMemorySkillPublisherStore,
+    SkillPublisherService,
+)
 from auraclaw.action.skill_rebuild import SkillStateRebuilder
 from auraclaw.contracts.capabilities import CapabilityKind
 from auraclaw.contracts.errors import SchemaValidationError
@@ -29,7 +36,10 @@ from auraclaw.contracts.internal import ServiceIdentity
 from auraclaw.contracts.skills import (
     ChangeSkillInstallationCommand,
     PublishSkillCommand,
+    RegisterSkillPublisherCommand,
     RevokeSkillPublicationCommand,
+    RevokeSkillPublisherKeyCommand,
+    RotateSkillPublisherKeyCommand,
     SkillInstallationOperation,
     SkillManifest,
     SkillSourceDesiredState,
@@ -135,6 +145,7 @@ def test_task_api_client_publishes_through_action_hands_service() -> None:
             lifecycle=lifecycle,
             projector=rebuilder,
         )
+        publishers = SkillPublisherService(InMemorySkillPublisherStore())
         contract = create_contract_app(
             "skill-publication-test",
             skill_publication_routes(
@@ -142,6 +153,7 @@ def test_task_api_client_publishes_through_action_hands_service() -> None:
                     publication,
                     management=management,
                     rebuilder=rebuilder,
+                    publishers=publishers,
                 )
             ),
             workload_identities={"task-token": ServiceIdentity.TASK_API},
@@ -160,6 +172,51 @@ def test_task_api_client_publishes_through_action_hands_service() -> None:
             compatibility_cache=compatibility_registry,
         )
         try:
+            registered, _ = await client.register_publisher(
+                RegisterSkillPublisherCommand(
+                    tenant_id="tenant-a",
+                    actor_id="security-admin",
+                    publisher="acme",
+                    display_name="Acme Skills",
+                    command_id="publisher-register-1",
+                    correlation_id="corr-publisher",
+                    causation_id="publisher-register-1",
+                )
+            )
+            public_key = base64.urlsafe_b64encode(
+                Ed25519PrivateKey.generate().public_key().public_bytes(
+                    serialization.Encoding.Raw,
+                    serialization.PublicFormat.Raw,
+                )
+            ).rstrip(b"=").decode()
+            registered, keys = await client.rotate_publisher_key(
+                RotateSkillPublisherKeyCommand(
+                    tenant_id="tenant-a",
+                    actor_id="security-admin",
+                    publisher="acme",
+                    key_id="key-a",
+                    public_key=public_key,
+                    command_id="publisher-rotate-1",
+                    expected_revision=registered.revision,
+                    correlation_id="corr-publisher",
+                    causation_id="publisher-rotate-1",
+                )
+            )
+            assert (await client.get_publisher("tenant-a", "acme"))[1] == keys
+            _registered, keys = await client.revoke_publisher_key(
+                RevokeSkillPublisherKeyCommand(
+                    tenant_id="tenant-a",
+                    actor_id="security-admin",
+                    publisher="acme",
+                    key_id="key-a",
+                    reason_code="key_compromised",
+                    command_id="publisher-revoke-1",
+                    expected_revision=keys[0].revision,
+                    correlation_id="corr-publisher",
+                    causation_id="publisher-revoke-1",
+                )
+            )
+            assert keys[0].status.value == "revoked"
             result = await client.publish(
                 PublishSkillCommand(
                     tenant_id="tenant-a",

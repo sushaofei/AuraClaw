@@ -15,6 +15,7 @@ from auraclaw.action.skill_packages import (
     skill_package_from_archive,
     version_satisfies,
 )
+from auraclaw.action.skill_publishers import SkillPublisherTrustService
 from auraclaw.contracts.capabilities import (
     CapabilityStatus,
     CapabilityTrustLevel,
@@ -47,11 +48,13 @@ class SkillStateRebuilder:
         artifacts: ArtifactContentReader,
         registry: SkillPackageRegistry,
         catalog: CapabilityCatalog,
+        publisher_trust: SkillPublisherTrustService | None = None,
     ) -> None:
         self._lifecycle = lifecycle
         self._artifacts = artifacts
         self._registry = registry
         self._catalog = catalog
+        self._publisher_trust = publisher_trust
 
     async def rebuild_all(self) -> SkillRebuildResult:
         tenants = await self._lifecycle.list_tenants()
@@ -101,6 +104,17 @@ class SkillStateRebuilder:
                     correlation_id=f"skill-rebuild:{tenant_id}",
                 )
                 package = skill_package_from_archive(content)
+                if package.manifest.signature.startswith("ed25519:"):
+                    if self._publisher_trust is None:
+                        raise ValueError("publisher registry unavailable")
+                    package = self._registry.validate_content(package)
+                    key_id = await self._publisher_trust.verify_for_restore(
+                        tenant_id, package
+                    )
+                    if key_id != package_record.signature_key_id:
+                        raise ValueError("signature key mismatch")
+                else:
+                    package = self._registry.validate(package)
                 if package.manifest != package_record.manifest:
                     raise ValueError("manifest mismatch")
                 if skill_package_digest(package) != record.package_digest:
@@ -130,6 +144,7 @@ class SkillStateRebuilder:
             tenant_id,
             tuple(entries),
             discoverable=frozenset(discoverable),
+            signatures_verified=True,
         )
         server = _skill_server(tenant_id)
         await self._catalog.register_server(server)

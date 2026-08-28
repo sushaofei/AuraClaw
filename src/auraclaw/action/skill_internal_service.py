@@ -6,6 +6,7 @@ import binascii
 from auraclaw.action.skill_management import SkillManagementService
 from auraclaw.action.skill_packages import SkillPackage
 from auraclaw.action.skill_publication import SkillPublicationService
+from auraclaw.action.skill_publishers import SkillPublisherService
 from auraclaw.action.skill_rebuild import SkillStateRebuilder
 from auraclaw.contracts.errors import AuthorizationError, SchemaValidationError
 from auraclaw.contracts.internal import (
@@ -15,6 +16,11 @@ from auraclaw.contracts.internal import (
     SkillPackageStateInternalRequest,
     SkillPackageStateInternalResponse,
     SkillPublishArtifactInternalRequest,
+    SkillPublisherInternalResponse,
+    SkillPublisherRegisterInternalRequest,
+    SkillPublisherRevokeKeyInternalRequest,
+    SkillPublisherRotateKeyInternalRequest,
+    SkillPublisherStateInternalRequest,
     SkillPublishInternalRequest,
     SkillPublishInternalResponse,
     SkillPurgeInternalRequest,
@@ -28,7 +34,10 @@ from auraclaw.contracts.skills import (
     ChangeSkillInstallationCommand,
     PublishSkillCommand,
     PurgeSkillPackageCommand,
+    RegisterSkillPublisherCommand,
     RevokeSkillPublicationCommand,
+    RevokeSkillPublisherKeyCommand,
+    RotateSkillPublisherKeyCommand,
     SkillInstallationOperation,
 )
 from auraclaw.contracts.tools import ArtifactRef
@@ -43,10 +52,12 @@ class SkillPublicationInternalService:
         *,
         management: SkillManagementService | None = None,
         rebuilder: SkillStateRebuilder | None = None,
+        publishers: SkillPublisherService | None = None,
     ) -> None:
         self._publication = publication
         self._management = management
         self._rebuilder = rebuilder
+        self._publishers = publishers
 
     async def publish(
         self, request: SkillPublishInternalRequest
@@ -260,4 +271,100 @@ class SkillPublicationInternalService:
                 if publication is None
                 else publication.model_dump(mode="json")
             ),
+        )
+
+    async def register_publisher(
+        self, request: SkillPublisherRegisterInternalRequest
+    ) -> SkillPublisherInternalResponse:
+        self._validate_management_request(
+            request.context.service_identity,
+            request.context.request_id,
+            request.command_id,
+        )
+        service = self._require_publishers()
+        await service.register(
+            RegisterSkillPublisherCommand(
+                tenant_id=request.context.tenant_id,
+                actor_id=request.actor_id,
+                publisher=request.publisher,
+                display_name=request.display_name,
+                command_id=request.command_id,
+                expected_revision=request.expected_revision,
+                correlation_id=request.context.correlation_id,
+                causation_id=request.context.causation_id,
+            )
+        )
+        return await self._publisher_state(service, request.context.tenant_id, request.publisher)
+
+    async def rotate_publisher_key(
+        self, request: SkillPublisherRotateKeyInternalRequest
+    ) -> SkillPublisherInternalResponse:
+        self._validate_management_request(
+            request.context.service_identity,
+            request.context.request_id,
+            request.command_id,
+        )
+        service = self._require_publishers()
+        await service.rotate_key(
+            RotateSkillPublisherKeyCommand(
+                tenant_id=request.context.tenant_id,
+                actor_id=request.actor_id,
+                publisher=request.publisher,
+                key_id=request.key_id,
+                public_key=request.public_key,
+                command_id=request.command_id,
+                expected_revision=request.expected_revision,
+                correlation_id=request.context.correlation_id,
+                causation_id=request.context.causation_id,
+            )
+        )
+        return await self._publisher_state(service, request.context.tenant_id, request.publisher)
+
+    async def revoke_publisher_key(
+        self, request: SkillPublisherRevokeKeyInternalRequest
+    ) -> SkillPublisherInternalResponse:
+        self._validate_management_request(
+            request.context.service_identity,
+            request.context.request_id,
+            request.command_id,
+        )
+        service = self._require_publishers()
+        await service.revoke_key(
+            RevokeSkillPublisherKeyCommand(
+                tenant_id=request.context.tenant_id,
+                actor_id=request.actor_id,
+                publisher=request.publisher,
+                key_id=request.key_id,
+                reason_code=request.reason_code,
+                command_id=request.command_id,
+                expected_revision=request.expected_revision,
+                correlation_id=request.context.correlation_id,
+                causation_id=request.context.causation_id,
+            )
+        )
+        if self._rebuilder is not None:
+            await self._rebuilder.rebuild_tenant(request.context.tenant_id)
+        return await self._publisher_state(service, request.context.tenant_id, request.publisher)
+
+    async def publisher_state(
+        self, request: SkillPublisherStateInternalRequest
+    ) -> SkillPublisherInternalResponse:
+        if request.context.service_identity is not ServiceIdentity.TASK_API:
+            raise AuthorizationError("workload may not query Skill Publishers")
+        service = self._require_publishers()
+        return await self._publisher_state(service, request.context.tenant_id, request.publisher)
+
+    def _require_publishers(self) -> SkillPublisherService:
+        if self._publishers is None:
+            raise SchemaValidationError("Skill Publisher Registry is not configured")
+        return self._publishers
+
+    @staticmethod
+    async def _publisher_state(
+        service: SkillPublisherService, tenant_id: str, publisher: str
+    ) -> SkillPublisherInternalResponse:
+        record, keys = await service.get(tenant_id, publisher)
+        return SkillPublisherInternalResponse(
+            publisher=record.model_dump(mode="json"),
+            keys=tuple(key.model_dump(mode="json") for key in keys),
         )

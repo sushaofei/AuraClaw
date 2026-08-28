@@ -18,6 +18,7 @@ from auraclaw.action.skill_packages import (
     SkillPackage,
     SkillPackageRegistry,
     SkillResolver,
+    skill_signing_payload,
 )
 from auraclaw.action.tool_gateway import ToolRegistry
 from auraclaw.contracts.capabilities import (
@@ -123,6 +124,12 @@ def _package(
             **content_files,
         },
     )
+
+
+def test_legacy_hmac_signing_payload_omits_empty_key_identity() -> None:
+    verifier = HmacSkillSignatureVerifier({"platform": _PUBLISHER_KEY})
+    payload = json.loads(skill_signing_payload(_package(verifier)))
+    assert "signature_key_id" not in payload["manifest"]
 
 
 def _descriptor(

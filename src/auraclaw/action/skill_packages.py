@@ -121,11 +121,16 @@ class SkillPackageRegistry:
         return self._resources
 
     def validate(self, package: SkillPackage) -> SkillPackage:
+        normalized = self.validate_content(package)
+        if not self._signature_verifier.verify(normalized):
+            raise PolicyDeniedError("Skill package signature is invalid")
+        return normalized
+
+    def validate_content(self, package: SkillPackage) -> SkillPackage:
+        """Validate package structure after a caller performed governed signature checks."""
         normalized = _validate_package(
             package, self._max_package_bytes, self._max_files
         )
-        if not self._signature_verifier.verify(normalized):
-            raise PolicyDeniedError("Skill package signature is invalid")
         validate_skill_test_vectors(normalized)
         return normalized
 
@@ -134,9 +139,15 @@ class SkillPackageRegistry:
         tenant_id: str,
         package: SkillPackage,
         publication: PublishedSkill,
+        *,
+        signature_verified: bool = False,
     ) -> PublishedSkill:
         """Restore validated persisted state without creating another Artifact."""
-        normalized = self.validate(package)
+        normalized = (
+            self.validate_content(package)
+            if signature_verified
+            else self.validate(package)
+        )
         if publication.tenant_id != tenant_id:
             raise PolicyDeniedError("Skill publication tenant does not match")
         if publication.manifest != normalized.manifest:
@@ -172,10 +183,15 @@ class SkillPackageRegistry:
         entries: tuple[tuple[SkillPackage, PublishedSkill], ...],
         *,
         discoverable: frozenset[tuple[str, str, str]] | None = None,
+        signatures_verified: bool = False,
     ) -> None:
         normalized_entries: list[tuple[SkillPackage, PublishedSkill]] = []
         for package, publication in entries:
-            normalized = self.validate(package)
+            normalized = (
+                self.validate_content(package)
+                if signatures_verified
+                else self.validate(package)
+            )
             if publication.tenant_id != tenant_id:
                 raise PolicyDeniedError("Skill publication tenant does not match")
             if publication.manifest != normalized.manifest:
@@ -226,13 +242,18 @@ class SkillPackageRegistry:
         package: SkillPackage,
         *,
         status: SkillPublicationStatus = SkillPublicationStatus.ACTIVE,
+        signature_verified: bool = False,
     ) -> PublishedSkill:
         if status not in {
             SkillPublicationStatus.STAGED,
             SkillPublicationStatus.ACTIVE,
         }:
             raise ValueError("New Skill packages can only be staged or activated")
-        normalized = self.validate(package)
+        normalized = (
+            self.validate_content(package)
+            if signature_verified
+            else self.validate(package)
+        )
         key = _package_key(tenant_id, normalized.manifest)
         digest = skill_package_digest(normalized)
         existing = self._publications.get(key)
@@ -690,6 +711,8 @@ class SkillResolver:
 def skill_signing_payload(package: SkillPackage) -> bytes:
     manifest = package.manifest.model_dump(mode="json")
     manifest["signature"] = None
+    if manifest.get("signature_key_id") is None:
+        manifest.pop("signature_key_id", None)
     file_digests = {
         path: hashlib.sha256(content).hexdigest()
         for path, content in sorted(package.files.items())
