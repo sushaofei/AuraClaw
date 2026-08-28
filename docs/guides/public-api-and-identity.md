@@ -777,6 +777,11 @@ Ed25519 公钥，不接收或生成私钥；新发布只接受 active key，reti
 correlation/causation 和 revision 证据，再复验原 Artifact 与当前 Source/Publisher/key 信任；失败保持
 `restoring` 且不进入新发现，同一 Idempotency-Key 可在修复信任条件后重试。
 
+外部 Publisher 可先用 `auraclaw skills sign <directory> --publisher <name> --key-id <id>` 离线签名，
+private key 只从 `AURACLAW_SKILL_SIGNING_KEY`（或指定 Secret 环境变量）读取。命令输出的 Ed25519 公钥
+需通过 Publisher key rotation API 登记；后续 validate/test/publish 用显式公钥本地验签，而服务端仍以
+tenant Registry 的 active key 独立验签。CLI 不接受命令行私钥，也不允许外部签名声明 `platform`。
+
 ```bash
 curl -sS http://127.0.0.1:8000/v1/admin/skills \
   -H 'X-Tenant-ID: local' \

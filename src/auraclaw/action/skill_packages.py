@@ -12,6 +12,9 @@ from datetime import UTC, datetime, timedelta
 from pathlib import PurePosixPath
 from typing import Protocol, TypeVar
 
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
 from auraclaw.action.mcp_primitives import McpResourceRegistry, RegisteredResource
 from auraclaw.action.ports import (
     ArtifactWriter,
@@ -93,6 +96,42 @@ class HmacSkillSignatureVerifier:
         package = SkillPackage(manifest=unsigned, files=dict(files))
         digest = hmac.new(key, skill_signing_payload(package), hashlib.sha256).hexdigest()
         return f"hmac-sha256:{digest}"
+
+
+class Ed25519SkillSignatureVerifier:
+    """Verify an offline-signed package against an explicitly trusted public key."""
+
+    def __init__(self, publisher_keys: Mapping[tuple[str, str], bytes]) -> None:
+        self._publisher_keys: dict[tuple[str, str], Ed25519PublicKey] = {}
+        for identity, value in publisher_keys.items():
+            if len(value) != 32:
+                raise ValueError("Ed25519 public keys must contain exactly 32 bytes")
+            self._publisher_keys[identity] = Ed25519PublicKey.from_public_bytes(value)
+
+    def verify(self, package: SkillPackage) -> bool:
+        manifest = package.manifest
+        if manifest.signature_key_id is None or not manifest.signature.startswith(
+            "ed25519:"
+        ):
+            return False
+        key = self._publisher_keys.get(
+            (manifest.publisher, manifest.signature_key_id)
+        )
+        if key is None:
+            return False
+        try:
+            encoded = manifest.signature.removeprefix("ed25519:")
+            signature = base64.b64decode(
+                encoded + "=" * (-len(encoded) % 4),
+                altchars=b"-_",
+                validate=True,
+            )
+            if len(signature) != 64:
+                return False
+            key.verify(signature, skill_signing_payload(package))
+        except (InvalidSignature, ValueError, binascii.Error):
+            return False
+        return True
 
 
 class SkillPackageRegistry:

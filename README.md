@@ -408,8 +408,20 @@ AURACLAW_API_TOKEN=... uv run auraclaw skills publish path/to/skill \
 目录必须包含已签名的 `manifest.json` 与 `SKILL.md`。`skills test` 只接受并校验
 `tests/*.json` 声明式向量，不执行包内代码；`skills publish` 从
 `AURACLAW_API_TOKEN`（或 `--token-env` 指定的环境变量）读取令牌，不接受命令行明文令牌。
-当前本地 CLI 仍只离线校验平台 HMAC 兼容包；服务端可通过 tenant Publisher Registry 接受
-Ed25519 签名的外部 publisher 包。Registry 只保存公钥，私钥必须留在 publisher 的签名环境。
+外部 Publisher 使用 Ed25519 离线签名。32-byte raw private key 必须以无 padding 的 base64url 放在
+`AURACLAW_SKILL_SIGNING_KEY`（或 `--private-key-env` 指定的 Secret 环境变量），不能作为命令行参数：
+
+```bash
+uv run auraclaw skills sign path/to/skill --publisher acme --key-id key-2026-a
+AURACLAW_SKILL_PUBLIC_KEY=... uv run auraclaw skills validate path/to/skill
+AURACLAW_SKILL_PUBLIC_KEY=... AURACLAW_API_TOKEN=... \
+  uv run auraclaw skills publish path/to/skill --tenant tenant_1 --publisher acme
+```
+
+`sign` 原子更新 `manifest.json`，输出可登记到 tenant Publisher Registry 的公钥、key id 与 package
+digest，不输出私钥；validate/test/publish 使用 `AURACLAW_SKILL_PUBLIC_KEY` 做本地验签，服务端仍以
+Registry 当前 active key 独立执行权威验签。平台 HMAC 只保留为兼容路径。Registry 只保存公钥，私钥
+必须留在 publisher 的签名环境。
 Publisher 可通过带 expected revision、reason 和幂等命令的 suspend/resume 管理入口充当租户级信任断路器；
 suspend 同时拒绝新发布和持久包恢复，resume 只恢复仍处于 active/retiring 的有效 key。
 发布的 Package、Publication、首个 Installation、成功命令账本和 Outbox 在 Action Hands 中原子提交；

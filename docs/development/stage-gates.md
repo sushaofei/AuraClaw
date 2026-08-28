@@ -1923,6 +1923,31 @@ ready Skill Artifact 建立带 fencing 的物理回收流程；不把成功命�
 - [x] README、公开 API、架构、数据库参考与阶段门禁同步。
 - [x] 本阶段作为一个 intentional commit 提交并 push，不包含 `.env`、Secret、缓存或无关改动。
 
+## 阶段 M14n：外部 Publisher 离线签名 CLI（Issue #56）
+
+状态：已完成。外部 Publisher 可在私钥不进入 AuraClaw 服务端的前提下完成离线签名与发布闭环。
+
+### 签名与密钥边界
+
+- [x] `auraclaw skills sign` 为非平台 Publisher 生成规范 Ed25519 Manifest 签名并原子替换 manifest。
+- [x] private key 仅从指定 Secret 环境变量读取；CLI 不提供明文 key 参数且输出不包含私钥。
+- [x] sign 强制显式 publisher/key id，拒绝冒用 `platform` 或与 Manifest publisher 不一致。
+- [x] 输出 32-byte raw Ed25519 公钥、key id、Skill identity 和稳定 package digest，便于 Registry 登记。
+
+### 验证与发布闭环
+
+- [x] validate/test/publish 对外部包使用显式公钥离线验签，平台 HMAC 兼容路径保持隔离。
+- [x] 外部 publish 仍使用 staged Artifact 与统一发布服务，服务端以 tenant Registry active key 独立验签。
+- [x] 本地签名产物由生产 `SkillPublisherTrustService` 验证通过；错误公钥、身份不匹配均 fail closed。
+- [x] CLI 继续拒绝 symlink、非规范路径、越界包和任意测试代码，不扩大私钥或 RCE 攻击面。
+
+### 质量与交付
+
+- [x] 单测覆盖签名、原子 Manifest 更新、生产 verifier 兼容、错误 key、platform 冒用和 parser 密钥边界。
+- [x] 全量 Ruff、Mypy、unit、相关 Skill 回归与 import-linter 通过。
+- [x] README、架构、公开 API 指南与阶段门禁同步，完整拒绝/安全审计未误标完成。
+- [x] 本阶段作为一个 intentional commit 提交并 push，不包含 `.env`、Secret、缓存或无关改动。
+
 ## 阶段 Product Activity：产品级对话执行轨迹（AuraX Issue #2）
 
 状态：代码与定向验证完成；完整基础设施集成门禁受现有 Kafka/MySQL/PostgreSQL/Artifact 环境失败阻塞。
