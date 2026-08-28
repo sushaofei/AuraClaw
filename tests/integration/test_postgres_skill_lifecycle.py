@@ -38,6 +38,7 @@ MIGRATION = "\n".join(
         (ROOT / "migrations/0024_skill_publication_actor.sql").read_text(),
         (ROOT / "migrations/0025_skill_package_retention.sql").read_text(),
         (ROOT / "migrations/0026_skill_publication_reliability.sql").read_text(),
+        (ROOT / "migrations/0028_skill_source_reconcile_lease.sql").read_text(),
     )
 )
 pytestmark = pytest.mark.skipif(DATABASE_URL is None, reason="PostgreSQL test URL not configured")
@@ -121,6 +122,35 @@ def test_postgres_skill_lifecycle_is_persistent_and_tenant_scoped() -> None:
                 updated_at=now,
             )
             await store_a.put_source(source, expected_revision=0)
+            first_lease = await store_a.claim_source_lease(
+                tenant_id=tenant_id,
+                source_id=source.source_id,
+                owner="hands-a",
+                ttl=timedelta(minutes=1),
+            )
+            assert first_lease is not None and first_lease.fencing_token == 1
+            assert (
+                await store_b.claim_source_lease(
+                    tenant_id=tenant_id,
+                    source_id=source.source_id,
+                    owner="hands-b",
+                    ttl=timedelta(minutes=1),
+                )
+                is None
+            )
+            await connection.execute(
+                """UPDATE hands.skill_source_lease SET expires_at=now()
+                WHERE tenant_id=$1 AND source_id=$2""",
+                tenant_id,
+                source.source_id,
+            )
+            second_lease = await store_b.claim_source_lease(
+                tenant_id=tenant_id,
+                source_id=source.source_id,
+                owner="hands-b",
+                ttl=timedelta(minutes=1),
+            )
+            assert second_lease is not None and second_lease.fencing_token == 2
             with pytest.raises(VersionConflictError, match="revision conflict"):
                 await store_a.put_source(
                     source.model_copy(
@@ -185,7 +215,17 @@ def test_postgres_skill_lifecycle_is_persistent_and_tenant_scoped() -> None:
                 publication=transactional_publication,
                 installation=None,
                 occurred_at=now,
+                source_lease=second_lease,
             )
+            with pytest.raises(VersionConflictError, match="lease is stale"):
+                await store_a.commit_publish(
+                    publish_commit.__class__(
+                        **{
+                            **publish_commit.__dict__,
+                            "source_lease": first_lease,
+                        }
+                    )
+                )
             committed = await store_a.commit_publish(publish_commit)
             replayed = await store_b.commit_publish(publish_commit)
             assert committed.publication == replayed.publication
@@ -314,6 +354,9 @@ def test_postgres_skill_lifecycle_is_persistent_and_tenant_scoped() -> None:
             await connection.execute(
                 "DELETE FROM hands.skill_source_sync_state WHERE tenant_id=$1",
                 tenant_id,
+            )
+            await connection.execute(
+                "DELETE FROM hands.skill_source_lease WHERE tenant_id=$1", tenant_id
             )
             await connection.execute(
                 "DELETE FROM hands.skill_installation WHERE tenant_id=$1", tenant_id

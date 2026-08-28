@@ -5,7 +5,11 @@ import json
 from datetime import UTC, datetime, timedelta
 
 from auraclaw.action.ports import ArtifactContentReader, SkillArtifactLifecycle
-from auraclaw.action.skill_lifecycle import SkillLifecycleStore, SkillPublishCommit
+from auraclaw.action.skill_lifecycle import (
+    SkillLifecycleStore,
+    SkillPublishCommit,
+    SkillSourceLease,
+)
 from auraclaw.action.skill_packages import (
     SkillPackage,
     SkillPackageRegistry,
@@ -55,13 +59,20 @@ class SkillPublicationService:
             (source.tenant_id, source.source_id): source for source in bootstrap_sources
         }
 
-    async def publish(self, command: PublishSkillCommand, package: SkillPackage) -> PublishedSkill:
+    async def publish(
+        self,
+        command: PublishSkillCommand,
+        package: SkillPackage,
+        *,
+        source_lease: SkillSourceLease | None = None,
+    ) -> PublishedSkill:
         package, key_id, externally_verified = await self._validate_signature(
             command.tenant_id, package
         )
         return await self._publish(
             command,
             package,
+            source_lease=source_lease,
             signature_key_id=key_id,
             signature_verified=externally_verified,
         )
@@ -114,6 +125,7 @@ class SkillPublicationService:
         artifact_claimed: bool = False,
         signature_key_id: str | None = None,
         signature_verified: bool = False,
+        source_lease: SkillSourceLease | None = None,
     ) -> PublishedSkill:
         source = await self._authorized_source(command, package)
         digest = skill_package_digest(package)
@@ -261,6 +273,7 @@ class SkillPublicationService:
                 publication=record,
                 installation=installation,
                 occurred_at=now,
+                source_lease=source_lease,
             )
         )
         if self._artifact_lifecycle is not None:

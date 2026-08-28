@@ -370,8 +370,18 @@ Service 只 claim retention 已到期、无 legal hold、未绑定且 publicatio
 决策并删除对象及 metadata。删除租约可过期接管，失败仅记录安全错误类型并退避重试，不记录包正文。
 这套 fencing 避免“先查无引用、后并发发布”的误删窗口，也不让 Artifact Service 反向读取 Hands 数据库。
 
-Source 多副本租约/对账、外部签名 CLI、publisher suspension 和完整拒绝/安全审计仍未完成，不能将
-当前状态描述为完整供应链治理。平台 HMAC 仅保留为兼容入口，不作为外部 publisher 信任根。
+MCP Skill Source 对账按 `(tenant_id, source_id)` 获取 PostgreSQL 持久租约。每次过期接管都会递增
+`fencing_token`；远端 snapshot 返回后、每个包下载后都必须续租，Publication 事务和
+`SkillSourceSyncState` 写入则在数据库事务内再次验证相同 owner/token/expiry。旧副本即使在网络调用
+结束后迟到，也不能提交 Package、Publication、Installation 或覆盖新一代同步证据。完整快照成功时
+记录 source revision、成功时间并清零失败次数；失败时只记录异常类型，保留上次成功证据且不保存远端
+响应正文。部分包已经提交但快照尚未完成时保持 `complete_snapshot=false`，下一轮依靠不可变版本和
+command digest 幂等补齐。Source disabled/retired 时不再取得租约或拉取内容。
+
+当前完整快照只证明“本轮发现和发布完成”，不会仅凭远端条目缺失自动安全撤销已发布版本；自动退役
+需要独立的缺失确认窗口、管理命令审计和既有 binding 策略。外部签名 CLI、publisher suspension、
+缺失版本自动退役和完整拒绝/安全审计仍未完成，不能将当前状态描述为完整供应链治理。平台 HMAC 仅
+保留为兼容入口，不作为外部 publisher 信任根。
 
 Action Hands 启动及周期对账时由 `SkillStateRebuilder` 枚举 Lifecycle tenant，从受 Policy 保护的
 Artifact 下载接口读取不可变包，并再次校验大小、内容 hash、Archive、Manifest、package digest 和

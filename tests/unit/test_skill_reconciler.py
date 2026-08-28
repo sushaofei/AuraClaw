@@ -240,6 +240,79 @@ def test_skill_reconciler_downloads_signed_package_from_mcp_resources() -> None:
         )
         assert source is not None
         assert source.publisher_allowlist == ("platform",)
+        sync_state = await lifecycle.get_sync_state("tenant-a", source.source_id)
+        assert sync_state is not None
+        assert sync_state.complete_snapshot
+        assert sync_state.generation == 1
+        assert sync_state.consecutive_failures == 0
+
+    asyncio.run(scenario())
+
+
+def test_skill_reconciler_persists_safe_failure_and_recovers() -> None:
+    class FailingOnceConnector(_SkillMcpConnector):
+        def __init__(self) -> None:
+            super().__init__(())
+            self.failed = False
+
+        async def snapshot(self, trusted: HandsTrustedContext) -> CapabilitySnapshot:
+            if not self.failed:
+                self.failed = True
+                raise RuntimeError("sensitive upstream response")
+            return await super().snapshot(trusted)
+
+    async def scenario() -> None:
+        server = McpServerDefinition(
+            server_id="recovering-skill-server",
+            tenant_id="tenant-a",
+            title="Recovering Skill MCP",
+            endpoint="https://skills.example/mcp",
+            enabled=True,
+            metadata={"skill_publisher_allowlist": ["platform"]},
+        )
+        lifecycle = InMemorySkillLifecycleStore()
+        artifacts = _Artifacts()
+        registry = SkillPackageRegistry(
+            artifacts=artifacts,
+            signature_verifier=HmacSkillSignatureVerifier(
+                {"platform": _PUBLISHER_KEY}
+            ),
+        )
+        catalog = CapabilityCatalog(InMemoryCapabilityCatalogStore())
+        reconciler = SkillPackageReconciler(
+            store=_Store(server),
+            connectors={server.server_id: FailingOnceConnector()},
+            lifecycle=lifecycle,
+            publication=SkillPublicationService(
+                registry=registry,
+                lifecycle=lifecycle,
+            ),
+            rebuilder=SkillStateRebuilder(
+                lifecycle=lifecycle,
+                artifacts=artifacts,
+                registry=registry,
+                catalog=catalog,
+            ),
+            owner="hands-a",
+        )
+
+        failed = await reconciler.reconcile_server(server)
+        source_id = next(iter(lifecycle._sources.values())).source_id
+        failed_state = await lifecycle.get_sync_state("tenant-a", source_id)
+        assert failed.error == "RuntimeError"
+        assert failed_state is not None
+        assert failed_state.safe_error_code == "RuntimeError"
+        assert "sensitive" not in failed_state.safe_error_code
+        assert failed_state.consecutive_failures == 1
+        assert not failed_state.complete_snapshot
+
+        recovered = await reconciler.reconcile_server(server)
+        recovered_state = await lifecycle.get_sync_state("tenant-a", source_id)
+        assert recovered.error is None
+        assert recovered_state is not None and recovered_state.complete_snapshot
+        assert recovered_state.safe_error_code is None
+        assert recovered_state.consecutive_failures == 0
+        assert recovered_state.generation == 2
 
     asyncio.run(scenario())
 

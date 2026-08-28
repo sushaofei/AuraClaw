@@ -62,6 +62,7 @@ uv run auraclaw migrate up
 | `0025` | Skill Package retention、legal hold 与 optimistic revision |
 | `0026` | Skill 发布命令账本、事务 Outbox 与 Artifact 发布/孤儿回收 fencing |
 | `0027` | tenant Publisher Registry、Ed25519 公钥、rotation/revoke 与命令幂等 |
+| `0028` | Skill Source 对账租约、单调 fencing token 与过期接管索引 |
 
 PostgreSQL / Kingbase 序列未使用 `0017`；MySQL 方言的 `0017` 用于扩大 Task View 文本字段。
 不要为了填补编号而重命名已经发布的迁移。

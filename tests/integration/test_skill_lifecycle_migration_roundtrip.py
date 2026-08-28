@@ -19,10 +19,12 @@ UP = "\n".join(
         (ROOT / "migrations/0025_skill_package_retention.sql").read_text(),
         (ROOT / "migrations/0026_skill_publication_reliability.sql").read_text(),
         (ROOT / "migrations/0027_skill_publisher_registry.sql").read_text(),
+        (ROOT / "migrations/0028_skill_source_reconcile_lease.sql").read_text(),
     )
 )
 DOWN = "\n".join(
     (
+        (ROOT / "migrations/0028_skill_source_reconcile_lease.down.sql").read_text(),
         (ROOT / "migrations/0027_skill_publisher_registry.down.sql").read_text(),
         (ROOT / "migrations/0026_skill_publication_reliability.down.sql").read_text(),
         (ROOT / "migrations/0025_skill_package_retention.down.sql").read_text(),
@@ -63,6 +65,7 @@ def test_skill_lifecycle_migration_roundtrip_in_isolated_postgres() -> None:
                 "skill_installation",
                 "skill_source",
                 "skill_source_sync_state",
+                "skill_source_lease",
                 "skill_command",
                 "skill_outbox",
                 "skill_publisher",
@@ -100,6 +103,7 @@ def test_skill_lifecycle_migration_roundtrip_in_isolated_postgres() -> None:
                 "skill_installation",
                 "skill_source",
                 "skill_source_sync_state",
+                "skill_source_lease",
                 "skill_command",
                 "skill_outbox",
             ):

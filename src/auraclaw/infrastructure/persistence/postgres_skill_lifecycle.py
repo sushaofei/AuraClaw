@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import Any
 
 import asyncpg  # type: ignore[import-untyped]
@@ -9,6 +10,7 @@ from auraclaw.action.skill_lifecycle import (
     SkillOutboxRecord,
     SkillPublishCommit,
     SkillPublishCommitResult,
+    SkillSourceLease,
     _publish_outbox_payload,
 )
 from auraclaw.contracts.errors import NotFoundError, VersionConflictError
@@ -41,6 +43,13 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
         package = commit.package
         publication = commit.publication
         async with pool.acquire() as connection, connection.transaction():
+            if commit.source_lease is not None:
+                if (
+                    commit.source_lease.tenant_id != package.tenant_id
+                    or commit.source_lease.source_id != commit.source_id
+                ):
+                    raise VersionConflictError("Skill Source lease scope mismatch")
+                await _require_active_source_lease(connection, commit.source_lease)
             await connection.execute(
                 "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
                 f"{package.tenant_id}:{commit.command_id}",
@@ -536,6 +545,97 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
         )
         return None if row is None else _sync_state(dict(row))
 
+    async def claim_source_lease(
+        self, *, tenant_id: str, source_id: str, owner: str, ttl: timedelta
+    ) -> SkillSourceLease | None:
+        pool = await self.pool()
+        row = await pool.fetchrow(
+            """INSERT INTO hands.skill_source_lease
+            (tenant_id,source_id,owner,fencing_token,expires_at,acquired_at,updated_at)
+            VALUES ($1,$2,$3,1,now()+$4::interval,now(),now())
+            ON CONFLICT (tenant_id,source_id) DO UPDATE SET
+              owner=EXCLUDED.owner,
+              fencing_token=hands.skill_source_lease.fencing_token+1,
+              expires_at=EXCLUDED.expires_at,acquired_at=now(),updated_at=now()
+            WHERE hands.skill_source_lease.expires_at <= now()
+            RETURNING tenant_id,source_id,owner,fencing_token,expires_at""",
+            tenant_id,
+            source_id,
+            owner,
+            ttl,
+        )
+        return None if row is None else _source_lease(dict(row))
+
+    async def renew_source_lease(
+        self, lease: SkillSourceLease, *, ttl: timedelta
+    ) -> SkillSourceLease | None:
+        pool = await self.pool()
+        row = await pool.fetchrow(
+            """UPDATE hands.skill_source_lease
+            SET expires_at=now()+$5::interval,updated_at=now()
+            WHERE tenant_id=$1 AND source_id=$2 AND owner=$3 AND fencing_token=$4
+              AND expires_at > now()
+            RETURNING tenant_id,source_id,owner,fencing_token,expires_at""",
+            lease.tenant_id,
+            lease.source_id,
+            lease.owner,
+            lease.fencing_token,
+            ttl,
+        )
+        return None if row is None else _source_lease(dict(row))
+
+    async def release_source_lease(self, lease: SkillSourceLease) -> None:
+        pool = await self.pool()
+        await pool.execute(
+            """UPDATE hands.skill_source_lease SET expires_at=now(),updated_at=now()
+            WHERE tenant_id=$1 AND source_id=$2 AND owner=$3 AND fencing_token=$4""",
+            lease.tenant_id,
+            lease.source_id,
+            lease.owner,
+            lease.fencing_token,
+        )
+
+    async def put_sync_state_fenced(
+        self, state: SkillSourceSyncState, *, lease: SkillSourceLease
+    ) -> None:
+        pool = await self.pool()
+        async with pool.acquire() as connection, connection.transaction():
+            await _require_active_source_lease(connection, lease)
+            if (state.tenant_id, state.source_id) != (
+                lease.tenant_id,
+                lease.source_id,
+            ):
+                raise VersionConflictError("Skill Source lease scope mismatch")
+            row = await connection.fetchrow(
+                """INSERT INTO hands.skill_source_sync_state
+                (source_id,tenant_id,generation,cursor,complete_snapshot,
+                 last_success_at,last_attempt_at,consecutive_failures,
+                 safe_error_code,updated_at)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,now())
+                ON CONFLICT (tenant_id,source_id) DO UPDATE SET
+                  generation=EXCLUDED.generation,cursor=EXCLUDED.cursor,
+                  complete_snapshot=EXCLUDED.complete_snapshot,
+                  last_success_at=EXCLUDED.last_success_at,
+                  last_attempt_at=EXCLUDED.last_attempt_at,
+                  consecutive_failures=EXCLUDED.consecutive_failures,
+                  safe_error_code=EXCLUDED.safe_error_code,updated_at=now()
+                WHERE EXCLUDED.generation >= hands.skill_source_sync_state.generation
+                RETURNING source_id""",
+                state.source_id,
+                state.tenant_id,
+                state.generation,
+                state.cursor,
+                state.complete_snapshot,
+                state.last_success_at,
+                state.last_attempt_at,
+                state.consecutive_failures,
+                state.safe_error_code,
+            )
+            if row is None:
+                raise VersionConflictError(
+                    "Skill Source generation cannot move backwards"
+                )
+
 
 async def _put_package_transaction(
     connection: asyncpg.Connection, record: SkillPackageRecord
@@ -743,9 +843,36 @@ async def _load_publish_result(
     )
 
 
+async def _require_active_source_lease(
+    connection: asyncpg.Connection, lease: SkillSourceLease
+) -> None:
+    active = await connection.fetchval(
+        """SELECT true FROM hands.skill_source_lease
+        WHERE tenant_id=$1 AND source_id=$2 AND owner=$3 AND fencing_token=$4
+          AND expires_at > now()
+        FOR UPDATE""",
+        lease.tenant_id,
+        lease.source_id,
+        lease.owner,
+        lease.fencing_token,
+    )
+    if active is None:
+        raise VersionConflictError("Skill Source lease is stale")
+
+
 def _require_next_revision(revision: int, expected_revision: int, label: str) -> None:
     if revision != expected_revision + 1:
         raise VersionConflictError(f"Skill {label} next revision is invalid")
+
+
+def _source_lease(row: dict[str, Any]) -> SkillSourceLease:
+    return SkillSourceLease(
+        tenant_id=str(row["tenant_id"]),
+        source_id=str(row["source_id"]),
+        owner=str(row["owner"]),
+        fencing_token=int(row["fencing_token"]),
+        expires_at=row["expires_at"],
+    )
 
 
 def _artifact_payload(ref: ArtifactRef) -> dict[str, object]:
