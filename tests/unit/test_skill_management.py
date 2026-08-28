@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from auraclaw.action.skill_lifecycle import InMemorySkillLifecycleStore
 from auraclaw.action.skill_management import SkillManagementService
-from auraclaw.contracts.errors import InvalidTransitionError, VersionConflictError
+from auraclaw.contracts.errors import (
+    InvalidTransitionError,
+    PolicyDeniedError,
+    VersionConflictError,
+)
 from auraclaw.contracts.skills import (
     ChangeSkillInstallationCommand,
+    PurgeSkillPackageCommand,
     RevokeSkillPublicationCommand,
     SkillInstallationOperation,
     SkillInstallationRecord,
@@ -30,6 +35,24 @@ class _Projector:
 
     async def rebuild_tenant(self, tenant_id: str) -> None:
         self.tenants.append(tenant_id)
+
+
+class _Artifacts:
+    def __init__(self) -> None:
+        self.deleted: list[str] = []
+
+    async def delete(self, *, artifact_ref: ArtifactRef, **kwargs: object) -> None:
+        del kwargs
+        self.deleted.append(artifact_ref.artifact_id)
+
+
+class _BindingReferences:
+    def __init__(self, referenced: bool = False) -> None:
+        self.referenced = referenced
+
+    async def has_reference(self, **kwargs: object) -> bool:
+        del kwargs
+        return self.referenced
 
 
 async def _service() -> tuple[
@@ -58,6 +81,9 @@ async def _service() -> tuple[
                 media_type="application/vnd.auraclaw.skill-package+json",
                 size=10,
             ),
+            retention_until=now + timedelta(days=90),
+            retention_updated_by="publisher",
+            retention_updated_at=now,
             created_at=now,
         )
     )
@@ -206,5 +232,167 @@ def test_management_enforces_revision_and_revoke_is_separate() -> None:
         assert package is not None
         assert package.retention_status.value == "retained"
         assert projector.tenants == ["tenant-a"]
+
+    asyncio.run(scenario())
+
+
+def test_purge_requires_expired_uninstalled_revoked_unreferenced_package() -> None:
+    async def scenario() -> None:
+        _unused, lifecycle, projector = await _service()
+        artifacts = _Artifacts()
+        references = _BindingReferences(referenced=True)
+        service = SkillManagementService(
+            lifecycle=lifecycle,
+            projector=projector,
+            artifacts=artifacts,
+            binding_references=references,
+            purge_quiescence=timedelta(0),
+        )
+        await service.change_installation(
+            _installation_command(
+                SkillInstallationOperation.DISABLE,
+                revision=1,
+                reason="retiring",
+            )
+        )
+        await service.change_installation(
+            _installation_command(
+                SkillInstallationOperation.UNINSTALL,
+                revision=2,
+                reason="retiring",
+            )
+        )
+        await service.revoke_publication(
+            RevokeSkillPublicationCommand(
+                tenant_id="tenant-a",
+                actor_id="security-a",
+                publisher="platform",
+                name="release.prepare",
+                version="1.0.0",
+                reason_code="retiring",
+                command_id="revoke-purge",
+                expected_revision=1,
+                correlation_id="corr-purge",
+                causation_id="revoke-purge",
+            )
+        )
+        package = await service.get_package(
+            "tenant-a", "platform", "release.prepare", "1.0.0"
+        )
+        package = await lifecycle.update_package_retention(
+            package.model_copy(
+                update={
+                    "retention_until": datetime.now(UTC) - timedelta(seconds=1),
+                    "retention_revision": 2,
+                    "retention_updated_by": "retention-worker",
+                    "retention_updated_at": datetime.now(UTC),
+                }
+            ),
+            expected_revision=1,
+        )
+        command = PurgeSkillPackageCommand(
+            tenant_id="tenant-a",
+            actor_id="admin-a",
+            publisher="platform",
+            name="release.prepare",
+            version="1.0.0",
+            reason_code="retention_elapsed",
+            command_id="purge-1",
+            expected_revision=package.retention_revision,
+            correlation_id="corr-purge",
+            causation_id="purge-1",
+        )
+        with pytest.raises(PolicyDeniedError, match="Session binding"):
+            await service.purge_package(command)
+        assert artifacts.deleted == []
+
+        references.referenced = False
+        purged = await service.purge_package(command)
+        assert purged.retention_status.value == "purged"
+        assert purged.retention_revision == 3
+        assert purged.retention_updated_by == "admin-a"
+        assert purged.purged_at is not None
+        assert artifacts.deleted == ["art_skill"]
+        assert await service.purge_package(command) == purged
+        assert artifacts.deleted == ["art_skill"]
+
+    asyncio.run(scenario())
+
+
+def test_purge_rejects_retention_period_and_legal_hold() -> None:
+    async def scenario() -> None:
+        _unused, lifecycle, projector = await _service()
+        artifacts = _Artifacts()
+        service = SkillManagementService(
+            lifecycle=lifecycle,
+            projector=projector,
+            artifacts=artifacts,
+            binding_references=_BindingReferences(),
+            purge_quiescence=timedelta(0),
+        )
+        await service.change_installation(
+            _installation_command(
+                SkillInstallationOperation.DISABLE,
+                revision=1,
+                reason="retiring",
+            )
+        )
+        await service.change_installation(
+            _installation_command(
+                SkillInstallationOperation.UNINSTALL,
+                revision=2,
+                reason="retiring",
+            )
+        )
+        await service.revoke_publication(
+            RevokeSkillPublicationCommand(
+                tenant_id="tenant-a",
+                actor_id="security-a",
+                publisher="platform",
+                name="release.prepare",
+                version="1.0.0",
+                reason_code="retiring",
+                command_id="revoke-retention",
+                expected_revision=1,
+                correlation_id="corr-retention",
+                causation_id="revoke-retention",
+            )
+        )
+        command = PurgeSkillPackageCommand(
+            tenant_id="tenant-a",
+            actor_id="admin-a",
+            publisher="platform",
+            name="release.prepare",
+            version="1.0.0",
+            reason_code="retention_elapsed",
+            command_id="purge-retention",
+            expected_revision=1,
+            correlation_id="corr-retention",
+            causation_id="purge-retention",
+        )
+        with pytest.raises(PolicyDeniedError, match="retention period"):
+            await service.purge_package(command)
+        package = await service.get_package(
+            "tenant-a", "platform", "release.prepare", "1.0.0"
+        )
+        package = await lifecycle.update_package_retention(
+            package.model_copy(
+                update={
+                    "retention_until": datetime.now(UTC) - timedelta(seconds=1),
+                    "legal_hold": True,
+                    "retention_revision": 2,
+                    "retention_updated_by": "legal",
+                    "retention_updated_at": datetime.now(UTC),
+                }
+            ),
+            expected_revision=1,
+        )
+        with pytest.raises(PolicyDeniedError, match="legal hold"):
+            await service.purge_package(
+                command.model_copy(
+                    update={"expected_revision": package.retention_revision}
+                )
+            )
+        assert artifacts.deleted == []
 
     asyncio.run(scenario())

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from pydantic import ValidationError
@@ -38,6 +38,7 @@ def _manifest(version: str = "1.0.0") -> SkillManifest:
 
 
 def _package(*, digest: str = DIGEST_A) -> SkillPackageRecord:
+    now = datetime.now(UTC)
     return SkillPackageRecord(
         tenant_id="tenant-a",
         manifest=_manifest(),
@@ -50,7 +51,10 @@ def _package(*, digest: str = DIGEST_A) -> SkillPackageRecord:
             size=128,
         ),
         signature_key_id="platform-2026",
-        created_at=datetime.now(UTC),
+        retention_until=now + timedelta(days=90),
+        retention_updated_by="admin",
+        retention_updated_at=now,
+        created_at=now,
     )
 
 

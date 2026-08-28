@@ -16,10 +16,12 @@ UP = "\n".join(
     (
         (ROOT / "migrations/0023_skill_lifecycle.sql").read_text(),
         (ROOT / "migrations/0024_skill_publication_actor.sql").read_text(),
+        (ROOT / "migrations/0025_skill_package_retention.sql").read_text(),
     )
 )
 DOWN = "\n".join(
     (
+        (ROOT / "migrations/0025_skill_package_retention.down.sql").read_text(),
         (ROOT / "migrations/0024_skill_publication_actor.down.sql").read_text(),
         (ROOT / "migrations/0023_skill_lifecycle.down.sql").read_text(),
     )
@@ -66,6 +68,19 @@ def test_skill_lifecycle_migration_roundtrip_in_isolated_postgres() -> None:
                 WHERE table_schema='hands' AND table_name='skill_publication'
                   AND column_name='updated_by'"""
             )
+            for column in (
+                "retention_until",
+                "legal_hold",
+                "retention_revision",
+                "retention_updated_by",
+                "retention_updated_at",
+            ):
+                assert await connection.fetchval(
+                    """SELECT EXISTS(SELECT 1 FROM information_schema.columns
+                    WHERE table_schema='hands' AND table_name='skill_package'
+                      AND column_name=$1)""",
+                    column,
+                )
             await connection.execute(DOWN)
             for relation in (
                 "skill_package",

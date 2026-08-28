@@ -52,7 +52,7 @@ class RemoteArtifactWriter:
         acl: tuple[str, ...] = (),
         retention_until: datetime | None = None,
     ) -> ArtifactRef:
-        del artifact_type, producer, lineage_refs, acl, retention_until
+        del artifact_type, producer, lineage_refs, acl
         checksum = hashlib.sha256(content).hexdigest()
         request_id = str(uuid.uuid4())
         context = InternalRequestContext(
@@ -73,6 +73,7 @@ class RemoteArtifactWriter:
                 expected_size=len(content),
                 expected_checksum=checksum,
                 classification=classification,
+                retention_until=retention_until,
             ),
             ArtifactUploadResponse,
         )

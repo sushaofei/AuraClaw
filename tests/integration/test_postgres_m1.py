@@ -7,7 +7,7 @@ import pytest
 
 from auraclaw.config import get_settings
 from auraclaw.contracts.commands import CommandContext
-from auraclaw.contracts.events import Actor
+from auraclaw.contracts.events import Actor, NewEvent
 from auraclaw.gateways.task.admission import AllowAllAdmissionController
 from auraclaw.infrastructure.persistence.postgres_common import asyncpg_url as _asyncpg_url
 from auraclaw.infrastructure.persistence.postgres_event_store import PostgresEventStore
@@ -106,6 +106,47 @@ def test_postgres_concurrent_idempotency_outbox_snapshot_and_rebuild() -> None:
             assert before["result_ref"] is after["result_ref"] is None
             assert before["error"] is after["error"] is None
             assert before["skill_activations"] == after["skill_activations"] == []
+
+            top_level_digest = f"sha256:{'a' * 64}"
+            nested_digest = f"sha256:{'b' * 64}"
+            await store.append(
+                root_session_id=session_id,
+                session_id=session_id,
+                run_id="run-skill-reference",
+                context=CommandContext(
+                    command_id="skill-reference-events",
+                    tenant_id=tenant_id,
+                    actor=Actor(type="runtime", id="postgres-test-runtime"),
+                    correlation_id="corr-skill-reference",
+                    causation_id="cause-skill-reference",
+                    expected_version=2,
+                    operation="record_skill_references",
+                ),
+                events=(
+                    NewEvent(
+                        type="skill.activated",
+                        payload={"package_digest": top_level_digest},
+                    ),
+                    NewEvent(
+                        type="skill.activated",
+                        payload={
+                            "activation": {
+                                "binding": {"package_digest": nested_digest}
+                            }
+                        },
+                    ),
+                ),
+                command_result={"recorded": True},
+            )
+            assert await store.has_skill_package_reference(
+                tenant_id, top_level_digest
+            )
+            assert await store.has_skill_package_reference(
+                tenant_id, nested_digest
+            )
+            assert not await store.has_skill_package_reference(
+                tenant_id, f"sha256:{'c' * 64}"
+            )
         finally:
             await store.close()
             await projection.close()

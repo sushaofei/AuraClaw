@@ -25,6 +25,20 @@ class _Policy:
         )
 
 
+class _DeletePolicy:
+    async def evaluate_action(self, **kwargs: object) -> PolicyEvaluation:
+        assert kwargs["action"] == "artifact.delete"
+        attributes = kwargs["attributes"]
+        assert isinstance(attributes, dict)
+        assert attributes["permission"] == "write-autonomous"
+        assert attributes["risk_level"] == "high"
+        return PolicyEvaluation(
+            decision=PolicyDecision.ALLOW,
+            decision_id="delete-decision-1",
+            policy_version="test",
+        )
+
+
 def test_remote_artifact_reader_verifies_downloaded_content() -> None:
     async def scenario() -> None:
         content = b"persisted-skill-package"
@@ -95,6 +109,51 @@ def test_remote_artifact_reader_verifies_downloaded_content() -> None:
                     )
             finally:
                 await limited_reader.aclose()
+        finally:
+            await reader.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_remote_artifact_reader_uses_governed_delete_contract() -> None:
+    async def scenario() -> None:
+        artifact = ArtifactRef(
+            artifact_id="art_skill",
+            version=1,
+            content_hash="a" * 64,
+            media_type="application/vnd.auraclaw.skill-package+json",
+            size=10,
+        )
+
+        def contract_handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/internal/v1/artifacts/delete"
+            payload = request.read().decode()
+            assert "delete-decision-1" in payload
+            assert "retention_elapsed" in payload
+            return httpx.Response(
+                200,
+                json={
+                    "api_version": INTERNAL_API_VERSION,
+                    "artifact_id": "art_skill",
+                    "version": 1,
+                    "status": "deleted",
+                },
+            )
+
+        reader = RemoteArtifactReader(
+            "http://artifact-service",
+            bearer_token="hands-token",
+            policy=_DeletePolicy(),
+            transport=httpx.MockTransport(contract_handler),
+        )
+        try:
+            await reader.delete(
+                tenant_id="tenant-a",
+                artifact_ref=artifact,
+                actor_id="admin-a",
+                reason_code="retention_elapsed",
+                correlation_id="purge-a",
+            )
         finally:
             await reader.aclose()
 

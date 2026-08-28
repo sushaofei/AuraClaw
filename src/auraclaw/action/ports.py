@@ -112,6 +112,28 @@ class ArtifactContentReader(Protocol):
     ) -> bytes: ...
 
 
+class ArtifactDeleter(Protocol):
+    async def delete(
+        self,
+        *,
+        tenant_id: str,
+        artifact_ref: ArtifactRef,
+        actor_id: str,
+        reason_code: str,
+        correlation_id: str,
+    ) -> None: ...
+
+
+class SkillBindingReferenceReader(Protocol):
+    async def has_reference(
+        self,
+        *,
+        tenant_id: str,
+        package_digest: str,
+        correlation_id: str,
+    ) -> bool: ...
+
+
 class CredentialInvoker(Protocol):
     async def invoke(
         self,

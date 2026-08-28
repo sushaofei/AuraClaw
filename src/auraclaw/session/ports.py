@@ -48,6 +48,10 @@ class EventStore(Protocol):
 
     async def load_all(self, tenant_id: str | None = None) -> list[CanonicalEvent]: ...
 
+    async def has_skill_package_reference(
+        self, tenant_id: str, package_digest: str
+    ) -> bool: ...
+
     async def load_root(
         self,
         tenant_id: str,

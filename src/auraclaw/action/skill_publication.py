@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from auraclaw.action.skill_lifecycle import SkillLifecycleStore
 from auraclaw.action.skill_packages import (
@@ -90,6 +90,9 @@ class SkillPublicationService:
                     manifest=publication.manifest,
                     package_digest=publication.package_digest,
                     artifact_ref=publication.artifact_ref,
+                    retention_until=now + timedelta(days=90),
+                    retention_updated_by=command.actor_id,
+                    retention_updated_at=now,
                     created_at=now,
                 )
             )

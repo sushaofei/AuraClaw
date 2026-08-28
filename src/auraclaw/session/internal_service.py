@@ -19,6 +19,8 @@ from auraclaw.contracts.internal import (
     SessionFeedResponse,
     SessionRootFeedRequest,
     SessionRootFeedResponse,
+    SkillBindingReferenceRequest,
+    SkillBindingReferenceResponse,
 )
 from auraclaw.contracts.state import Visibility
 from auraclaw.infrastructure.persistence.memory_event_store import (
@@ -98,6 +100,18 @@ class SessionInternalService:
         self._event_allowlist = event_allowlist
         self._actor_allowlist = actor_allowlist
         self._outbox_wake = outbox_wake
+
+    async def skill_binding_reference(
+        self, request: SkillBindingReferenceRequest
+    ) -> SkillBindingReferenceResponse:
+        if request.context.service_identity is not ServiceIdentity.ACTION_HANDS:
+            raise AuthorizationError("workload may not query Skill binding references")
+        return SkillBindingReferenceResponse(
+            referenced=await self._event_store.has_skill_package_reference(
+                request.context.tenant_id,
+                request.package_digest,
+            )
+        )
 
     async def append(self, request: SessionAppendRequest) -> SessionAppendResponse:
         identity = request.context.service_identity

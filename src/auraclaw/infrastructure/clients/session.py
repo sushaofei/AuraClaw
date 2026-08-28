@@ -23,6 +23,8 @@ from auraclaw.contracts.internal import (
     SessionFeedResponse,
     SessionRootFeedRequest,
     SessionRootFeedResponse,
+    SkillBindingReferenceRequest,
+    SkillBindingReferenceResponse,
 )
 from auraclaw.contracts.state import Visibility
 from auraclaw.internal.http import HttpContractClient
@@ -77,6 +79,7 @@ class RemoteSessionEventStore:
 
     async def aclose(self) -> None:
         await self._client.aclose()
+
 
     @staticmethod
     def _unsupported(operation: str) -> NoReturn:
@@ -174,6 +177,28 @@ class RemoteSessionEventStore:
     async def load_all(self, tenant_id: str | None = None) -> list[CanonicalEvent]:
         del tenant_id
         self._unsupported("load_all")
+
+    async def has_skill_package_reference(
+        self, tenant_id: str, package_digest: str
+    ) -> bool:
+        if self._identity is not ServiceIdentity.ACTION_HANDS:
+            self._unsupported("has_skill_package_reference")
+        request_id = f"skill-binding-reference:{package_digest}"
+        response = await self._contract.call(
+            "/internal/v1/session/skill-bindings/reference",
+            SkillBindingReferenceRequest(
+                context=InternalRequestContext(
+                    tenant_id=tenant_id,
+                    service_identity=self._identity,
+                    request_id=request_id,
+                    correlation_id=request_id,
+                    causation_id=request_id,
+                ),
+                package_digest=package_digest,
+            ),
+            SkillBindingReferenceResponse,
+        )
+        return response.referenced
 
     async def load_root(
         self,
@@ -285,6 +310,50 @@ class RemoteSessionEventStore:
             OutboxDispositionResponse,
         )
         return response.accepted
+
+
+class RemoteSkillBindingReferenceReader:
+    """Action Hands query of canonical Session Events for purge safety."""
+
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        bearer_token: str,
+        timeout: float = 30.0,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        self._client = httpx.AsyncClient(
+            base_url=base_url, timeout=timeout, transport=transport
+        )
+        self._contract = HttpContractClient(self._client, bearer_token=bearer_token)
+
+    async def aclose(self) -> None:
+        await self._client.aclose()
+
+    async def has_reference(
+        self,
+        *,
+        tenant_id: str,
+        package_digest: str,
+        correlation_id: str,
+    ) -> bool:
+        request_id = f"skill-binding-reference:{package_digest}"
+        response = await self._contract.call(
+            "/internal/v1/session/skill-bindings/reference",
+            SkillBindingReferenceRequest(
+                context=InternalRequestContext(
+                    tenant_id=tenant_id,
+                    service_identity=ServiceIdentity.ACTION_HANDS,
+                    request_id=request_id,
+                    correlation_id=correlation_id,
+                    causation_id=request_id,
+                ),
+                package_digest=package_digest,
+            ),
+            SkillBindingReferenceResponse,
+        )
+        return response.referenced
 
 
 class RemoteTaskProjection:

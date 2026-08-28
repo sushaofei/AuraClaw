@@ -18,9 +18,9 @@ class PostgresArtifactRepository(LazyPool):
              name,version,content_hash,size,storage_ref,producer,lineage_refs,
              classification,acl,created_at,status,upload_id,upload_expires_at,
              expected_checksum,scan_status,upload_mode,multipart_upload_id,
-             multipart_part_size)
+             multipart_part_size,retention_until)
             VALUES ($1,$2,$3,$4,'upload',$5,$6,1,$7,$8,$9,$10,'[]'::jsonb,$11,
-                    '[]'::jsonb,now(),'pending',$12,$13,$7,'pending',$14,$15,$16)""",
+                    '[]'::jsonb,now(),'pending',$12,$13,$7,'pending',$14,$15,$16,$17)""",
             pending.tenant_id,
             pending.artifact_id,
             pending.root_session_id,
@@ -37,6 +37,7 @@ class PostgresArtifactRepository(LazyPool):
             pending.upload_mode,
             pending.multipart_upload_id,
             pending.multipart_part_size,
+            pending.retention_until,
         )
 
     async def mark_multipart_completed(self, pending: PendingUpload) -> None:
@@ -126,6 +127,72 @@ class PostgresArtifactRepository(LazyPool):
             version,
         )
         return self._pending(row) if row is not None else None
+
+    async def claim_ready_delete(
+        self, tenant_id: str, artifact_id: str, version: int
+    ) -> PendingUpload | None:
+        pool = await self.pool()
+        token = f"delete_{uuid4().hex}"
+        row = await pool.fetchrow(
+            """UPDATE artifact.metadata SET status='deleting',gc_claim_token=$4,
+            gc_claim_expires_at=now()+$5::interval,gc_attempt_count=gc_attempt_count+1
+            WHERE tenant_id=$1 AND artifact_id=$2 AND version=$3
+              AND (status='ready' OR (
+                    status='deleting' AND gc_claim_expires_at <= now()))
+              AND deleted_at IS NULL AND NOT legal_hold
+              AND retention_until IS NOT NULL AND retention_until <= now()
+              AND (gc_claim_expires_at IS NULL OR gc_claim_expires_at <= now())
+            RETURNING *""",
+            tenant_id,
+            artifact_id,
+            version,
+            token,
+            timedelta(seconds=30),
+        )
+        return self._pending(row) if row is not None else None
+
+    async def mark_ready_deleted(self, pending: PendingUpload) -> bool:
+        pool = await self.pool()
+        result = await pool.execute(
+            """UPDATE artifact.metadata SET status='deleted',deleted_at=now(),
+            gc_last_error=NULL,gc_claim_token=NULL,gc_claim_expires_at=NULL
+            WHERE tenant_id=$1 AND artifact_id=$2 AND status='deleting'
+              AND gc_claim_token=$3""",
+            pending.tenant_id,
+            pending.artifact_id,
+            pending.gc_claim_token,
+        )
+        return str(result) == "UPDATE 1"
+
+    async def is_deleted(
+        self, tenant_id: str, artifact_id: str, version: int
+    ) -> bool:
+        pool = await self.pool()
+        return bool(
+            await pool.fetchval(
+                """SELECT EXISTS(SELECT 1 FROM artifact.metadata
+                WHERE tenant_id=$1 AND artifact_id=$2 AND version=$3
+                  AND status='deleted' AND deleted_at IS NOT NULL)""",
+                tenant_id,
+                artifact_id,
+                version,
+            )
+        )
+
+    async def release_ready_delete(
+        self, pending: PendingUpload, error: str
+    ) -> None:
+        pool = await self.pool()
+        await pool.execute(
+            """UPDATE artifact.metadata SET status='ready',gc_claim_token=NULL,
+            gc_claim_expires_at=NULL,gc_last_error=$3
+            WHERE tenant_id=$1 AND artifact_id=$2 AND status='deleting'
+              AND gc_claim_token=$4""",
+            pending.tenant_id,
+            pending.artifact_id,
+            error,
+            pending.gc_claim_token,
+        )
 
     async def cleanup_expired(self) -> int:
         pool = await self.pool()
@@ -223,4 +290,6 @@ class PostgresArtifactRepository(LazyPool):
                 if row["finalize_claim_token"] is not None
                 else None
             ),
+            retention_until=row["retention_until"],
+            legal_hold=bool(row["legal_hold"]),
         )

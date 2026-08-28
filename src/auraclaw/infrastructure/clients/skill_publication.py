@@ -13,8 +13,12 @@ from auraclaw.contracts.internal import (
     ServiceIdentity,
     SkillInstallationInternalRequest,
     SkillInstallationInternalResponse,
+    SkillPackageStateInternalRequest,
+    SkillPackageStateInternalResponse,
     SkillPublishInternalRequest,
     SkillPublishInternalResponse,
+    SkillPurgeInternalRequest,
+    SkillPurgeInternalResponse,
     SkillRevokeInternalRequest,
     SkillRevokeInternalResponse,
     SkillStateInternalRequest,
@@ -24,9 +28,11 @@ from auraclaw.contracts.skills import (
     ChangeSkillInstallationCommand,
     PublishedSkill,
     PublishSkillCommand,
+    PurgeSkillPackageCommand,
     RevokeSkillPublicationCommand,
     SkillInstallationRecord,
     SkillInstallationStatus,
+    SkillPackageRecord,
     SkillPublicationRecord,
 )
 from auraclaw.internal.http import HttpContractClient
@@ -145,6 +151,51 @@ class RemoteSkillPublicationClient:
                 )
         return publication
 
+    async def get_package(
+        self,
+        tenant_id: str,
+        publisher: str,
+        name: str,
+        version: str,
+    ) -> SkillPackageRecord:
+        request_id = f"skill-package-state-{uuid4().hex}"
+        response = await self._contract.call(
+            "/internal/v1/skill-publications/package",
+            SkillPackageStateInternalRequest(
+                context=InternalRequestContext(
+                    tenant_id=tenant_id,
+                    service_identity=ServiceIdentity.TASK_API,
+                    request_id=request_id,
+                    correlation_id=request_id,
+                    causation_id=request_id,
+                ),
+                publisher=publisher,
+                name=name,
+                version=version,
+            ),
+            SkillPackageStateInternalResponse,
+        )
+        return SkillPackageRecord.model_validate(response.package)
+
+    async def purge_package(
+        self, command: PurgeSkillPackageCommand
+    ) -> SkillPackageRecord:
+        response = await self._contract.call(
+            "/internal/v1/skill-publications/purge",
+            SkillPurgeInternalRequest(
+                context=_context(command),
+                actor_id=command.actor_id,
+                publisher=command.publisher,
+                name=command.name,
+                version=command.version,
+                reason_code=command.reason_code,
+                command_id=command.command_id,
+                expected_revision=command.expected_revision,
+            ),
+            SkillPurgeInternalResponse,
+        )
+        return SkillPackageRecord.model_validate(response.package)
+
     async def get_installation(
         self,
         tenant_id: str,
@@ -205,7 +256,11 @@ class RemoteSkillPublicationClient:
 
 
 def _context(
-    command: ChangeSkillInstallationCommand | RevokeSkillPublicationCommand,
+    command: (
+        ChangeSkillInstallationCommand
+        | RevokeSkillPublicationCommand
+        | PurgeSkillPackageCommand
+    ),
 ) -> InternalRequestContext:
     return InternalRequestContext(
         tenant_id=command.tenant_id,

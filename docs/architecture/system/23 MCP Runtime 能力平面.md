@@ -368,8 +368,22 @@ Admin 同时提供持久 Installation 和指定 Publication 的状态查询，�
 和时间；调用方先读 revision 再提交 `X-Expected-Revision`，不能依赖本地 Registry 缓存猜测并发版本。
 
 `uninstall` 是面向租户的删除能力，不删除不可变 Package/Artifact，也不改变 Publication；因此可审计、
-可重装且不破坏已有 binding。物理 `purge` 必须等待 Artifact 删除端口、保留期限、legal hold、跨 binding
-引用检查和 tombstone 对账全部具备后才能开放，不能把数据库 retention 标记伪装成已删除对象。
+可重装且不破坏已有 binding。物理 `purge` 是版本级、不可逆的独立命令，只允许已 revoke、已 uninstall、
+超过 revoke 静默窗口且 retention 已到期的 Package 执行。Package legal hold 和 Artifact metadata legal hold
+任一存在都拒绝删除；调用方还必须提供 reason、expected retention revision 和可信 actor。
+
+Purge 不读取可滞后的 Projection 来判断引用。Action Hands 通过内部 Session 契约在 Canonical Event Store
+执行 tenant 级 `EXISTS` 查询，并兼容 `skill.activated` 的顶层 digest 与旧
+`activation.binding.package_digest` 载荷；发现任一历史
+binding 即永久拒绝物理清理，以保留历史执行的可解释性。Publication revoke 后的静默窗口用于排空已经开始
+但尚未写入激活事件的请求，新 binding 又会因 revoke 无法加载。
+
+通过引用门禁后，Action Hands 先用 Policy decision 调用 Artifact Service 的受控 delete；Artifact Service
+再次校验自身 retention/legal hold，并用可过期 delete lease 抢占对象删除。对象存储的 DELETE/404 都视为
+幂等成功；metadata tombstone 丢失响应时可在 lease 到期后接管，已 deleted 的重试直接成功。只有物理对象和
+Artifact metadata 都完成删除后，Lifecycle 才以 optimistic revision 把 Package 标为 `purged` 并记录
+actor/time。若此后 Package tombstone 写入发生冲突，重试会利用 Artifact delete 幂等性收敛，不能只改
+retention 状态来伪装物理删除。
 
 ## 4. 发现、加载与调用
 

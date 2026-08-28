@@ -144,6 +144,14 @@ def test_skill_admin_manages_installation_and_revocation_separately() -> None:
         assert installation_state.status_code == 200
         assert installation_state.json()["installation"]["revision"] == 1
 
+        package_state = client.get(
+            "/v1/admin/skill-packages/platform/release.prepare/versions/1.4.0",
+            headers=headers,
+        )
+        assert package_state.status_code == 200
+        assert package_state.json()["package"]["retention_status"] == "retained"
+        assert package_state.json()["package"]["retention_revision"] == 1
+
         disabled = client.post(
             "/v1/admin/skills/platform/release.prepare:disable",
             headers={

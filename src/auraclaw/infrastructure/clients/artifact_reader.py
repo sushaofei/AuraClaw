@@ -9,6 +9,8 @@ import httpx
 from auraclaw.action.ports import PolicyEvaluation
 from auraclaw.contracts.errors import ArtifactAccessError
 from auraclaw.contracts.internal import (
+    ArtifactDeleteRequest,
+    ArtifactDeleteResponse,
     ArtifactDownloadRequest,
     ArtifactDownloadResponse,
     InternalRequestContext,
@@ -118,3 +120,54 @@ class RemoteArtifactReader:
         if hashlib.sha256(content).hexdigest() != artifact_ref.content_hash:
             raise ArtifactAccessError("Skill package Artifact digest does not match")
         return content
+
+    async def delete(
+        self,
+        *,
+        tenant_id: str,
+        artifact_ref: ArtifactRef,
+        actor_id: str,
+        reason_code: str,
+        correlation_id: str,
+    ) -> None:
+        evaluation = await self._policy.evaluate_action(
+            tenant_id=tenant_id,
+            subject=actor_id,
+            action="artifact.delete",
+            resource=artifact_ref.artifact_id,
+            input_digest=artifact_ref.content_hash,
+            correlation_id=correlation_id,
+            attributes={
+                "artifact_version": artifact_ref.version,
+                "media_type": artifact_ref.media_type,
+                "purpose": "skill-package-purge",
+                "reason_code": reason_code,
+                "permission": "write-autonomous",
+                "risk_level": "high",
+                "runtime_location": "hands",
+            },
+        )
+        if evaluation.decision not in {
+            PolicyDecision.ALLOW,
+            PolicyDecision.ALLOW_WITH_CONSTRAINTS,
+        }:
+            raise ArtifactAccessError("Skill package Artifact policy denied deletion")
+        request_id = str(uuid.uuid4())
+        await self._contract.call(
+            "/internal/v1/artifacts/delete",
+            ArtifactDeleteRequest(
+                context=InternalRequestContext(
+                    tenant_id=tenant_id,
+                    service_identity=ServiceIdentity.ACTION_HANDS,
+                    request_id=request_id,
+                    correlation_id=correlation_id,
+                    causation_id=request_id,
+                ),
+                artifact_id=artifact_ref.artifact_id,
+                version=artifact_ref.version,
+                actor_id=actor_id,
+                reason_code=reason_code,
+                policy_decision_id=evaluation.decision_id,
+            ),
+            ArtifactDeleteResponse,
+        )

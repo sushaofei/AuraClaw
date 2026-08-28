@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
@@ -35,6 +35,7 @@ MIGRATION = "\n".join(
     (
         (ROOT / "migrations/0023_skill_lifecycle.sql").read_text(),
         (ROOT / "migrations/0024_skill_publication_actor.sql").read_text(),
+        (ROOT / "migrations/0025_skill_package_retention.sql").read_text(),
     )
 )
 pytestmark = pytest.mark.skipif(DATABASE_URL is None, reason="PostgreSQL test URL not configured")
@@ -69,6 +70,9 @@ def test_postgres_skill_lifecycle_is_persistent_and_tenant_scoped() -> None:
                     media_type="application/vnd.auraclaw.skill-package+json",
                     size=100,
                 ),
+                retention_until=now + timedelta(days=90),
+                retention_updated_by="integration-test",
+                retention_updated_at=now,
                 created_at=now,
             )
             await store_a.put_package(package)
@@ -159,6 +163,26 @@ def test_postgres_skill_lifecycle_is_persistent_and_tenant_scoped() -> None:
             )
             assert revoked.updated_by == "security-test"
             assert revoked.status is SkillPublicationStatus.REVOKED
+
+            retained = await store_b.update_package_retention(
+                package.model_copy(
+                    update={
+                        "retention_until": now + timedelta(days=180),
+                        "legal_hold": True,
+                        "retention_revision": 2,
+                        "retention_updated_by": "legal-test",
+                        "retention_updated_at": datetime.now(UTC),
+                    }
+                ),
+                expected_revision=1,
+            )
+            assert retained.legal_hold
+            assert retained.retention_revision == 2
+            with pytest.raises(VersionConflictError, match="retention revision"):
+                await store_b.update_package_retention(
+                    retained,
+                    expected_revision=1,
+                )
 
             disabled = await store_b.put_installation(
                 installation.model_copy(

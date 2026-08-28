@@ -13,6 +13,8 @@ from auraclaw.artifact.ports import (
 from auraclaw.contracts.errors import ArtifactAccessError, NotFoundError
 from auraclaw.contracts.internal import (
     ArtifactCreateUploadRequest,
+    ArtifactDeleteRequest,
+    ArtifactDeleteResponse,
     ArtifactDownloadRequest,
     ArtifactDownloadResponse,
     ArtifactFinalizeRequest,
@@ -36,6 +38,8 @@ class PendingUpload:
     expected_checksum: str
     classification: str
     expires_at: datetime
+    retention_until: datetime | None = None
+    legal_hold: bool = False
     upload_mode: str = "single"
     multipart_upload_id: str | None = None
     multipart_part_size: int | None = None
@@ -72,6 +76,20 @@ class ArtifactMetadataRepository(Protocol):
     async def get_ready(
         self, tenant_id: str, artifact_id: str, version: int
     ) -> PendingUpload | None: ...
+
+    async def claim_ready_delete(
+        self, tenant_id: str, artifact_id: str, version: int
+    ) -> PendingUpload | None: ...
+
+    async def is_deleted(
+        self, tenant_id: str, artifact_id: str, version: int
+    ) -> bool: ...
+
+    async def mark_ready_deleted(self, pending: PendingUpload) -> bool: ...
+
+    async def release_ready_delete(
+        self, pending: PendingUpload, error: str
+    ) -> None: ...
 
 
 class ArtifactPolicyValidator(Protocol):
@@ -145,6 +163,7 @@ class ArtifactInternalService:
             expected_checksum=request.expected_checksum,
             classification=request.classification,
             expires_at=expires_at,
+            retention_until=request.retention_until,
             upload_mode=upload_mode,
             multipart_upload_id=multipart_upload_id,
             multipart_part_size=(
@@ -324,3 +343,57 @@ class ArtifactInternalService:
             "GET", record.object_key, ttl=timedelta(minutes=5)
         )
         return ArtifactDownloadResponse(download_url=url, expires_at=expires_at)
+
+    async def delete(self, request: ArtifactDeleteRequest) -> ArtifactDeleteResponse:
+        if request.context.service_identity is not ServiceIdentity.ACTION_HANDS:
+            raise ArtifactAccessError("workload may not delete Artifacts")
+        if self._repository is None or self._object_verifier is None:
+            raise ArtifactAccessError("artifact deletion is unavailable")
+        if self._policy is not None and not await self._policy.validate_decision(
+            tenant_id=request.context.tenant_id,
+            decision_id=request.policy_decision_id,
+            action="artifact.delete",
+            resource=request.artifact_id,
+        ):
+            raise ArtifactAccessError("artifact policy decision is invalid or expired")
+        pending = await self._repository.claim_ready_delete(
+            request.context.tenant_id,
+            request.artifact_id,
+            request.version,
+        )
+        if pending is None:
+            if await self._repository.is_deleted(
+                request.context.tenant_id,
+                request.artifact_id,
+                request.version,
+            ):
+                self._ready.pop(
+                    (
+                        request.context.tenant_id,
+                        request.artifact_id,
+                        request.version,
+                    ),
+                    None,
+                )
+                return ArtifactDeleteResponse(
+                    artifact_id=request.artifact_id,
+                    version=request.version,
+                )
+            raise ArtifactAccessError(
+                "artifact is retained, held, missing, or already deleting"
+            )
+        if not await self._object_verifier.delete(pending):
+            await self._repository.release_ready_delete(
+                pending, "object deletion failed"
+            )
+            raise ArtifactAccessError("artifact object deletion failed")
+        if not await self._repository.mark_ready_deleted(pending):
+            raise ArtifactAccessError("artifact deletion lease was lost")
+        self._ready.pop(
+            (request.context.tenant_id, request.artifact_id, request.version),
+            None,
+        )
+        return ArtifactDeleteResponse(
+            artifact_id=request.artifact_id,
+            version=request.version,
+        )
