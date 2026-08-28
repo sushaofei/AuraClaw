@@ -87,6 +87,28 @@ class SkillRestoreCommit:
 
 
 @dataclass(frozen=True)
+class SkillAdmissionAuditRecord:
+    admission_id: str
+    tenant_id: str
+    command_id: str
+    operation: str
+    actor_id: str
+    source_id: str
+    correlation_id: str
+    causation_id: str
+    publisher: str | None
+    name: str | None
+    version: str | None
+    package_digest: str | None
+    artifact_id: str | None
+    outcome: str
+    stage: str
+    safe_error_code: str | None
+    duration_ms: int
+    occurred_at: datetime
+
+
+@dataclass(frozen=True)
 class SkillPublishCommitResult:
     package: SkillPackageRecord
     publication: SkillPublicationRecord
@@ -105,6 +127,12 @@ class SkillOutboxRecord:
 
 
 class SkillLifecycleStore(Protocol):
+    async def record_admission(self, record: SkillAdmissionAuditRecord) -> None: ...
+
+    async def list_admissions(
+        self, tenant_id: str, *, limit: int = 100
+    ) -> tuple[SkillAdmissionAuditRecord, ...]: ...
+
     async def commit_publish(
         self, commit: SkillPublishCommit
     ) -> SkillPublishCommitResult: ...
@@ -198,6 +226,7 @@ class SkillLifecycleStore(Protocol):
 
 @dataclass
 class InMemorySkillLifecycleStore:
+    _admission_audits: list[SkillAdmissionAuditRecord] = field(default_factory=list)
     _packages: dict[PackageKey, SkillPackageRecord] = field(default_factory=dict)
     _publications: dict[PublicationKey, SkillPublicationRecord] = field(
         default_factory=dict
@@ -219,6 +248,19 @@ class InMemorySkillLifecycleStore:
     _outbox: dict[str, SkillOutboxRecord] = field(default_factory=dict)
     _claimed_outbox: dict[str, str] = field(default_factory=dict)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+    async def record_admission(self, record: SkillAdmissionAuditRecord) -> None:
+        async with self._lock:
+            self._admission_audits.append(record)
+
+    async def list_admissions(
+        self, tenant_id: str, *, limit: int = 100
+    ) -> tuple[SkillAdmissionAuditRecord, ...]:
+        return tuple(
+            record
+            for record in reversed(self._admission_audits)
+            if record.tenant_id == tenant_id
+        )[:limit]
 
     async def commit_publish(
         self, commit: SkillPublishCommit

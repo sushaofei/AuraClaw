@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 
 from auraclaw.action.ports import ArtifactContentReader, SkillArtifactLifecycle
 from auraclaw.action.skill_lifecycle import (
+    SkillAdmissionAuditRecord,
     SkillLifecycleStore,
     SkillPublishCommit,
     SkillSourceLease,
@@ -18,6 +22,7 @@ from auraclaw.action.skill_packages import (
 )
 from auraclaw.action.skill_publishers import SkillPublisherTrustService
 from auraclaw.contracts.errors import (
+    AuraClawError,
     InvalidTransitionError,
     PolicyDeniedError,
     VersionConflictError,
@@ -35,6 +40,28 @@ from auraclaw.contracts.skills import (
     SkillSourceRecord,
 )
 from auraclaw.contracts.tools import ArtifactRef
+
+
+@dataclass
+class _AdmissionTrace:
+    operation: str
+    stage: str = "request_validation"
+    publisher: str | None = None
+    name: str | None = None
+    version: str | None = None
+    package_digest: str | None = None
+    artifact_id: str | None = None
+
+    @classmethod
+    def from_package(cls, operation: str, package: SkillPackage) -> _AdmissionTrace:
+        trace = cls(operation=operation)
+        trace.set_identity(package)
+        return trace
+
+    def set_identity(self, package: SkillPackage) -> None:
+        self.publisher = package.manifest.publisher
+        self.name = package.manifest.name
+        self.version = package.manifest.version
 
 
 class SkillPublicationService:
@@ -66,16 +93,30 @@ class SkillPublicationService:
         *,
         source_lease: SkillSourceLease | None = None,
     ) -> PublishedSkill:
-        package, key_id, externally_verified = await self._validate_signature(
-            command.tenant_id, package
-        )
-        return await self._publish(
-            command,
-            package,
-            source_lease=source_lease,
-            signature_key_id=key_id,
-            signature_verified=externally_verified,
-        )
+        started = time.monotonic()
+        trace = _AdmissionTrace.from_package("publish", package)
+        try:
+            trace.stage = "signature_validation"
+            package, key_id, externally_verified = await self._validate_signature(
+                command.tenant_id, package
+            )
+            trace.package_digest = skill_package_digest(package)
+            trace.stage = "source_authorization"
+            source = await self._authorized_source(command, package)
+            trace.stage = "lifecycle_commit"
+            result = await self._publish(
+                command,
+                package,
+                source=source,
+                source_lease=source_lease,
+                signature_key_id=key_id,
+                signature_verified=externally_verified,
+            )
+        except Exception as exc:
+            await self._record_admission(command, trace, started, error=exc)
+            raise
+        await self._record_admission(command, trace, started)
+        return result
 
     async def publish_artifact(
         self,
@@ -83,51 +124,74 @@ class SkillPublicationService:
         artifact_ref: ArtifactRef,
         expected_digest: str,
     ) -> PublishedSkill:
-        if self._artifacts is None:
-            raise PolicyDeniedError("Staged Skill publication is not configured")
-        if artifact_ref.media_type != "application/vnd.auraclaw.skill-package+json":
-            raise PolicyDeniedError("Staged Artifact is not a Skill package")
-        if expected_digest != f"sha256:{artifact_ref.content_hash}":
-            raise VersionConflictError("Staged Artifact digest does not match")
-        if self._artifact_lifecycle is not None:
-            await self._artifact_lifecycle.claim_publication(
+        started = time.monotonic()
+        trace = _AdmissionTrace(
+            operation="publish_artifact",
+            artifact_id=artifact_ref.artifact_id,
+            package_digest=expected_digest,
+        )
+        try:
+            trace.stage = "artifact_validation"
+            if self._artifacts is None:
+                raise PolicyDeniedError("Staged Skill publication is not configured")
+            if artifact_ref.media_type != "application/vnd.auraclaw.skill-package+json":
+                raise PolicyDeniedError("Staged Artifact is not a Skill package")
+            if expected_digest != f"sha256:{artifact_ref.content_hash}":
+                raise VersionConflictError("Staged Artifact digest does not match")
+            if self._artifact_lifecycle is not None:
+                trace.stage = "artifact_claim"
+                await self._artifact_lifecycle.claim_publication(
+                    tenant_id=command.tenant_id,
+                    artifact_ref=artifact_ref,
+                    command_id=command.command_id,
+                    correlation_id=command.correlation_id,
+                )
+            trace.stage = "artifact_read"
+            content = await self._artifacts.read(
                 tenant_id=command.tenant_id,
                 artifact_ref=artifact_ref,
-                command_id=command.command_id,
+                actor_id=command.actor_id,
                 correlation_id=command.correlation_id,
             )
-        content = await self._artifacts.read(
-            tenant_id=command.tenant_id,
-            artifact_ref=artifact_ref,
-            actor_id=command.actor_id,
-            correlation_id=command.correlation_id,
-        )
-        package, key_id, externally_verified = await self._validate_signature(
-            command.tenant_id, skill_package_from_archive(content)
-        )
-        if skill_package_digest(package) != expected_digest:
-            raise VersionConflictError("Skill package digest does not match")
-        return await self._publish(
-            command,
-            package,
-            artifact_ref=artifact_ref,
-            artifact_claimed=True,
-            signature_key_id=key_id,
-            signature_verified=externally_verified,
-        )
+            trace.stage = "archive_validation"
+            package = skill_package_from_archive(content)
+            trace.set_identity(package)
+            trace.stage = "signature_validation"
+            package, key_id, externally_verified = await self._validate_signature(
+                command.tenant_id, package
+            )
+            if skill_package_digest(package) != expected_digest:
+                raise VersionConflictError("Skill package digest does not match")
+            trace.stage = "source_authorization"
+            source = await self._authorized_source(command, package)
+            trace.stage = "lifecycle_commit"
+            result = await self._publish(
+                command,
+                package,
+                source=source,
+                artifact_ref=artifact_ref,
+                artifact_claimed=True,
+                signature_key_id=key_id,
+                signature_verified=externally_verified,
+            )
+        except Exception as exc:
+            await self._record_admission(command, trace, started, error=exc)
+            raise
+        await self._record_admission(command, trace, started)
+        return result
 
     async def _publish(
         self,
         command: PublishSkillCommand,
         package: SkillPackage,
         *,
+        source: SkillSourceRecord,
         artifact_ref: ArtifactRef | None = None,
         artifact_claimed: bool = False,
         signature_key_id: str | None = None,
         signature_verified: bool = False,
         source_lease: SkillSourceLease | None = None,
     ) -> PublishedSkill:
-        source = await self._authorized_source(command, package)
         digest = skill_package_digest(package)
         manifest = package.manifest
         existing = await self._lifecycle.get_publication(
@@ -315,6 +379,42 @@ class SkillPublicationService:
             tenant_id, normalized
         )
         return normalized, key_id, True
+
+    async def _record_admission(
+        self,
+        command: PublishSkillCommand,
+        trace: _AdmissionTrace,
+        started: float,
+        *,
+        error: Exception | None = None,
+    ) -> None:
+        safe_error_code = None
+        if error is not None:
+            safe_error_code = (
+                error.code if isinstance(error, AuraClawError) else "internal_error"
+            )
+        await self._lifecycle.record_admission(
+            SkillAdmissionAuditRecord(
+                admission_id=f"skad_{uuid4().hex}",
+                tenant_id=command.tenant_id,
+                command_id=command.command_id,
+                operation=trace.operation,
+                actor_id=command.actor_id,
+                source_id=command.source_id,
+                correlation_id=command.correlation_id,
+                causation_id=command.causation_id,
+                publisher=trace.publisher,
+                name=trace.name,
+                version=trace.version,
+                package_digest=trace.package_digest,
+                artifact_id=trace.artifact_id,
+                outcome="rejected" if error is not None else "accepted",
+                stage=trace.stage if error is not None else "completed",
+                safe_error_code=safe_error_code,
+                duration_ms=max(0, int((time.monotonic() - started) * 1000)),
+                occurred_at=datetime.now(UTC),
+            )
+        )
 
     async def _authorized_source(
         self, command: PublishSkillCommand, package: SkillPackage

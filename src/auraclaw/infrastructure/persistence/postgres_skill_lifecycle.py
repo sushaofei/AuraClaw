@@ -6,6 +6,7 @@ from typing import Any
 import asyncpg  # type: ignore[import-untyped]
 
 from auraclaw.action.skill_lifecycle import (
+    SkillAdmissionAuditRecord,
     SkillLifecycleStore,
     SkillOutboxRecord,
     SkillPublishCommit,
@@ -41,6 +42,46 @@ from auraclaw.infrastructure.persistence.postgres_common import (
 
 
 class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
+    async def record_admission(self, record: SkillAdmissionAuditRecord) -> None:
+        pool = await self.pool()
+        await pool.execute(
+            """INSERT INTO hands.skill_admission_audit
+            (admission_id,tenant_id,command_id,operation,actor_id,source_id,
+             correlation_id,causation_id,publisher,name,version,package_digest,
+             artifact_id,outcome,stage,safe_error_code,duration_ms,occurred_at)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)""",
+            record.admission_id,
+            record.tenant_id,
+            record.command_id,
+            record.operation,
+            record.actor_id,
+            record.source_id,
+            record.correlation_id,
+            record.causation_id,
+            record.publisher,
+            record.name,
+            record.version,
+            record.package_digest,
+            record.artifact_id,
+            record.outcome,
+            record.stage,
+            record.safe_error_code,
+            record.duration_ms,
+            record.occurred_at,
+        )
+
+    async def list_admissions(
+        self, tenant_id: str, *, limit: int = 100
+    ) -> tuple[SkillAdmissionAuditRecord, ...]:
+        pool = await self.pool()
+        rows = await pool.fetch(
+            """SELECT * FROM hands.skill_admission_audit
+            WHERE tenant_id=$1 ORDER BY occurred_at DESC, admission_id DESC LIMIT $2""",
+            tenant_id,
+            limit,
+        )
+        return tuple(SkillAdmissionAuditRecord(**dict(row)) for row in rows)
+
     async def commit_publish(
         self, commit: SkillPublishCommit
     ) -> SkillPublishCommitResult:

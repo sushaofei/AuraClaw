@@ -1948,6 +1948,32 @@ ready Skill Artifact 建立带 fencing 的物理回收流程；不把成功命�
 - [x] README、架构、公开 API 指南与阶段门禁同步，完整拒绝/安全审计未误标完成。
 - [x] 本阶段作为一个 intentional commit 提交并 push，不包含 `.env`、Secret、缓存或无关改动。
 
+## 阶段 M14o：Skill 发布准入拒绝审计（Issue #56）
+
+状态：已完成。所有统一 Skill 发布入口都生成不含正文与异常消息的 tenant 准入审计事实。
+
+### 审计事实与隐私边界
+
+- [x] publish/publish-artifact 成功与拒绝均写追加式 tenant 审计，覆盖所有统一发布入口。
+- [x] 审计记录 actor、Source、command/correlation/causation、可用 identity/digest、stage、结果与耗时。
+- [x] 已知错误只保存稳定 code，未知异常折叠为 `internal_error`；异常消息与包正文不落审计。
+- [x] Artifact、Secret、签名私钥和未脱敏远端响应不进入审计；审计失败使准入 fail closed。
+
+### 持久化与恢复
+
+- [x] In-memory 与 PostgreSQL Lifecycle Store 提供 tenant 隔离的 append/list 能力。
+- [x] 0032 增加 tenant/time 与失败 stage/code 索引，不与 Publication/Installation 事实混用。
+- [x] command 幂等重试可恢复业务结果并补写 attempt 审计，不要求审计记录覆盖或静默去重。
+- [x] 内部 reader 按 tenant 和 limit 返回新到旧记录，不开放 Skill 正文或公共审计查询接口。
+
+### 质量与交付
+
+- [x] 单测覆盖成功、签名/Source/版本拒绝、Artifact 异常与敏感错误消息不落表。
+- [x] PostgreSQL 覆盖跨 Store 可见、tenant 隔离和 0032 正反迁移。
+- [x] 全量 Ruff、Mypy、unit、相关 integration 与 import-linter 通过。
+- [x] README、架构、公开 API、数据库参考与阶段门禁同步，内容扫描仍留待 M14p。
+- [x] 本阶段作为一个 intentional commit 提交并 push，不包含 `.env`、Secret、缓存或无关改动。
+
 ## 阶段 Product Activity：产品级对话执行轨迹（AuraX Issue #2）
 
 状态：代码与定向验证完成；完整基础设施集成门禁受现有 Kafka/MySQL/PostgreSQL/Artifact 环境失败阻塞。
