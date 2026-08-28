@@ -16,8 +16,6 @@ from auraclaw.contracts.errors import (
     PolicyDeniedError,
     VersionConflictError,
 )
-
-logger = logging.getLogger(__name__)
 from auraclaw.contracts.internal import (
     ModelCancelRequest,
     ModelCancelResponse,
@@ -30,6 +28,8 @@ from auraclaw.contracts.tools import PolicyDecision
 from auraclaw.model_gateway.ports import ModelCallReservation, ModelStateStore
 from auraclaw.runtime.model_stream import iter_model_stream
 from auraclaw.runtime.ports import ModelClient, ModelPolicy, ModelRequest, ModelResponse
+
+logger = logging.getLogger(__name__)
 
 
 class ModelPolicyEnforcer(Protocol):

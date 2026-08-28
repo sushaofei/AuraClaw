@@ -271,6 +271,42 @@ skill://<publisher>/<name>/<version>/assets/<path>
 一个 Run 内绑定固定。Catalog 的 `list_changed` 通知不能悄悄替换已激活版本；升级只影响下一次解析，
 除非当前绑定已被撤销且 Policy 要求立即停止。
 
+### 3.5 Skill 控制面生命周期
+
+Skill 的创作、包发布、租户安装和运行时激活是四个不同阶段，不能由 Runtime 扫描目录或在任务期
+临时发布：
+
+```text
+本地 CLI / Admin Upload / Built-in / Model Compiler / MCP Source
+ -> 统一 PublishSkillPackage 准入命令
+ -> 不可变 SkillPackage + Artifact
+ -> Publisher SkillPublication
+ -> tenant SkillInstallation
+ -> Capability Catalog 可重建投影
+ -> Runtime search/load/resolve/activate
+```
+
+权威状态分为：
+
+- `SkillPackage`：不可变内容、Manifest、digest、签名 key id 和 Artifact Ref；
+- `SkillPublication`：Publisher 的 `staged/validating/active/quarantined/revoked` 发布状态；
+- `SkillInstallation`：tenant 的 `active/disabled/uninstalled` 期望状态、版本约束和来源抑制；
+- `SkillSource/SyncState`：外部来源配置、cursor、完整快照 generation 和失败状态；
+- `CapabilityDescriptor`：只做可搜索投影，丢失后从上述状态重建。
+
+`purged` 不是 Publication 状态。物理包清理由 Artifact 保留策略和 Package tombstone 表示；历史
+publisher/name/version/digest 必须继续可解释。普通停用只影响新的发现和激活，不等同安全撤销。
+安全撤销是否继续、暂停或取消已有 binding 由明确 Policy 决定，不能由包读取代码根据 Publication
+非 active 状态隐式决定。
+
+发布准入可以读取完整包以验证所有文件 digest 和签名；Runtime 的渐进加载仅表示按当前步骤注入
+`SKILL.md`、reference 或 asset。包内 `tests/` 首期只允许平台定义的声明式测试向量，禁止执行任意
+Python、Shell、二进制或其他代码。
+
+所有添加入口收敛到同一应用命令，并携带 tenant、command id、expected version、actor、correlation
+和 causation context。生产跨信任域使用 Publisher Registry 与非对称签名；现有 HMAC 只作为平台
+兼容和开发测试适配器。
+
 ## 4. 发现、加载与调用
 
 ### 4.1 协议发现和目录同步

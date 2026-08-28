@@ -193,19 +193,15 @@ async def test_session_http_rejects_unknown_workload_token() -> None:
     await remote.aclose()
 
 
-def test_production_task_api_uses_remote_session_and_fails_closed() -> None:
-    app = create_service_app(
-        "api",
-        _settings(
-            deployment_profile="production",
-            storage_backend="memory",
-        ),
-    )
-    assert app.state.session_access == "http"
-    with TestClient(app) as client:
-        readiness = client.get("/health/ready")
-        assert readiness.status_code == 503
-        assert readiness.json()["status"] == "degraded"
+def test_production_task_api_rejects_memory_storage() -> None:
+    with pytest.raises(ValueError, match="requires SQL storage"):
+        create_service_app(
+            "api",
+            _settings(
+                deployment_profile="production",
+                storage_backend="memory",
+            ),
+        )
 
 
 @pytest.mark.asyncio
