@@ -317,6 +317,23 @@ digest 是幂等成功，相同 identity 不同 digest 必须冲突；`staged ->
 后续两阶段 staged Artifact upload、持久审计/Outbox、Publisher Registry、CLI 和 Source Worker 仍须
 复用同一服务，而不是复制发布逻辑。SQL 部署使用持久 Lifecycle Store；内存 Store 只用于开发测试。
 
+生产部署中，Task API 只负责验证外部 Identity 和构造发布命令，不持有对象存储凭证，也不在自身
+进程内落 Skill Artifact。它通过带 workload identity 的内部契约调用 Action Hands：
+
+```text
+Admin API -> Task API RemoteSkillPublicationClient
+          -> Action Hands SkillPublicationInternalService
+          -> SkillPublicationService
+          -> production ArtifactWriter + persistent Lifecycle Store
+```
+
+内部服务重新校验调用方身份、command/request id、base64 与包大小，包路径/Manifest/签名验证必须先于
+版本冲突判断，避免恶意包通过既有版本探测绕过准入错误。开发 memory profile 可以使用进程内适配器；
+SQL profile 必须走 Action Hands。该链路解决 Artifact 所有权，不代表统一 Catalog 已完成：在持久包恢复、
+Installation 投影与 Resolver 回查就绪前，不能提前删除 Runtime 的兼容目录。
+Task API 在迁移期可把已确认的发布结果写入本副本只读兼容缓存，以保证同请求副本的旧查询入口立即可见；
+该缓存不是事实源，也不提供跨副本一致性，后续必须由持久查询/统一 Catalog 取代。
+
 ## 4. 发现、加载与调用
 
 ### 4.1 协议发现和目录同步

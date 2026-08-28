@@ -557,6 +557,21 @@ class ArtifactDownloadResponse(ContractModel):
     expires_at: datetime
 
 
+class SkillPublishInternalRequest(ContractModel):
+    context: InternalRequestContext
+    actor_id: str = Field(min_length=1, max_length=256)
+    source_id: str = Field(min_length=1, max_length=128)
+    activate: bool = True
+    command_id: str = Field(min_length=1, max_length=256)
+    expected_revision: int = Field(default=0, ge=0)
+    files: dict[str, str] = Field(min_length=1, max_length=512)
+
+
+class SkillPublishInternalResponse(ContractModel):
+    api_version: str = INTERNAL_API_VERSION
+    publication: dict[str, Any]
+
+
 class AdminOperationRequest(ContractModel):
     context: InternalRequestContext
     operation_id: str

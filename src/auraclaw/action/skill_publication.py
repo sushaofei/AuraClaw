@@ -44,6 +44,7 @@ class SkillPublicationService:
         }
 
     async def publish(self, command: PublishSkillCommand, package: SkillPackage) -> PublishedSkill:
+        package = self._registry.validate(package)
         source = await self._authorized_source(command, package)
         digest = skill_package_digest(package)
         manifest = package.manifest
