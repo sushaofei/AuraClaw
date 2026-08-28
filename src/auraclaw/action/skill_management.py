@@ -141,6 +141,7 @@ class SkillManagementService:
             SkillPublicationStatus.VALIDATING,
             SkillPublicationStatus.ACTIVE,
             SkillPublicationStatus.QUARANTINED,
+            SkillPublicationStatus.RETIRED,
         }:
             raise InvalidTransitionError("Skill publication cannot be revoked")
         updated = await self._lifecycle.put_publication(

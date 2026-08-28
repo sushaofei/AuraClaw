@@ -512,7 +512,10 @@ class SkillPackageRegistry:
         package = self._packages.get(key)
         if publication is None or package is None:
             raise NotFoundError("Skill package not found")
-        if publication.status != SkillPublicationStatus.ACTIVE:
+        if publication.status not in {
+            SkillPublicationStatus.ACTIVE,
+            SkillPublicationStatus.RETIRED,
+        }:
             raise PolicyDeniedError("Skill package is revoked")
         if publication.package_digest != package_digest:
             raise VersionConflictError("Skill package digest does not match the binding")

@@ -8,7 +8,11 @@ from uuid import uuid4
 import asyncpg
 import pytest
 
-from auraclaw.action.skill_lifecycle import SkillPublishCommit
+from auraclaw.action.skill_lifecycle import (
+    SkillPublishCommit,
+    SkillSourcePackageIdentity,
+    SkillSourceSnapshotCommit,
+)
 from auraclaw.config import get_settings
 from auraclaw.contracts.errors import VersionConflictError
 from auraclaw.contracts.skills import (
@@ -39,6 +43,7 @@ MIGRATION = "\n".join(
         (ROOT / "migrations/0025_skill_package_retention.sql").read_text(),
         (ROOT / "migrations/0026_skill_publication_reliability.sql").read_text(),
         (ROOT / "migrations/0028_skill_source_reconcile_lease.sql").read_text(),
+        (ROOT / "migrations/0029_skill_source_inventory_retirement.sql").read_text(),
     )
 )
 pytestmark = pytest.mark.skipif(DATABASE_URL is None, reason="PostgreSQL test URL not configured")
@@ -248,6 +253,119 @@ def test_postgres_skill_lifecycle_is_persistent_and_tenant_scoped() -> None:
             await store_a.complete_outbox(
                 outbox_id=outbox[0].outbox_id, owner="integration-a"
             )
+            await store_a.commit_source_snapshot(
+                SkillSourceSnapshotCommit(
+                    state=sync_state.model_copy(
+                        update={
+                            "generation": second_lease.fencing_token,
+                            "cursor": "snapshot-observed",
+                        }
+                    ),
+                    lease=second_lease,
+                    observed=(
+                        SkillSourcePackageIdentity(
+                            "platform", "release.prepare", "2.0.0"
+                        ),
+                    ),
+                    missing_snapshot_threshold=2,
+                    actor_id="action-hands-skill-reconciler",
+                    command_prefix=f"source-retire:{source.source_id}",
+                    correlation_id=f"reconcile-{suffix}",
+                    causation_id=f"snapshot-observed-{suffix}",
+                    occurred_at=datetime.now(UTC),
+                )
+            )
+            await store_a.release_source_lease(second_lease)
+            third_lease = await store_b.claim_source_lease(
+                tenant_id=tenant_id,
+                source_id=source.source_id,
+                owner="hands-b",
+                ttl=timedelta(minutes=1),
+            )
+            assert third_lease is not None
+            first_missing_result = await store_b.commit_source_snapshot(
+                SkillSourceSnapshotCommit(
+                    state=sync_state.model_copy(
+                        update={
+                            "generation": third_lease.fencing_token,
+                            "cursor": "snapshot-missing-1",
+                            "last_success_at": datetime.now(UTC),
+                            "last_attempt_at": datetime.now(UTC),
+                        }
+                    ),
+                    lease=third_lease,
+                    observed=(),
+                    missing_snapshot_threshold=2,
+                    actor_id="action-hands-skill-reconciler",
+                    command_prefix=f"source-retire:{source.source_id}",
+                    correlation_id=f"reconcile-{suffix}",
+                    causation_id=f"snapshot-missing-1-{suffix}",
+                    occurred_at=datetime.now(UTC),
+                )
+            )
+            assert first_missing_result.retired == ()
+            with pytest.raises(
+                VersionConflictError, match="snapshot generation must advance"
+            ):
+                await store_a.commit_source_snapshot(
+                    SkillSourceSnapshotCommit(
+                        state=sync_state.model_copy(
+                            update={
+                                "generation": third_lease.fencing_token,
+                                "cursor": "snapshot-missing-1-replay",
+                                "last_success_at": datetime.now(UTC),
+                                "last_attempt_at": datetime.now(UTC),
+                            }
+                        ),
+                        lease=third_lease,
+                        observed=(),
+                        missing_snapshot_threshold=2,
+                        actor_id="action-hands-skill-reconciler",
+                        command_prefix=f"source-retire:{source.source_id}",
+                        correlation_id=f"reconcile-{suffix}",
+                        causation_id=f"snapshot-missing-1-replay-{suffix}",
+                        occurred_at=datetime.now(UTC),
+                    )
+                )
+            await store_b.release_source_lease(third_lease)
+            fourth_lease = await store_a.claim_source_lease(
+                tenant_id=tenant_id,
+                source_id=source.source_id,
+                owner="hands-a",
+                ttl=timedelta(minutes=1),
+            )
+            assert fourth_lease is not None
+            retired_result = await store_a.commit_source_snapshot(
+                SkillSourceSnapshotCommit(
+                    state=sync_state.model_copy(
+                        update={
+                            "generation": fourth_lease.fencing_token,
+                            "cursor": "snapshot-missing-2",
+                            "last_success_at": datetime.now(UTC),
+                            "last_attempt_at": datetime.now(UTC),
+                        }
+                    ),
+                    lease=fourth_lease,
+                    observed=(),
+                    missing_snapshot_threshold=2,
+                    actor_id="action-hands-skill-reconciler",
+                    command_prefix=f"source-retire:{source.source_id}",
+                    correlation_id=f"reconcile-{suffix}",
+                    causation_id=f"snapshot-missing-2-{suffix}",
+                    occurred_at=datetime.now(UTC),
+                )
+            )
+            assert len(retired_result.retired) == 1
+            assert retired_result.retired[0].reason_code == (
+                "source_missing_confirmed"
+            )
+            audit_count = await connection.fetchval(
+                """SELECT count(*) FROM hands.skill_source_retirement_command
+                WHERE tenant_id=$1 AND source_id=$2""",
+                tenant_id,
+                source.source_id,
+            )
+            assert audit_count == 1
 
             rollback_package = transactional_package.model_copy(
                 update={
@@ -273,15 +391,16 @@ def test_postgres_skill_lifecycle_is_persistent_and_tenant_scoped() -> None:
                             "request_digest": f"sha256:{'f' * 64}",
                             "expected_publication_revision": 1,
                             "package": rollback_package,
-                            "publication": transactional_publication.model_copy(
+                                "publication": transactional_publication.model_copy(
                                 update={
                                 "publication_id": f"skp_rollback_{suffix}",
                                     "version": "3.0.0",
                                     "package_digest": rollback_package.package_digest,
                                     "revision": 2,
-                                }
-                            ),
-                        }
+                                    }
+                                ),
+                                "source_lease": fourth_lease,
+                            }
                     )
                 )
             assert await store_b.get_package(
@@ -350,6 +469,14 @@ def test_postgres_skill_lifecycle_is_persistent_and_tenant_scoped() -> None:
             )
             await connection.execute(
                 "DELETE FROM hands.skill_command WHERE tenant_id=$1", tenant_id
+            )
+            await connection.execute(
+                "DELETE FROM hands.skill_source_retirement_command WHERE tenant_id=$1",
+                tenant_id,
+            )
+            await connection.execute(
+                "DELETE FROM hands.skill_source_inventory WHERE tenant_id=$1",
+                tenant_id,
             )
             await connection.execute(
                 "DELETE FROM hands.skill_source_sync_state WHERE tenant_id=$1",

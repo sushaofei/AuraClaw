@@ -289,7 +289,7 @@ Skill 的创作、包发布、租户安装和运行时激活是四个不同阶�
 权威状态分为：
 
 - `SkillPackage`：不可变内容、Manifest、digest、签名 key id 和 Artifact Ref；
-- `SkillPublication`：Publisher 的 `staged/validating/active/quarantined/revoked` 发布状态；
+- `SkillPublication`：Publisher 的 `staged/validating/active/quarantined/retired/revoked` 发布状态；
 - `SkillInstallation`：tenant 的 `active/disabled/uninstalled` 期望状态、版本约束和来源抑制；
 - `SkillSource/SyncState`：外部来源配置、cursor、完整快照 generation 和失败状态；
 - `CapabilityDescriptor`：只做可搜索投影，丢失后从上述状态重建。
@@ -378,9 +378,17 @@ MCP Skill Source 对账按 `(tenant_id, source_id)` 获取 PostgreSQL 持久租�
 响应正文。部分包已经提交但快照尚未完成时保持 `complete_snapshot=false`，下一轮依靠不可变版本和
 command digest 幂等补齐。Source disabled/retired 时不再取得租约或拉取内容。
 
-当前完整快照只证明“本轮发现和发布完成”，不会仅凭远端条目缺失自动安全撤销已发布版本；自动退役
-需要独立的缺失确认窗口、管理命令审计和既有 binding 策略。外部签名 CLI、publisher suspension、
-缺失版本自动退役和完整拒绝/安全审计仍未完成，不能将当前状态描述为完整供应链治理。平台 HMAC 仅
+完整快照还在同一 fenced 事务内维护 Source inventory。首次缺失只记录
+`missing_complete_snapshots=1`；连续第二个、且 generation 严格递增的完整快照仍缺失时，才写入
+`skill_source_retirement_command` 并把 Publication 原子转为 `retired`。任一中间完整快照重新观察到
+该版本都会清零计数；失败/不完整快照、相同 generation 重放和旧 lease 都不能推进计数。退役命令记录
+actor、correlation、causation、fencing token、前后 revision 与固定 reason code；重新出现的同一不可变
+版本不会自动恢复，必须由后续显式管理流程处理。
+
+`retired` 与安全 `revoked` 不同：两者都不进入 Catalog/Resolver 新候选，但 rebuilder 仍装载 retained
+的 retired Package，按既有 binding 的固定 digest 允许读取；revoked 则继续 fail closed。这样来源下架
+不会悄悄改变既有执行，而密钥泄露等安全撤销仍可立即停止。外部签名 CLI、publisher suspension、
+退役版本显式恢复和完整拒绝/安全审计仍未完成，不能将当前状态描述为完整供应链治理。平台 HMAC 仅
 保留为兼容入口，不作为外部 publisher 信任根。
 
 Action Hands 启动及周期对账时由 `SkillStateRebuilder` 枚举 Lifecycle tenant，从受 Policy 保护的
