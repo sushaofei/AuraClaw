@@ -7,6 +7,7 @@ import pytest
 from auraclaw.artifact.internal_service import ArtifactInternalService, PendingUpload
 from auraclaw.contracts.errors import ArtifactAccessError
 from auraclaw.contracts.internal import (
+    ArtifactCreateUploadRequest,
     ArtifactDeleteRequest,
     ArtifactFinalizeRequest,
     InternalRequestContext,
@@ -16,7 +17,10 @@ from auraclaw.infrastructure.artifacts.seaweedfs import (
     SeaweedFSMultipartClient,
     SeaweedFSS3Presigner,
 )
-from auraclaw.infrastructure.clients.artifact import RemoteArtifactWriter
+from auraclaw.infrastructure.clients.artifact import (
+    RemoteArtifactWriter,
+    RemoteSkillPackageUploadClient,
+)
 from auraclaw.internal.http import create_contract_app
 from auraclaw.internal.routes import artifact_routes
 
@@ -301,3 +305,87 @@ async def test_ready_artifact_delete_enforces_retention_and_is_idempotent() -> N
     second = await service.delete(request)
     assert first.status == second.status == "deleted"
     assert verifier.deleted == ["tenant/artifact/object"]
+
+
+@pytest.mark.asyncio
+async def test_task_api_can_only_stage_governed_skill_packages() -> None:
+    service = ArtifactInternalService(
+        SeaweedFSS3Presigner(
+            "http://seaweed.test:8333",
+            access_key="access",
+            secret_key="secret",
+            bucket="artifacts",
+            region="us-east-1",
+        )
+    )
+    context = InternalRequestContext(
+        tenant_id="tenant-s4",
+        service_identity=ServiceIdentity.TASK_API,
+        request_id="skill-upload-s4",
+        correlation_id="skill-upload-s4",
+        causation_id="skill-upload-s4",
+    )
+    valid = ArtifactCreateUploadRequest(
+        context=context,
+        root_session_id="skill-upload:skill-upload-s4",
+        session_id="skill-upload:skill-upload-s4",
+        name="package.skill.json",
+        media_type="application/vnd.auraclaw.skill-package+json",
+        expected_size=10,
+        expected_checksum="a" * 64,
+        retention_until=datetime.now(UTC) + timedelta(days=90),
+    )
+    assert (await service.create_upload(valid)).artifact_id.startswith("art_")
+    with pytest.raises(ArtifactAccessError, match="only stage"):
+        await service.create_upload(
+            valid.model_copy(update={"media_type": "application/octet-stream"})
+        )
+
+
+@pytest.mark.asyncio
+async def test_task_api_staged_upload_client_uses_restricted_artifact_contract() -> None:
+    service = ArtifactInternalService(
+        SeaweedFSS3Presigner(
+            "http://seaweed.test:8333",
+            access_key="access",
+            secret_key="secret",
+            bucket="artifacts",
+            region="us-east-1",
+        )
+    )
+    app = create_contract_app(
+        "artifact-service",
+        artifact_routes(service),
+        workload_identities={"task-token": ServiceIdentity.TASK_API},
+    )
+    client = RemoteSkillPackageUploadClient(
+        "http://artifact.test",
+        bearer_token="task-token",
+        transport=httpx.ASGITransport(app=app),
+    )
+    try:
+        upload = await client.create(
+            tenant_id="tenant-s4",
+            name="package.skill.json",
+            expected_size=10,
+            expected_checksum="a" * 64,
+            correlation_id="skill-upload-s4",
+            command_id="skill-upload-s4:create",
+        )
+        finalized = await client.finalize(
+            tenant_id="tenant-s4",
+            artifact_id=upload.artifact_id,
+            version=upload.version,
+            upload_id=upload.upload_id,
+            size=10,
+            checksum="a" * 64,
+            parts=(),
+            correlation_id="skill-upload-s4",
+            command_id="skill-upload-s4:finalize",
+        )
+        assert finalized.status == "ready"
+        assert finalized.artifact_ref["media_type"] == (
+            "application/vnd.auraclaw.skill-package+json"
+        )
+    finally:
+        await client.aclose()

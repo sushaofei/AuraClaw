@@ -1724,6 +1724,36 @@ uninstall、revoke 和 purge 三种不同语义。
 - [x] 架构、数据库参考与阶段门禁同步，明确删除恢复和竞态边界。
 - [x] 本阶段作为一个 intentional commit 提交并 push，不包含 `.env`、Secret、缓存或无关改动。
 
+## 阶段 M14g：Skill 两阶段发布与开发者 CLI（Issue #56）
+
+状态：已完成。本阶段交付 staged Artifact 上传、Artifact Ref 发布和安全的
+本地 CLI，不把 Publisher Registry、持久 Outbox 或 finalized orphan GC 冒充为已完成。
+
+### 两阶段上传与统一准入
+
+- [x] Admin API 提供 Skill 专用 create/finalize 上传契约，支持单段与 multipart 预签名直传。
+- [x] Task API workload 只能创建和完成 `internal`、24 MiB 内、带 retention 的 `skill-upload:*` Skill Artifact。
+- [x] Artifact Ref 发布经 workload-authenticated 内部契约交给 Action Hands，并复用同一
+  `SkillPublicationService` 完成 Source、allowlist、Archive、Manifest、测试向量、digest 与签名准入。
+- [x] staged 发布复用已 finalize 的 Artifact Ref，不再由 Action Hands 写入重复对象。
+- [x] base64 小包入口继续兼容，body 不能覆盖可信 tenant、actor 或命令上下文。
+
+### 开发者 CLI 与安全边界
+
+- [x] 新增 `auraclaw skills validate|test|publish`；publish 始终采用 staged 上传。
+- [x] validate 使用与服务端相同的确定性包校验；test 仅接受 `tests/*.json` 声明式向量且不执行代码。
+- [x] CLI 拒绝 symlink、文件数/大小越界和非平台 publisher；bearer token 只从环境变量读取且错误不打印正文。
+- [x] 当前平台 HMAC 仅为兼容路径；Publisher Registry、Ed25519/key rotation 继续 fail closed。
+- [x] finalized 但未发布的 ready Artifact 使用保守 retention；安全 orphan 判定/GC、持久幂等审计与 Outbox
+  明确留到后续阶段，pending GC 不得直接删除它们。
+
+### 质量与交付
+
+- [x] staged service、公开/内部 API、Task API Artifact 限权和 CLI 单元测试通过。
+- [x] 全量 Ruff、Mypy、unit、相关 integration 与 import-linter 通过。
+- [x] README、架构说明和阶段门禁同步，已记录仍未完成的供应链治理范围。
+- [x] 本阶段作为一个 intentional commit 提交并 push，不包含 `.env`、Secret、缓存或无关改动。
+
 ## 阶段 Product Activity：产品级对话执行轨迹（AuraX Issue #2）
 
 状态：代码与定向验证完成；完整基础设施集成门禁受现有 Kafka/MySQL/PostgreSQL/Artifact 环境失败阻塞。

@@ -1,6 +1,6 @@
 import asyncio
 import hashlib
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
@@ -75,6 +75,7 @@ def test_artifact_multipart_scan_restart_and_gc() -> None:
         content = b"m" * (5 * 1024 * 1024) + b"checked-tail"
         checksum = hashlib.sha256(content).hexdigest()
         ready_key: str | None = None
+        skill_ready_key: str | None = None
         try:
             upload = await service.create_upload(
                 ArtifactCreateUploadRequest(
@@ -156,6 +157,58 @@ def test_artifact_multipart_scan_restart_and_gc() -> None:
             ) == deleted
             ready_key = None
 
+            skill_content = b'{"files":{"SKILL.md":"IyBTa2lsbA=="}}'
+            skill_checksum = hashlib.sha256(skill_content).hexdigest()
+            skill_scope = f"skill-upload:{suffix}"
+            skill_context = context.model_copy(
+                update={
+                    "service_identity": ServiceIdentity.TASK_API,
+                    "request_id": f"skill-upload-{suffix}",
+                }
+            )
+            skill_upload = await service.create_upload(
+                ArtifactCreateUploadRequest(
+                    context=skill_context,
+                    root_session_id=skill_scope,
+                    session_id=skill_scope,
+                    name="integration.skill.json",
+                    media_type="application/vnd.auraclaw.skill-package+json",
+                    expected_size=len(skill_content),
+                    expected_checksum=skill_checksum,
+                    classification="internal",
+                    retention_until=datetime.now(UTC) + timedelta(days=90),
+                )
+            )
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                response = await client.put(skill_upload.upload_url, content=skill_content)
+                assert response.status_code in {200, 201, 204}
+            skill_finalized = await service.finalize(
+                ArtifactFinalizeRequest(
+                    context=skill_context,
+                    artifact_id=skill_upload.artifact_id,
+                    version=1,
+                    upload_id=skill_upload.upload_id,
+                    size=len(skill_content),
+                    checksum=skill_checksum,
+                )
+            )
+            assert skill_finalized.status == "ready"
+            assert await service_b.finalize(
+                ArtifactFinalizeRequest(
+                    context=skill_context,
+                    artifact_id=skill_upload.artifact_id,
+                    version=1,
+                    upload_id=skill_upload.upload_id,
+                    size=len(skill_content),
+                    checksum=skill_checksum,
+                )
+            ) == skill_finalized
+            skill_ready = await repository_b.get_ready(
+                tenant_id, skill_upload.artifact_id, 1
+            )
+            assert skill_ready is not None
+            skill_ready_key = skill_ready.object_key
+
             expired = await service.create_upload(
                 ArtifactCreateUploadRequest(
                     context=context,
@@ -181,6 +234,10 @@ def test_artifact_multipart_scan_restart_and_gc() -> None:
         finally:
             if ready_key is not None:
                 delete_url, _ = presigner.presign("DELETE", ready_key)
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    await client.delete(delete_url)
+            if skill_ready_key is not None:
+                delete_url, _ = presigner.presign("DELETE", skill_ready_key)
                 async with httpx.AsyncClient(timeout=15.0) as client:
                     await client.delete(delete_url)
             await repository_a.close()

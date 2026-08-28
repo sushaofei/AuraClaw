@@ -15,6 +15,7 @@ from auraclaw.contracts.internal import (
     SkillInstallationInternalResponse,
     SkillPackageStateInternalRequest,
     SkillPackageStateInternalResponse,
+    SkillPublishArtifactInternalRequest,
     SkillPublishInternalRequest,
     SkillPublishInternalResponse,
     SkillPurgeInternalRequest,
@@ -35,6 +36,7 @@ from auraclaw.contracts.skills import (
     SkillPackageRecord,
     SkillPublicationRecord,
 )
+from auraclaw.contracts.tools import ArtifactRef
 from auraclaw.internal.http import HttpContractClient
 
 
@@ -89,6 +91,29 @@ class RemoteSkillPublicationClient:
             publication = self._compatibility_cache.restore(
                 command.tenant_id, package, publication
             )
+        return publication
+
+    async def publish_artifact(
+        self,
+        command: PublishSkillCommand,
+        artifact_ref: ArtifactRef,
+        expected_digest: str,
+    ) -> PublishedSkill:
+        response = await self._contract.call(
+            "/internal/v1/skill-publications/publish-artifact",
+            SkillPublishArtifactInternalRequest(
+                context=_context(command),
+                actor_id=command.actor_id,
+                source_id=command.source_id,
+                activate=command.activate,
+                command_id=command.command_id,
+                expected_revision=command.expected_revision,
+                expected_digest=expected_digest,
+                artifact_ref=artifact_ref.as_dict(),
+            ),
+            SkillPublishInternalResponse,
+        )
+        publication = PublishedSkill.model_validate(response.publication)
         return publication
 
     async def change_installation(
@@ -257,6 +282,8 @@ class RemoteSkillPublicationClient:
 
 def _context(
     command: (
+        PublishSkillCommand
+        |
         ChangeSkillInstallationCommand
         | RevokeSkillPublicationCommand
         | PurgeSkillPackageCommand

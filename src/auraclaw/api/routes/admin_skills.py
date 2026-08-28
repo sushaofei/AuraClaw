@@ -5,11 +5,15 @@ import binascii
 from typing import Annotated, Any, Protocol
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from auraclaw.action.skill_packages import SkillPackage, SkillPackageRegistry
 from auraclaw.api.dependencies import RequestIdentity, request_identity
-from auraclaw.contracts.internal import ContractModel
+from auraclaw.contracts.internal import (
+    ArtifactFinalizeResponse,
+    ArtifactUploadResponse,
+    ContractModel,
+)
 from auraclaw.contracts.skills import (
     ChangeSkillInstallationCommand,
     PublishedSkill,
@@ -21,6 +25,7 @@ from auraclaw.contracts.skills import (
     SkillPackageRecord,
     SkillPublicationRecord,
 )
+from auraclaw.contracts.tools import ArtifactRef
 
 Identity = Annotated[RequestIdentity, Depends(request_identity)]
 
@@ -31,13 +36,77 @@ _MAX_ENCODED_UPLOAD_BYTES = 24 * 1024 * 1024
 class PublishSkillRequest(ContractModel):
     source_id: str = Field(min_length=1, max_length=128)
     activate: bool = True
-    files: dict[str, str] = Field(min_length=1, max_length=_MAX_UPLOAD_FILES)
+    files: dict[str, str] | None = Field(
+        default=None, min_length=1, max_length=_MAX_UPLOAD_FILES
+    )
+    artifact_ref: dict[str, Any] | None = None
+    expected_digest: str | None = Field(
+        default=None, pattern=r"^sha256:[0-9a-f]{64}$"
+    )
+
+    @model_validator(mode="after")
+    def validate_source(self) -> PublishSkillRequest:
+        direct = self.files is not None
+        staged = self.artifact_ref is not None or self.expected_digest is not None
+        if direct == staged:
+            raise ValueError("Supply either files or artifact_ref with expected_digest")
+        if staged and (self.artifact_ref is None or self.expected_digest is None):
+            raise ValueError("Staged publication requires artifact_ref and expected_digest")
+        return self
+
+
+class CreateSkillPackageUploadRequest(ContractModel):
+    name: str = Field(min_length=1, max_length=512)
+    expected_size: int = Field(ge=1, le=_MAX_ENCODED_UPLOAD_BYTES)
+    expected_checksum: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class FinalizeSkillPackageUploadRequest(ContractModel):
+    upload_id: str = Field(min_length=1, max_length=256)
+    version: int = Field(default=1, ge=1)
+    size: int = Field(ge=1, le=_MAX_ENCODED_UPLOAD_BYTES)
+    checksum: str = Field(pattern=r"^[0-9a-f]{64}$")
+    parts: tuple[dict[str, object], ...] = Field(default=(), max_length=10_000)
 
 
 class SkillPublisher(Protocol):
     async def publish(
         self, command: PublishSkillCommand, package: SkillPackage
     ) -> PublishedSkill: ...
+
+    async def publish_artifact(
+        self,
+        command: PublishSkillCommand,
+        artifact_ref: ArtifactRef,
+        expected_digest: str,
+    ) -> PublishedSkill: ...
+
+
+class SkillPackageUploadManager(Protocol):
+    async def create(
+        self,
+        *,
+        tenant_id: str,
+        name: str,
+        expected_size: int,
+        expected_checksum: str,
+        correlation_id: str,
+        command_id: str,
+    ) -> ArtifactUploadResponse: ...
+
+    async def finalize(
+        self,
+        *,
+        tenant_id: str,
+        artifact_id: str,
+        version: int,
+        upload_id: str,
+        size: int,
+        checksum: str,
+        parts: tuple[dict[str, object], ...],
+        correlation_id: str,
+        command_id: str,
+    ) -> ArtifactFinalizeResponse: ...
 
 
 class SkillManager(Protocol):
@@ -100,6 +169,7 @@ def create_skill_admin_router(
     *,
     publication_service: SkillPublisher | None = None,
     management_service: SkillManager | None = None,
+    upload_service: SkillPackageUploadManager | None = None,
 ) -> APIRouter:
     router = APIRouter(prefix="/v1/admin", tags=["skill-admin"])
 
@@ -203,6 +273,63 @@ def create_skill_admin_router(
         return {"package": _package_state_summary(package)}
 
     @router.post(
+        "/skill-package-uploads",
+        status_code=status.HTTP_201_CREATED,
+    )
+    async def create_skill_package_upload(
+        payload: CreateSkillPackageUploadRequest,
+        identity: Identity,
+        command_id: Annotated[
+            str,
+            Header(alias="Idempotency-Key", min_length=1, max_length=256),
+        ],
+    ) -> dict[str, Any]:
+        if upload_service is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Skill package upload service is not configured",
+            )
+        result = await upload_service.create(
+            tenant_id=identity.tenant_id,
+            name=payload.name,
+            expected_size=payload.expected_size,
+            expected_checksum=payload.expected_checksum,
+            correlation_id=identity.correlation_id,
+            command_id=command_id,
+        )
+        return result.model_dump(mode="json")
+
+    @router.post(
+        "/skill-package-uploads/{artifact_id}:finalize",
+    )
+    async def finalize_skill_package_upload(
+        artifact_id: str,
+        payload: FinalizeSkillPackageUploadRequest,
+        identity: Identity,
+        command_id: Annotated[
+            str,
+            Header(alias="Idempotency-Key", min_length=1, max_length=256),
+        ],
+    ) -> dict[str, Any]:
+        if upload_service is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Skill package upload service is not configured",
+            )
+        result = await upload_service.finalize(
+            tenant_id=identity.tenant_id,
+            artifact_id=artifact_id,
+            version=payload.version,
+            upload_id=payload.upload_id,
+            size=payload.size,
+            checksum=payload.checksum,
+            parts=payload.parts,
+            correlation_id=identity.correlation_id,
+            command_id=command_id,
+        )
+        return result.model_dump(mode="json")
+
+    @router.post(
         "/skill-publications",
         status_code=status.HTTP_201_CREATED,
     )
@@ -219,33 +346,41 @@ def create_skill_admin_router(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Skill publication service is not configured",
             )
-        encoded_size = sum(len(value) for value in payload.files.values())
-        if encoded_size > _MAX_ENCODED_UPLOAD_BYTES:
-            raise HTTPException(status_code=413, detail="Skill package is too large")
-        try:
-            files = {
-                path: base64.b64decode(content, validate=True)
-                for path, content in payload.files.items()
-            }
-        except (binascii.Error, ValueError) as exc:
-            raise HTTPException(
-                status_code=422,
-                detail="Skill package files must use valid base64",
-            ) from exc
-        package = SkillPackage.from_files(files)
-        publication = await publication_service.publish(
-            PublishSkillCommand(
-                tenant_id=identity.tenant_id,
-                actor_id=identity.actor.id,
-                source_id=payload.source_id,
-                activate=payload.activate,
-                command_id=command_id,
-                expected_revision=expected_revision,
-                correlation_id=identity.correlation_id,
-                causation_id=command_id,
-            ),
-            package,
+        command = PublishSkillCommand(
+            tenant_id=identity.tenant_id,
+            actor_id=identity.actor.id,
+            source_id=payload.source_id,
+            activate=payload.activate,
+            command_id=command_id,
+            expected_revision=expected_revision,
+            correlation_id=identity.correlation_id,
+            causation_id=command_id,
         )
+        if payload.files is not None:
+            encoded_size = sum(len(value) for value in payload.files.values())
+            if encoded_size > _MAX_ENCODED_UPLOAD_BYTES:
+                raise HTTPException(status_code=413, detail="Skill package is too large")
+            try:
+                files = {
+                    path: base64.b64decode(content, validate=True)
+                    for path, content in payload.files.items()
+                }
+            except (binascii.Error, ValueError) as exc:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Skill package files must use valid base64",
+                ) from exc
+            publication = await publication_service.publish(
+                command, SkillPackage.from_files(files)
+            )
+        else:
+            assert payload.artifact_ref is not None
+            assert payload.expected_digest is not None
+            publication = await publication_service.publish_artifact(
+                command,
+                ArtifactRef(**payload.artifact_ref),
+                payload.expected_digest,
+            )
         return _summary(publication)
 
     @router.post(

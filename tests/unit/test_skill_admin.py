@@ -12,7 +12,12 @@ from auraclaw.action.skill_management import (
     InProcessSkillStateProjector,
     SkillManagementService,
 )
-from auraclaw.action.skill_packages import HmacSkillSignatureVerifier, SkillPackage
+from auraclaw.action.skill_packages import (
+    HmacSkillSignatureVerifier,
+    SkillPackage,
+    skill_package_archive,
+    skill_package_digest,
+)
 from auraclaw.action.skill_publication import SkillPublicationService
 from auraclaw.api.routes.admin_skills import create_skill_admin_router
 from auraclaw.composition.api import create_app
@@ -33,6 +38,7 @@ from auraclaw.contracts.skills import (
     SkillSourceRecord,
     SkillToolRequirement,
 )
+from auraclaw.contracts.tools import ArtifactRef
 
 _PLATFORM_KEY = b"auraclaw-development-platform-skill-key"
 
@@ -247,6 +253,8 @@ def test_task_api_service_exposes_skill_admin_routes() -> None:
         in paths
     )
     assert "/v1/admin/skill-publications" in paths
+    assert "/v1/admin/skill-package-uploads" in paths
+    assert "/v1/admin/skill-package-uploads/{artifact_id}:finalize" in paths
 
 
 def test_skill_admin_publishes_base64_package_through_application_service() -> None:
@@ -299,3 +307,70 @@ def test_skill_admin_publishes_base64_package_through_application_service() -> N
     assert response.status_code == 201, response.text
     assert response.json()["status"] == "active"
     assert response.json()["publisher"] == "platform"
+
+
+def test_skill_admin_publishes_staged_artifact_through_same_admission_service() -> None:
+    package = _package()
+    archive = skill_package_archive(package)
+    digest = skill_package_digest(package)
+    artifact_ref = ArtifactRef(
+        artifact_id="art_staged",
+        version=1,
+        content_hash=digest.removeprefix("sha256:"),
+        media_type="application/vnd.auraclaw.skill-package+json",
+        size=len(archive),
+    )
+
+    class ArtifactReader:
+        async def read(self, **kwargs: object) -> bytes:
+            assert kwargs["tenant_id"] == "tenant-1"
+            assert kwargs["artifact_ref"] == artifact_ref
+            return archive
+
+    app = create_app(profile="task-api")
+    registry = services._skill_registry_service(get_settings())
+    now = datetime.now(UTC)
+    lifecycle = InMemorySkillLifecycleStore()
+    publication_service = SkillPublicationService(
+        registry=registry,
+        lifecycle=lifecycle,
+        artifacts=ArtifactReader(),
+        bootstrap_sources=(
+            SkillSourceRecord(
+                source_id="sks_admin_upload",
+                tenant_id="tenant-1",
+                kind=SkillSourceKind.ADMIN_UPLOAD,
+                desired_state=SkillSourceDesiredState.ENABLED,
+                publisher_allowlist=("platform",),
+                created_by="system",
+                updated_by="system",
+                created_at=now,
+                updated_at=now,
+            ),
+        ),
+    )
+    app.include_router(
+        create_skill_admin_router(registry, publication_service=publication_service)
+    )
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/admin/skill-publications",
+            headers={
+                "X-Tenant-ID": "tenant-1",
+                "X-Actor-ID": "admin-1",
+                "Idempotency-Key": "publish-staged-1",
+                "X-Expected-Revision": "0",
+            },
+            json={
+                "source_id": "sks_admin_upload",
+                "activate": True,
+                "artifact_ref": artifact_ref.as_dict(),
+                "expected_digest": digest,
+            },
+        )
+    assert response.status_code == 201, response.text
+    assert response.json()["package_digest"] == digest
+    stored = registry.get_publication(
+        "tenant-1", "platform", "release.prepare", "1.4.0"
+    )
+    assert stored.artifact_ref == artifact_ref

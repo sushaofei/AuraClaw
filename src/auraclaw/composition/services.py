@@ -44,7 +44,7 @@ from auraclaw.action.mcp_registry import (
     InMemoryMcpServerRegistryStore,
     McpServerRegistryService,
 )
-from auraclaw.action.ports import ArtifactWriter
+from auraclaw.action.ports import ArtifactContentReader, ArtifactWriter
 from auraclaw.action.resource_gateway import ManagedResourceGateway
 from auraclaw.action.skill_internal_service import SkillPublicationInternalService
 from auraclaw.action.skill_lifecycle import (
@@ -115,7 +115,10 @@ from auraclaw.gateways.streaming.gateway import StreamingGateway
 from auraclaw.gateways.task.commands import TaskCommandGateway
 from auraclaw.gateways.task.invocations import SyncInvocationGateway
 from auraclaw.infrastructure.artifacts.store import ArtifactStore, InMemoryObjectStorage
-from auraclaw.infrastructure.clients.artifact import RemoteArtifactWriter
+from auraclaw.infrastructure.clients.artifact import (
+    RemoteArtifactWriter,
+    RemoteSkillPackageUploadClient,
+)
 from auraclaw.infrastructure.clients.artifact_reader import RemoteArtifactReader
 from auraclaw.infrastructure.clients.credential import RemoteCredentialProxy
 from auraclaw.infrastructure.clients.mcp_egress import RemoteMcpEgressClient
@@ -309,6 +312,7 @@ def _skill_publication_service(
     settings: Settings,
     registry: SkillPackageRegistry,
     lifecycle: SkillLifecycleStore | None = None,
+    artifact_reader: ArtifactContentReader | None = None,
 ) -> tuple[SkillPublicationService, SkillLifecycleStore]:
     selected_lifecycle = lifecycle
     if selected_lifecycle is None:
@@ -334,6 +338,7 @@ def _skill_publication_service(
         SkillPublicationService(
             registry=registry,
             lifecycle=selected_lifecycle,
+            artifacts=artifact_reader,
             bootstrap_sources=(admin_upload,),
         ),
         selected_lifecycle,
@@ -725,6 +730,7 @@ def _task_api_app(settings: Settings) -> FastAPI:
     skill_lifecycle: SkillLifecycleStore | None = None
     skill_publication: SkillPublicationService | RemoteSkillPublicationClient
     skill_management: SkillManagementService | RemoteSkillPublicationClient
+    skill_uploads: RemoteSkillPackageUploadClient | None = None
     if settings.sql_storage_enabled:
         skill_publication = RemoteSkillPublicationClient(
             settings.hands_url,
@@ -734,6 +740,12 @@ def _task_api_app(settings: Settings) -> FastAPI:
             compatibility_cache=skill_registry,
         )
         skill_management = skill_publication
+        skill_uploads = RemoteSkillPackageUploadClient(
+            settings.artifact_base_url,
+            bearer_token=_service_bearer_token(
+                settings, ServiceIdentity.TASK_API
+            ),
+        )
     else:
         skill_publication, skill_lifecycle = _skill_publication_service(
             settings, skill_registry
@@ -750,6 +762,7 @@ def _task_api_app(settings: Settings) -> FastAPI:
             skill_registry,
             publication_service=skill_publication,
             management_service=skill_management,
+            upload_service=skill_uploads,
         )
     )
     extra_closeables: list[Any] = [mcp_lifecycle]
@@ -761,6 +774,8 @@ def _task_api_app(settings: Settings) -> FastAPI:
         extra_closeables.append(skill_lifecycle)
     if isinstance(skill_publication, RemoteSkillPublicationClient):
         extra_closeables.append(skill_publication)
+    if skill_uploads is not None:
+        extra_closeables.append(skill_uploads)
     app.state.closeables = (*app.state.closeables, *extra_closeables)
     app.state.config_ready = config_ready
     app.state.storage_label = "projection-read-only"
@@ -1350,7 +1365,10 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
     capability_catalog = CapabilityCatalog(capability_catalog_store)
     skill_registry = _skill_registry_service(settings, artifacts=artifacts)
     skill_publication, _ = _skill_publication_service(
-        settings, skill_registry, skill_lifecycle
+        settings,
+        skill_registry,
+        skill_lifecycle,
+        artifact_reader=artifact_reader,
     )
     skill_rebuilder = SkillStateRebuilder(
         lifecycle=skill_lifecycle,

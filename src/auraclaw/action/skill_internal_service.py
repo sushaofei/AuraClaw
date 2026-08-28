@@ -14,6 +14,7 @@ from auraclaw.contracts.internal import (
     SkillInstallationInternalResponse,
     SkillPackageStateInternalRequest,
     SkillPackageStateInternalResponse,
+    SkillPublishArtifactInternalRequest,
     SkillPublishInternalRequest,
     SkillPublishInternalResponse,
     SkillPurgeInternalRequest,
@@ -30,6 +31,7 @@ from auraclaw.contracts.skills import (
     RevokeSkillPublicationCommand,
     SkillInstallationOperation,
 )
+from auraclaw.contracts.tools import ArtifactRef
 
 _MAX_ENCODED_PACKAGE_BYTES = 24 * 1024 * 1024
 
@@ -78,6 +80,33 @@ class SkillPublicationInternalService:
                 causation_id=request.context.causation_id,
             ),
             SkillPackage.from_files(files),
+        )
+        if self._rebuilder is not None:
+            await self._rebuilder.rebuild_tenant(request.context.tenant_id)
+        return SkillPublishInternalResponse(
+            publication=result.model_dump(mode="json")
+        )
+
+    async def publish_artifact(
+        self, request: SkillPublishArtifactInternalRequest
+    ) -> SkillPublishInternalResponse:
+        if request.context.service_identity is not ServiceIdentity.TASK_API:
+            raise AuthorizationError("workload may not publish Skill packages")
+        if request.context.request_id != request.command_id:
+            raise SchemaValidationError("Skill command request id does not match")
+        result = await self._publication.publish_artifact(
+            PublishSkillCommand(
+                tenant_id=request.context.tenant_id,
+                actor_id=request.actor_id,
+                source_id=request.source_id,
+                activate=request.activate,
+                command_id=request.command_id,
+                expected_revision=request.expected_revision,
+                correlation_id=request.context.correlation_id,
+                causation_id=request.context.causation_id,
+            ),
+            ArtifactRef(**request.artifact_ref),
+            request.expected_digest,
         )
         if self._rebuilder is not None:
             await self._rebuilder.rebuild_tenant(request.context.tenant_id)
