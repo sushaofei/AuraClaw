@@ -10,6 +10,7 @@ from auraclaw.action.skill_lifecycle import (
     SkillOutboxRecord,
     SkillPublishCommit,
     SkillPublishCommitResult,
+    SkillRestoreCommit,
     SkillSourceLease,
     SkillSourcePackageIdentity,
     SkillSourceSnapshotCommit,
@@ -114,6 +115,103 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
                 commit.occurred_at,
             )
             return result
+
+    async def commit_restore(
+        self, commit: SkillRestoreCommit
+    ) -> SkillPublicationRecord:
+        record = commit.publication
+        pool = await self.pool()
+        async with pool.acquire() as connection, connection.transaction():
+            await connection.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+                f"skill-restore:{record.tenant_id}:{commit.command_id}",
+            )
+            replay = await connection.fetchrow(
+                """SELECT request_digest
+                FROM hands.skill_publication_restore_command
+                WHERE tenant_id=$1 AND command_id=$2""",
+                record.tenant_id,
+                commit.command_id,
+            )
+            if replay is not None:
+                if str(replay["request_digest"]) != commit.request_digest:
+                    raise VersionConflictError(
+                        "Skill restore command id was reused"
+                    )
+                current = await connection.fetchrow(
+                    """SELECT * FROM hands.skill_publication
+                    WHERE tenant_id=$1 AND publisher=$2 AND name=$3 AND version=$4""",
+                    record.tenant_id,
+                    record.publisher,
+                    record.name,
+                    record.version,
+                )
+                if current is None:
+                    raise VersionConflictError(
+                        "Skill restore command result is incomplete"
+                    )
+                return _publication(dict(current))
+            current_row = await connection.fetchrow(
+                """SELECT * FROM hands.skill_publication
+                WHERE tenant_id=$1 AND publisher=$2 AND name=$3 AND version=$4
+                FOR UPDATE""",
+                record.tenant_id,
+                record.publisher,
+                record.name,
+                record.version,
+            )
+            if current_row is None:
+                raise NotFoundError("Skill publication was not found")
+            current = _publication(dict(current_row))
+            if current.revision != commit.expected_revision:
+                raise VersionConflictError("Skill publication revision conflict")
+            if current.status is not SkillPublicationStatus.RETIRED:
+                raise VersionConflictError("Skill publication is not retired")
+            if (
+                record.status is not SkillPublicationStatus.RESTORING
+                or record.revision != current.revision + 1
+                or record.package_digest != current.package_digest
+                or record.publication_id != current.publication_id
+            ):
+                raise VersionConflictError("Skill restore transition is invalid")
+            updated = await connection.fetchrow(
+                """UPDATE hands.skill_publication SET status='restoring',
+                revision=$5,updated_by=$6,updated_at=$7,reason_code=$8
+                WHERE tenant_id=$1 AND publisher=$2 AND name=$3 AND version=$4
+                  AND revision=$9 AND status='retired' RETURNING *""",
+                record.tenant_id,
+                record.publisher,
+                record.name,
+                record.version,
+                record.revision,
+                commit.actor_id,
+                commit.occurred_at,
+                commit.reason_code,
+                commit.expected_revision,
+            )
+            if updated is None:
+                raise VersionConflictError("Skill publication revision conflict")
+            await connection.execute(
+                """INSERT INTO hands.skill_publication_restore_command
+                (tenant_id,command_id,request_digest,publisher,name,version,
+                 actor_id,reason_code,correlation_id,causation_id,
+                 previous_revision,restoring_revision,created_at)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)""",
+                record.tenant_id,
+                commit.command_id,
+                commit.request_digest,
+                record.publisher,
+                record.name,
+                record.version,
+                commit.actor_id,
+                commit.reason_code,
+                commit.correlation_id,
+                commit.causation_id,
+                commit.expected_revision,
+                record.revision,
+                commit.occurred_at,
+            )
+            return _publication(dict(updated))
 
     async def claim_outbox(
         self, *, owner: str, limit: int = 100

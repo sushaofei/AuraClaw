@@ -21,6 +21,7 @@ from auraclaw.contracts.skills import (
     PublishSkillCommand,
     PurgeSkillPackageCommand,
     RegisterSkillPublisherCommand,
+    RestoreSkillPublicationCommand,
     RevokeSkillPublicationCommand,
     RevokeSkillPublisherKeyCommand,
     RotateSkillPublisherKeyCommand,
@@ -152,6 +153,10 @@ class SkillManager(Protocol):
 
     async def revoke_publication(
         self, command: RevokeSkillPublicationCommand
+    ) -> SkillPublicationRecord: ...
+
+    async def restore_publication(
+        self, command: RestoreSkillPublicationCommand
     ) -> SkillPublicationRecord: ...
 
     async def purge_package(
@@ -696,6 +701,40 @@ def create_skill_admin_router(
         return {
             "publication": _publication_state_summary(publication)
         }
+
+    @router.post(
+        "/skill-publications/{publisher}/{name}/versions/{version}:restore",
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    async def restore_skill_publication(
+        publisher: str,
+        name: str,
+        version: str,
+        identity: Identity,
+        command_id: str = Header(alias="Idempotency-Key"),
+        expected_revision: int = Header(alias="X-Expected-Revision", ge=1),
+        reason_code: str = Header(alias="X-Reason-Code", min_length=1, max_length=128),
+    ) -> dict[str, Any]:
+        if management_service is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Skill management service is not configured",
+            )
+        publication = await management_service.restore_publication(
+            RestoreSkillPublicationCommand(
+                tenant_id=identity.tenant_id,
+                actor_id=identity.actor.id,
+                publisher=publisher,
+                name=name,
+                version=version,
+                reason_code=reason_code,
+                command_id=command_id,
+                expected_revision=expected_revision,
+                correlation_id=identity.correlation_id,
+                causation_id=command_id,
+            )
+        )
+        return {"publication": _publication_state_summary(publication)}
 
     @router.post(
         "/skill-packages/{publisher}/{name}/versions/{version}:purge",

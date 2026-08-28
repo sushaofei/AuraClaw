@@ -14,7 +14,10 @@ from auraclaw.contracts.errors import (
 )
 from auraclaw.contracts.skills import (
     ChangeSkillInstallationCommand,
+    PublishedSkill,
+    PublishSkillCommand,
     PurgeSkillPackageCommand,
+    RestoreSkillPublicationCommand,
     RevokeSkillPublicationCommand,
     SkillInstallationOperation,
     SkillInstallationRecord,
@@ -23,6 +26,9 @@ from auraclaw.contracts.skills import (
     SkillPackageRecord,
     SkillPublicationRecord,
     SkillPublicationStatus,
+    SkillSourceDesiredState,
+    SkillSourceKind,
+    SkillSourceRecord,
 )
 from auraclaw.contracts.tools import ArtifactRef
 
@@ -35,6 +41,49 @@ class _Projector:
 
     async def rebuild_tenant(self, tenant_id: str) -> None:
         self.tenants.append(tenant_id)
+
+
+class _RetiredActivator:
+    def __init__(self, lifecycle: InMemorySkillLifecycleStore) -> None:
+        self.lifecycle = lifecycle
+        self.calls: list[tuple[PublishSkillCommand, ArtifactRef, str]] = []
+        self.failure: Exception | None = None
+
+    async def publish_artifact(
+        self,
+        command: PublishSkillCommand,
+        artifact_ref: ArtifactRef,
+        expected_digest: str,
+    ) -> PublishedSkill:
+        self.calls.append((command, artifact_ref, expected_digest))
+        if self.failure is not None:
+            raise self.failure
+        publication = await self.lifecycle.get_publication(
+            command.tenant_id, "platform", "release.prepare", "1.0.0"
+        )
+        package = await self.lifecycle.get_package(
+            command.tenant_id, "platform", "release.prepare", "1.0.0"
+        )
+        assert publication is not None
+        assert package is not None
+        await self.lifecycle.put_publication(
+            publication.model_copy(
+                update={
+                    "status": SkillPublicationStatus.ACTIVE,
+                    "revision": publication.revision + 1,
+                    "updated_by": command.actor_id,
+                    "updated_at": datetime.now(UTC),
+                    "reason_code": None,
+                }
+            ),
+            expected_revision=command.expected_revision,
+        )
+        return PublishedSkill(
+            tenant_id=command.tenant_id,
+            manifest=package.manifest,
+            package_digest=package.package_digest,
+            artifact_ref=package.artifact_ref,
+        )
 
 
 class _Artifacts:
@@ -62,6 +111,20 @@ async def _service() -> tuple[
 ]:
     now = datetime.now(UTC)
     lifecycle = InMemorySkillLifecycleStore()
+    await lifecycle.put_source(
+        SkillSourceRecord(
+            source_id="sks_admin_upload",
+            tenant_id="tenant-a",
+            kind=SkillSourceKind.ADMIN_UPLOAD,
+            desired_state=SkillSourceDesiredState.ENABLED,
+            publisher_allowlist=("platform",),
+            created_by="system",
+            updated_by="system",
+            created_at=now,
+            updated_at=now,
+        ),
+        expected_revision=0,
+    )
     manifest = SkillManifest(
         name="release.prepare",
         version="1.0.0",
@@ -96,6 +159,7 @@ async def _service() -> tuple[
             version="1.0.0",
             package_digest=_DIGEST,
             status=SkillPublicationStatus.ACTIVE,
+            source_id="sks_admin_upload",
             revision=1,
             created_by="publisher",
             updated_by="publisher",
@@ -193,6 +257,110 @@ def test_disable_uninstall_and_reinstall_change_installation_only() -> None:
         assert installed.status is SkillInstallationStatus.ACTIVE
         assert installed.reason_code is None
         assert projector.tenants == ["tenant-a", "tenant-a", "tenant-a"]
+
+    asyncio.run(scenario())
+
+
+def _restore_command(
+    *, command_id: str = "restore-1", reason: str = "source_reviewed"
+) -> RestoreSkillPublicationCommand:
+    return RestoreSkillPublicationCommand(
+        tenant_id="tenant-a",
+        actor_id="reviewer-a",
+        publisher="platform",
+        name="release.prepare",
+        version="1.0.0",
+        reason_code=reason,
+        command_id=command_id,
+        expected_revision=2,
+        correlation_id="corr-restore",
+        causation_id=command_id,
+    )
+
+
+async def _retire(lifecycle: InMemorySkillLifecycleStore) -> None:
+    current = await lifecycle.get_publication(
+        "tenant-a", "platform", "release.prepare", "1.0.0"
+    )
+    assert current is not None
+    await lifecycle.put_publication(
+        current.model_copy(
+            update={
+                "status": SkillPublicationStatus.RETIRED,
+                "revision": 2,
+                "updated_by": "source-reconciler",
+                "updated_at": datetime.now(UTC),
+                "reason_code": "source_missing_confirmed",
+            }
+        ),
+        expected_revision=1,
+    )
+
+
+def test_restore_is_reviewed_idempotent_and_revalidates_retired_artifact() -> None:
+    async def scenario() -> None:
+        _unused, lifecycle, projector = await _service()
+        await _retire(lifecycle)
+        activator = _RetiredActivator(lifecycle)
+        service = SkillManagementService(
+            lifecycle=lifecycle,
+            projector=projector,
+            retired_activator=activator,
+        )
+
+        restored = await service.restore_publication(_restore_command())
+
+        assert restored.status is SkillPublicationStatus.ACTIVE
+        assert restored.revision == 4
+        assert restored.reason_code is None
+        assert len(activator.calls) == 1
+        activation, artifact_ref, digest = activator.calls[0]
+        assert activation.source_id == "sks_admin_upload"
+        assert activation.expected_revision == 3
+        assert activation.causation_id == "restore-1"
+        assert artifact_ref.artifact_id == "art_skill"
+        assert digest == _DIGEST
+
+        assert await service.restore_publication(_restore_command()) == restored
+        assert len(activator.calls) == 1
+        assert projector.tenants == ["tenant-a", "tenant-a"]
+
+    asyncio.run(scenario())
+
+
+def test_failed_restore_stays_non_discoverable_and_same_command_can_retry() -> None:
+    async def scenario() -> None:
+        _unused, lifecycle, projector = await _service()
+        await _retire(lifecycle)
+        activator = _RetiredActivator(lifecycle)
+        activator.failure = PolicyDeniedError("publisher suspended")
+        service = SkillManagementService(
+            lifecycle=lifecycle,
+            projector=projector,
+            retired_activator=activator,
+        )
+
+        with pytest.raises(PolicyDeniedError, match="publisher suspended"):
+            await service.restore_publication(_restore_command())
+        restoring = await service.get_publication(
+            "tenant-a", "platform", "release.prepare", "1.0.0"
+        )
+        assert restoring.status is SkillPublicationStatus.RESTORING
+        assert restoring.revision == 3
+
+        with pytest.raises(VersionConflictError, match="revision conflict"):
+            await service.restore_publication(
+                _restore_command(command_id="restore-2")
+            )
+        with pytest.raises(VersionConflictError, match="command id was reused"):
+            await service.restore_publication(
+                _restore_command(reason="different_review")
+            )
+
+        activator.failure = None
+        restored = await service.restore_publication(_restore_command())
+        assert restored.status is SkillPublicationStatus.ACTIVE
+        assert restored.revision == 4
 
     asyncio.run(scenario())
 

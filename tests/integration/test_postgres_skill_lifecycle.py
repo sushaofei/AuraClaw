@@ -10,6 +10,7 @@ import pytest
 
 from auraclaw.action.skill_lifecycle import (
     SkillPublishCommit,
+    SkillRestoreCommit,
     SkillSourcePackageIdentity,
     SkillSourceSnapshotCommit,
 )
@@ -44,6 +45,8 @@ MIGRATION = "\n".join(
         (ROOT / "migrations/0026_skill_publication_reliability.sql").read_text(),
         (ROOT / "migrations/0028_skill_source_reconcile_lease.sql").read_text(),
         (ROOT / "migrations/0029_skill_source_inventory_retirement.sql").read_text(),
+        (ROOT / "migrations/0030_skill_publisher_suspension.sql").read_text(),
+        (ROOT / "migrations/0031_skill_publication_restore.sql").read_text(),
     )
 )
 pytestmark = pytest.mark.skipif(DATABASE_URL is None, reason="PostgreSQL test URL not configured")
@@ -367,6 +370,51 @@ def test_postgres_skill_lifecycle_is_persistent_and_tenant_scoped() -> None:
             )
             assert audit_count == 1
 
+            retired = retired_result.retired[0]
+            restore = SkillRestoreCommit(
+                command_id=f"restore-{suffix}",
+                request_digest=f"sha256:{'f' * 64}",
+                actor_id="reviewer-test",
+                reason_code="source_inventory_reviewed",
+                correlation_id=f"restore-correlation-{suffix}",
+                causation_id=f"restore-causation-{suffix}",
+                expected_revision=retired.revision,
+                publication=retired.model_copy(
+                    update={
+                        "status": SkillPublicationStatus.RESTORING,
+                        "revision": retired.revision + 1,
+                        "updated_by": "reviewer-test",
+                        "updated_at": datetime.now(UTC),
+                        "reason_code": "source_inventory_reviewed",
+                    }
+                ),
+                occurred_at=datetime.now(UTC),
+            )
+            restoring = await store_a.commit_restore(restore)
+            assert restoring.status is SkillPublicationStatus.RESTORING
+            assert restoring.revision == retired.revision + 1
+            assert await store_b.commit_restore(restore) == restoring
+            with pytest.raises(VersionConflictError, match="command id was reused"):
+                await store_b.commit_restore(
+                    restore.__class__(
+                        **{
+                            **restore.__dict__,
+                            "request_digest": f"sha256:{'0' * 64}",
+                        }
+                    )
+                )
+            restore_audit = await connection.fetchrow(
+                """SELECT actor_id, previous_revision, restoring_revision
+                FROM hands.skill_publication_restore_command
+                WHERE tenant_id=$1 AND command_id=$2""",
+                tenant_id,
+                restore.command_id,
+            )
+            assert restore_audit is not None
+            assert restore_audit["actor_id"] == "reviewer-test"
+            assert restore_audit["previous_revision"] == retired.revision
+            assert restore_audit["restoring_revision"] == restoring.revision
+
             rollback_package = transactional_package.model_copy(
                 update={
                     "manifest": transactional_package.manifest.model_copy(
@@ -469,6 +517,10 @@ def test_postgres_skill_lifecycle_is_persistent_and_tenant_scoped() -> None:
             )
             await connection.execute(
                 "DELETE FROM hands.skill_command WHERE tenant_id=$1", tenant_id
+            )
+            await connection.execute(
+                "DELETE FROM hands.skill_publication_restore_command WHERE tenant_id=$1",
+                tenant_id,
             )
             await connection.execute(
                 "DELETE FROM hands.skill_source_retirement_command WHERE tenant_id=$1",

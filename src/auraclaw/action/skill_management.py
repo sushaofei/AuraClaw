@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
 from auraclaw.action.ports import ArtifactDeleter, SkillBindingReferenceReader
-from auraclaw.action.skill_lifecycle import SkillLifecycleStore
+from auraclaw.action.skill_lifecycle import SkillLifecycleStore, SkillRestoreCommit
 from auraclaw.action.skill_packages import SkillPackageRegistry
 from auraclaw.contracts.errors import (
     InvalidTransitionError,
@@ -14,7 +15,10 @@ from auraclaw.contracts.errors import (
 )
 from auraclaw.contracts.skills import (
     ChangeSkillInstallationCommand,
+    PublishedSkill,
+    PublishSkillCommand,
     PurgeSkillPackageCommand,
+    RestoreSkillPublicationCommand,
     RevokeSkillPublicationCommand,
     SkillInstallationOperation,
     SkillInstallationRecord,
@@ -24,10 +28,20 @@ from auraclaw.contracts.skills import (
     SkillPublicationRecord,
     SkillPublicationStatus,
 )
+from auraclaw.contracts.tools import ArtifactRef
 
 
 class SkillStateProjector(Protocol):
     async def rebuild_tenant(self, tenant_id: str) -> object: ...
+
+
+class SkillRetiredActivator(Protocol):
+    async def publish_artifact(
+        self,
+        command: PublishSkillCommand,
+        artifact_ref: ArtifactRef,
+        expected_digest: str,
+    ) -> PublishedSkill: ...
 
 
 class SkillManagementService:
@@ -40,12 +54,14 @@ class SkillManagementService:
         projector: SkillStateProjector,
         artifacts: ArtifactDeleter | None = None,
         binding_references: SkillBindingReferenceReader | None = None,
+        retired_activator: SkillRetiredActivator | None = None,
         purge_quiescence: timedelta = timedelta(minutes=5),
     ) -> None:
         self._lifecycle = lifecycle
         self._projector = projector
         self._artifacts = artifacts
         self._binding_references = binding_references
+        self._retired_activator = retired_activator
         self._purge_quiescence = purge_quiescence
 
     async def get_package(
@@ -141,6 +157,7 @@ class SkillManagementService:
             SkillPublicationStatus.VALIDATING,
             SkillPublicationStatus.ACTIVE,
             SkillPublicationStatus.QUARANTINED,
+            SkillPublicationStatus.RESTORING,
             SkillPublicationStatus.RETIRED,
         }:
             raise InvalidTransitionError("Skill publication cannot be revoked")
@@ -158,6 +175,81 @@ class SkillManagementService:
         )
         await self._projector.rebuild_tenant(command.tenant_id)
         return updated
+
+    async def restore_publication(
+        self,
+        command: RestoreSkillPublicationCommand,
+    ) -> SkillPublicationRecord:
+        if self._retired_activator is None:
+            raise PolicyDeniedError("Skill publication restore is not configured")
+        current = await self.get_publication(
+            command.tenant_id,
+            command.publisher,
+            command.name,
+            command.version,
+        )
+        now = datetime.now(UTC)
+        proposed = current
+        if current.status is SkillPublicationStatus.RETIRED:
+            proposed = current.model_copy(
+                update={
+                    "status": SkillPublicationStatus.RESTORING,
+                    "revision": current.revision + 1,
+                    "updated_by": command.actor_id,
+                    "updated_at": now,
+                    "reason_code": command.reason_code,
+                }
+            )
+        request_digest = _restore_request_digest(command)
+        restoring = await self._lifecycle.commit_restore(
+            SkillRestoreCommit(
+                command_id=command.command_id,
+                request_digest=request_digest,
+                actor_id=command.actor_id,
+                reason_code=command.reason_code,
+                correlation_id=command.correlation_id,
+                causation_id=command.causation_id,
+                expected_revision=command.expected_revision,
+                publication=proposed,
+                occurred_at=now,
+            )
+        )
+        if restoring.status is SkillPublicationStatus.ACTIVE:
+            await self._projector.rebuild_tenant(command.tenant_id)
+            return restoring
+        if restoring.status is not SkillPublicationStatus.RESTORING:
+            raise VersionConflictError("Skill publication restore is incomplete")
+        if restoring.source_id is None:
+            raise PolicyDeniedError("Skill publication has no governed Source")
+        package = await self.get_package(
+            command.tenant_id,
+            command.publisher,
+            command.name,
+            command.version,
+        )
+        activation_command_id = _restore_activation_command_id(command.command_id)
+        await self._retired_activator.publish_artifact(
+            PublishSkillCommand(
+                tenant_id=command.tenant_id,
+                actor_id=command.actor_id,
+                source_id=restoring.source_id,
+                activate=True,
+                command_id=activation_command_id,
+                expected_revision=restoring.revision,
+                correlation_id=command.correlation_id,
+                causation_id=command.command_id,
+            ),
+            package.artifact_ref,
+            package.package_digest,
+        )
+        restored = await self.get_publication(
+            command.tenant_id,
+            command.publisher,
+            command.name,
+            command.version,
+        )
+        await self._projector.rebuild_tenant(command.tenant_id)
+        return restored
 
     async def purge_package(
         self,
@@ -273,6 +365,26 @@ class InProcessSkillStateProjector:
                     and installation.status is SkillInstallationStatus.ACTIVE
                 ),
             )
+
+def _restore_request_digest(command: RestoreSkillPublicationCommand) -> str:
+    value = "\0".join(
+        (
+            command.tenant_id,
+            command.publisher,
+            command.name,
+            command.version,
+            command.actor_id,
+            command.reason_code,
+            str(command.expected_revision),
+        )
+    )
+    return f"sha256:{hashlib.sha256(value.encode()).hexdigest()}"
+
+
+def _restore_activation_command_id(command_id: str) -> str:
+    digest = hashlib.sha256(command_id.encode()).hexdigest()
+    return f"skill-restore-activate:{digest}"
+
 
 def _installation_target(
     operation: SkillInstallationOperation,

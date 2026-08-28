@@ -782,6 +782,7 @@ def _task_api_app(settings: Settings) -> FastAPI:
                 lifecycle=skill_lifecycle,
                 registry=skill_registry,
             ),
+            retired_activator=skill_publication,
         )
     app.include_router(
         create_skill_admin_router(
@@ -1439,6 +1440,7 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         projector=skill_rebuilder,
         artifacts=artifact_reader,
         binding_references=skill_binding_references,
+        retired_activator=skill_publication,
     )
     resources = skill_registry.resources or HandsResourceRegistry()
     resource_gateway = ManagedResourceGateway(

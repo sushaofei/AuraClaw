@@ -26,6 +26,8 @@ from auraclaw.contracts.internal import (
     SkillPublishInternalResponse,
     SkillPurgeInternalRequest,
     SkillPurgeInternalResponse,
+    SkillRestoreInternalRequest,
+    SkillRestoreInternalResponse,
     SkillRevokeInternalRequest,
     SkillRevokeInternalResponse,
     SkillStateInternalRequest,
@@ -38,6 +40,7 @@ from auraclaw.contracts.skills import (
     PublishSkillCommand,
     PurgeSkillPackageCommand,
     RegisterSkillPublisherCommand,
+    RestoreSkillPublicationCommand,
     RevokeSkillPublicationCommand,
     RevokeSkillPublisherKeyCommand,
     RotateSkillPublisherKeyCommand,
@@ -187,6 +190,26 @@ class RemoteSkillPublicationClient:
                     command.version,
                 )
         return publication
+
+    async def restore_publication(
+        self,
+        command: RestoreSkillPublicationCommand,
+    ) -> SkillPublicationRecord:
+        response = await self._contract.call(
+            "/internal/v1/skill-publications/restore",
+            SkillRestoreInternalRequest(
+                context=_context(command),
+                actor_id=command.actor_id,
+                publisher=command.publisher,
+                name=command.name,
+                version=command.version,
+                reason_code=command.reason_code,
+                command_id=command.command_id,
+                expected_revision=command.expected_revision,
+            ),
+            SkillRestoreInternalResponse,
+        )
+        return SkillPublicationRecord.model_validate(response.publication)
 
     async def get_package(
         self,
@@ -394,6 +417,7 @@ def _context(
         | RotateSkillPublisherKeyCommand
         | RevokeSkillPublisherKeyCommand
         | ChangeSkillPublisherStatusCommand
+        | RestoreSkillPublicationCommand
     ),
 ) -> InternalRequestContext:
     return InternalRequestContext(

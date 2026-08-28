@@ -1896,6 +1896,33 @@ ready Skill Artifact 建立带 fencing 的物理回收流程；不把成功命�
 - [x] README、公开 API、架构、数据库参考与阶段门禁同步。
 - [x] 本阶段作为一个 intentional commit 提交并 push，不包含 `.env`、Secret、缓存或无关改动。
 
+## 阶段 M14m：Skill Publication 审核化显式恢复（Issue #56）
+
+状态：已完成。退役版本只能经有审计证据的显式 review 与完整信任复验恢复。
+
+### 状态与安全语义
+
+- [x] 普通 `retired` 只能经显式 review 命令进入 `restoring`，不会因 Source 重新出现自动激活。
+- [x] `restoring` 不参与 Catalog/Resolver 新发现，但 retained Package 仍按固定 digest 服务既有 binding。
+- [x] 激活前从原 Artifact 重读并复验 digest、Source allowlist/状态、Publisher/key 信任与签名。
+- [x] `revoked` 不可通过 restore 恢复；复验失败保持 `restoring`，不会短暂暴露为 active。
+
+### 命令、事务与 API
+
+- [x] restore 命令携带 actor、reason、expected revision、command、correlation 和 causation。
+- [x] Lifecycle 事务原子写入 `restoring` revision 与独立 restore 命令账本，支持跨副本幂等重放。
+- [x] 同 command id 不同可信请求显式冲突；同一失败命令可在信任条件修复后继续激活。
+- [x] Admin API、Task API 远程客户端和 workload-authenticated 内部合约全部贯通。
+
+### 质量与交付
+
+- [x] 0031 正反迁移覆盖 restoring 状态约束、restore 审计账本及安全回滚映射。
+- [x] 单测覆盖成功、失败保持 restoring、同命令重试、不同 payload 冲突和内部远程契约。
+- [x] PostgreSQL 测试覆盖 restore revision、跨 Store 幂等、命令审计及迁移回滚。
+- [x] 全量 Ruff、Mypy、unit、相关 integration 与 import-linter 通过。
+- [x] README、公开 API、架构、数据库参考与阶段门禁同步。
+- [x] 本阶段作为一个 intentional commit 提交并 push，不包含 `.env`、Secret、缓存或无关改动。
+
 ## 阶段 Product Activity：产品级对话执行轨迹（AuraX Issue #2）
 
 状态：代码与定向验证完成；完整基础设施集成门禁受现有 Kafka/MySQL/PostgreSQL/Artifact 环境失败阻塞。

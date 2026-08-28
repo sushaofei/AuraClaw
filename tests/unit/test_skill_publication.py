@@ -202,7 +202,7 @@ def test_publish_service_cannot_reactivate_revoked_publication() -> None:
             expected_revision=1,
         )
 
-        with pytest.raises(InvalidTransitionError, match="staged to active"):
+        with pytest.raises(InvalidTransitionError, match="staged or restoring"):
             await service.publish(_command(activate=True, expected_revision=2), _package())
 
     asyncio.run(scenario())

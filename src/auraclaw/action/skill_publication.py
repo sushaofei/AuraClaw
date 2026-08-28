@@ -145,11 +145,16 @@ class SkillPublicationService:
             existing is not None
             and existing.status is not desired_status
             and not (
-                existing.status is SkillPublicationStatus.STAGED
+                existing.status in {
+                    SkillPublicationStatus.STAGED,
+                    SkillPublicationStatus.RESTORING,
+                }
                 and desired_status is SkillPublicationStatus.ACTIVE
             )
         ):
-            raise InvalidTransitionError("Skill publish only permits staged to active transition")
+            raise InvalidTransitionError(
+                "Skill publish only permits staged or restoring to active transition"
+            )
         if (
             existing is not None
             and existing.status is not desired_status

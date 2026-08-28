@@ -38,11 +38,13 @@ from auraclaw.contracts.skills import (
     ChangeSkillPublisherStatusCommand,
     PublishSkillCommand,
     RegisterSkillPublisherCommand,
+    RestoreSkillPublicationCommand,
     RevokeSkillPublicationCommand,
     RevokeSkillPublisherKeyCommand,
     RotateSkillPublisherKeyCommand,
     SkillInstallationOperation,
     SkillManifest,
+    SkillPublicationStatus,
     SkillPublisherStatusOperation,
     SkillSourceDesiredState,
     SkillSourceKind,
@@ -146,6 +148,7 @@ def test_task_api_client_publishes_through_action_hands_service() -> None:
         management = SkillManagementService(
             lifecycle=lifecycle,
             projector=rebuilder,
+            retired_activator=publication,
         )
         publishers = SkillPublisherService(InMemorySkillPublisherStore())
         contract = create_contract_app(
@@ -291,6 +294,38 @@ def test_task_api_client_publishes_through_action_hands_service() -> None:
                     ),
                     unsafe,
                 )
+            active_publication = await lifecycle.get_publication(
+                "tenant-a", "platform", "release.prepare", "2.0.0"
+            )
+            assert active_publication is not None
+            await lifecycle.put_publication(
+                active_publication.model_copy(
+                    update={
+                        "status": SkillPublicationStatus.RETIRED,
+                        "revision": 2,
+                        "updated_by": "source-reconciler",
+                        "updated_at": datetime.now(UTC),
+                        "reason_code": "source_missing_confirmed",
+                    }
+                ),
+                expected_revision=1,
+            )
+            restored = await client.restore_publication(
+                RestoreSkillPublicationCommand(
+                    tenant_id="tenant-a",
+                    actor_id="reviewer-a",
+                    publisher="platform",
+                    name="release.prepare",
+                    version="2.0.0",
+                    reason_code="source_inventory_reviewed",
+                    command_id="restore-internal-1",
+                    expected_revision=2,
+                    correlation_id="corr-restore",
+                    causation_id="restore-internal-1",
+                )
+            )
+            assert restored.status is SkillPublicationStatus.ACTIVE
+            assert restored.revision == 4
             installation_state = await client.get_installation(
                 "tenant-a", "platform", "release.prepare"
             )
@@ -322,7 +357,7 @@ def test_task_api_client_publishes_through_action_hands_service() -> None:
                     version="2.0.0",
                     reason_code="publisher_key_compromised",
                     command_id="revoke-internal-1",
-                    expected_revision=1,
+                    expected_revision=4,
                     correlation_id="corr-revoke",
                     causation_id="revoke-internal-1",
                 )
@@ -331,7 +366,7 @@ def test_task_api_client_publishes_through_action_hands_service() -> None:
             publication_state = await client.get_publication(
                 "tenant-a", "platform", "release.prepare", "2.0.0"
             )
-            assert publication_state.revision == 2
+            assert publication_state.revision == 5
             assert publication_state.updated_by == "security-a"
             package_state = await client.get_package(
                 "tenant-a", "platform", "release.prepare", "2.0.0"
