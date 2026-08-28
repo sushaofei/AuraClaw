@@ -1527,6 +1527,44 @@ Mypy、10 条 import-linter contract 和全量 Pytest 通过；MySQL、SeaweedFS
 - [x] `ruff check .`、`mypy src/auraclaw`、完整单元测试与 import lint 通过。
 - [ ] 本阶段 intentional commit 已完成；待网络恢复后 push，并在 Issue #55 同步实现与验证结果。
 
+## 阶段 M14a：Skill 生命周期持久化基础（Issue #56）
+
+状态：已完成。本阶段只冻结生命周期契约和持久化基础，不接入发布 API、Source Worker、统一
+Catalog 切换或 Runtime 撤销动作；后续能力必须分别建立 M14b+ 阶段门禁并独立交付。
+
+依据：[MCP Runtime 能力平面](../architecture/system/23%20MCP%20Runtime%20能力平面.md)；
+[GitHub Issue #56](https://github.com/sushaofei/AuraClaw/issues/56)。
+
+### 契约与语义
+
+- [x] Package、Publication、Installation、Source 和 Sync State 使用独立契约。
+- [x] Publication 状态不包含 `purged`；物理清理属于 Package retention/tombstone。
+- [x] Disable/Uninstall 与安全 Revoke 分离，为后续应用服务保留明确状态。
+- [x] `tests/` 首期仅允许声明式测试向量，不执行包内任意代码。
+
+### 持久化
+
+- [x] 新增 PostgreSQL/KingBase migration 和 down migration。
+- [x] Package 使用 tenant + publisher + name + version 不可变键，并校验 digest 冲突。
+- [x] Publication、Installation 和 Source 使用 revision 乐观并发语义。
+- [x] Source Sync State generation 不允许倒退，且与 tenant/source 外键绑定。
+- [x] 提供内存 Store 和 PostgreSQL Store，共享稳定 Action Port。
+
+### 范围边界
+
+- [x] 本阶段不改变现有 `SkillPackageRegistry`、Admin API 或 Runtime 行为。
+- [x] 本阶段不把 Skill 搜索切换到统一 Catalog，避免未完成投影时破坏既有闭环。
+- [x] Publisher Registry、非对称签名、Outbox、租约、发布 CLI/API 和 Artifact GC 后续分阶段实现。
+
+### 质量与交付
+
+- [x] Lifecycle 单元测试、PostgreSQL 集成测试和 migration roundtrip 通过。
+- [x] 全量 Ruff、全量 Mypy、完整单元测试、相关集成测试和 10 条 import-linter contract 通过。
+- [x] 架构、migration 和阶段门禁文档同步完成。
+- [x] 修正 migration target、生产 SQL fail-closed 测试和既有 Ruff 导入基线；Vault 集成恢复并通过。
+- [x] MySQL 服务未部署、PostgreSQL 可选 Role 未安装的环境测试不纳入本地完成判定，失败原因已记录。
+- [x] 本阶段作为一个 intentional commit 提交并 push，不包含 `.env`、Secret、缓存或无关改动。
+
 ## 阶段 Product Activity：产品级对话执行轨迹（AuraX Issue #2）
 
 状态：代码与定向验证完成；完整基础设施集成门禁受现有 Kafka/MySQL/PostgreSQL/Artifact 环境失败阻塞。

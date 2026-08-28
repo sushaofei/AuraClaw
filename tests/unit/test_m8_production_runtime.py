@@ -9,13 +9,13 @@ import pytest
 
 from auraclaw.composition.services import RemoteRuntimeWorker
 from auraclaw.config import Settings
-from auraclaw.control.ports import RunnableItem, RuntimeAssignment, RuntimeInstance
 from auraclaw.contracts.errors import (
     ModelAuthenticationError,
     ModelProviderError,
     ModelRateLimitError,
     ModelTimeoutError,
 )
+from auraclaw.control.ports import RunnableItem, RuntimeAssignment, RuntimeInstance
 from auraclaw.infrastructure.model import OpenAICompatibleProvider
 from auraclaw.runtime.ports import ModelRequest
 

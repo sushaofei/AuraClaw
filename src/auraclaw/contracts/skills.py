@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
@@ -15,8 +16,37 @@ _DIGEST = r"^sha256:[0-9a-f]{64}$"
 
 
 class SkillPublicationStatus(StrEnum):
+    STAGED = "staged"
+    VALIDATING = "validating"
     ACTIVE = "active"
+    QUARANTINED = "quarantined"
     REVOKED = "revoked"
+
+
+class SkillInstallationStatus(StrEnum):
+    ACTIVE = "active"
+    DISABLED = "disabled"
+    UNINSTALLED = "uninstalled"
+
+
+class SkillPackageRetentionStatus(StrEnum):
+    RETAINED = "retained"
+    PURGED = "purged"
+
+
+class SkillSourceKind(StrEnum):
+    BUILTIN = "builtin"
+    ADMIN_UPLOAD = "admin_upload"
+    MCP = "mcp"
+    MODEL_COMPILER = "model_compiler"
+    GIT = "git"
+    OCI = "oci"
+
+
+class SkillSourceDesiredState(StrEnum):
+    ENABLED = "enabled"
+    DISABLED = "disabled"
+    RETIRED = "retired"
 
 
 class SkillToolRequirement(ContractModel):
@@ -129,6 +159,162 @@ class PublishedSkill(ContractModel):
     status: SkillPublicationStatus = SkillPublicationStatus.ACTIVE
 
 
+class SkillPackageRecord(ContractModel):
+    tenant_id: str = Field(min_length=1, max_length=128)
+    manifest: SkillManifest
+    package_digest: str = Field(pattern=_DIGEST)
+    artifact_ref: ArtifactRef
+    signature_key_id: str | None = Field(default=None, max_length=256)
+    retention_status: SkillPackageRetentionStatus = (
+        SkillPackageRetentionStatus.RETAINED
+    )
+    created_at: datetime
+    purged_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def validate_retention(self) -> SkillPackageRecord:
+        if (
+            self.retention_status is SkillPackageRetentionStatus.PURGED
+            and self.purged_at is None
+        ):
+            raise ValueError("Purged Skill package requires purged_at")
+        if (
+            self.retention_status is SkillPackageRetentionStatus.RETAINED
+            and self.purged_at is not None
+        ):
+            raise ValueError("Retained Skill package cannot have purged_at")
+        return self
+
+
+class SkillPublicationRecord(ContractModel):
+    publication_id: str = Field(pattern=r"^skp_[A-Za-z0-9_-]+$")
+    tenant_id: str = Field(min_length=1, max_length=128)
+    publisher: str = Field(min_length=1, max_length=128, pattern=_SKILL_NAME)
+    name: str = Field(min_length=1, max_length=256, pattern=_SKILL_NAME)
+    version: str = Field(pattern=_SEMVER)
+    package_digest: str = Field(pattern=_DIGEST)
+    status: SkillPublicationStatus = SkillPublicationStatus.STAGED
+    source_id: str | None = Field(default=None, max_length=128)
+    revision: int = Field(default=1, ge=1)
+    created_by: str = Field(min_length=1, max_length=256)
+    created_at: datetime
+    updated_at: datetime
+    reason_code: str | None = Field(default=None, max_length=128)
+
+    @model_validator(mode="after")
+    def validate_status_reason(self) -> SkillPublicationRecord:
+        if self.status in {
+            SkillPublicationStatus.QUARANTINED,
+            SkillPublicationStatus.REVOKED,
+        } and not self.reason_code:
+            raise ValueError("Quarantined or revoked Skill publication requires a reason")
+        return self
+
+
+class SkillInstallationRecord(ContractModel):
+    installation_id: str = Field(pattern=r"^ski_[A-Za-z0-9_-]+$")
+    tenant_id: str = Field(min_length=1, max_length=128)
+    publisher: str = Field(min_length=1, max_length=128, pattern=_SKILL_NAME)
+    name: str = Field(min_length=1, max_length=256, pattern=_SKILL_NAME)
+    version_constraint: str = Field(default="*", min_length=1, max_length=128)
+    pinned_package_digest: str | None = Field(default=None, pattern=_DIGEST)
+    status: SkillInstallationStatus = SkillInstallationStatus.ACTIVE
+    source_id: str | None = Field(default=None, max_length=128)
+    auto_upgrade: bool = True
+    revision: int = Field(default=1, ge=1)
+    created_by: str = Field(min_length=1, max_length=256)
+    updated_by: str = Field(min_length=1, max_length=256)
+    created_at: datetime
+    updated_at: datetime
+    reason_code: str | None = Field(default=None, max_length=128)
+
+    @field_validator("version_constraint")
+    @classmethod
+    def validate_version_constraint(cls, constraint: str) -> str:
+        clause = re.compile(
+            r"^(>=|<=|>|<|==|=)?(0|[1-9]\d*)"
+            r"(?:\.(0|[1-9]\d*))?(?:\.(0|[1-9]\d*))?$"
+        )
+        if constraint != "*" and any(
+            clause.fullmatch(item.strip()) is None for item in constraint.split(",")
+        ):
+            raise ValueError(f"Unsupported Skill version constraint: {constraint}")
+        return constraint
+
+    @model_validator(mode="after")
+    def validate_pin(self) -> SkillInstallationRecord:
+        if self.pinned_package_digest is not None and self.auto_upgrade:
+            raise ValueError("Pinned Skill installation cannot auto-upgrade")
+        if self.status in {
+            SkillInstallationStatus.DISABLED,
+            SkillInstallationStatus.UNINSTALLED,
+        } and not self.reason_code:
+            raise ValueError("Disabled or uninstalled Skill requires a reason")
+        return self
+
+
+class SkillSourceRecord(ContractModel):
+    source_id: str = Field(pattern=r"^sks_[A-Za-z0-9_.-]+$")
+    tenant_id: str = Field(min_length=1, max_length=128)
+    kind: SkillSourceKind
+    desired_state: SkillSourceDesiredState = SkillSourceDesiredState.DISABLED
+    publisher_allowlist: tuple[str, ...] = ()
+    credential_ref: str | None = Field(default=None, max_length=512)
+    config_metadata: dict[str, Any] = Field(default_factory=dict)
+    revision: int = Field(default=1, ge=1)
+    created_by: str = Field(min_length=1, max_length=256)
+    updated_by: str = Field(min_length=1, max_length=256)
+    created_at: datetime
+    updated_at: datetime
+
+    @field_validator("publisher_allowlist")
+    @classmethod
+    def validate_publishers(cls, publishers: tuple[str, ...]) -> tuple[str, ...]:
+        if len(publishers) != len(set(publishers)):
+            raise ValueError("Skill Source publisher allowlist must be unique")
+        if any(re.fullmatch(_SKILL_NAME, publisher) is None for publisher in publishers):
+            raise ValueError("Skill Source publisher is invalid")
+        return publishers
+
+    @model_validator(mode="after")
+    def validate_source_security(self) -> SkillSourceRecord:
+        if (
+            self.desired_state is SkillSourceDesiredState.ENABLED
+            and not self.publisher_allowlist
+        ):
+            raise ValueError("Enabled Skill Source requires a publisher allowlist")
+        if _contains_sensitive_metadata_key(self.config_metadata):
+            raise ValueError(
+                "Skill Source metadata cannot contain credentials or secrets; "
+                "use credential_ref"
+            )
+        return self
+
+
+class SkillSourceSyncState(ContractModel):
+    source_id: str = Field(pattern=r"^sks_[A-Za-z0-9_.-]+$")
+    tenant_id: str = Field(min_length=1, max_length=128)
+    generation: int = Field(default=0, ge=0)
+    cursor: str | None = Field(default=None, max_length=2048)
+    complete_snapshot: bool = False
+    last_success_at: datetime | None = None
+    last_attempt_at: datetime | None = None
+    consecutive_failures: int = Field(default=0, ge=0)
+    safe_error_code: str | None = Field(default=None, max_length=128)
+
+    @model_validator(mode="after")
+    def validate_sync_evidence(self) -> SkillSourceSyncState:
+        if self.complete_snapshot and self.last_success_at is None:
+            raise ValueError("Complete Skill Source snapshot requires last_success_at")
+        if (
+            self.last_success_at is not None
+            and self.last_attempt_at is not None
+            and self.last_success_at > self.last_attempt_at
+        ):
+            raise ValueError("Skill Source success cannot be after its last attempt")
+        return self
+
+
 class ResolvedSkillTool(ContractModel):
     capability_id: str
     canonical_name: str
@@ -180,3 +366,27 @@ class SkillActivation(ContractModel):
 
 def is_semver(value: str) -> bool:
     return re.fullmatch(_SEMVER, value) is not None
+
+
+def _contains_sensitive_metadata_key(value: Any) -> bool:
+    if isinstance(value, dict):
+        for key, child in value.items():
+            normalized = str(key).lower().replace("-", "_")
+            if any(
+                marker in normalized
+                for marker in (
+                    "secret",
+                    "password",
+                    "token",
+                    "private_key",
+                    "api_key",
+                    "access_key",
+                    "credential",
+                )
+            ):
+                return True
+            if _contains_sensitive_metadata_key(child):
+                return True
+    elif isinstance(value, (list, tuple)):
+        return any(_contains_sensitive_metadata_key(item) for item in value)
+    return False
