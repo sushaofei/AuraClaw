@@ -21,6 +21,7 @@ from auraclaw.contracts.internal import (
     SkillPublisherRevokeKeyInternalRequest,
     SkillPublisherRotateKeyInternalRequest,
     SkillPublisherStateInternalRequest,
+    SkillPublisherStatusInternalRequest,
     SkillPublishInternalRequest,
     SkillPublishInternalResponse,
     SkillPurgeInternalRequest,
@@ -32,6 +33,7 @@ from auraclaw.contracts.internal import (
 )
 from auraclaw.contracts.skills import (
     ChangeSkillInstallationCommand,
+    ChangeSkillPublisherStatusCommand,
     PublishSkillCommand,
     PurgeSkillPackageCommand,
     RegisterSkillPublisherCommand,
@@ -39,6 +41,7 @@ from auraclaw.contracts.skills import (
     RevokeSkillPublisherKeyCommand,
     RotateSkillPublisherKeyCommand,
     SkillInstallationOperation,
+    SkillPublisherStatusOperation,
 )
 from auraclaw.contracts.tools import ArtifactRef
 
@@ -345,6 +348,34 @@ class SkillPublicationInternalService:
         if self._rebuilder is not None:
             await self._rebuilder.rebuild_tenant(request.context.tenant_id)
         return await self._publisher_state(service, request.context.tenant_id, request.publisher)
+
+    async def change_publisher_status(
+        self, request: SkillPublisherStatusInternalRequest
+    ) -> SkillPublisherInternalResponse:
+        self._validate_management_request(
+            request.context.service_identity,
+            request.context.request_id,
+            request.command_id,
+        )
+        service = self._require_publishers()
+        await service.change_status(
+            ChangeSkillPublisherStatusCommand(
+                tenant_id=request.context.tenant_id,
+                actor_id=request.actor_id,
+                publisher=request.publisher,
+                operation=SkillPublisherStatusOperation(request.operation),
+                reason_code=request.reason_code,
+                command_id=request.command_id,
+                expected_revision=request.expected_revision,
+                correlation_id=request.context.correlation_id,
+                causation_id=request.context.causation_id,
+            )
+        )
+        if self._rebuilder is not None:
+            await self._rebuilder.rebuild_tenant(request.context.tenant_id)
+        return await self._publisher_state(
+            service, request.context.tenant_id, request.publisher
+        )
 
     async def publisher_state(
         self, request: SkillPublisherStateInternalRequest

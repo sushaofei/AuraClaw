@@ -767,6 +767,16 @@ class SkillPublisherRevokeKeyInternalRequest(ContractModel):
     expected_revision: int = Field(ge=1)
 
 
+class SkillPublisherStatusInternalRequest(ContractModel):
+    context: InternalRequestContext
+    actor_id: str = Field(min_length=1, max_length=256)
+    publisher: str = Field(min_length=1, max_length=128)
+    operation: Literal["suspend", "resume"]
+    reason_code: str = Field(min_length=1, max_length=128)
+    command_id: str = Field(min_length=1, max_length=256)
+    expected_revision: int = Field(ge=1)
+
+
 class SkillPublisherStateInternalRequest(ContractModel):
     context: InternalRequestContext
     publisher: str = Field(min_length=1, max_length=128)

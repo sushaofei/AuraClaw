@@ -72,6 +72,29 @@ def test_admin_manages_tenant_publisher_and_key_rotation() -> None:
         assert rotated.status_code == 202, rotated.text
         assert rotated.json()["keys"][0]["status"] == "active"
 
+        suspended = client.post(
+            "/v1/admin/skill-publishers/acme/status:suspend",
+            headers={
+                **identity,
+                "Idempotency-Key": "suspend-1",
+                "X-Expected-Revision": "2",
+                "X-Reason-Code": "publisher_under_review",
+            },
+        )
+        assert suspended.status_code == 202, suspended.text
+        assert suspended.json()["publisher"]["status"] == "suspended"
+        resumed = client.post(
+            "/v1/admin/skill-publishers/acme/status:resume",
+            headers={
+                **identity,
+                "Idempotency-Key": "resume-1",
+                "X-Expected-Revision": "3",
+                "X-Reason-Code": "review_completed",
+            },
+        )
+        assert resumed.status_code == 202, resumed.text
+        assert resumed.json()["publisher"]["status"] == "active"
+
         state = client.get(
             "/v1/admin/skill-publishers/acme", headers=identity
         )

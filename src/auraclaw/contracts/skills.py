@@ -55,6 +55,11 @@ class SkillPublisherStatus(StrEnum):
     SUSPENDED = "suspended"
 
 
+class SkillPublisherStatusOperation(StrEnum):
+    SUSPEND = "suspend"
+    RESUME = "resume"
+
+
 class SkillPublisherKeyStatus(StrEnum):
     ACTIVE = "active"
     RETIRING = "retiring"
@@ -160,6 +165,18 @@ class RevokeSkillPublisherKeyCommand(ContractModel):
     actor_id: str = Field(min_length=1, max_length=256)
     publisher: str = Field(min_length=1, max_length=128, pattern=_SKILL_NAME)
     key_id: str = Field(min_length=1, max_length=128, pattern=_SKILL_NAME)
+    reason_code: str = Field(min_length=1, max_length=128)
+    command_id: str = Field(min_length=1, max_length=256)
+    expected_revision: int = Field(ge=1)
+    correlation_id: str = Field(min_length=1, max_length=256)
+    causation_id: str = Field(min_length=1, max_length=256)
+
+
+class ChangeSkillPublisherStatusCommand(ContractModel):
+    tenant_id: str = Field(min_length=1, max_length=128)
+    actor_id: str = Field(min_length=1, max_length=256)
+    publisher: str = Field(min_length=1, max_length=128, pattern=_SKILL_NAME)
+    operation: SkillPublisherStatusOperation
     reason_code: str = Field(min_length=1, max_length=128)
     command_id: str = Field(min_length=1, max_length=256)
     expected_revision: int = Field(ge=1)
@@ -277,11 +294,23 @@ class SkillPublisherRecord(ContractModel):
     publisher: str = Field(min_length=1, max_length=128, pattern=_SKILL_NAME)
     display_name: str = Field(min_length=1, max_length=256)
     status: SkillPublisherStatus = SkillPublisherStatus.ACTIVE
+    status_reason_code: str | None = Field(default=None, max_length=128)
+    status_changed_at: datetime | None = None
     revision: int = Field(default=1, ge=1)
     created_by: str = Field(min_length=1, max_length=256)
     updated_by: str = Field(min_length=1, max_length=256)
     created_at: datetime
     updated_at: datetime
+
+    @model_validator(mode="after")
+    def validate_status_evidence(self) -> SkillPublisherRecord:
+        if self.status is SkillPublisherStatus.SUSPENDED and (
+            not self.status_reason_code or self.status_changed_at is None
+        ):
+            raise ValueError("Suspended Skill Publisher requires status evidence")
+        if self.status is SkillPublisherStatus.ACTIVE and self.status_reason_code:
+            raise ValueError("Active Skill Publisher cannot carry suspension reason")
+        return self
 
 
 class SkillPublisherKeyRecord(ContractModel):

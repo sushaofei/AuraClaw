@@ -356,6 +356,13 @@ Publisher 管理通过 `POST /v1/admin/skill-publishers/{publisher}` 注册，�
 `SkillPackage.signature_key_id` 相同的包；revoked key 在 admission 和 restore 都 fail closed。撤销所在
 Action Hands 立即重建 tenant，其他副本由周期全量重建收敛，从 Catalog/Resolver 移除受影响包。
 
+Publisher 还提供 `/status:suspend` 与 `/status:resume` 作为 tenant 级可逆信任断路器。状态命令要求
+reason、expected revision、actor、command/correlation/causation，并写入同一 Publisher 命令账本；
+suspended record 持久化 reason 与变更时间。suspend 后禁止 key rotation、新包 admission 和任何签名包
+restore，当前 Action Hands 立即按持久事实重建 tenant，其余副本周期收敛。resume 不改变 key 状态，
+因此只会恢复仍为 active/retiring 且验签通过的包，revoked key 及其包不会被复活。若即时重建失败，
+相同命令重放仍会再次触发重建，且周期任务提供最终恢复路径。
+
 发布服务先以 command id 在 Artifact metadata 获取有期限的 publication claim，再在一个数据库事务内
 提交不可变 Package、Publication、首个 Installation、成功命令账本和 `skill.publication.committed`
 Outbox。相同 command id 与 request digest 可跨副本重放；相同 command id 的不同可信请求冲突并

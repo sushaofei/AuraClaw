@@ -11,12 +11,15 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from auraclaw.config import get_settings
-from auraclaw.contracts.errors import VersionConflictError
+from auraclaw.contracts.errors import PolicyDeniedError, VersionConflictError
 from auraclaw.contracts.skills import (
+    ChangeSkillPublisherStatusCommand,
     RegisterSkillPublisherCommand,
     RevokeSkillPublisherKeyCommand,
     RotateSkillPublisherKeyCommand,
     SkillPublisherKeyStatus,
+    SkillPublisherStatus,
+    SkillPublisherStatusOperation,
 )
 from auraclaw.infrastructure.persistence.postgres_common import asyncpg_url
 from auraclaw.infrastructure.persistence.postgres_skill_publishers import (
@@ -28,7 +31,12 @@ DATABASE_URL = (
     asyncpg_url(SETTINGS.resolved_database_url) if SETTINGS.postgres_enabled else None
 )
 ROOT = Path(__file__).resolve().parents[2]
-MIGRATION = (ROOT / "migrations/0027_skill_publisher_registry.sql").read_text()
+MIGRATION = "\n".join(
+    (
+        (ROOT / "migrations/0027_skill_publisher_registry.sql").read_text(),
+        (ROOT / "migrations/0030_skill_publisher_suspension.sql").read_text(),
+    )
+)
 pytestmark = pytest.mark.skipif(
     DATABASE_URL is None, reason="PostgreSQL test URL not configured"
 )
@@ -110,6 +118,45 @@ def test_postgres_publisher_rotation_is_atomic_and_idempotent() -> None:
                 await store_a.rotate_key(
                     second.model_copy(update={"public_key": _public_key()})
                 )
+            suspend = ChangeSkillPublisherStatusCommand(
+                tenant_id=tenant_id,
+                actor_id="security-admin",
+                publisher=publisher,
+                operation=SkillPublisherStatusOperation.SUSPEND,
+                reason_code="publisher_under_review",
+                command_id=f"suspend-{suffix}",
+                expected_revision=publisher_record.revision,
+                correlation_id=f"corr-{suffix}",
+                causation_id=f"suspend-{suffix}",
+            )
+            suspended = await store_a.change_status(suspend)
+            assert await store_b.change_status(suspend) == suspended
+            assert suspended.status is SkillPublisherStatus.SUSPENDED
+            assert suspended.status_reason_code == "publisher_under_review"
+            with pytest.raises(PolicyDeniedError, match="not active"):
+                await store_b.rotate_key(
+                    second.model_copy(
+                        update={
+                            "key_id": "key-c",
+                            "public_key": _public_key(),
+                            "command_id": f"rotate-suspended-{suffix}",
+                            "causation_id": f"rotate-suspended-{suffix}",
+                            "expected_revision": suspended.revision,
+                        }
+                    )
+                )
+            resume = suspend.model_copy(
+                update={
+                    "operation": SkillPublisherStatusOperation.RESUME,
+                    "reason_code": "review_completed",
+                    "command_id": f"resume-{suffix}",
+                    "causation_id": f"resume-{suffix}",
+                    "expected_revision": suspended.revision,
+                }
+            )
+            resumed = await store_b.change_status(resume)
+            assert resumed.status is SkillPublisherStatus.ACTIVE
+            assert resumed.status_reason_code is None
             revoked = await store_a.revoke_key(
                 RevokeSkillPublisherKeyCommand(
                     tenant_id=tenant_id,
@@ -124,7 +171,7 @@ def test_postgres_publisher_rotation_is_atomic_and_idempotent() -> None:
                 )
             )
             assert revoked.status is SkillPublisherKeyStatus.REVOKED
-            assert (await store_b.get_publisher(tenant_id, publisher)) == publisher_record
+            assert (await store_b.get_publisher(tenant_id, publisher)) == resumed
         finally:
             await store_a.close()
             await store_b.close()

@@ -29,12 +29,15 @@ from auraclaw.action.skill_publishers import (
 from auraclaw.action.skill_rebuild import SkillStateRebuilder
 from auraclaw.contracts.errors import PolicyDeniedError, VersionConflictError
 from auraclaw.contracts.skills import (
+    ChangeSkillPublisherStatusCommand,
     PublishSkillCommand,
     RegisterSkillPublisherCommand,
     RevokeSkillPublisherKeyCommand,
     RotateSkillPublisherKeyCommand,
     SkillManifest,
     SkillPublisherKeyStatus,
+    SkillPublisherStatus,
+    SkillPublisherStatusOperation,
     SkillSourceDesiredState,
     SkillSourceKind,
     SkillSourceRecord,
@@ -120,6 +123,11 @@ def test_publisher_rotation_admission_restore_and_revocation() -> None:
         trust = SkillPublisherTrustService(store)
         publisher, keys = await service.register(_publisher_command())
         assert publisher.revision == 1 and keys == ()
+        await service.register(
+            _publisher_command("publisher-tenant-b").model_copy(
+                update={"tenant_id": "tenant-b"}
+            )
+        )
         first_private = Ed25519PrivateKey.generate()
         first_public = _b64(
             first_private.public_key().public_bytes(
@@ -157,6 +165,51 @@ def test_publisher_rotation_admission_restore_and_revocation() -> None:
         ]
         with pytest.raises(PolicyDeniedError, match="not trusted"):
             await trust.verify_for_admission("tenant-a", first_package)
+        assert await trust.verify_for_restore("tenant-a", first_package) == "key-2026-a"
+
+        suspended, _keys = await service.change_status(
+            ChangeSkillPublisherStatusCommand(
+                tenant_id="tenant-a",
+                actor_id="security-admin",
+                publisher="acme",
+                operation=SkillPublisherStatusOperation.SUSPEND,
+                reason_code="publisher_under_review",
+                command_id="suspend-1",
+                expected_revision=publisher.revision,
+                correlation_id="corr-a",
+                causation_id="suspend-1",
+            )
+        )
+        assert suspended.status is SkillPublisherStatus.SUSPENDED
+        assert suspended.status_reason_code == "publisher_under_review"
+        tenant_b, _tenant_b_keys = await service.get("tenant-b", "acme")
+        assert tenant_b.status is SkillPublisherStatus.ACTIVE
+        with pytest.raises(PolicyDeniedError, match="not trusted"):
+            await trust.verify_for_restore("tenant-a", first_package)
+        with pytest.raises(PolicyDeniedError, match="not active"):
+            await service.rotate_key(
+                _rotate(
+                    "key-2026-c",
+                    second_public,
+                    suspended.revision,
+                    "rotate-suspended",
+                )
+            )
+        resumed, _keys = await service.change_status(
+            ChangeSkillPublisherStatusCommand(
+                tenant_id="tenant-a",
+                actor_id="security-admin",
+                publisher="acme",
+                operation=SkillPublisherStatusOperation.RESUME,
+                reason_code="review_completed",
+                command_id="resume-1",
+                expected_revision=suspended.revision,
+                correlation_id="corr-a",
+                causation_id="resume-1",
+            )
+        )
+        assert resumed.status is SkillPublisherStatus.ACTIVE
+        assert resumed.status_reason_code is None
         assert await trust.verify_for_restore("tenant-a", first_package) == "key-2026-a"
 
         first_key = keys[0]
@@ -265,6 +318,39 @@ def test_ed25519_publisher_can_publish_and_key_id_is_persisted() -> None:
         )
         restored = await rebuilder.rebuild_tenant("tenant-a")
         assert restored == (1, ())
+        current_publisher, _current_keys = await publishers.get("tenant-a", "acme")
+        suspended, _current_keys = await publishers.change_status(
+            ChangeSkillPublisherStatusCommand(
+                tenant_id="tenant-a",
+                actor_id="security-admin",
+                publisher="acme",
+                operation=SkillPublisherStatusOperation.SUSPEND,
+                reason_code="publisher_under_review",
+                command_id="suspend-after-publish",
+                expected_revision=current_publisher.revision,
+                correlation_id="corr-a",
+                causation_id="suspend-after-publish",
+            )
+        )
+        assert await rebuilder.rebuild_tenant("tenant-a") == (
+            0,
+            ("package_restore_PolicyDeniedError",),
+        )
+        assert registry.list_publications("tenant-a") == ()
+        await publishers.change_status(
+            ChangeSkillPublisherStatusCommand(
+                tenant_id="tenant-a",
+                actor_id="security-admin",
+                publisher="acme",
+                operation=SkillPublisherStatusOperation.RESUME,
+                reason_code="review_completed",
+                command_id="resume-after-publish",
+                expected_revision=suspended.revision,
+                correlation_id="corr-a",
+                causation_id="resume-after-publish",
+            )
+        )
+        assert await rebuilder.rebuild_tenant("tenant-a") == (1, ())
         _publisher, keys = await publishers.get("tenant-a", "acme")
         first_key = next(key for key in keys if key.key_id == "key-2026-a")
         await publishers.revoke_key(

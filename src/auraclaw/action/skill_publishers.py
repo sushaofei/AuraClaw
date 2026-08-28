@@ -17,6 +17,7 @@ from auraclaw.contracts.errors import (
     VersionConflictError,
 )
 from auraclaw.contracts.skills import (
+    ChangeSkillPublisherStatusCommand,
     RegisterSkillPublisherCommand,
     RevokeSkillPublisherKeyCommand,
     RotateSkillPublisherKeyCommand,
@@ -24,6 +25,7 @@ from auraclaw.contracts.skills import (
     SkillPublisherKeyStatus,
     SkillPublisherRecord,
     SkillPublisherStatus,
+    SkillPublisherStatusOperation,
 )
 
 
@@ -39,6 +41,10 @@ class SkillPublisherStore(Protocol):
     async def revoke_key(
         self, command: RevokeSkillPublisherKeyCommand
     ) -> SkillPublisherKeyRecord: ...
+
+    async def change_status(
+        self, command: ChangeSkillPublisherStatusCommand
+    ) -> SkillPublisherRecord: ...
 
     async def get_publisher(
         self, tenant_id: str, publisher: str
@@ -189,6 +195,53 @@ class InMemorySkillPublisherStore:
         self.commands[(command.tenant_id, command.command_id)] = (request, revoked)
         return revoked
 
+    async def change_status(
+        self, command: ChangeSkillPublisherStatusCommand
+    ) -> SkillPublisherRecord:
+        request = (
+            f"status:{command.publisher}:{command.operation.value}:"
+            f"{command.reason_code}:{command.expected_revision}"
+        )
+        replay = self._replay(command.tenant_id, command.command_id, request)
+        if replay is not None:
+            assert isinstance(replay, SkillPublisherRecord)
+            return replay
+        key = (command.tenant_id, command.publisher)
+        current = self.publishers.get(key)
+        if current is None:
+            raise NotFoundError("Skill Publisher not found")
+        if current.revision != command.expected_revision:
+            raise VersionConflictError("Skill Publisher revision conflict")
+        target = (
+            SkillPublisherStatus.SUSPENDED
+            if command.operation is SkillPublisherStatusOperation.SUSPEND
+            else SkillPublisherStatus.ACTIVE
+        )
+        if current.status is target:
+            self.commands[(command.tenant_id, command.command_id)] = (
+                request,
+                current,
+            )
+            return current
+        now = datetime.now(UTC)
+        updated = current.model_copy(
+            update={
+                "status": target,
+                "status_reason_code": (
+                    command.reason_code
+                    if target is SkillPublisherStatus.SUSPENDED
+                    else None
+                ),
+                "status_changed_at": now,
+                "revision": current.revision + 1,
+                "updated_by": command.actor_id,
+                "updated_at": now,
+            }
+        )
+        self.publishers[key] = updated
+        self.commands[(command.tenant_id, command.command_id)] = (request, updated)
+        return updated
+
     async def get_publisher(
         self, tenant_id: str, publisher: str
     ) -> SkillPublisherRecord | None:
@@ -257,6 +310,17 @@ class SkillPublisherService:
         self, command: RevokeSkillPublisherKeyCommand
     ) -> tuple[SkillPublisherRecord, tuple[SkillPublisherKeyRecord, ...]]:
         return await self.revoke_key(command)
+
+    async def change_status(
+        self, command: ChangeSkillPublisherStatusCommand
+    ) -> tuple[SkillPublisherRecord, tuple[SkillPublisherKeyRecord, ...]]:
+        await self._store.change_status(command)
+        return await self.get(command.tenant_id, command.publisher)
+
+    async def change_publisher_status(
+        self, command: ChangeSkillPublisherStatusCommand
+    ) -> tuple[SkillPublisherRecord, tuple[SkillPublisherKeyRecord, ...]]:
+        return await self.change_status(command)
 
     async def get(
         self, tenant_id: str, publisher: str
