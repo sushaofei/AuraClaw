@@ -79,15 +79,18 @@ class SkillPublicationInternalService:
         self._validate_admission_reader(request.context.service_identity)
         if self._admissions is None:
             raise SchemaValidationError("Skill admission reader is not configured")
-        records = await self._admissions.list_admissions(
+        page = await self._admissions.page_admissions(
             request.context.tenant_id,
             outcome=request.outcome,
             stage=request.stage,
             content_policy_version=request.content_policy_version,
+            since=request.since,
+            cursor=request.cursor,
             limit=request.limit,
         )
         return SkillAdmissionListInternalResponse(
-            admissions=tuple(asdict(record) for record in records)
+            admissions=tuple(asdict(record) for record in page.admissions),
+            next_cursor=page.next_cursor,
         )
 
     async def admission_metrics(
@@ -96,7 +99,9 @@ class SkillPublicationInternalService:
         self._validate_admission_reader(request.context.service_identity)
         if self._admissions is None:
             raise SchemaValidationError("Skill admission reader is not configured")
-        metrics = await self._admissions.admission_metrics(request.context.tenant_id)
+        metrics = await self._admissions.admission_metrics(
+            request.context.tenant_id, since=request.since
+        )
         return SkillAdmissionMetricsInternalResponse(
             metrics=tuple(asdict(metric) for metric in metrics)
         )

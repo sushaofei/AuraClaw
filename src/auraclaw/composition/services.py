@@ -50,6 +50,7 @@ from auraclaw.action.ports import (
     SkillArtifactLifecycle,
 )
 from auraclaw.action.resource_gateway import ManagedResourceGateway
+from auraclaw.action.skill_admission_maintenance import SkillAdmissionMaintenanceWorker
 from auraclaw.action.skill_internal_service import SkillPublicationInternalService
 from auraclaw.action.skill_lifecycle import (
     InMemorySkillLifecycleStore,
@@ -792,6 +793,13 @@ def _task_api_app(settings: Settings) -> FastAPI:
             upload_service=skill_uploads,
             publisher_service=publisher_management,
             admission_reader=skill_publication if skill_lifecycle is None else skill_lifecycle,
+            admission_metrics_window_hours=settings.skill_admission_metrics_window_hours,
+            admission_quarantine_alert_ratio=(
+                settings.skill_admission_quarantine_alert_ratio
+            ),
+            admission_quarantine_alert_min_samples=(
+                settings.skill_admission_quarantine_alert_min_samples
+            ),
         )
     )
     extra_closeables: list[Any] = [mcp_lifecycle]
@@ -1436,6 +1444,11 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         rebuilder=skill_rebuilder,
         owner=f"action-hands-{secrets.token_hex(8)}",
     )
+    skill_admission_maintenance = SkillAdmissionMaintenanceWorker(
+        skill_lifecycle,
+        retention=timedelta(days=settings.skill_admission_retention_days),
+        batch_size=settings.skill_admission_cleanup_batch_size,
+    )
     skill_management = SkillManagementService(
         lifecycle=skill_lifecycle,
         projector=skill_rebuilder,
@@ -1513,6 +1526,9 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
                 )
         app.state.skill_rebuild_result = await skill_rebuilder.rebuild_all()
         app.state.skill_reliability_result = await skill_reliability.run_once()
+        app.state.skill_admission_maintenance_result = (
+            await skill_admission_maintenance.run_once()
+        )
 
     app.state.capability_connectors = {}
     app.state.catalog_reconciler = None
@@ -1577,6 +1593,19 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
             "skill-state",
             settings.mcp_reconcile_interval_seconds,
             rebuild_skill_state,
+        )
+    )
+
+    async def cleanup_skill_admissions() -> int:
+        result = await skill_admission_maintenance.run_once()
+        app.state.skill_admission_maintenance_result = result
+        return result.deleted
+
+    periodic_jobs.append(
+        (
+            "skill-admission-cleanup",
+            settings.skill_admission_cleanup_interval_seconds,
+            cleanup_skill_admissions,
         )
     )
 

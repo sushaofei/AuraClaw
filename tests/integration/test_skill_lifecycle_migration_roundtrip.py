@@ -26,10 +26,12 @@ UP = "\n".join(
         (ROOT / "migrations/0032_skill_admission_audit.sql").read_text(),
         (ROOT / "migrations/0033_skill_content_quarantine.sql").read_text(),
         (ROOT / "migrations/0034_skill_admission_operations.sql").read_text(),
+        (ROOT / "migrations/0035_skill_admission_retention.sql").read_text(),
     )
 )
 DOWN = "\n".join(
     (
+        (ROOT / "migrations/0035_skill_admission_retention.down.sql").read_text(),
         (ROOT / "migrations/0034_skill_admission_operations.down.sql").read_text(),
         (ROOT / "migrations/0033_skill_content_quarantine.down.sql").read_text(),
         (ROOT / "migrations/0032_skill_admission_audit.down.sql").read_text(),

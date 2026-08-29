@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
@@ -51,6 +52,7 @@ MIGRATION = "\n".join(
         (ROOT / "migrations/0032_skill_admission_audit.sql").read_text(),
         (ROOT / "migrations/0033_skill_content_quarantine.sql").read_text(),
         (ROOT / "migrations/0034_skill_admission_operations.sql").read_text(),
+        (ROOT / "migrations/0035_skill_admission_retention.sql").read_text(),
     )
 )
 pytestmark = pytest.mark.skipif(DATABASE_URL is None, reason="PostgreSQL test URL not configured")
@@ -106,6 +108,29 @@ def test_postgres_skill_lifecycle_is_persistent_and_tenant_scoped() -> None:
             assert metrics[0].content_policy_version == "skill-content-v1"
             assert metrics[0].count == 1
             assert metrics[0].average_duration_ms == 7
+            old_admission = replace(
+                admission,
+                admission_id=f"skad_old_{suffix}",
+                command_id=f"admission-old-{suffix}",
+                occurred_at=now - timedelta(days=100),
+            )
+            await store_a.record_admission(old_admission)
+            first_page = await store_b.page_admissions(tenant_id, limit=1)
+            assert first_page.admissions == (admission,)
+            assert first_page.next_cursor is not None
+            second_page = await store_b.page_admissions(
+                tenant_id, cursor=first_page.next_cursor, limit=1
+            )
+            assert second_page.admissions == (old_admission,)
+            assert second_page.next_cursor is None
+            recent_metrics = await store_b.admission_metrics(
+                tenant_id, since=now - timedelta(days=1)
+            )
+            assert recent_metrics[0].count == 1
+            assert await store_a.delete_admissions_before(
+                now - timedelta(days=90), limit=1
+            ) == 1
+            assert await store_b.list_admissions(tenant_id) == (admission,)
             assert await store_b.list_admissions(f"other-{tenant_id}") == ()
             package = SkillPackageRecord(
                 tenant_id=tenant_id,

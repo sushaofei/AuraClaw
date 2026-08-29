@@ -788,6 +788,10 @@ tenant Registry 的 active key 独立验签。CLI 不接受命令行私钥，也
 `GET /v1/admin/skill-admissions/metrics` 获取按 outcome/策略版本聚合的 count 与平均延迟。产品端不得把
 这些管理详情或原始拒绝原因返回给普通终端用户。
 
+列表还接受 timezone-aware `since`、`cursor` 和 `limit`（1–500），响应返回 `next_cursor`。继续翻页时
+必须保持相同 filters 与 since。指标端点接受 `window_hours`（1–2160），同时返回 quarantine ratio 和
+`ok|firing|insufficient_data` 告警状态；低于最小样本数不会告警。
+
 签名通过后，服务端还会扫描可执行扩展与 magic、高置信凭据、Secret 赋值和 Prompt Injection 模式。
 命中后 API 以受控 `skill_content_*` 策略错误拒绝，本次 admission 在内部记为 `quarantined`，但不会把
 不可信内容创建为 Package/Publication/Installation。客户端不得根据具体 finding 自动修改或重发正文；
@@ -801,6 +805,12 @@ curl -sS 'http://127.0.0.1:8000/v1/admin/skill-admissions?outcome=quarantined&co
 
 策略版本用于解释历史 finding 和灰度期间的结果差异，不表示隔离内容可以恢复或启用。修复后的内容仍须
 重新签名并以新 Idempotency-Key 发布。
+
+```bash
+curl -sS 'http://127.0.0.1:8000/v1/admin/skill-admissions/metrics?window_hours=24' \
+  -H 'X-Tenant-ID: local' \
+  -H 'X-Actor-ID: security-operator'
+```
 
 ```bash
 curl -sS http://127.0.0.1:8000/v1/admin/skills \

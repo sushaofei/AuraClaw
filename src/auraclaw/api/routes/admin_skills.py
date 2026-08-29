@@ -3,14 +3,15 @@ from __future__ import annotations
 import base64
 import binascii
 from dataclasses import asdict
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, Literal, Protocol
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
-from pydantic import Field, model_validator
+from pydantic import AwareDatetime, Field, model_validator
 
 from auraclaw.action.skill_lifecycle import (
-    SkillAdmissionAuditRecord,
     SkillAdmissionMetricRecord,
+    SkillAdmissionPage,
 )
 from auraclaw.action.skill_packages import SkillPackage, SkillPackageRegistry
 from auraclaw.api.dependencies import RequestIdentity, request_identity
@@ -192,18 +193,20 @@ class SkillPublisherManager(Protocol):
 
 
 class SkillAdmissionReader(Protocol):
-    async def list_admissions(
+    async def page_admissions(
         self,
         tenant_id: str,
         *,
         outcome: str | None = None,
         stage: str | None = None,
         content_policy_version: str | None = None,
+        since: AwareDatetime | None = None,
+        cursor: str | None = None,
         limit: int = 100,
-    ) -> tuple[SkillAdmissionAuditRecord, ...]: ...
+    ) -> SkillAdmissionPage: ...
 
     async def admission_metrics(
-        self, tenant_id: str
+        self, tenant_id: str, *, since: datetime | None = None
     ) -> tuple[SkillAdmissionMetricRecord, ...]: ...
 
 
@@ -236,7 +239,16 @@ def create_skill_admin_router(
     upload_service: SkillPackageUploadManager | None = None,
     publisher_service: SkillPublisherManager | None = None,
     admission_reader: SkillAdmissionReader | None = None,
+    admission_metrics_window_hours: int = 24,
+    admission_quarantine_alert_ratio: float = 0.25,
+    admission_quarantine_alert_min_samples: int = 20,
 ) -> APIRouter:
+    if not 1 <= admission_metrics_window_hours <= 2160:
+        raise ValueError("Skill admission metrics window must be between 1 and 2160 hours")
+    if not 0 <= admission_quarantine_alert_ratio <= 1:
+        raise ValueError("Skill admission quarantine alert ratio must be between 0 and 1")
+    if admission_quarantine_alert_min_samples < 1:
+        raise ValueError("Skill admission quarantine alert minimum samples must be positive")
     router = APIRouter(prefix="/v1/admin", tags=["skill-admin"])
 
     @router.get("/skills")
@@ -260,14 +272,18 @@ def create_skill_admin_router(
         content_policy_version: Annotated[
             str | None, Query(min_length=1, max_length=128)
         ] = None,
+        since: AwareDatetime | None = None,
+        cursor: Annotated[str | None, Query(min_length=1, max_length=2048)] = None,
         limit: Annotated[int, Query(ge=1, le=500)] = 100,
     ) -> dict[str, Any]:
         reader = _require_admission_reader(admission_reader)
-        records = await reader.list_admissions(
+        page = await reader.page_admissions(
             identity.tenant_id,
             outcome=outcome,
             stage=stage,
             content_policy_version=content_policy_version,
+            since=since,
+            cursor=cursor,
             limit=limit,
         )
         return {
@@ -276,19 +292,27 @@ def create_skill_admin_router(
                     **asdict(record),
                     "occurred_at": record.occurred_at.isoformat(),
                 }
-                for record in records
-            ]
+                for record in page.admissions
+            ],
+            "next_cursor": page.next_cursor,
         }
 
     @router.get("/skill-admissions/metrics")
-    async def skill_admission_metrics(identity: Identity) -> dict[str, Any]:
+    async def skill_admission_metrics(
+        identity: Identity,
+        window_hours: Annotated[int | None, Query(ge=1, le=2160)] = None,
+    ) -> dict[str, Any]:
         reader = _require_admission_reader(admission_reader)
-        groups = await reader.admission_metrics(identity.tenant_id)
+        selected_window = window_hours or admission_metrics_window_hours
+        observed_at = datetime.now(UTC)
+        since = observed_at - timedelta(hours=selected_window)
+        groups = await reader.admission_metrics(identity.tenant_id, since=since)
         metrics: list[dict[str, Any]] = []
         for group in groups:
             labels = {
                 "outcome": group.outcome,
                 "content_policy_version": group.content_policy_version,
+                "window_hours": str(selected_window),
             }
             metrics.extend(
                 (
@@ -304,7 +328,46 @@ def create_skill_admin_router(
                     },
                 )
             )
-        return {"metrics": metrics}
+        sample_count = sum(group.count for group in groups)
+        quarantined_count = sum(
+            group.count for group in groups if group.outcome == "quarantined"
+        )
+        quarantine_ratio = (
+            quarantined_count / sample_count if sample_count else 0.0
+        )
+        ratio_labels = {"window_hours": str(selected_window)}
+        metrics.append(
+            {
+                "name": "skill.admission.quarantine_ratio",
+                "value": quarantine_ratio,
+                "labels": ratio_labels,
+            }
+        )
+        alert_status = (
+            "insufficient_data"
+            if sample_count < admission_quarantine_alert_min_samples
+            else "firing"
+            if quarantine_ratio > admission_quarantine_alert_ratio
+            else "ok"
+        )
+        return {
+            "window": {
+                "hours": selected_window,
+                "since": since.isoformat(),
+                "observed_at": observed_at.isoformat(),
+            },
+            "metrics": metrics,
+            "alerts": [
+                {
+                    "rule": "skill.admission.quarantine_ratio",
+                    "status": alert_status,
+                    "value": quarantine_ratio,
+                    "threshold": admission_quarantine_alert_ratio,
+                    "sample_count": sample_count,
+                    "minimum_samples": admission_quarantine_alert_min_samples,
+                }
+            ],
+        }
 
     @router.get("/skill-publishers/{publisher}")
     async def get_skill_publisher(

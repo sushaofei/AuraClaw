@@ -429,6 +429,14 @@ Package、Publication 或 Installation；production staged Artifact 继续由原
 运维查询支持按 outcome、stage 与 `content_policy_version` 过滤，并直接从持久账本按
 `outcome + content_policy_version` 聚合 count 与平均 admission latency。聚合不从受 limit 约束的页面结果
 推导，重启后仍可重建；返回内容只有安全审计字段和稳定 labels，不包含正文、匹配片段或异常消息。
+列表使用 `(occurred_at, admission_id)` 降序 keyset cursor，并可用 timezone-aware `since` 固定时间窗口；
+调用方翻页时必须保持原 filters/since。指标按配置的窗口计算 quarantine ratio，样本少于门槛时状态为
+`insufficient_data`，超过阈值才为 `firing`，避免低流量 tenant 的单次拒绝触发噪声。
+
+Admission 账本默认保留 365 天。Action Hands 启动及周期维护通过 Lifecycle port 执行严格
+`occurred_at < cutoff` 的有界批量删除；PostgreSQL 使用全局 retention index 与 `FOR UPDATE SKIP LOCKED`，
+允许多副本竞争而不重复处理。该能力没有 tenant/user 删除 API，不允许用运维查询绕过审计保留期；更长的
+合规保留应通过增大配置或外部归档完成后再缩短窗口。
 
 Action Hands 启动及周期对账时由 `SkillStateRebuilder` 枚举 Lifecycle tenant，从受 Policy 保护的
 Artifact 下载接口读取不可变包，并再次校验大小、内容 hash、Archive、Manifest、package digest 和

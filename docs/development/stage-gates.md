@@ -2026,6 +2026,32 @@ ready Skill Artifact 建立带 fencing 的物理回收流程；不把成功命�
 - [x] README、架构、公开 API、数据库参考与阶段门禁同步。
 - [x] 本阶段作为一个 intentional commit 提交并 push，不包含 `.env`、Secret、缓存或无关改动。
 
+## 阶段 M14r：Skill Admission 分页、保留与告警状态（Issue #56）
+
+状态：已完成。
+
+### 稳定查询与时间窗口
+
+- [x] 列表使用 `(occurred_at, admission_id)` 降序 keyset cursor，不使用会随新增记录漂移的 offset。
+- [x] Admin 与内部契约支持 timezone-aware since、opaque cursor 和 1–500 limit，并返回 next cursor。
+- [x] PostgreSQL 与内存适配器保持相同 filters、时间窗口、排序和翻页语义；非法 cursor 受控失败。
+- [x] 指标按明确窗口从完整账本聚合，count/latency labels 包含 outcome、policy version 与窗口。
+
+### 保留与告警
+
+- [x] Admission 默认保留 365 天，Action Hands 启动及周期任务执行严格 `< cutoff` 的有界批量清理。
+- [x] PostgreSQL 清理使用 retention index、稳定顺序和 `FOR UPDATE SKIP LOCKED`，不暴露用户删除 API。
+- [x] quarantine ratio 只有达到最小样本且超过阈值才进入 firing；低样本明确为 insufficient_data。
+- [x] 阈值、窗口、最小样本、保留期、批次和周期均有受约束配置。
+
+### 质量与交付
+
+- [x] 单测覆盖无重复分页、窗口、非法 cursor、边界保留、批次限制、告警 firing 与 tenant 隔离。
+- [x] PostgreSQL 覆盖 tuple cursor、窗口聚合、批量删除及 0035 完整正反迁移。
+- [x] 全量 Ruff、Mypy、unit、相关 integration 与 import-linter 通过。
+- [x] README、架构、公开 API、数据库参考、运维手册与阶段门禁同步。
+- [x] 本阶段作为一个 intentional commit 提交并 push，不包含 `.env`、Secret、缓存或无关改动。
+
 ## 阶段 Product Activity：产品级对话执行轨迹（AuraX Issue #2）
 
 状态：代码与定向验证完成；完整基础设施集成门禁受现有 Kafka/MySQL/PostgreSQL/Artifact 环境失败阻塞。
