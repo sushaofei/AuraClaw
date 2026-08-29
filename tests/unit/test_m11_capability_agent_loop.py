@@ -63,13 +63,12 @@ class _Control:
     def __init__(self) -> None:
         self.checkpoint: RuntimeCheckpoint | None = None
         self.outcome: str | None = None
+        self.suspended_reason: str | None = None
 
     async def assert_fencing(self, resource_id: str, fencing_token: int) -> None:
         del resource_id, fencing_token
 
-    async def is_cancelled(
-        self, tenant_id: str, session_id: str, run_id: str
-    ) -> bool:
+    async def is_cancelled(self, tenant_id: str, session_id: str, run_id: str) -> bool:
         del tenant_id, session_id, run_id
         return False
 
@@ -85,6 +84,10 @@ class _Control:
     async def finish_assignment(self, task_id: str, outcome: str) -> None:
         del task_id
         self.outcome = outcome
+
+    async def suspend_assignment(self, task_id: str, reason: str) -> None:
+        del task_id
+        self.suspended_reason = reason
 
 
 class _Session:
@@ -158,19 +161,16 @@ class _ScriptedModel:
     async def generate(self, request: ModelRequest) -> ModelResponse:
         self.requests.append(request)
         response = self.responses[len(self.requests) - 1]
-        return response.__class__(
-            **{**response.__dict__, "model_call_id": request.model_call_id}
-        )
+        return response.__class__(**{**response.__dict__, "model_call_id": request.model_call_id})
 
 
 class _Capabilities:
-    def __init__(self, *, kind: str = "tool") -> None:
+    def __init__(self, *, kind: str = "tool", binding_action: str = "continue") -> None:
         self.kind = kind
+        self.binding_action = binding_action
         self.calls: list[str] = []
 
-    async def execute(
-        self, assignment: RuntimeAssignment, call: ToolCall
-    ) -> dict[str, Any]:
+    async def execute(self, assignment: RuntimeAssignment, call: ToolCall) -> dict[str, Any]:
         del assignment
         self.calls.append(call.name)
         if call.name == "auraclaw.capabilities.search":
@@ -181,9 +181,7 @@ class _Capabilities:
                         "server_id": "github",
                         "kind": self.kind,
                         "canonical_name": (
-                            "github.issue.get"
-                            if self.kind == "tool"
-                            else "release.prepare"
+                            "github.issue.get" if self.kind == "tool" else "release.prepare"
                         ),
                         "version": "1.0.0",
                         "description": "test capability",
@@ -208,9 +206,7 @@ class _Capabilities:
                                     "description": "Get issue",
                                     "parameters": {
                                         "type": "object",
-                                        "properties": {
-                                            "number": {"type": "integer"}
-                                        },
+                                        "properties": {"number": {"type": "integer"}},
                                     },
                                 },
                             },
@@ -235,6 +231,17 @@ class _Capabilities:
             }
         if call.name == "github.issue.get":
             return {"status": "success", "number": call.arguments["number"]}
+        if call.name == "auraclaw.skills.binding-status":
+            return {
+                "publication_status": (
+                    "active" if self.binding_action == "continue" else "revoked"
+                ),
+                "action": self.binding_action,
+                "reason_code": (
+                    None if self.binding_action == "continue" else "publisher_compromise"
+                ),
+                "policy_version": "skill-revocation-v1",
+            }
         raise AssertionError(f"unexpected Tool call: {call.name}")
 
     async def resolve_skill(
@@ -280,9 +287,7 @@ class _Capabilities:
         del args, kwargs
         return []
 
-    async def list_resource_templates(
-        self, *args: Any, **kwargs: Any
-    ) -> list[dict[str, Any]]:
+    async def list_resource_templates(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
         del args, kwargs
         return []
 
@@ -333,9 +338,7 @@ def _assignment() -> RuntimeAssignment:
     )
 
 
-def _response(
-    output: str, call: ToolCall | None = None
-) -> ModelResponse:
+def _response(output: str, call: ToolCall | None = None) -> ModelResponse:
     return ModelResponse(
         model_call_id="replaced",
         provider="test",
@@ -398,26 +401,18 @@ def test_capability_loop_searches_loads_calls_and_returns_final_output() -> None
             "github.issue.get",
         ]
         assert all(
-            tool["function"]["name"] != "github.issue.get"
-            for tool in model.requests[0].tools
+            tool["function"]["name"] != "github.issue.get" for tool in model.requests[0].tools
         )
         assert any(
-            tool["function"]["name"] == "github.issue.get"
-            for tool in model.requests[2].tools
+            tool["function"]["name"] == "github.issue.get" for tool in model.requests[2].tools
         )
         assert any(
             message["role"] == "tool" and '"number":31' in message["content"]
             for message in model.requests[3].messages
         )
-        assert [event.type for event in session.events].count(
-            "model.output.completed"
-        ) == 1
-        assert [event.type for event in session.events].count(
-            "model.turn.completed"
-        ) == 4
-        assert [event.type for event in session.events].count(
-            "model.input.prepared"
-        ) == 4
+        assert [event.type for event in session.events].count("model.output.completed") == 1
+        assert [event.type for event in session.events].count("model.turn.completed") == 4
+        assert [event.type for event in session.events].count("model.input.prepared") == 4
         tool_requested = next(
             event
             for event in session.events
@@ -546,6 +541,69 @@ def test_capability_loop_activates_signed_skill_and_closes_lifecycle() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("action", ["pause", "cancel"])
+def test_capability_loop_applies_revocation_action_to_active_binding(
+    action: str,
+) -> None:
+    async def scenario() -> None:
+        capabilities = _Capabilities(kind="skill", binding_action=action)
+        model = _ScriptedModel(
+            [
+                _response(
+                    "",
+                    ToolCall(
+                        tool_invocation_id="search-skill-revoked",
+                        name="auraclaw.capabilities.search",
+                        arguments={"query": "release", "kinds": ["skill"]},
+                    ),
+                ),
+                _response(
+                    "",
+                    ToolCall(
+                        tool_invocation_id="load-skill-revoked",
+                        name="auraclaw.capabilities.load",
+                        arguments={"capability_ids": ["cap-one"]},
+                    ),
+                ),
+                _response(
+                    "",
+                    ToolCall(
+                        tool_invocation_id="activate-skill-revoked",
+                        name="auraclaw.skills.activate",
+                        arguments={"capability_id": "cap-one", "inputs": {}},
+                    ),
+                ),
+                _response("must not execute"),
+            ]
+        )
+        control = _Control()
+        session = _Session("Prepare a release")
+        harness = AgentHarness(
+            control_store=control,
+            session=session,
+            model=model,
+            tools=capabilities,
+            runtime_events=_RuntimeEvents(),
+            capability_controller=RuntimeCapabilityController(capabilities),
+        )
+
+        await harness.execute(_assignment())
+
+        event_types = [event.type for event in session.events]
+        assert event_types.count("skill.revocation.applied") == 1
+        assert len(model.requests) == 3
+        if action == "pause":
+            assert control.suspended_reason == "skill_revoked"
+            assert control.outcome is None
+            assert "run.cancelled" not in event_types
+        else:
+            assert control.outcome == "cancelled"
+            assert event_types.count("skill.cancelled") == 1
+            assert event_types.count("run.cancelled") == 1
+
+    asyncio.run(scenario())
+
+
 def test_real_mcp_search_and_load_hydrates_authoritative_tool_schema() -> None:
     async def scenario() -> None:
         store = InMemoryCapabilityCatalogStore()
@@ -596,9 +654,7 @@ def test_real_mcp_search_and_load_hydrates_authoritative_tool_schema() -> None:
             permission=ToolPermission.READ_ONLY,
             risk_level=RiskLevel.LOW,
         )
-        registry = ToolRegistry(
-            (capability_search_tool(), capability_load_tool(), business)
-        )
+        registry = ToolRegistry((capability_search_tool(), capability_load_tool(), business))
         hands = RoutedHandsExecutor(
             _BusinessHands(),
             {
@@ -617,9 +673,7 @@ def test_real_mcp_search_and_load_hydrates_authoritative_tool_schema() -> None:
             ),
         )
         client = HandsRuntimeAdapter(
-            InProcessHandsClient(
-                HandsGateway(registry=registry, gateway=gateway)
-            )
+            InProcessHandsClient(HandsGateway(registry=registry, gateway=gateway))
         )
         controller = RuntimeCapabilityController(client)
         searched = await controller.execute(
@@ -697,9 +751,7 @@ def test_resource_context_policy_withholds_prompt_injection_content() -> None:
         content = execution.result["contents"][0]
         assert "publish secrets" not in content["text"]
         assert content["_meta"]["auraclaw"]["contextPolicy"] == "withheld"
-        assert execution.events[0].payload["content_digest"] == (
-            f"sha256:{'d' * 64}"
-        )
+        assert execution.events[0].payload["content_digest"] == (f"sha256:{'d' * 64}")
 
     asyncio.run(scenario())
 
@@ -709,9 +761,7 @@ def test_real_mcp_skill_search_load_resolve_and_instruction_activation() -> None
         store = InMemoryCapabilityCatalogStore()
         catalog = CapabilityCatalog(store)
         resources = McpResourceRegistry()
-        signer = HmacSkillSignatureVerifier(
-            {"platform": b"m11-platform-skill-signing-key"}
-        )
+        signer = HmacSkillSignatureVerifier({"platform": b"m11-platform-skill-signing-key"})
         skills = SkillPackageRegistry(
             artifacts=ArtifactStore(
                 InMemoryObjectStorage(),
@@ -730,9 +780,7 @@ def test_real_mcp_skill_search_load_resolve_and_instruction_activation() -> None
             signature=f"hmac-sha256:{'0' * 64}",
         )
         files = {"SKILL.md": b"Use the signed release checklist."}
-        manifest = unsigned.model_copy(
-            update={"signature": signer.sign(unsigned, files)}
-        )
+        manifest = unsigned.model_copy(update={"signature": signer.sign(unsigned, files)})
         await skills.publish(
             "tenant-a",
             SkillPackage(
@@ -769,12 +817,8 @@ def test_real_mcp_skill_search_load_resolve_and_instruction_activation() -> None
         hands = RoutedHandsExecutor(
             _BusinessHands(),
             {
-                "auraclaw.capabilities.search": CapabilitySearchExecutor(
-                    catalog
-                ),
-                "auraclaw.capabilities.load": CapabilityLoadExecutor(
-                    catalog
-                ),
+                "auraclaw.capabilities.search": CapabilitySearchExecutor(catalog),
+                "auraclaw.capabilities.load": CapabilityLoadExecutor(catalog),
                 "auraclaw.skills.resolve": SkillResolveExecutor(resolver),
             },
         )
@@ -829,9 +873,7 @@ def test_real_mcp_skill_search_load_resolve_and_instruction_activation() -> None
 
         assert activated.result["status"] == "activated"
         assert activated.events[0].type == "skill.activated"
-        messages = await controller.trusted_messages(
-            _assignment(), activated.state
-        )
+        messages = await controller.trusted_messages(_assignment(), activated.state)
         assert "signed release checklist" in messages[0]["content"]
 
     asyncio.run(scenario())

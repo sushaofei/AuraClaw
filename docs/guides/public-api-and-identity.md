@@ -236,7 +236,7 @@ Secret 只允许引用 `credential_ref`，响应里不会出现明文。写命�
 | `POST` | `/v1/admin/skills/{publisher}/{name}:enable` | 租户级启用（不改进行中 Run 的 binding） |
 | `POST` | `/v1/admin/skills/{publisher}/{name}:disable` | 租户级停用 |
 | `POST` | `/v1/admin/skill-publications/{publisher}/{name}/versions/{version}:restore` | 审核后恢复普通退役版本；要求 revision、reason 与幂等键 |
-| `POST` | `/v1/admin/skill-publications/{publisher}/{name}/versions/{version}:revoke` | 安全撤销版本；不可通过 restore 复活 |
+| `POST` | `/v1/admin/skill-publications/{publisher}/{name}/versions/{version}:revoke` | 安全撤销版本；`X-Skill-Revocation-Action: continue|pause|cancel` 明确处理活动 binding，默认 cancel；不可通过 restore 复活 |
 | `GET` | `/v1/admin/skill-publishers/{publisher}` | Publisher 与公钥状态 |
 | `POST` | `/v1/admin/skill-publishers/{publisher}` | 注册 tenant Publisher |
 | `POST` | `/v1/admin/skill-publishers/{publisher}/keys:rotate` | 原子轮换 Ed25519 公钥 |
@@ -776,6 +776,12 @@ Ed25519 公钥，不接收或生成私钥；新发布只接受 active key，reti
 普通来源下架产生的 `retired` Publication 只能经显式 restore 恢复。restore 先持久化 reviewer、reason、
 correlation/causation 和 revision 证据，再复验原 Artifact 与当前 Source/Publisher/key 信任；失败保持
 `restoring` 且不进入新发现，同一 Idempotency-Key 可在修复信任条件后重试。
+
+安全 revoke 与普通停用不同。Publication 会持久化 reason、`continue|pause|cancel`、policy version 和
+可选 decision id；Runtime 在每个模型轮次及 Skill step 前通过内部 Hands 能力校验固定
+publisher/name/version/digest。`continue` 只保留已固定 digest 的 `skill://` 正文读取，不恢复 Catalog
+可发现性；`pause` 保存 checkpoint 并挂起 assignment；`cancel` 写 `skill.revocation.applied`、
+`skill.cancelled` 与 `run.cancelled` Canonical Event 后结束 assignment。状态查询会返回完整撤销策略证据。
 
 外部 Publisher 可先用 `auraclaw skills sign <directory> --publisher <name> --key-id <id>` 离线签名，
 private key 只从 `AURACLAW_SKILL_SIGNING_KEY`（或指定 Secret 环境变量）读取。命令输出的 Ed25519 公钥

@@ -716,6 +716,11 @@ class SkillRevokeInternalRequest(ContractModel):
     name: str = Field(min_length=1, max_length=256)
     version: str = Field(min_length=1, max_length=128)
     reason_code: str = Field(min_length=1, max_length=128)
+    revocation_action: Literal["continue", "pause", "cancel"] = "cancel"
+    policy_version: str = Field(
+        default="skill-revocation-v1", min_length=1, max_length=128
+    )
+    policy_decision_id: str | None = Field(default=None, max_length=256)
     command_id: str = Field(min_length=1, max_length=256)
     expected_revision: int = Field(ge=1)
 

@@ -5,6 +5,10 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from auraclaw.action.capability_catalog import (
+    SkillBindingStatusExecutor,
+    skill_binding_status_tool,
+)
 from auraclaw.action.skill_lifecycle import InMemorySkillLifecycleStore
 from auraclaw.action.skill_management import SkillManagementService
 from auraclaw.contracts.errors import (
@@ -26,11 +30,12 @@ from auraclaw.contracts.skills import (
     SkillPackageRecord,
     SkillPublicationRecord,
     SkillPublicationStatus,
+    SkillRevocationAction,
     SkillSourceDesiredState,
     SkillSourceKind,
     SkillSourceRecord,
 )
-from auraclaw.contracts.tools import ArtifactRef
+from auraclaw.contracts.tools import ArtifactRef, ToolInvocation
 
 _DIGEST = f"sha256:{'a' * 64}"
 
@@ -279,9 +284,7 @@ def _restore_command(
 
 
 async def _retire(lifecycle: InMemorySkillLifecycleStore) -> None:
-    current = await lifecycle.get_publication(
-        "tenant-a", "platform", "release.prepare", "1.0.0"
-    )
+    current = await lifecycle.get_publication("tenant-a", "platform", "release.prepare", "1.0.0")
     assert current is not None
     await lifecycle.put_publication(
         current.model_copy(
@@ -349,13 +352,9 @@ def test_failed_restore_stays_non_discoverable_and_same_command_can_retry() -> N
         assert restoring.revision == 3
 
         with pytest.raises(VersionConflictError, match="revision conflict"):
-            await service.restore_publication(
-                _restore_command(command_id="restore-2")
-            )
+            await service.restore_publication(_restore_command(command_id="restore-2"))
         with pytest.raises(VersionConflictError, match="command id was reused"):
-            await service.restore_publication(
-                _restore_command(reason="different_review")
-            )
+            await service.restore_publication(_restore_command(reason="different_review"))
 
         activator.failure = None
         restored = await service.restore_publication(_restore_command())
@@ -385,6 +384,8 @@ def test_management_enforces_revision_and_revoke_is_separate() -> None:
                 name="release.prepare",
                 version="1.0.0",
                 reason_code="publisher_key_compromised",
+                revocation_action=SkillRevocationAction.PAUSE,
+                policy_decision_id="decision-1",
                 command_id="revoke-1",
                 expected_revision=1,
                 correlation_id="corr-revoke",
@@ -394,9 +395,59 @@ def test_management_enforces_revision_and_revoke_is_separate() -> None:
         assert revoked.status is SkillPublicationStatus.REVOKED
         assert revoked.updated_by == "security-a"
         assert revoked.reason_code == "publisher_key_compromised"
-        package = await lifecycle.get_package(
-            "tenant-a", "platform", "release.prepare", "1.0.0"
+        assert revoked.revocation_action is SkillRevocationAction.PAUSE
+        assert revoked.revocation_policy_decision_id == "decision-1"
+        disposition = await SkillBindingStatusExecutor(lifecycle).execute(
+            ToolInvocation(
+                tool_invocation_id="binding-status-1",
+                tenant_id="tenant-a",
+                root_session_id="root-1",
+                session_id="session-1",
+                run_id="run-1",
+                tool_name="auraclaw.skills.binding-status",
+                tool_version="1",
+                arguments={
+                    "publisher": "platform",
+                    "name": "release.prepare",
+                    "version": "1.0.0",
+                    "package_digest": _DIGEST,
+                },
+                expected_side_effect="read",
+                idempotency_key="binding-status-1",
+                deadline=None,
+                fencing_token=1,
+                actor_id="runtime-1",
+            ),
+            skill_binding_status_tool(),
         )
+        assert disposition["action"] == "pause"
+        assert disposition["policy_decision_id"] == "decision-1"
+        unavailable = await SkillBindingStatusExecutor(lifecycle).execute(
+            ToolInvocation(
+                tool_invocation_id="binding-status-cross-tenant",
+                tenant_id="tenant-b",
+                root_session_id="root-1",
+                session_id="session-1",
+                run_id="run-1",
+                tool_name="auraclaw.skills.binding-status",
+                tool_version="1",
+                arguments={
+                    "publisher": "platform",
+                    "name": "release.prepare",
+                    "version": "1.0.0",
+                    "package_digest": _DIGEST,
+                },
+                expected_side_effect="read",
+                idempotency_key="binding-status-cross-tenant",
+                deadline=None,
+                fencing_token=1,
+                actor_id="runtime-1",
+            ),
+            skill_binding_status_tool(),
+        )
+        assert unavailable["action"] == "cancel"
+        assert unavailable["reason_code"] == "binding_authority_unavailable"
+        package = await lifecycle.get_package("tenant-a", "platform", "release.prepare", "1.0.0")
         assert package is not None
         assert package.retention_status.value == "retained"
         assert projector.tenants == ["tenant-a"]
@@ -407,9 +458,7 @@ def test_management_enforces_revision_and_revoke_is_separate() -> None:
 def test_security_revoke_can_override_ordinary_retirement() -> None:
     async def scenario() -> None:
         service, lifecycle, _projector = await _service()
-        current = await service.get_publication(
-            "tenant-a", "platform", "release.prepare", "1.0.0"
-        )
+        current = await service.get_publication("tenant-a", "platform", "release.prepare", "1.0.0")
         await lifecycle.put_publication(
             current.model_copy(
                 update={
@@ -484,9 +533,7 @@ def test_purge_requires_expired_uninstalled_revoked_unreferenced_package() -> No
                 causation_id="revoke-purge",
             )
         )
-        package = await service.get_package(
-            "tenant-a", "platform", "release.prepare", "1.0.0"
-        )
+        package = await service.get_package("tenant-a", "platform", "release.prepare", "1.0.0")
         package = await lifecycle.update_package_retention(
             package.model_copy(
                 update={
@@ -580,9 +627,7 @@ def test_purge_rejects_retention_period_and_legal_hold() -> None:
         )
         with pytest.raises(PolicyDeniedError, match="retention period"):
             await service.purge_package(command)
-        package = await service.get_package(
-            "tenant-a", "platform", "release.prepare", "1.0.0"
-        )
+        package = await service.get_package("tenant-a", "platform", "release.prepare", "1.0.0")
         package = await lifecycle.update_package_retention(
             package.model_copy(
                 update={
@@ -597,9 +642,7 @@ def test_purge_rejects_retention_period_and_legal_hold() -> None:
         )
         with pytest.raises(PolicyDeniedError, match="legal hold"):
             await service.purge_package(
-                command.model_copy(
-                    update={"expected_revision": package.retention_revision}
-                )
+                command.model_copy(update={"expected_revision": package.retention_revision})
             )
         assert artifacts.deleted == []
 

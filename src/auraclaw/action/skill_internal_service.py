@@ -146,9 +146,7 @@ class SkillPublicationInternalService:
         )
         if self._rebuilder is not None:
             await self._rebuilder.rebuild_tenant(request.context.tenant_id)
-        return SkillPublishInternalResponse(
-            publication=result.model_dump(mode="json")
-        )
+        return SkillPublishInternalResponse(publication=result.model_dump(mode="json"))
 
     async def publish_artifact(
         self, request: SkillPublishArtifactInternalRequest
@@ -173,9 +171,7 @@ class SkillPublicationInternalService:
         )
         if self._rebuilder is not None:
             await self._rebuilder.rebuild_tenant(request.context.tenant_id)
-        return SkillPublishInternalResponse(
-            publication=result.model_dump(mode="json")
-        )
+        return SkillPublishInternalResponse(publication=result.model_dump(mode="json"))
 
     async def change_installation(
         self,
@@ -225,15 +221,16 @@ class SkillPublicationInternalService:
                 name=request.name,
                 version=request.version,
                 reason_code=request.reason_code,
+                revocation_action=request.revocation_action,
+                policy_version=request.policy_version,
+                policy_decision_id=request.policy_decision_id,
                 command_id=request.command_id,
                 expected_revision=request.expected_revision,
                 correlation_id=request.context.correlation_id,
                 causation_id=request.context.causation_id,
             )
         )
-        return SkillRevokeInternalResponse(
-            publication=result.model_dump(mode="json")
-        )
+        return SkillRevokeInternalResponse(publication=result.model_dump(mode="json"))
 
     async def restore(
         self,
@@ -260,9 +257,7 @@ class SkillPublicationInternalService:
                 causation_id=request.context.causation_id,
             )
         )
-        return SkillRestoreInternalResponse(
-            publication=result.model_dump(mode="json")
-        )
+        return SkillRestoreInternalResponse(publication=result.model_dump(mode="json"))
 
     async def package_state(
         self, request: SkillPackageStateInternalRequest
@@ -343,14 +338,10 @@ class SkillPublicationInternalService:
             )
         return SkillStateInternalResponse(
             installation=(
-                None
-                if installation is None
-                else installation.model_dump(mode="json")
+                None if installation is None else installation.model_dump(mode="json")
             ),
             publication=(
-                None
-                if publication is None
-                else publication.model_dump(mode="json")
+                None if publication is None else publication.model_dump(mode="json")
             ),
         )
 
@@ -375,7 +366,9 @@ class SkillPublicationInternalService:
                 causation_id=request.context.causation_id,
             )
         )
-        return await self._publisher_state(service, request.context.tenant_id, request.publisher)
+        return await self._publisher_state(
+            service, request.context.tenant_id, request.publisher
+        )
 
     async def rotate_publisher_key(
         self, request: SkillPublisherRotateKeyInternalRequest
@@ -399,7 +392,9 @@ class SkillPublicationInternalService:
                 causation_id=request.context.causation_id,
             )
         )
-        return await self._publisher_state(service, request.context.tenant_id, request.publisher)
+        return await self._publisher_state(
+            service, request.context.tenant_id, request.publisher
+        )
 
     async def revoke_publisher_key(
         self, request: SkillPublisherRevokeKeyInternalRequest
@@ -425,7 +420,9 @@ class SkillPublicationInternalService:
         )
         if self._rebuilder is not None:
             await self._rebuilder.rebuild_tenant(request.context.tenant_id)
-        return await self._publisher_state(service, request.context.tenant_id, request.publisher)
+        return await self._publisher_state(
+            service, request.context.tenant_id, request.publisher
+        )
 
     async def change_publisher_status(
         self, request: SkillPublisherStatusInternalRequest
@@ -461,7 +458,9 @@ class SkillPublicationInternalService:
         if request.context.service_identity is not ServiceIdentity.TASK_API:
             raise AuthorizationError("workload may not query Skill Publishers")
         service = self._require_publishers()
-        return await self._publisher_state(service, request.context.tenant_id, request.publisher)
+        return await self._publisher_state(
+            service, request.context.tenant_id, request.publisher
+        )
 
     def _require_publishers(self) -> SkillPublisherService:
         if self._publishers is None:

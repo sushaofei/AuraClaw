@@ -128,9 +128,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
         cursor: str | None = None,
         limit: int = 100,
     ) -> SkillAdmissionPage:
-        cursor_at, cursor_id = (
-            decode_skill_admission_cursor(cursor) if cursor else (None, None)
-        )
+        cursor_at, cursor_id = decode_skill_admission_cursor(cursor) if cursor else (None, None)
         pool = await self.pool()
         rows = await pool.fetch(
             """SELECT * FROM hands.skill_admission_audit
@@ -150,9 +148,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
             cursor_id,
             limit + 1,
         )
-        records = tuple(
-            SkillAdmissionAuditRecord(**dict(row)) for row in rows[:limit]
-        )
+        records = tuple(SkillAdmissionAuditRecord(**dict(row)) for row in rows[:limit])
         return SkillAdmissionPage(
             admissions=records,
             next_cursor=(
@@ -162,9 +158,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
             ),
         )
 
-    async def delete_admissions_before(
-        self, cutoff: datetime, *, limit: int = 1000
-    ) -> int:
+    async def delete_admissions_before(self, cutoff: datetime, *, limit: int = 1000) -> int:
         pool = await self.pool()
         deleted = await pool.fetchval(
             """WITH candidates AS (
@@ -184,9 +178,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
         )
         return int(deleted or 0)
 
-    async def commit_publish(
-        self, commit: SkillPublishCommit
-    ) -> SkillPublishCommitResult:
+    async def commit_publish(self, commit: SkillPublishCommit) -> SkillPublishCommitResult:
         pool = await self.pool()
         package = commit.package
         publication = commit.publication
@@ -259,9 +251,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
             )
             return result
 
-    async def commit_restore(
-        self, commit: SkillRestoreCommit
-    ) -> SkillPublicationRecord:
+    async def commit_restore(self, commit: SkillRestoreCommit) -> SkillPublicationRecord:
         record = commit.publication
         pool = await self.pool()
         async with pool.acquire() as connection, connection.transaction():
@@ -278,9 +268,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
             )
             if replay is not None:
                 if str(replay["request_digest"]) != commit.request_digest:
-                    raise VersionConflictError(
-                        "Skill restore command id was reused"
-                    )
+                    raise VersionConflictError("Skill restore command id was reused")
                 current = await connection.fetchrow(
                     """SELECT * FROM hands.skill_publication
                     WHERE tenant_id=$1 AND publisher=$2 AND name=$3 AND version=$4""",
@@ -290,9 +278,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
                     record.version,
                 )
                 if current is None:
-                    raise VersionConflictError(
-                        "Skill restore command result is incomplete"
-                    )
+                    raise VersionConflictError("Skill restore command result is incomplete")
                 return _publication(dict(current))
             current_row = await connection.fetchrow(
                 """SELECT * FROM hands.skill_publication
@@ -356,9 +342,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
             )
             return _publication(dict(updated))
 
-    async def claim_outbox(
-        self, *, owner: str, limit: int = 100
-    ) -> tuple[SkillOutboxRecord, ...]:
+    async def claim_outbox(self, *, owner: str, limit: int = 100) -> tuple[SkillOutboxRecord, ...]:
         pool = await self.pool()
         rows = await pool.fetch(
             """UPDATE hands.skill_outbox target SET claimed_by=$1,
@@ -394,9 +378,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
             owner,
         )
 
-    async def fail_outbox(
-        self, *, outbox_id: str, owner: str, safe_error_code: str
-    ) -> None:
+    async def fail_outbox(self, *, outbox_id: str, owner: str, safe_error_code: str) -> None:
         pool = await self.pool()
         await pool.execute(
             """UPDATE hands.skill_outbox SET claimed_by=NULL,claim_expires_at=NULL,
@@ -408,9 +390,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
             safe_error_code[:128],
         )
 
-    async def has_artifact_reference(
-        self, tenant_id: str, artifact_id: str, version: int
-    ) -> bool:
+    async def has_artifact_reference(self, tenant_id: str, artifact_id: str, version: int) -> bool:
         pool = await self.pool()
         return bool(
             await pool.fetchval(
@@ -456,9 +436,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
                 record.purged_at,
             )
         except asyncpg.UniqueViolationError as exc:
-            raise VersionConflictError(
-                "Skill package digest belongs to another version"
-            ) from exc
+            raise VersionConflictError("Skill package digest belongs to another version") from exc
         if row is not None:
             return _package(dict(row))
         existing = await self.get_package(
@@ -489,9 +467,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
         self, record: SkillPackageRecord, *, expected_revision: int
     ) -> SkillPackageRecord:
         if record.retention_revision != expected_revision + 1:
-            raise VersionConflictError(
-                "Skill package retention next revision is invalid"
-            )
+            raise VersionConflictError("Skill package retention next revision is invalid")
         pool = await self.pool()
         row = await pool.fetchrow(
             """UPDATE hands.skill_package SET
@@ -551,8 +527,10 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
                     """INSERT INTO hands.skill_publication
                     (publication_id,tenant_id,publisher,name,version,package_digest,
                      status,source_id,revision,created_by,updated_by,created_at,
-                     updated_at,reason_code)
-                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+                     updated_at,reason_code,revocation_action,
+                     revocation_policy_version,revocation_policy_decision_id)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,
+                            $15,$16,$17)
                     ON CONFLICT (tenant_id,publisher,name,version) DO NOTHING
                     RETURNING *""",
                     *_publication_values(record),
@@ -561,9 +539,10 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
                 row = await connection.fetchrow(
                     """UPDATE hands.skill_publication SET
                     status=$1,source_id=$2,revision=$3,updated_by=$4,updated_at=$5,
-                    reason_code=$6
-                    WHERE tenant_id=$7 AND publisher=$8 AND name=$9 AND version=$10
-                      AND publication_id=$11 AND package_digest=$12 AND revision=$13
+                    reason_code=$6,revocation_action=$7,
+                    revocation_policy_version=$8,revocation_policy_decision_id=$9
+                    WHERE tenant_id=$10 AND publisher=$11 AND name=$12 AND version=$13
+                      AND publication_id=$14 AND package_digest=$15 AND revision=$16
                     RETURNING *""",
                     record.status.value,
                     record.source_id,
@@ -571,6 +550,13 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
                     record.updated_by,
                     record.updated_at,
                     record.reason_code,
+                    (
+                        record.revocation_action.value
+                        if record.revocation_action is not None
+                        else None
+                    ),
+                    record.revocation_policy_version,
+                    record.revocation_policy_decision_id,
                     record.tenant_id,
                     record.publisher,
                     record.name,
@@ -597,9 +583,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
         )
         return None if row is None else _publication(dict(row))
 
-    async def list_publications(
-        self, tenant_id: str
-    ) -> tuple[SkillPublicationRecord, ...]:
+    async def list_publications(self, tenant_id: str) -> tuple[SkillPublicationRecord, ...]:
         pool = await self.pool()
         rows = await pool.fetch(
             """SELECT * FROM hands.skill_publication WHERE tenant_id=$1
@@ -680,9 +664,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
         )
         return None if row is None else _installation(dict(row))
 
-    async def list_installations(
-        self, tenant_id: str
-    ) -> tuple[SkillInstallationRecord, ...]:
+    async def list_installations(self, tenant_id: str) -> tuple[SkillInstallationRecord, ...]:
         pool = await self.pool()
         rows = await pool.fetch(
             """SELECT * FROM hands.skill_installation
@@ -730,9 +712,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
             raise VersionConflictError("Skill Source revision conflict")
         return _source(dict(row))
 
-    async def get_source(
-        self, tenant_id: str, source_id: str
-    ) -> SkillSourceRecord | None:
+    async def get_source(self, tenant_id: str, source_id: str) -> SkillSourceRecord | None:
         pool = await self.pool()
         row = await pool.fetchrow(
             """SELECT * FROM hands.skill_source
@@ -778,9 +758,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
         if row is None:
             raise VersionConflictError("Skill Source generation cannot move backwards")
 
-    async def get_sync_state(
-        self, tenant_id: str, source_id: str
-    ) -> SkillSourceSyncState | None:
+    async def get_sync_state(self, tenant_id: str, source_id: str) -> SkillSourceSyncState | None:
         pool = await self.pool()
         row = await pool.fetchrow(
             """SELECT * FROM hands.skill_source_sync_state
@@ -877,9 +855,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
                 state.safe_error_code,
             )
             if row is None:
-                raise VersionConflictError(
-                    "Skill Source generation cannot move backwards"
-                )
+                raise VersionConflictError("Skill Source generation cannot move backwards")
 
     async def commit_source_snapshot(
         self, commit: SkillSourceSnapshotCommit
@@ -904,13 +880,8 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
                 state.tenant_id,
                 state.source_id,
             )
-            if (
-                previous_generation is not None
-                and state.generation <= int(previous_generation)
-            ):
-                raise VersionConflictError(
-                    "Skill Source complete snapshot generation must advance"
-                )
+            if previous_generation is not None and state.generation <= int(previous_generation):
+                raise VersionConflictError("Skill Source complete snapshot generation must advance")
             rows = await connection.fetch(
                 """SELECT * FROM hands.skill_publication
                 WHERE tenant_id=$1 AND source_id=$2
@@ -968,9 +939,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
                 )
                 if int(missing) < commit.missing_snapshot_threshold:
                     continue
-                command_id = _retirement_command_id(
-                    commit.command_prefix, identity
-                )
+                command_id = _retirement_command_id(commit.command_prefix, identity)
                 command_row = await connection.fetchrow(
                     """INSERT INTO hands.skill_source_retirement_command
                     (tenant_id,command_id,source_id,publisher,name,version,
@@ -1011,9 +980,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
                     commit.occurred_at,
                 )
                 if updated_row is None:
-                    raise VersionConflictError(
-                        "Skill publication revision conflict"
-                    )
+                    raise VersionConflictError("Skill publication revision conflict")
                 await connection.execute(
                     """UPDATE hands.skill_source_inventory SET retired_at=$6
                     WHERE tenant_id=$1 AND source_id=$2 AND publisher=$3
@@ -1052,9 +1019,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
                 state.safe_error_code,
             )
             if sync_row is None:
-                raise VersionConflictError(
-                    "Skill Source generation cannot move backwards"
-                )
+                raise VersionConflictError("Skill Source generation cannot move backwards")
         return SkillSourceSnapshotResult(tuple(retired))
 
 
@@ -1091,9 +1056,7 @@ async def _put_package_transaction(
             record.purged_at,
         )
     except asyncpg.UniqueViolationError as exc:
-        raise VersionConflictError(
-            "Skill package digest belongs to another version"
-        ) from exc
+        raise VersionConflictError("Skill package digest belongs to another version") from exc
     if row is not None:
         return
     digest = await connection.fetchval(
@@ -1120,8 +1083,10 @@ async def _put_publication_transaction(
             """INSERT INTO hands.skill_publication
             (publication_id,tenant_id,publisher,name,version,package_digest,
              status,source_id,revision,created_by,updated_by,created_at,
-             updated_at,reason_code)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+             updated_at,reason_code,revocation_action,
+             revocation_policy_version,revocation_policy_decision_id)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,
+                    $15,$16,$17)
             ON CONFLICT (tenant_id,publisher,name,version) DO NOTHING
             RETURNING *""",
             *_publication_values(record),
@@ -1145,9 +1110,11 @@ async def _put_publication_transaction(
         _require_next_revision(record.revision, expected_revision, "publication")
         row = await connection.fetchrow(
             """UPDATE hands.skill_publication SET status=$1,source_id=$2,
-            revision=$3,updated_by=$4,updated_at=$5,reason_code=$6
-            WHERE tenant_id=$7 AND publisher=$8 AND name=$9 AND version=$10
-              AND publication_id=$11 AND package_digest=$12 AND revision=$13
+            revision=$3,updated_by=$4,updated_at=$5,reason_code=$6,
+            revocation_action=$7,revocation_policy_version=$8,
+            revocation_policy_decision_id=$9
+            WHERE tenant_id=$10 AND publisher=$11 AND name=$12 AND version=$13
+              AND publication_id=$14 AND package_digest=$15 AND revision=$16
             RETURNING *""",
             record.status.value,
             record.source_id,
@@ -1155,6 +1122,9 @@ async def _put_publication_transaction(
             record.updated_by,
             record.updated_at,
             record.reason_code,
+            (record.revocation_action.value if record.revocation_action is not None else None),
+            record.revocation_policy_version,
+            record.revocation_policy_decision_id,
             record.tenant_id,
             record.publisher,
             record.name,
@@ -1174,10 +1144,7 @@ async def _put_publication_transaction(
         )
         if concurrent is not None:
             current = _publication(dict(concurrent))
-            if (
-                current.package_digest == record.package_digest
-                and current.status is record.status
-            ):
+            if current.package_digest == record.package_digest and current.status is record.status:
                 return current
         raise VersionConflictError("Skill publication revision conflict")
     return _publication(dict(row))
@@ -1351,6 +1318,9 @@ def _publication_values(record: SkillPublicationRecord) -> tuple[object, ...]:
         record.created_at,
         record.updated_at,
         record.reason_code,
+        (record.revocation_action.value if record.revocation_action is not None else None),
+        record.revocation_policy_version,
+        record.revocation_policy_decision_id,
     )
 
 
@@ -1370,6 +1340,9 @@ def _publication(row: dict[str, Any]) -> SkillPublicationRecord:
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         reason_code=row["reason_code"],
+        revocation_action=row.get("revocation_action"),
+        revocation_policy_version=row.get("revocation_policy_version"),
+        revocation_policy_decision_id=row.get("revocation_policy_decision_id"),
     )
 
 

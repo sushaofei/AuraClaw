@@ -25,6 +25,12 @@ class SkillPublicationStatus(StrEnum):
     REVOKED = "revoked"
 
 
+class SkillRevocationAction(StrEnum):
+    CONTINUE = "continue"
+    PAUSE = "pause"
+    CANCEL = "cancel"
+
+
 class SkillInstallationStatus(StrEnum):
     ACTIVE = "active"
     DISABLED = "disabled"
@@ -99,15 +105,23 @@ class ChangeSkillInstallationCommand(ContractModel):
 
     @model_validator(mode="after")
     def validate_reason(self) -> ChangeSkillInstallationCommand:
-        if self.operation in {
-            SkillInstallationOperation.DISABLE,
-            SkillInstallationOperation.UNINSTALL,
-        } and self.reason_code is None:
+        if (
+            self.operation
+            in {
+                SkillInstallationOperation.DISABLE,
+                SkillInstallationOperation.UNINSTALL,
+            }
+            and self.reason_code is None
+        ):
             raise ValueError("Disable or uninstall requires a reason")
-        if self.operation in {
-            SkillInstallationOperation.INSTALL,
-            SkillInstallationOperation.ENABLE,
-        } and self.reason_code is not None:
+        if (
+            self.operation
+            in {
+                SkillInstallationOperation.INSTALL,
+                SkillInstallationOperation.ENABLE,
+            }
+            and self.reason_code is not None
+        ):
             raise ValueError("Install or enable cannot carry a reason")
         return self
 
@@ -119,6 +133,9 @@ class RevokeSkillPublicationCommand(ContractModel):
     name: str = Field(min_length=1, max_length=256, pattern=_SKILL_NAME)
     version: str = Field(pattern=_SEMVER)
     reason_code: str = Field(min_length=1, max_length=128)
+    revocation_action: SkillRevocationAction = SkillRevocationAction.CANCEL
+    policy_version: str = Field(default="skill-revocation-v1", min_length=1, max_length=128)
+    policy_decision_id: str | None = Field(default=None, max_length=256)
     command_id: str = Field(min_length=1, max_length=256)
     expected_revision: int = Field(ge=1)
     correlation_id: str = Field(min_length=1, max_length=256)
@@ -252,12 +269,9 @@ class SkillManifest(ContractModel):
         )
         for requirement in requirements:
             if requirement.version != "*" and any(
-                clause.fullmatch(item.strip()) is None
-                for item in requirement.version.split(",")
+                clause.fullmatch(item.strip()) is None for item in requirement.version.split(",")
             ):
-                raise ValueError(
-                    f"Unsupported Tool version constraint: {requirement.version}"
-                )
+                raise ValueError(f"Unsupported Tool version constraint: {requirement.version}")
         return requirements
 
     @field_validator("required_skills")
@@ -272,21 +286,16 @@ class SkillManifest(ContractModel):
         )
         for requirement in requirements:
             if requirement.version != "*" and any(
-                clause.fullmatch(item.strip()) is None
-                for item in requirement.version.split(",")
+                clause.fullmatch(item.strip()) is None for item in requirement.version.split(",")
             ):
-                raise ValueError(
-                    f"Unsupported Skill version constraint: {requirement.version}"
-                )
+                raise ValueError(f"Unsupported Skill version constraint: {requirement.version}")
         return requirements
 
     @model_validator(mode="after")
     def validate_dependencies(self) -> SkillManifest:
         tool_names = [item.name for item in self.required_tools]
         resource_uris = [item.uri_template for item in self.required_resources]
-        skill_names = [
-            (item.publisher, item.name) for item in self.required_skills
-        ]
+        skill_names = [(item.publisher, item.name) for item in self.required_skills]
         if len(tool_names) != len(set(tool_names)):
             raise ValueError("Skill Tool dependencies must be unique")
         if len(resource_uris) != len(set(resource_uris)):
@@ -363,6 +372,7 @@ class PublishedSkill(ContractModel):
     package_digest: str = Field(pattern=_DIGEST)
     artifact_ref: ArtifactRef
     status: SkillPublicationStatus = SkillPublicationStatus.ACTIVE
+    revocation_action: SkillRevocationAction | None = None
 
 
 class SkillPackageRecord(ContractModel):
@@ -371,9 +381,7 @@ class SkillPackageRecord(ContractModel):
     package_digest: str = Field(pattern=_DIGEST)
     artifact_ref: ArtifactRef
     signature_key_id: str | None = Field(default=None, max_length=256)
-    retention_status: SkillPackageRetentionStatus = (
-        SkillPackageRetentionStatus.RETAINED
-    )
+    retention_status: SkillPackageRetentionStatus = SkillPackageRetentionStatus.RETAINED
     retention_until: datetime
     legal_hold: bool = False
     retention_revision: int = Field(default=1, ge=1)
@@ -384,10 +392,7 @@ class SkillPackageRecord(ContractModel):
 
     @model_validator(mode="after")
     def validate_retention(self) -> SkillPackageRecord:
-        if (
-            self.retention_status is SkillPackageRetentionStatus.PURGED
-            and self.purged_at is None
-        ):
+        if self.retention_status is SkillPackageRetentionStatus.PURGED and self.purged_at is None:
             raise ValueError("Purged Skill package requires purged_at")
         if (
             self.retention_status is SkillPackageRetentionStatus.RETAINED
@@ -412,18 +417,40 @@ class SkillPublicationRecord(ContractModel):
     created_at: datetime
     updated_at: datetime
     reason_code: str | None = Field(default=None, max_length=128)
+    revocation_action: SkillRevocationAction | None = None
+    revocation_policy_version: str | None = Field(default=None, max_length=128)
+    revocation_policy_decision_id: str | None = Field(default=None, max_length=256)
 
     @model_validator(mode="after")
     def validate_status_reason(self) -> SkillPublicationRecord:
-        if self.status in {
-            SkillPublicationStatus.RESTORING,
-            SkillPublicationStatus.QUARANTINED,
-            SkillPublicationStatus.RETIRED,
-            SkillPublicationStatus.REVOKED,
-        } and not self.reason_code:
+        if (
+            self.status
+            in {
+                SkillPublicationStatus.RESTORING,
+                SkillPublicationStatus.QUARANTINED,
+                SkillPublicationStatus.RETIRED,
+                SkillPublicationStatus.REVOKED,
+            }
+            and not self.reason_code
+        ):
             raise ValueError(
                 "Restoring, quarantined, retired, or revoked Skill publication requires a reason"
             )
+        if self.status is SkillPublicationStatus.REVOKED and (
+            self.revocation_action is None or not self.revocation_policy_version
+        ):
+            raise ValueError(
+                "Revoked Skill publication requires an explicit runtime action and policy version"
+            )
+        if self.status is not SkillPublicationStatus.REVOKED and any(
+            value is not None
+            for value in (
+                self.revocation_action,
+                self.revocation_policy_version,
+                self.revocation_policy_decision_id,
+            )
+        ):
+            raise ValueError("Only revoked Skill publication may carry revocation policy evidence")
         return self
 
 
@@ -461,10 +488,14 @@ class SkillInstallationRecord(ContractModel):
     def validate_pin(self) -> SkillInstallationRecord:
         if self.pinned_package_digest is not None and self.auto_upgrade:
             raise ValueError("Pinned Skill installation cannot auto-upgrade")
-        if self.status in {
-            SkillInstallationStatus.DISABLED,
-            SkillInstallationStatus.UNINSTALLED,
-        } and not self.reason_code:
+        if (
+            self.status
+            in {
+                SkillInstallationStatus.DISABLED,
+                SkillInstallationStatus.UNINSTALLED,
+            }
+            and not self.reason_code
+        ):
             raise ValueError("Disabled or uninstalled Skill requires a reason")
         return self
 
@@ -494,15 +525,11 @@ class SkillSourceRecord(ContractModel):
 
     @model_validator(mode="after")
     def validate_source_security(self) -> SkillSourceRecord:
-        if (
-            self.desired_state is SkillSourceDesiredState.ENABLED
-            and not self.publisher_allowlist
-        ):
+        if self.desired_state is SkillSourceDesiredState.ENABLED and not self.publisher_allowlist:
             raise ValueError("Enabled Skill Source requires a publisher allowlist")
         if _contains_sensitive_metadata_key(self.config_metadata):
             raise ValueError(
-                "Skill Source metadata cannot contain credentials or secrets; "
-                "use credential_ref"
+                "Skill Source metadata cannot contain credentials or secrets; use credential_ref"
             )
         return self
 

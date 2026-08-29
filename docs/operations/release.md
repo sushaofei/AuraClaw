@@ -200,6 +200,8 @@ curl --fail http://127.0.0.1:8080/health/ready
 1. 先保证 `action-hands` 起来且 ready
 2. 改 Tool schema 必须 bump version，避免 Catalog 对账因 digest 漂移失败
 3. 不再通过 `MYSQL_DB_*` / `AURACLAW_MODEL_SKILL_*` / `AURACLAW_PRICE_INSIGHT_*` 配置外部 MySQL 源（运行时已不读取）
+4. 执行 Skill 安全撤销前显式选择活动 binding 动作；不确定时使用默认 `cancel`。`pause` 需要确认恢复流程，
+   `continue` 只适用于经 Policy 证明继续执行风险低于中断风险的场景，并核对 Publication 中的 policy evidence。
 
 ---
 

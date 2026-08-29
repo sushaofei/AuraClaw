@@ -18,6 +18,7 @@ CAPABILITY_SEARCH = "auraclaw.capabilities.search"
 CAPABILITY_LOAD = "auraclaw.capabilities.load"
 SKILL_ACTIVATE = "auraclaw.skills.activate"
 RESOURCE_READ = "auraclaw.resources.read"
+SKILL_BINDING_STATUS = "auraclaw.skills.binding-status"
 _TEMPLATE_FIELD = re.compile(r"\{([A-Za-z0-9_.-]+)\}")
 
 
@@ -148,6 +149,82 @@ class RuntimeCapabilityController:
                 tools.append(copy.deepcopy(model_tool))
         return tuple(tools)
 
+    async def binding_disposition(
+        self,
+        assignment: RuntimeAssignment,
+        state: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Return the strongest current action for fixed active Skill bindings."""
+        strongest: dict[str, Any] | None = None
+        precedence = {"continue": 0, "pause": 1, "cancel": 2}
+        checked: set[tuple[str, str, str, str]] = set()
+        for item in state.get("active_skills", ()):
+            if not isinstance(item, dict):
+                continue
+            activation = item.get("activation")
+            binding = item.get("binding")
+            if not isinstance(activation, dict) or not isinstance(binding, dict):
+                continue
+            references = [
+                {
+                    "publisher": binding.get("publisher"),
+                    "name": binding.get("skill_name"),
+                    "version": binding.get("skill_version"),
+                    "package_digest": binding.get("package_digest"),
+                },
+                *(
+                    reference
+                    for reference in binding.get("resolved_skills", ())
+                    if isinstance(reference, dict)
+                ),
+            ]
+            for reference in references:
+                identity = (
+                    str(reference.get("publisher", "")),
+                    str(reference.get("name") or reference.get("skill_name") or ""),
+                    str(reference.get("version") or reference.get("skill_version") or ""),
+                    str(reference.get("package_digest", "")),
+                )
+                if not all(identity) or identity in checked:
+                    continue
+                checked.add(identity)
+                result = await self._client.execute(
+                    assignment,
+                    ToolCall(
+                        tool_invocation_id=(
+                            "binding_status_"
+                            + hashlib.sha256("\0".join(identity).encode()).hexdigest()[:24]
+                        ),
+                        name=SKILL_BINDING_STATUS,
+                        version="1",
+                        arguments={
+                            "publisher": identity[0],
+                            "name": identity[1],
+                            "version": identity[2],
+                            "package_digest": identity[3],
+                        },
+                        expected_side_effect="read",
+                    ),
+                )
+                payload = _result_content(result)
+                action = str(payload.get("action", "cancel"))
+                if action not in precedence:
+                    action = "cancel"
+                candidate = {
+                    **payload,
+                    "action": action,
+                    "skill_activation_id": activation.get("skill_activation_id"),
+                    "binding": {
+                        "publisher": identity[0],
+                        "name": identity[1],
+                        "version": identity[2],
+                        "package_digest": identity[3],
+                    },
+                }
+                if strongest is None or precedence[action] > precedence[str(strongest["action"])]:
+                    strongest = candidate
+        return strongest
+
     async def trusted_messages(
         self,
         assignment: RuntimeAssignment,
@@ -163,11 +240,7 @@ class RuntimeCapabilityController:
             if not isinstance(binding, dict):
                 continue
             dependencies = binding.get("resolved_skills", ())
-            skill_refs = [
-                dependency
-                for dependency in dependencies
-                if isinstance(dependency, dict)
-            ]
+            skill_refs = [dependency for dependency in dependencies if isinstance(dependency, dict)]
             skill_refs.append(
                 {
                     "publisher": binding["publisher"],
@@ -208,8 +281,7 @@ class RuntimeCapabilityController:
                 (
                     str(part["text"])
                     for part in parts
-                    if isinstance(part, dict)
-                    and isinstance(part.get("text"), str)
+                    if isinstance(part, dict) and isinstance(part.get("text"), str)
                 ),
                 "",
             )
@@ -262,9 +334,7 @@ class RuntimeCapabilityController:
             for item in payload.get("capabilities", ()):
                 if isinstance(item, dict) and item.get("capability_id"):
                     candidates[str(item["capability_id"])] = dict(item)
-            current["candidates"] = dict(
-                list(candidates.items())[: self._max_candidates]
-            )
+            current["candidates"] = dict(list(candidates.items())[: self._max_candidates])
             current["search_count"] = search_count + 1
             return CapabilityExecution(result=result, state=current)
 
@@ -280,9 +350,7 @@ class RuntimeCapabilityController:
                 )
             candidates = dict(current.get("candidates", {}))
             requested = [
-                str(value)
-                for value in call.arguments.get("capability_ids", ())
-                if str(value)
+                str(value) for value in call.arguments.get("capability_ids", ()) if str(value)
             ][: self._max_loaded]
             result = await self._client.execute(
                 assignment,
@@ -349,9 +417,7 @@ class RuntimeCapabilityController:
             state=current,
         )
 
-    def terminal_events(
-        self, state: dict[str, Any], output: str
-    ) -> tuple[NewEvent, ...]:
+    def terminal_events(self, state: dict[str, Any], output: str) -> tuple[NewEvent, ...]:
         events: list[NewEvent] = []
         for item in state.get("active_skills", ()):
             if not isinstance(item, dict):
@@ -369,9 +435,7 @@ class RuntimeCapabilityController:
                         "skill_version": activation["binding"]["skill_version"],
                         "package_digest": activation["binding"]["package_digest"],
                         "policy_version": activation["binding"]["policy_version"],
-                        "policy_decision_id": activation["binding"].get(
-                            "policy_decision_id"
-                        ),
+                        "policy_decision_id": activation["binding"].get("policy_decision_id"),
                         "output_summary": output,
                         "artifact_refs": [],
                     },
@@ -404,9 +468,7 @@ class RuntimeCapabilityController:
             )
         inputs = dict(call.arguments.get("inputs", {}))
         _validate_object(inputs, dict(contract.get("input_schema", {})))
-        active = [
-            item for item in state.get("active_skills", ()) if isinstance(item, dict)
-        ]
+        active = [item for item in state.get("active_skills", ()) if isinstance(item, dict)]
         binding = await self._client.resolve_skill(
             assignment,
             name=str(contract["name"]),
@@ -428,9 +490,7 @@ class RuntimeCapabilityController:
             for batch_index, start in enumerate(range(0, len(dependency_ids), 8)):
                 batch = dependency_ids[start : start + 8]
                 dependency_invocation_id = (
-                    "dep_"
-                    f"{_digest({'activation': call.tool_invocation_id})[:24]}"
-                    f"_{batch_index}"
+                    f"dep_{_digest({'activation': call.tool_invocation_id})[:24]}_{batch_index}"
                 )
                 dependency_result = await self._client.execute(
                     assignment,
@@ -523,9 +583,7 @@ class RuntimeCapabilityController:
             model_tool = item.get("model_tool")
             if isinstance(model_tool, dict):
                 previous = loaded.get(capability_id)
-                previous_size = (
-                    _model_tool_size(previous) if isinstance(previous, dict) else 0
-                )
+                previous_size = _model_tool_size(previous) if isinstance(previous, dict) else 0
                 size = _model_tool_size(item)
                 if schema_bytes - previous_size + size > self._max_schema_bytes:
                     continue
@@ -573,9 +631,7 @@ class RuntimeCapabilityController:
         )
 
 
-def _function_tool(
-    name: str, description: str, parameters: dict[str, Any]
-) -> dict[str, Any]:
+def _function_tool(name: str, description: str, parameters: dict[str, Any]) -> dict[str, Any]:
     return {
         "type": "function",
         "function": {
@@ -613,9 +669,7 @@ def _validate_object(value: dict[str, Any], schema: dict[str, Any]) -> None:
     if schema.get("additionalProperties") is False:
         extras = set(value).difference(dict(schema.get("properties", {})))
         if extras:
-            raise ValueError(
-                f"Skill inputs contain unexpected fields: {sorted(extras)}"
-            )
+            raise ValueError(f"Skill inputs contain unexpected fields: {sorted(extras)}")
     properties = schema.get("properties", {})
     if isinstance(properties, dict):
         for name, child_schema in properties.items():
@@ -656,9 +710,7 @@ def _resource_evidence(
     capability_id: str, uri: str, contents: list[dict[str, Any]]
 ) -> dict[str, Any]:
     first = contents[0] if contents and isinstance(contents[0], dict) else {}
-    governance = (
-        dict(first["_governance"]) if isinstance(first.get("_governance"), dict) else {}
-    )
+    governance = dict(first["_governance"]) if isinstance(first.get("_governance"), dict) else {}
     meta = dict(first["_meta"]) if isinstance(first.get("_meta"), dict) else {}
     auraclaw = dict(meta["auraclaw"]) if isinstance(meta.get("auraclaw"), dict) else {}
     return {
@@ -713,9 +765,7 @@ def _contextualize_contents(
         if "prompt_injection" in findings:
             item.pop("text", None)
             item.pop("blob", None)
-            item["text"] = (
-                "[Resource content withheld: prompt-injection indicators detected]"
-            )
+            item["text"] = "[Resource content withheld: prompt-injection indicators detected]"
             auraclaw["contextPolicy"] = "withheld"
         elif isinstance(item.get("text"), str):
             text = str(item["text"])
@@ -735,7 +785,5 @@ def _activation_id(assignment: RuntimeAssignment, activation_key: str) -> str:
 
 
 def _digest(value: object) -> str:
-    payload = json.dumps(
-        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-    ).encode()
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
     return hashlib.sha256(payload).hexdigest()

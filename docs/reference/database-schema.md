@@ -70,6 +70,7 @@ uv run auraclaw migrate up
 | `0033` | Skill 内容扫描 quarantine 审计结果约束与安全回滚映射 |
 | `0034` | Skill admission 内容策略版本、运维查询索引与聚合读取基础 |
 | `0035` | Skill admission keyset/保留清理的全局时间索引 |
+| `0036` | Skill Publication 撤销后的 `continue|pause|cancel` Runtime Policy 证据与查询索引 |
 
 PostgreSQL / Kingbase 序列未使用 `0017`；MySQL 方言的 `0017` 用于扩大 Task View 文本字段。
 不要为了填补编号而重命名已经发布的迁移。

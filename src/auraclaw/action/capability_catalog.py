@@ -12,7 +12,12 @@ from auraclaw.contracts.capabilities import (
     CapabilityStatus,
     McpServerDefinition,
 )
-from auraclaw.contracts.skills import SkillBinding
+from auraclaw.contracts.skills import (
+    SkillBinding,
+    SkillPublicationRecord,
+    SkillPublicationStatus,
+    SkillRevocationAction,
+)
 from auraclaw.contracts.tools import (
     RiskLevel,
     ToolCapability,
@@ -23,6 +28,7 @@ from auraclaw.contracts.tools import (
 CAPABILITY_SEARCH_TOOL_NAME = "auraclaw.capabilities.search"
 CAPABILITY_LOAD_TOOL_NAME = "auraclaw.capabilities.load"
 SKILL_RESOLVE_TOOL_NAME = "auraclaw.skills.resolve"
+SKILL_BINDING_STATUS_TOOL_NAME = "auraclaw.skills.binding-status"
 _LATIN_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_.-]+")
 _CJK_RUN_PATTERN = re.compile(r"[\u3400-\u9FFF\uF900-\uFAFF]+")
 
@@ -41,6 +47,12 @@ class SkillResolverPort(Protocol):
         correlation_id: str = "skill.resolve",
         active_skill_names: tuple[str, ...] = (),
     ) -> SkillBinding: ...
+
+
+class SkillPublicationReader(Protocol):
+    async def get_publication(
+        self, tenant_id: str, publisher: str, name: str, version: str
+    ) -> SkillPublicationRecord | None: ...
 
 
 class InMemoryCapabilityCatalogStore:
@@ -83,9 +95,7 @@ class InMemoryCapabilityCatalogStore:
             if capability.server_id != server_id
         }
 
-    async def list_capabilities(
-        self, tenant_id: str
-    ) -> tuple[CapabilityDescriptor, ...]:
+    async def list_capabilities(self, tenant_id: str) -> tuple[CapabilityDescriptor, ...]:
         return tuple(
             capability
             for capability in sorted(
@@ -95,8 +105,7 @@ class InMemoryCapabilityCatalogStore:
             if (
                 (server := self._servers.get(capability.server_id)) is not None
                 and server.enabled
-                and server.status
-                in {CapabilityStatus.ACTIVE, CapabilityStatus.DEGRADED}
+                and server.status in {CapabilityStatus.ACTIVE, CapabilityStatus.DEGRADED}
             )
             if capability.tenant_id is None or capability.tenant_id == tenant_id
         )
@@ -202,15 +211,11 @@ class CapabilityCatalog:
     ) -> tuple[CapabilityDescriptor, ...]:
         return tuple(
             capability
-            for capability in await self._store.list_server_capabilities(
-                tenant_id, server_id
-            )
+            for capability in await self._store.list_server_capabilities(tenant_id, server_id)
             if capability.kind is CapabilityKind.TOOL
         )
 
-    async def get(
-        self, *, tenant_id: str, capability_id: str
-    ) -> CapabilityDescriptor | None:
+    async def get(self, *, tenant_id: str, capability_id: str) -> CapabilityDescriptor | None:
         capability = await self._store.get_capability(tenant_id, capability_id)
         if capability is None or capability.status not in {
             CapabilityStatus.ACTIVE,
@@ -232,9 +237,7 @@ class CapabilitySearchExecutor:
         del capability
         arguments = invocation.arguments
         kinds = tuple(CapabilityKind(str(value)) for value in arguments.get("kinds", ()))
-        permissions = tuple(
-            str(value) for value in arguments.get("required_permissions", ())
-        )
+        permissions = tuple(str(value) for value in arguments.get("required_permissions", ()))
         query = str(arguments.get("query", ""))
         results = list(
             await self.catalog.search(
@@ -318,6 +321,58 @@ class SkillResolveExecutor:
         if not callable(dump):
             raise TypeError("Skill resolver returned an invalid binding")
         return {"binding": dump(mode="json")}
+
+
+@dataclass(frozen=True)
+class SkillBindingStatusExecutor:
+    publications: SkillPublicationReader
+
+    async def execute(
+        self,
+        invocation: ToolInvocation,
+        capability: ToolCapability,
+    ) -> dict[str, object]:
+        del capability
+        arguments = invocation.arguments
+        publication = await self.publications.get_publication(
+            invocation.tenant_id,
+            str(arguments["publisher"]),
+            str(arguments["name"]),
+            str(arguments["version"]),
+        )
+        expected_digest = str(arguments["package_digest"])
+        if publication is None or publication.package_digest != expected_digest:
+            return {
+                "publication_status": "unavailable",
+                "action": SkillRevocationAction.CANCEL.value,
+                "reason_code": "binding_authority_unavailable",
+                "policy_version": "skill-revocation-v1",
+            }
+        if publication.status is SkillPublicationStatus.REVOKED:
+            return {
+                "publication_status": publication.status.value,
+                "action": (
+                    publication.revocation_action or SkillRevocationAction.CANCEL
+                ).value,
+                "reason_code": publication.reason_code,
+                "policy_version": publication.revocation_policy_version,
+                "policy_decision_id": (publication.revocation_policy_decision_id),
+            }
+        return {
+            "publication_status": publication.status.value,
+            "action": (
+                SkillRevocationAction.CONTINUE.value
+                if publication.status
+                in {
+                    SkillPublicationStatus.ACTIVE,
+                    SkillPublicationStatus.RESTORING,
+                    SkillPublicationStatus.RETIRED,
+                }
+                else SkillRevocationAction.CANCEL.value
+            ),
+            "reason_code": None,
+            "policy_version": "skill-revocation-v1",
+        }
 
 
 class RoutedHandsExecutor:
@@ -454,6 +509,35 @@ def skill_resolve_tool() -> ToolCapability:
     )
 
 
+def skill_binding_status_tool() -> ToolCapability:
+    return ToolCapability(
+        name=SKILL_BINDING_STATUS_TOOL_NAME,
+        version="1",
+        description=(
+            "Evaluate the current governed disposition of an already-fixed Skill binding."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "publisher": {"type": "string", "minLength": 1, "maxLength": 128},
+                "name": {"type": "string", "minLength": 1, "maxLength": 256},
+                "version": {"type": "string", "minLength": 1, "maxLength": 128},
+                "package_digest": {
+                    "type": "string",
+                    "pattern": "^sha256:[0-9a-f]{64}$",
+                },
+            },
+            "required": ["publisher", "name", "version", "package_digest"],
+            "additionalProperties": False,
+        },
+        output_schema={"type": "object"},
+        permission=ToolPermission.READ_ONLY,
+        risk_level=RiskLevel.LOW,
+        runtime_location="hands",
+        owner="platform-internal",
+    )
+
+
 def _load_result(descriptor: CapabilityDescriptor) -> dict[str, Any]:
     result = descriptor.as_search_result()
     raw_source = descriptor.metadata.get("source", {})
@@ -471,16 +555,11 @@ def _load_result(descriptor: CapabilityDescriptor) -> dict[str, Any]:
         result["resource"] = {"uri": source.get("uri")}
     elif descriptor.kind == CapabilityKind.RESOURCE_TEMPLATE:
         result["resource"] = {
-            "uri_template": (
-                descriptor.metadata.get("uri_template")
-                or source.get("uriTemplate")
-            )
+            "uri_template": (descriptor.metadata.get("uri_template") or source.get("uriTemplate"))
         }
     elif descriptor.kind == CapabilityKind.SKILL:
         raw_contract = descriptor.metadata.get("model_contract", {})
-        result["skill"] = (
-            dict(raw_contract) if isinstance(raw_contract, dict) else {}
-        )
+        result["skill"] = dict(raw_contract) if isinstance(raw_contract, dict) else {}
     return result
 
 

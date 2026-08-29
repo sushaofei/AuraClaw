@@ -462,6 +462,13 @@ MCP `skill://` 发现也不能直接写进程 Registry。Reconciler 从 Server �
 - `install`：仅允许 `uninstalled -> active`，避免 enable 隐式重装；
 - `revoke`：Publication 任一非 revoked 状态进入 `revoked`，用于安全事件并立即使固定包不可加载。
 
+安全 revoke 不能再由 `load_part()` 看到非 active 状态后隐式决定运行结果。Publication 同时持久化
+`continue | pause | cancel`、policy version 和可选 decision id。Runtime 在每个模型轮次及 Skill step 前
+通过仅对受信 Runtime 开放的 `auraclaw.skills.binding-status` 查询固定
+publisher/name/version/package digest：`continue` 仅允许该固定内容继续读取且不恢复 Catalog 候选，
+`pause` 保存 checkpoint 并挂起 assignment，`cancel` 写入 `skill.revocation.applied`、`skill.cancelled` 和
+`run.cancelled` 后结束 assignment。普通 disabled/uninstalled/retired 仍不借用安全撤销动作。
+
 这些命令携带 tenant、actor、command/correlation/causation、expected revision；disable、uninstall 和
 revoke 还必须带非空 reason code。Task API 只负责外部 Identity 与 HTTP 映射，SQL profile 经 workload
 identity 调用 Action Hands，后者原子更新 Lifecycle 后触发 tenant rebuild。Publication 保存

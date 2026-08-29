@@ -430,6 +430,8 @@ suspend 同时拒绝新发布和持久包恢复，resume 只恢复仍处于 acti
 租约 fencing token 同时约束 Publication 事务与 Sync State，过期 Hands 副本不能提交迟到快照。
 某版本只有在连续两个完整快照中缺失才自动转为 `retired`；任一完整快照重新观察到它都会清零缺失计数。
 `retired` 不再参与新发现，但保留不可变内容供既有固定 binding 读取，并与安全 `revoked` 明确区分。
+安全 revoke 必须选择 `continue|pause|cancel`（默认 cancel）并持久化 Policy 证据。Runtime 每轮/每步检查
+固定 binding：continue 不恢复新发现，pause 保存 checkpoint 后挂起，cancel 写入 Canonical 终态证据。
 退役版本不会因来源重新出现而自动复活；管理员必须提交带 expected revision、reason 和幂等键的显式
 restore。服务先审计化进入不可发现的 `restoring`，再从原 Artifact 重读并复验 digest、Source、Publisher
 及签名信任，全部通过后才恢复 `active`；验证失败会停留在 `restoring`，同一命令可安全重试。
