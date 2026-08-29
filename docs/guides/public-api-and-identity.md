@@ -786,6 +786,11 @@ tenant Registry 的 active key 独立验签。CLI 不接受命令行私钥，也
 上下文、验证阶段、稳定错误码和耗时，不包含 Skill 正文或异常消息。它不是公开 API；产品端不得把内部
 审计详情或原始拒绝原因直接返回给非安全运维角色。
 
+签名通过后，服务端还会扫描可执行扩展与 magic、高置信凭据、Secret 赋值和 Prompt Injection 模式。
+命中后 API 以受控 `skill_content_*` 策略错误拒绝，本次 admission 在内部记为 `quarantined`，但不会把
+不可信内容创建为 Package/Publication/Installation。客户端不得根据具体 finding 自动修改或重发正文；
+应由 Publisher 在本地清除风险、重新签名并以新命令提交。
+
 ```bash
 curl -sS http://127.0.0.1:8000/v1/admin/skills \
   -H 'X-Tenant-ID: local' \

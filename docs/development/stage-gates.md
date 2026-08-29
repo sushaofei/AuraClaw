@@ -1974,6 +1974,33 @@ ready Skill Artifact 建立带 fencing 的物理回收流程；不把成功命�
 - [x] README、架构、公开 API、数据库参考与阶段门禁同步，内容扫描仍留待 M14p。
 - [x] 本阶段作为一个 intentional commit 提交并 push，不包含 `.env`、Secret、缓存或无关改动。
 
+## 阶段 M14p：Skill 内容安全扫描与准入隔离（Issue #56）
+
+状态：已完成。
+
+### 扫描边界
+
+- [x] 签名验证后、Source 授权和事实写入前，对所有统一发布入口执行同一内容扫描器。
+- [x] 拒绝脚本/可执行扩展与 ELF、PE、Mach-O、WASM magic，且从不执行或加载包内代码。
+- [x] 检测高置信 private key/cloud token、Secret 赋值和 Prompt Injection，仅返回稳定 finding code。
+- [x] 文本规则只扫描无 NUL、合法 UTF-8 内容；二进制 asset 不做宽松文本匹配以控制误报。
+
+### Quarantine 与安全语义
+
+- [x] 命中扫描规则时 admission outcome 为 `quarantined`，stage 为 `content_scan`，错误为 `skill_content_*`。
+- [x] Finding 匹配片段、正文、Secret 和异常消息不进入错误、审计或日志。
+- [x] 隔离尝试不创建 Package、Publication 或 Installation；修复后必须重新签名并使用新命令发布。
+- [x] production staged Artifact 继续受 retention/orphan GC 管理，不新增绕过 Artifact 生命周期的删除路径。
+
+### 质量与交付
+
+- [x] 0033 正反迁移覆盖 quarantine outcome，并将回滚数据安全映射为 rejected。
+- [x] 单测覆盖 Prompt Injection、Secret、可执行扩展/magic、无事实写入及本地 CLI fail closed。
+- [x] PostgreSQL 覆盖 quarantine 持久化、tenant 隔离与迁移回滚。
+- [x] 全量 Ruff、Mypy、unit、相关 integration 与 import-linter 通过。
+- [x] README、架构、公开 API、数据库参考与阶段门禁同步。
+- [x] 本阶段作为一个 intentional commit 提交并 push，不包含 `.env`、Secret、缓存或无关改动。
+
 ## 阶段 Product Activity：产品级对话执行轨迹（AuraX Issue #2）
 
 状态：代码与定向验证完成；完整基础设施集成门禁受现有 Kafka/MySQL/PostgreSQL/Artifact 环境失败阻塞。

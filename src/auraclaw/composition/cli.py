@@ -17,6 +17,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from auraclaw.action.skill_packages import (
+    DefaultSkillPackageContentScanner,
     Ed25519SkillSignatureVerifier,
     HmacSkillSignatureVerifier,
     SkillPackage,
@@ -33,6 +34,7 @@ from auraclaw.composition.local_ingress import (
 )
 from auraclaw.composition.services import SERVICE_BY_COMMAND, create_service_app, service_spec
 from auraclaw.config import Settings, get_settings
+from auraclaw.contracts.errors import SkillContentRejectedError
 from auraclaw.contracts.internal import ServiceIdentity
 from auraclaw.contracts.skills import SkillManifest
 from auraclaw.infrastructure.clients.admin import RemoteAdminClient
@@ -238,7 +240,11 @@ def _validate_local_skill(
         artifacts=_ValidationArtifactWriter(),
         signature_verifier=verifier,
     )
-    return registry.validate(package)
+    validated = registry.validate(package)
+    findings = DefaultSkillPackageContentScanner().scan(validated)
+    if findings:
+        raise SkillContentRejectedError(findings[0])
+    return validated
 
 
 def _decode_ed25519_key(value: str, *, kind: str) -> bytes:

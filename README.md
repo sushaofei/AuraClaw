@@ -436,6 +436,10 @@ restore。服务先审计化进入不可发现的 `restoring`，再从原 Artifa
 每次统一发布准入还会写入 tenant 隔离的 `skill_admission_audit`：记录 operation、actor、Source、
 command/correlation/causation、可用的 Skill identity/digest、验证阶段、结果、稳定 error code 与耗时，
 但不记录包正文、异常消息、Secret 或私钥。该表是内部安全审计面，不作为公开包内容查询接口。
+签名验证后、Source 授权前还会执行确定性内容扫描：拒绝脚本/可执行扩展、ELF/PE/Mach-O/WASM magic、
+高置信私钥或 token、Secret 赋值以及指令劫持模式。命中项只记录稳定 finding code，并把本次 admission
+记为 `quarantined`；不会创建 Package、Publication 或 Installation。已上传 Artifact 继续受 retention 与
+孤儿 GC 管理，扫描器不会执行或反序列化包内代码。
 
 重建只读取 Canonical Event Log；Read Model 和 checkpoint 可以删除后恢复。真实
 PostgreSQL 集成测试使用独立测试库：
