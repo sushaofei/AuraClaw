@@ -99,6 +99,17 @@ Artifact 依据 `retention_until` GC；同租户相同 Hash 的对象仍被其�
 Audit 保留时间独立于普通 Log/Trace。租户删除或合规保留必须同时覆盖 Event、Telemetry、Artifact
 和 Delivery 数据。每次发布运行 `uv run python scripts/release_gate.py`；任何 Secret 命中均阻断。
 
+Skill admission 安全账本默认保留 365 天，由 Action Hands 启动和周期任务按批次清理。相关配置为
+`AURACLAW_SKILL_ADMISSION_RETENTION_DAYS`、`AURACLAW_SKILL_ADMISSION_CLEANUP_INTERVAL_SECONDS`
+和 `AURACLAW_SKILL_ADMISSION_CLEANUP_BATCH_SIZE`。清理只删除严格早于 cutoff 的记录，不暴露人工删除
+API；缩短保留期前必须先完成合规审批和外部归档。
+
+安全运维使用 `/v1/admin/skill-admissions/metrics?window_hours=24` 检查
+`skill.admission.quarantine_ratio`。阈值和最小样本由
+`AURACLAW_SKILL_ADMISSION_QUARANTINE_ALERT_RATIO` 与
+`AURACLAW_SKILL_ADMISSION_QUARANTINE_ALERT_MIN_SAMPLES` 控制；`insufficient_data` 不应升级为事故，
+`firing` 时按 policy version、Source 和 stable finding code 下钻，禁止复制包正文或匹配片段到工单。
+
 ## 灰度与回滚
 
 按以下顺序放量，每级观察错误率、恢复率、Projection lag、unknown side effect、Delivery DLQ、

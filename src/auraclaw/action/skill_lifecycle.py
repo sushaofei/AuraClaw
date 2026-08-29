@@ -1,12 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import hashlib
+import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
-from auraclaw.contracts.errors import NotFoundError, VersionConflictError
+from auraclaw.contracts.errors import (
+    NotFoundError,
+    SchemaValidationError,
+    VersionConflictError,
+)
 from auraclaw.contracts.skills import (
     SkillInstallationRecord,
     SkillPackageRecord,
@@ -118,6 +125,46 @@ class SkillAdmissionMetricRecord:
 
 
 @dataclass(frozen=True)
+class SkillAdmissionPage:
+    admissions: tuple[SkillAdmissionAuditRecord, ...]
+    next_cursor: str | None = None
+
+
+def encode_skill_admission_cursor(record: SkillAdmissionAuditRecord) -> str:
+    raw = json.dumps(
+        (record.occurred_at.isoformat(), record.admission_id),
+        separators=(",", ":"),
+    ).encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def decode_skill_admission_cursor(cursor: str) -> tuple[datetime, str]:
+    try:
+        padding = "=" * (-len(cursor) % 4)
+        raw = base64.b64decode(
+            cursor + padding, altchars=b"-_", validate=True
+        ).decode()
+        payload = json.loads(raw)
+        if not isinstance(payload, list) or len(payload) != 2:
+            raise ValueError
+        occurred_at_value, admission_id = payload
+        if not isinstance(occurred_at_value, str) or not isinstance(admission_id, str):
+            raise ValueError
+        occurred_at = datetime.fromisoformat(occurred_at_value)
+        if occurred_at.tzinfo is None or not 1 <= len(admission_id) <= 128:
+            raise ValueError
+    except (
+        ValueError,
+        TypeError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        binascii.Error,
+    ) as exc:
+        raise SchemaValidationError("Skill admission cursor is invalid") from exc
+    return occurred_at, str(admission_id)
+
+
+@dataclass(frozen=True)
 class SkillPublishCommitResult:
     package: SkillPackageRecord
     publication: SkillPublicationRecord
@@ -149,8 +196,24 @@ class SkillLifecycleStore(Protocol):
     ) -> tuple[SkillAdmissionAuditRecord, ...]: ...
 
     async def admission_metrics(
-        self, tenant_id: str
+        self, tenant_id: str, *, since: datetime | None = None
     ) -> tuple[SkillAdmissionMetricRecord, ...]: ...
+
+    async def page_admissions(
+        self,
+        tenant_id: str,
+        *,
+        outcome: str | None = None,
+        stage: str | None = None,
+        content_policy_version: str | None = None,
+        since: datetime | None = None,
+        cursor: str | None = None,
+        limit: int = 100,
+    ) -> SkillAdmissionPage: ...
+
+    async def delete_admissions_before(
+        self, cutoff: datetime, *, limit: int = 1000
+    ) -> int: ...
 
     async def commit_publish(
         self, commit: SkillPublishCommit
@@ -294,11 +357,13 @@ class InMemorySkillLifecycleStore:
         )[:limit]
 
     async def admission_metrics(
-        self, tenant_id: str
+        self, tenant_id: str, *, since: datetime | None = None
     ) -> tuple[SkillAdmissionMetricRecord, ...]:
         grouped: dict[tuple[str, str], list[int]] = {}
         for record in self._admission_audits:
-            if record.tenant_id != tenant_id:
+            if record.tenant_id != tenant_id or (
+                since is not None and record.occurred_at < since
+            ):
                 continue
             grouped.setdefault(
                 (record.outcome, record.content_policy_version), []
@@ -312,6 +377,68 @@ class InMemorySkillLifecycleStore:
             )
             for (outcome, policy_version), durations in sorted(grouped.items())
         )
+
+    async def page_admissions(
+        self,
+        tenant_id: str,
+        *,
+        outcome: str | None = None,
+        stage: str | None = None,
+        content_policy_version: str | None = None,
+        since: datetime | None = None,
+        cursor: str | None = None,
+        limit: int = 100,
+    ) -> SkillAdmissionPage:
+        cursor_key = decode_skill_admission_cursor(cursor) if cursor else None
+        records = sorted(
+            (
+                record
+                for record in self._admission_audits
+                if record.tenant_id == tenant_id
+                and (outcome is None or record.outcome == outcome)
+                and (stage is None or record.stage == stage)
+                and (
+                    content_policy_version is None
+                    or record.content_policy_version == content_policy_version
+                )
+                and (since is None or record.occurred_at >= since)
+                and (
+                    cursor_key is None
+                    or (record.occurred_at, record.admission_id) < cursor_key
+                )
+            ),
+            key=lambda record: (record.occurred_at, record.admission_id),
+            reverse=True,
+        )
+        page = records[: limit + 1]
+        admissions = tuple(page[:limit])
+        next_cursor = (
+            encode_skill_admission_cursor(admissions[-1])
+            if len(page) > limit and admissions
+            else None
+        )
+        return SkillAdmissionPage(admissions=admissions, next_cursor=next_cursor)
+
+    async def delete_admissions_before(
+        self, cutoff: datetime, *, limit: int = 1000
+    ) -> int:
+        async with self._lock:
+            candidates = sorted(
+                (
+                    record
+                    for record in self._admission_audits
+                    if record.occurred_at < cutoff
+                ),
+                key=lambda record: (record.occurred_at, record.admission_id),
+            )[:limit]
+            deleted = {record.admission_id for record in candidates}
+            if deleted:
+                self._admission_audits = [
+                    record
+                    for record in self._admission_audits
+                    if record.admission_id not in deleted
+                ]
+            return len(deleted)
 
     async def commit_publish(
         self, commit: SkillPublishCommit

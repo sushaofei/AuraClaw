@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 import asyncpg  # type: ignore[import-untyped]
@@ -8,6 +8,7 @@ import asyncpg  # type: ignore[import-untyped]
 from auraclaw.action.skill_lifecycle import (
     SkillAdmissionAuditRecord,
     SkillAdmissionMetricRecord,
+    SkillAdmissionPage,
     SkillLifecycleStore,
     SkillOutboxRecord,
     SkillPublishCommit,
@@ -19,6 +20,8 @@ from auraclaw.action.skill_lifecycle import (
     SkillSourceSnapshotResult,
     _publish_outbox_payload,
     _retirement_command_id,
+    decode_skill_admission_cursor,
+    encode_skill_admission_cursor,
 )
 from auraclaw.contracts.errors import NotFoundError, VersionConflictError
 from auraclaw.contracts.skills import (
@@ -99,19 +102,87 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
         return tuple(SkillAdmissionAuditRecord(**dict(row)) for row in rows)
 
     async def admission_metrics(
-        self, tenant_id: str
+        self, tenant_id: str, *, since: datetime | None = None
     ) -> tuple[SkillAdmissionMetricRecord, ...]:
         pool = await self.pool()
         rows = await pool.fetch(
             """SELECT outcome,content_policy_version,count(*) AS count,
                       avg(duration_ms)::double precision AS average_duration_ms
             FROM hands.skill_admission_audit
-            WHERE tenant_id=$1
+            WHERE tenant_id=$1 AND ($2::timestamptz IS NULL OR occurred_at >= $2)
             GROUP BY outcome,content_policy_version
             ORDER BY outcome,content_policy_version""",
             tenant_id,
+            since,
         )
         return tuple(SkillAdmissionMetricRecord(**dict(row)) for row in rows)
+
+    async def page_admissions(
+        self,
+        tenant_id: str,
+        *,
+        outcome: str | None = None,
+        stage: str | None = None,
+        content_policy_version: str | None = None,
+        since: datetime | None = None,
+        cursor: str | None = None,
+        limit: int = 100,
+    ) -> SkillAdmissionPage:
+        cursor_at, cursor_id = (
+            decode_skill_admission_cursor(cursor) if cursor else (None, None)
+        )
+        pool = await self.pool()
+        rows = await pool.fetch(
+            """SELECT * FROM hands.skill_admission_audit
+            WHERE tenant_id=$1
+              AND ($2::text IS NULL OR outcome=$2)
+              AND ($3::text IS NULL OR stage=$3)
+              AND ($4::text IS NULL OR content_policy_version=$4)
+              AND ($5::timestamptz IS NULL OR occurred_at >= $5)
+              AND ($6::timestamptz IS NULL OR (occurred_at,admission_id) < ($6,$7))
+            ORDER BY occurred_at DESC,admission_id DESC LIMIT $8""",
+            tenant_id,
+            outcome,
+            stage,
+            content_policy_version,
+            since,
+            cursor_at,
+            cursor_id,
+            limit + 1,
+        )
+        records = tuple(
+            SkillAdmissionAuditRecord(**dict(row)) for row in rows[:limit]
+        )
+        return SkillAdmissionPage(
+            admissions=records,
+            next_cursor=(
+                encode_skill_admission_cursor(records[-1])
+                if len(rows) > limit and records
+                else None
+            ),
+        )
+
+    async def delete_admissions_before(
+        self, cutoff: datetime, *, limit: int = 1000
+    ) -> int:
+        pool = await self.pool()
+        deleted = await pool.fetchval(
+            """WITH candidates AS (
+                SELECT admission_id FROM hands.skill_admission_audit
+                WHERE occurred_at < $1
+                ORDER BY occurred_at,admission_id
+                LIMIT $2 FOR UPDATE SKIP LOCKED
+            ), removed AS (
+                DELETE FROM hands.skill_admission_audit AS audit
+                USING candidates
+                WHERE audit.admission_id=candidates.admission_id
+                RETURNING 1
+            )
+            SELECT count(*) FROM removed""",
+            cutoff,
+            limit,
+        )
+        return int(deleted or 0)
 
     async def commit_publish(
         self, commit: SkillPublishCommit

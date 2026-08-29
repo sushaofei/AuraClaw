@@ -444,6 +444,9 @@ command/correlation/causation、可用的 Skill identity/digest、验证阶段�
 `GET /v1/admin/skill-admissions` 按 outcome、stage 和策略版本查询当前 tenant，并通过
 `GET /v1/admin/skill-admissions/metrics` 查看按 outcome/策略版本聚合的数量和平均准入延迟；响应不会
 包含正文、匹配片段或异常消息。
+列表使用稳定 keyset cursor 并支持 timezone-aware `since`；指标支持时间窗口，返回 quarantine ratio
+及带最小样本门槛的告警状态。Admission 审计默认保留 365 天，由 Action Hands 使用有界批次周期清理，
+不提供用户可直接删除审计记录的 API。
 
 重建只读取 Canonical Event Log；Read Model 和 checkpoint 可以删除后恢复。真实
 PostgreSQL 集成测试使用独立测试库：

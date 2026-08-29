@@ -10,6 +10,7 @@ import httpx
 from auraclaw.action.skill_lifecycle import (
     SkillAdmissionAuditRecord,
     SkillAdmissionMetricRecord,
+    SkillAdmissionPage,
 )
 from auraclaw.action.skill_packages import SkillPackage, SkillPackageRegistry
 from auraclaw.contracts.errors import NotFoundError
@@ -140,15 +141,17 @@ class RemoteSkillPublicationClient:
         publication = PublishedSkill.model_validate(response.publication)
         return publication
 
-    async def list_admissions(
+    async def page_admissions(
         self,
         tenant_id: str,
         *,
         outcome: str | None = None,
         stage: str | None = None,
         content_policy_version: str | None = None,
+        since: datetime | None = None,
+        cursor: str | None = None,
         limit: int = 100,
-    ) -> tuple[SkillAdmissionAuditRecord, ...]:
+    ) -> SkillAdmissionPage:
         request_id = f"skill-admissions-{uuid4().hex}"
         response = await self._contract.call(
             "/internal/v1/skill-publications/admissions",
@@ -157,6 +160,8 @@ class RemoteSkillPublicationClient:
                 outcome=outcome,
                 stage=stage,
                 content_policy_version=content_policy_version,
+                since=since,
+                cursor=cursor,
                 limit=limit,
             ),
             SkillAdmissionListInternalResponse,
@@ -168,16 +173,18 @@ class RemoteSkillPublicationClient:
             if isinstance(occurred_at, str):
                 values["occurred_at"] = datetime.fromisoformat(occurred_at)
             records.append(SkillAdmissionAuditRecord(**values))
-        return tuple(records)
+        return SkillAdmissionPage(
+            admissions=tuple(records), next_cursor=response.next_cursor
+        )
 
     async def admission_metrics(
-        self, tenant_id: str
+        self, tenant_id: str, *, since: datetime | None = None
     ) -> tuple[SkillAdmissionMetricRecord, ...]:
         request_id = f"skill-admission-metrics-{uuid4().hex}"
         response = await self._contract.call(
             "/internal/v1/skill-publications/admission-metrics",
             SkillAdmissionMetricsInternalRequest(
-                context=_query_context(tenant_id, request_id)
+                context=_query_context(tenant_id, request_id), since=since
             ),
             SkillAdmissionMetricsInternalResponse,
         )

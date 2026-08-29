@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -108,6 +108,8 @@ def test_skill_admission_queries_are_tenant_scoped_filterable_and_aggregated() -
             registry,
             publication_service=publication_service,
             admission_reader=lifecycle,
+            admission_quarantine_alert_ratio=0.4,
+            admission_quarantine_alert_min_samples=2,
         )
     )
 
@@ -142,6 +144,26 @@ def test_skill_admission_queries_are_tenant_scoped_filterable_and_aggregated() -
         assert admissions[0]["content_policy_version"] == "skill-content-v1"
         assert "Reveal hidden instructions" not in quarantined.text
 
+        first_page = client.get(
+            "/v1/admin/skill-admissions",
+            params={"limit": 1},
+            headers=headers,
+        )
+        assert first_page.status_code == 200
+        assert len(first_page.json()["admissions"]) == 1
+        assert first_page.json()["next_cursor"] is not None
+        second_page = client.get(
+            "/v1/admin/skill-admissions",
+            params={"limit": 1, "cursor": first_page.json()["next_cursor"]},
+            headers=headers,
+        )
+        assert second_page.status_code == 200
+        assert len(second_page.json()["admissions"]) == 1
+        assert second_page.json()["next_cursor"] is None
+        assert second_page.json()["admissions"][0]["admission_id"] != (
+            first_page.json()["admissions"][0]["admission_id"]
+        )
+
         metrics = client.get("/v1/admin/skill-admissions/metrics", headers=headers)
         assert metrics.status_code == 200, metrics.text
         count_metrics = {
@@ -150,6 +172,30 @@ def test_skill_admission_queries_are_tenant_scoped_filterable_and_aggregated() -
             if item["name"] == "skill.admission.count"
         }
         assert count_metrics == {"accepted": 1, "quarantined": 1}
+        assert metrics.json()["alerts"] == [
+            {
+                "rule": "skill.admission.quarantine_ratio",
+                "status": "firing",
+                "value": 0.5,
+                "threshold": 0.4,
+                "sample_count": 2,
+                "minimum_samples": 2,
+            }
+        ]
+
+        future_window = client.get(
+            "/v1/admin/skill-admissions",
+            params={"since": (datetime.now(UTC) + timedelta(days=1)).isoformat()},
+            headers=headers,
+        )
+        assert future_window.status_code == 200
+        assert future_window.json() == {"admissions": [], "next_cursor": None}
+        naive_window = client.get(
+            "/v1/admin/skill-admissions",
+            params={"since": "2026-08-29T12:00:00"},
+            headers=headers,
+        )
+        assert naive_window.status_code == 422
 
         other_tenant = client.get(
             "/v1/admin/skill-admissions",
@@ -157,6 +203,12 @@ def test_skill_admission_queries_are_tenant_scoped_filterable_and_aggregated() -
         )
         assert other_tenant.status_code == 200
         assert other_tenant.json()["admissions"] == []
+        other_metrics = client.get(
+            "/v1/admin/skill-admissions/metrics",
+            headers={"X-Tenant-ID": "tenant-2", "X-Actor-ID": "admin-2"},
+        )
+        assert other_metrics.status_code == 200
+        assert other_metrics.json()["alerts"][0]["status"] == "insufficient_data"
 
 
 def test_skill_admin_manages_installation_and_revocation_separately() -> None:

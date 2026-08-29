@@ -4,7 +4,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 INTERNAL_API_VERSION = "2026-07-22"
 
@@ -672,16 +672,20 @@ class SkillAdmissionListInternalRequest(ContractModel):
     content_policy_version: str | None = Field(
         default=None, min_length=1, max_length=128
     )
+    since: AwareDatetime | None = None
+    cursor: str | None = Field(default=None, min_length=1, max_length=2048)
     limit: int = Field(default=100, ge=1, le=500)
 
 
 class SkillAdmissionListInternalResponse(ContractModel):
     api_version: str = INTERNAL_API_VERSION
     admissions: tuple[dict[str, Any], ...] = ()
+    next_cursor: str | None = None
 
 
 class SkillAdmissionMetricsInternalRequest(ContractModel):
     context: InternalRequestContext
+    since: AwareDatetime | None = None
 
 
 class SkillAdmissionMetricsInternalResponse(ContractModel):

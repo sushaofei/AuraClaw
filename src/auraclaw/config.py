@@ -325,6 +325,16 @@ class Settings(BaseSettings):
     mcp_allow_private_auth_none: bool | None = None
     mcp_trust_remote_tool_annotations: bool = False
     skill_signing_key: SecretStr | None = None
+    skill_admission_retention_days: int = Field(default=365, ge=30, le=3650)
+    skill_admission_cleanup_interval_seconds: float = Field(
+        default=3600.0, ge=60.0, le=86400.0
+    )
+    skill_admission_cleanup_batch_size: int = Field(default=1000, ge=1, le=10_000)
+    skill_admission_metrics_window_hours: int = Field(default=24, ge=1, le=2160)
+    skill_admission_quarantine_alert_ratio: float = Field(default=0.25, ge=0, le=1)
+    skill_admission_quarantine_alert_min_samples: int = Field(
+        default=20, ge=1, le=1_000_000
+    )
     credential_vault_addr: str | None = None
     credential_vault_token: SecretStr | None = None
     credential_vault_mount: str = "secret"

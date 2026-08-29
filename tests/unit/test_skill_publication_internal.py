@@ -295,15 +295,16 @@ def test_task_api_client_publishes_through_action_hands_service() -> None:
                     ),
                     unsafe,
                 )
-            rejected_admissions = await client.list_admissions(
+            rejected_page = await client.page_admissions(
                 "tenant-a",
                 outcome="rejected",
                 content_policy_version="skill-content-v1",
             )
+            rejected_admissions = rejected_page.admissions
             assert len(rejected_admissions) == 1
             assert rejected_admissions[0].command_id == "publish-internal-unsafe"
             assert rejected_admissions[0].content_policy_version == "skill-content-v1"
-            assert await client.list_admissions("tenant-b") == ()
+            assert (await client.page_admissions("tenant-b")).admissions == ()
             admission_metrics = await client.admission_metrics("tenant-a")
             assert {(item.outcome, item.count) for item in admission_metrics} == {
                 ("accepted", 2),
