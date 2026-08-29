@@ -1,4 +1,5 @@
-UPDATE hands.skill_publisher SET status='active'
+UPDATE hands.skill_publisher
+SET status='active',status_reason_code=NULL,status_changed_at=NULL
 WHERE status='suspended';
 DELETE FROM hands.skill_publisher_command
 WHERE command_type IN ('suspend','resume');

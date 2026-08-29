@@ -35,10 +35,19 @@ _MISSING_SNAPSHOT_THRESHOLD = 2
 
 
 @dataclass(frozen=True)
+class SkillPackageReconcileFailure:
+    publisher: str
+    name: str
+    version: str
+    error_code: str
+
+
+@dataclass(frozen=True)
 class SkillReconcileResult:
     server_id: str
     published_count: int
     error: str | None = None
+    package_failures: tuple[SkillPackageReconcileFailure, ...] = ()
 
 
 class SkillPackageReconciler:
@@ -133,31 +142,56 @@ class SkillPackageReconciler:
             grouped = _group_skill_resource_uris(snapshot.resources)
             published = 0
             observed: list[SkillSourcePackageIdentity] = []
+            package_failures: list[SkillPackageReconcileFailure] = []
             for (publisher, name, version), uris in grouped.items():
                 if not any(uri.endswith("/manifest") for uri in uris):
                     continue
-                package = await _download_skill_package(
-                    connector,
-                    trusted,
-                    uris,
-                )
-                lease = await self._renew(lease)
-                digest = skill_package_digest(package)
-                await self._publication.publish(
-                    PublishSkillCommand(
-                        tenant_id=tenant_id,
-                        actor_id="action-hands-skill-reconciler",
-                        source_id=source.source_id,
-                        command_id=f"mcp-skill:{server.server_id}:{digest}",
-                        correlation_id=f"skill-reconcile:{server.server_id}",
-                        causation_id=f"mcp-snapshot:{server.server_id}",
-                    ),
-                    package,
-                    source_lease=lease,
-                )
+                try:
+                    package = await _download_skill_package(
+                        connector,
+                        trusted,
+                        uris,
+                    )
+                    lease = await self._renew(lease)
+                    digest = skill_package_digest(package)
+                    await self._publication.publish(
+                        PublishSkillCommand(
+                            tenant_id=tenant_id,
+                            actor_id="action-hands-skill-reconciler",
+                            source_id=source.source_id,
+                            command_id=f"mcp-skill:{server.server_id}:{digest}",
+                            correlation_id=f"skill-reconcile:{server.server_id}",
+                            causation_id=f"mcp-snapshot:{server.server_id}",
+                        ),
+                        package,
+                        source_lease=lease,
+                    )
+                except Exception as exc:
+                    package_failures.append(
+                        SkillPackageReconcileFailure(
+                            publisher=publisher,
+                            name=name,
+                            version=version,
+                            error_code=type(exc).__name__,
+                        )
+                    )
+                    continue
                 published += 1
                 observed.append(SkillSourcePackageIdentity(publisher, name, version))
             lease = await self._renew(lease)
+            if package_failures:
+                lease = await self._record_failure(
+                    source=source,
+                    lease=lease,
+                    safe_error_code="package_failure",
+                ) or lease
+                await self._rebuilder.rebuild_tenant(tenant_id)
+                return SkillReconcileResult(
+                    server_id=server.server_id,
+                    published_count=published,
+                    error="package_failure",
+                    package_failures=tuple(package_failures),
+                )
             now = datetime.now(UTC)
             await self._lifecycle.commit_source_snapshot(
                 SkillSourceSnapshotCommit(

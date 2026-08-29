@@ -474,7 +474,10 @@ Capability Catalog。`capabilities.search/load` 只查询 Catalog，不再拼接
 
 MCP `skill://` 发现也不能直接写进程 Registry。Reconciler 从 Server 配置读取 fail-closed 的
 `skill_publisher_allowlist`，建立持久 MCP Source，并调用同一 `SkillPublicationService`；缺少 allowlist
-时整个来源拒绝发布。发布完成后触发 tenant 重建，周期重建负责修复短暂 Artifact/Catalog 故障。
+时整个来源拒绝发布。Reconciler 以 Package identity 为隔离边界捕获下载/准入失败，只记录
+publisher/name/version 和稳定 error code，不保存异常正文；同一快照中的其余 Package 继续发布。只要存在
+包级失败，该轮就持久化为 `complete_snapshot=false` 并禁止缺失项退役，避免坏包或短暂读取错误误撤销旧版本。
+发布完成后触发 tenant 重建，周期重建负责修复短暂 Artifact/Catalog 故障。
 
 管理动作必须区分租户意图和全局安全状态：
 

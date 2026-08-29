@@ -2149,6 +2149,31 @@ ready Skill Artifact 建立带 fencing 的物理回收流程；不把成功命�
 - [x] README、架构、公开 API、数据库参考、运维与阶段门禁同步。
 - [x] 本阶段作为一个 intentional commit 提交并 push，不包含 `.env`、Secret、缓存或无关改动。
 
+## 阶段 M14w：Skill 生命周期最终验收与 Issue 收口（Issue #56）
+
+状态：已完成。按 Issue 原始阶段与验收标准从头复核，不以既有阶段勾选代替跨边界验证。
+
+### 缺口修正
+
+- [x] MCP Source 对每个 Package 独立捕获下载、准入和发布失败，一个坏包不再终止同一快照的其余包。
+- [x] 包级失败仅暴露 publisher/name/version 与稳定 error code，不持久化异常正文或包内容。
+- [x] 含包级失败的轮次持久化为不完整快照，不推进来源缺失计数，防止坏包误退役既有有效版本。
+
+### 跨边界与多副本验收
+
+- [x] E2E 以真实 `python -m auraclaw skills validate/test` 子进程验证目录与声明式向量，再通过真实 Admin HTTP 路由发布同一 digest。
+- [x] E2E 覆盖 Publication、Installation、统一 Catalog、tenant 隔离、force uninstall、reinstall、revoke 与固定 binding cancel。
+- [x] Source Adapter 测试覆盖 MCP Resource 下载、统一发布服务、完整/失败快照、坏包隔离、恢复和来源缺失 grace period。
+- [x] 隔离 PostgreSQL 由两个独立 Lifecycle Store 交叉配置 Source、发布、重选、并发幂等卸载和恢复读取，并执行 0023-0039 正反迁移。
+- [x] 正反迁移以真实 suspended/revoked Publisher 数据执行，并修复 0030 回滚时未清理状态证据导致的约束冲突。
+
+### 最终门禁与交付
+
+- [x] Issue #56 的 Phase 0-5 与全部验收标准均有实现、测试或文档证据，不遗留占位代码或未完成分支。
+- [x] Ruff、Mypy、unit、E2E、Skill 相关 integration、import-linter 与 migration roundtrip 通过。
+- [x] README、架构、API、运维、回滚、数据保留和阶段门禁保持同步。
+- [x] 本阶段作为一个 intentional commit 提交并 push，不包含 `.env`、Secret、缓存或无关改动。
+
 ## 阶段 Product Activity：产品级对话执行轨迹（AuraX Issue #2）
 
 状态：代码与定向验证完成；完整基础设施集成门禁受现有 Kafka/MySQL/PostgreSQL/Artifact 环境失败阻塞。

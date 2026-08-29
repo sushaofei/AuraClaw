@@ -17,15 +17,23 @@ from auraclaw.action.skill_lifecycle import (
     SkillPublishCommit,
 )
 from auraclaw.action.skill_sources import SkillSourceService
+from auraclaw.contracts.errors import PolicyDeniedError
 from auraclaw.contracts.skills import (
+    ChangeSkillPublisherStatusCommand,
     ConfigureSkillSourceCommand,
+    RegisterSkillPublisherCommand,
     RetireSkillSourceCommand,
+    RevokeSkillPublisherKeyCommand,
+    RotateSkillPublisherKeyCommand,
     SkillInstallationRecord,
     SkillInstallationStatus,
     SkillManifest,
     SkillPackageRecord,
     SkillPublicationRecord,
     SkillPublicationStatus,
+    SkillPublisherKeyStatus,
+    SkillPublisherStatus,
+    SkillPublisherStatusOperation,
     SkillRevocationAction,
     SkillSourceDesiredState,
     SkillSourceKind,
@@ -33,6 +41,9 @@ from auraclaw.contracts.skills import (
 from auraclaw.contracts.tools import ArtifactRef
 from auraclaw.infrastructure.persistence.postgres_skill_lifecycle import (
     PostgresSkillLifecycleStore,
+)
+from auraclaw.infrastructure.persistence.postgres_skill_publishers import (
+    PostgresSkillPublisherStore,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -186,7 +197,11 @@ def test_skill_lifecycle_migration_roundtrip_in_isolated_postgres() -> None:
                   AND column_name='priority'"""
             )
             lifecycle = PostgresSkillLifecycleStore(database_url)
+            lifecycle_peer = PostgresSkillLifecycleStore(database_url)
+            publishers = PostgresSkillPublisherStore(database_url)
+            publisher_peer = PostgresSkillPublisherStore(database_url)
             sources = SkillSourceService(lifecycle)
+            peer_sources = SkillSourceService(lifecycle_peer)
             now = datetime.now(UTC)
 
             def source_command(
@@ -215,7 +230,7 @@ def test_skill_lifecycle_migration_roundtrip_in_isolated_postgres() -> None:
                 await sources.configure(
                     source_command("sks_roundtrip_low", "source-low", 0)
                 )
-                await sources.configure(
+                await peer_sources.configure(
                     source_command("sks_roundtrip_high", "source-high", 10)
                 )
                 package = SkillPackageRecord(
@@ -242,7 +257,10 @@ def test_skill_lifecycle_migration_roundtrip_in_isolated_postgres() -> None:
                 )
 
                 async def publish_from(
-                    source_id: str, command_id: str, expected_revision: int
+                    store: PostgresSkillLifecycleStore,
+                    source_id: str,
+                    command_id: str,
+                    expected_revision: int,
                 ) -> SkillPublicationRecord:
                     publication = SkillPublicationRecord(
                         publication_id="skp_roundtrip_source",
@@ -259,7 +277,7 @@ def test_skill_lifecycle_migration_roundtrip_in_isolated_postgres() -> None:
                         created_at=now,
                         updated_at=now,
                     )
-                    result = await lifecycle.commit_publish(
+                    result = await store.commit_publish(
                         SkillPublishCommit(
                             command_id=command_id,
                             request_digest=(
@@ -295,10 +313,18 @@ def test_skill_lifecycle_migration_roundtrip_in_isolated_postgres() -> None:
                     return result.publication
 
                 assert (
-                    await publish_from("sks_roundtrip_low", "publish-low", 0)
+                    await publish_from(
+                        lifecycle,
+                        "sks_roundtrip_low",
+                        "publish-low",
+                        0,
+                    )
                 ).source_id == "sks_roundtrip_low"
                 selected = await publish_from(
-                    "sks_roundtrip_high", "publish-high", 1
+                    lifecycle_peer,
+                    "sks_roundtrip_high",
+                    "publish-high",
+                    1,
                 )
                 assert selected.source_id == "sks_roundtrip_high"
                 assert selected.revision == 2
@@ -308,7 +334,7 @@ def test_skill_lifecycle_migration_roundtrip_in_isolated_postgres() -> None:
                         "sks_roundtrip_low", "source-low-priority", 20, 1
                     )
                 )
-                reprioritized = await lifecycle.get_publication(
+                reprioritized = await lifecycle_peer.get_publication(
                     package.tenant_id, "acme", "release.prepare", "1.0.0"
                 )
                 assert reprioritized is not None
@@ -326,7 +352,7 @@ def test_skill_lifecycle_migration_roundtrip_in_isolated_postgres() -> None:
                         causation_id="source-low-retire",
                     )
                 )
-                fallback = await lifecycle.get_publication(
+                fallback = await lifecycle_peer.get_publication(
                     package.tenant_id, "acme", "release.prepare", "1.0.0"
                 )
                 assert fallback is not None
@@ -365,7 +391,7 @@ def test_skill_lifecycle_migration_roundtrip_in_isolated_postgres() -> None:
                 )
                 drain_results = await asyncio.gather(
                     lifecycle.commit_installation_change(drain_commit),
-                    lifecycle.commit_installation_change(drain_commit),
+                    lifecycle_peer.commit_installation_change(drain_commit),
                 )
                 assert all(
                     result.status is SkillInstallationStatus.DRAINING
@@ -384,7 +410,7 @@ def test_skill_lifecycle_migration_roundtrip_in_isolated_postgres() -> None:
                     }
                 )
                 assert (
-                    await lifecycle.commit_installation_change(
+                    await lifecycle_peer.commit_installation_change(
                         SkillInstallationCommit(
                             command_id="uninstall-force",
                             request_digest=f"sha256:{'e' * 64}",
@@ -400,8 +426,118 @@ def test_skill_lifecycle_migration_roundtrip_in_isolated_postgres() -> None:
                         )
                     )
                 ).uninstall_action is SkillRevocationAction.CANCEL
+
+                registered = await publishers.register_publisher(
+                    RegisterSkillPublisherCommand(
+                        tenant_id=package.tenant_id,
+                        actor_id="migration-test",
+                        publisher="acme",
+                        display_name="Acme",
+                        command_id="publisher-register",
+                        correlation_id="migration-publisher-test",
+                        causation_id="publisher-register",
+                    )
+                )
+                publisher_record, key = await publisher_peer.rotate_key(
+                    RotateSkillPublisherKeyCommand(
+                        tenant_id=package.tenant_id,
+                        actor_id="migration-test",
+                        publisher="acme",
+                        key_id="key-a",
+                        public_key="A" * 43,
+                        command_id="publisher-rotate",
+                        expected_revision=registered.revision,
+                        correlation_id="migration-publisher-test",
+                        causation_id="publisher-rotate",
+                    )
+                )
+                suspended = await publishers.change_status(
+                    ChangeSkillPublisherStatusCommand(
+                        tenant_id=package.tenant_id,
+                        actor_id="migration-test",
+                        publisher="acme",
+                        operation=SkillPublisherStatusOperation.SUSPEND,
+                        reason_code="publisher_under_review",
+                        command_id="publisher-suspend",
+                        expected_revision=publisher_record.revision,
+                        correlation_id="migration-publisher-test",
+                        causation_id="publisher-suspend",
+                    )
+                )
+                assert (
+                    await publisher_peer.get_publisher(package.tenant_id, "acme")
+                ) == suspended
+                assert suspended.security_action is SkillRevocationAction.PAUSE
+                resumed = await publisher_peer.change_status(
+                    ChangeSkillPublisherStatusCommand(
+                        tenant_id=package.tenant_id,
+                        actor_id="migration-test",
+                        publisher="acme",
+                        operation=SkillPublisherStatusOperation.RESUME,
+                        reason_code="review_completed",
+                        command_id="publisher-resume",
+                        expected_revision=suspended.revision,
+                        correlation_id="migration-publisher-test",
+                        causation_id="publisher-resume",
+                    )
+                )
+                revoked_key = await publishers.revoke_key(
+                    RevokeSkillPublisherKeyCommand(
+                        tenant_id=package.tenant_id,
+                        actor_id="migration-test",
+                        publisher="acme",
+                        key_id=key.key_id,
+                        reason_code="key_compromised",
+                        revocation_action=SkillRevocationAction.PAUSE,
+                        policy_decision_id="key-decision",
+                        command_id="publisher-key-revoke",
+                        expected_revision=key.revision,
+                        correlation_id="migration-publisher-test",
+                        causation_id="publisher-key-revoke",
+                    )
+                )
+                assert revoked_key.status is SkillPublisherKeyStatus.REVOKED
+                assert (
+                    await publisher_peer.get_key(package.tenant_id, "acme", "key-a")
+                ) == revoked_key
+                revoked_publisher = await publisher_peer.change_status(
+                    ChangeSkillPublisherStatusCommand(
+                        tenant_id=package.tenant_id,
+                        actor_id="migration-test",
+                        publisher="acme",
+                        operation=SkillPublisherStatusOperation.REVOKE,
+                        reason_code="publisher_compromised",
+                        revocation_action=SkillRevocationAction.CANCEL,
+                        policy_version="skill-revocation-v2",
+                        command_id="publisher-revoke",
+                        expected_revision=resumed.revision,
+                        correlation_id="migration-publisher-test",
+                        causation_id="publisher-revoke",
+                    )
+                )
+                assert revoked_publisher.status is SkillPublisherStatus.REVOKED
+                assert (
+                    await publishers.get_publisher(package.tenant_id, "acme")
+                ) == revoked_publisher
+                with pytest.raises(PolicyDeniedError, match="cannot change status"):
+                    await publishers.change_status(
+                        ChangeSkillPublisherStatusCommand(
+                            tenant_id=package.tenant_id,
+                            actor_id="migration-test",
+                            publisher="acme",
+                            operation=SkillPublisherStatusOperation.RESUME,
+                            reason_code="unsafe_resume",
+                            command_id="publisher-unsafe-resume",
+                            expected_revision=revoked_publisher.revision,
+                            correlation_id="migration-publisher-test",
+                            causation_id="publisher-unsafe-resume",
+                        )
+                    )
             finally:
                 await lifecycle.close()
+                await lifecycle_peer.close()
+                await publishers.close()
+                await publisher_peer.close()
             await connection.execute(DOWN)
             for relation in (
                 "skill_package",
