@@ -791,6 +791,7 @@ def _task_api_app(settings: Settings) -> FastAPI:
             management_service=skill_management,
             upload_service=skill_uploads,
             publisher_service=publisher_management,
+            admission_reader=skill_publication if skill_lifecycle is None else skill_lifecycle,
         )
     )
     extra_closeables: list[Any] = [mcp_lifecycle]
@@ -1718,6 +1719,7 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
                     management=skill_management,
                     rebuilder=skill_rebuilder,
                     publishers=skill_publishers,
+                    admissions=skill_lifecycle,
                 )
             ),
             workload_identities=_configured_identities(

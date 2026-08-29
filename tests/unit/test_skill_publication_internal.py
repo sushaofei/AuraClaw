@@ -159,6 +159,7 @@ def test_task_api_client_publishes_through_action_hands_service() -> None:
                     management=management,
                     rebuilder=rebuilder,
                     publishers=publishers,
+                    admissions=lifecycle,
                 )
             ),
             workload_identities={"task-token": ServiceIdentity.TASK_API},
@@ -294,6 +295,20 @@ def test_task_api_client_publishes_through_action_hands_service() -> None:
                     ),
                     unsafe,
                 )
+            rejected_admissions = await client.list_admissions(
+                "tenant-a",
+                outcome="rejected",
+                content_policy_version="skill-content-v1",
+            )
+            assert len(rejected_admissions) == 1
+            assert rejected_admissions[0].command_id == "publish-internal-unsafe"
+            assert rejected_admissions[0].content_policy_version == "skill-content-v1"
+            assert await client.list_admissions("tenant-b") == ()
+            admission_metrics = await client.admission_metrics("tenant-a")
+            assert {(item.outcome, item.count) for item in admission_metrics} == {
+                ("accepted", 2),
+                ("rejected", 1),
+            }
             active_publication = await lifecycle.get_publication(
                 "tenant-a", "platform", "release.prepare", "2.0.0"
             )

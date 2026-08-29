@@ -25,10 +25,12 @@ UP = "\n".join(
         (ROOT / "migrations/0031_skill_publication_restore.sql").read_text(),
         (ROOT / "migrations/0032_skill_admission_audit.sql").read_text(),
         (ROOT / "migrations/0033_skill_content_quarantine.sql").read_text(),
+        (ROOT / "migrations/0034_skill_admission_operations.sql").read_text(),
     )
 )
 DOWN = "\n".join(
     (
+        (ROOT / "migrations/0034_skill_admission_operations.down.sql").read_text(),
         (ROOT / "migrations/0033_skill_content_quarantine.down.sql").read_text(),
         (ROOT / "migrations/0032_skill_admission_audit.down.sql").read_text(),
         (ROOT / "migrations/0031_skill_publication_restore.down.sql").read_text(),
@@ -114,6 +116,11 @@ def test_skill_lifecycle_migration_roundtrip_in_isolated_postgres() -> None:
                       AND column_name=$1)""",
                     column,
                 )
+            assert await connection.fetchval(
+                """SELECT is_nullable = 'NO' FROM information_schema.columns
+                WHERE table_schema='hands' AND table_name='skill_admission_audit'
+                  AND column_name='content_policy_version'"""
+            )
             await connection.execute(DOWN)
             for relation in (
                 "skill_package",

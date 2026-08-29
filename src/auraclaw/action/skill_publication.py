@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -43,6 +44,8 @@ from auraclaw.contracts.skills import (
     SkillSourceRecord,
 )
 from auraclaw.contracts.tools import ArtifactRef
+
+_CONTENT_POLICY_VERSION = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
 
 
 @dataclass
@@ -87,6 +90,9 @@ class SkillPublicationService:
         self._artifact_lifecycle = artifact_lifecycle
         self._publisher_trust = publisher_trust
         self._content_scanner = content_scanner or DefaultSkillPackageContentScanner()
+        self._content_policy_version = self._content_scanner.policy_version
+        if _CONTENT_POLICY_VERSION.fullmatch(self._content_policy_version) is None:
+            raise ValueError("Skill content policy version is invalid")
         self._bootstrap_sources = {
             (source.tenant_id, source.source_id): source for source in bootstrap_sources
         }
@@ -433,6 +439,7 @@ class SkillPublicationService:
                 safe_error_code=safe_error_code,
                 duration_ms=max(0, int((time.monotonic() - started) * 1000)),
                 occurred_at=datetime.now(UTC),
+                content_policy_version=self._content_policy_version,
             )
         )
 

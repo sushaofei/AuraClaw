@@ -665,6 +665,30 @@ class SkillPublishArtifactInternalRequest(ContractModel):
     artifact_ref: dict[str, Any]
 
 
+class SkillAdmissionListInternalRequest(ContractModel):
+    context: InternalRequestContext
+    outcome: Literal["accepted", "rejected", "quarantined"] | None = None
+    stage: str | None = Field(default=None, min_length=1, max_length=128)
+    content_policy_version: str | None = Field(
+        default=None, min_length=1, max_length=128
+    )
+    limit: int = Field(default=100, ge=1, le=500)
+
+
+class SkillAdmissionListInternalResponse(ContractModel):
+    api_version: str = INTERNAL_API_VERSION
+    admissions: tuple[dict[str, Any], ...] = ()
+
+
+class SkillAdmissionMetricsInternalRequest(ContractModel):
+    context: InternalRequestContext
+
+
+class SkillAdmissionMetricsInternalResponse(ContractModel):
+    api_version: str = INTERNAL_API_VERSION
+    metrics: tuple[dict[str, Any], ...] = ()
+
+
 class SkillInstallationInternalRequest(ContractModel):
     context: InternalRequestContext
     actor_id: str = Field(min_length=1, max_length=256)

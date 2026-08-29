@@ -2,11 +2,16 @@ from __future__ import annotations
 
 import base64
 import binascii
-from typing import Annotated, Any, Protocol
+from dataclasses import asdict
+from typing import Annotated, Any, Literal, Protocol
 
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from pydantic import Field, model_validator
 
+from auraclaw.action.skill_lifecycle import (
+    SkillAdmissionAuditRecord,
+    SkillAdmissionMetricRecord,
+)
 from auraclaw.action.skill_packages import SkillPackage, SkillPackageRegistry
 from auraclaw.api.dependencies import RequestIdentity, request_identity
 from auraclaw.contracts.internal import (
@@ -185,6 +190,23 @@ class SkillPublisherManager(Protocol):
         self, tenant_id: str, publisher: str
     ) -> tuple[SkillPublisherRecord, tuple[SkillPublisherKeyRecord, ...]]: ...
 
+
+class SkillAdmissionReader(Protocol):
+    async def list_admissions(
+        self,
+        tenant_id: str,
+        *,
+        outcome: str | None = None,
+        stage: str | None = None,
+        content_policy_version: str | None = None,
+        limit: int = 100,
+    ) -> tuple[SkillAdmissionAuditRecord, ...]: ...
+
+    async def admission_metrics(
+        self, tenant_id: str
+    ) -> tuple[SkillAdmissionMetricRecord, ...]: ...
+
+
 def _summary(publication: PublishedSkill, *, skill_markdown: str | None = None) -> dict[str, Any]:
     manifest = publication.manifest
     payload = {
@@ -213,6 +235,7 @@ def create_skill_admin_router(
     management_service: SkillManager | None = None,
     upload_service: SkillPackageUploadManager | None = None,
     publisher_service: SkillPublisherManager | None = None,
+    admission_reader: SkillAdmissionReader | None = None,
 ) -> APIRouter:
     router = APIRouter(prefix="/v1/admin", tags=["skill-admin"])
 
@@ -225,6 +248,63 @@ def create_skill_admin_router(
             if current is None or publication.manifest.version > current.manifest.version:
                 latest[key] = publication
         return {"skills": [_summary(item) for item in latest.values()]}
+
+    @router.get("/skill-admissions")
+    async def list_skill_admissions(
+        identity: Identity,
+        outcome: Annotated[
+            Literal["accepted", "rejected", "quarantined"] | None,
+            Query(),
+        ] = None,
+        stage: Annotated[str | None, Query(min_length=1, max_length=128)] = None,
+        content_policy_version: Annotated[
+            str | None, Query(min_length=1, max_length=128)
+        ] = None,
+        limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    ) -> dict[str, Any]:
+        reader = _require_admission_reader(admission_reader)
+        records = await reader.list_admissions(
+            identity.tenant_id,
+            outcome=outcome,
+            stage=stage,
+            content_policy_version=content_policy_version,
+            limit=limit,
+        )
+        return {
+            "admissions": [
+                {
+                    **asdict(record),
+                    "occurred_at": record.occurred_at.isoformat(),
+                }
+                for record in records
+            ]
+        }
+
+    @router.get("/skill-admissions/metrics")
+    async def skill_admission_metrics(identity: Identity) -> dict[str, Any]:
+        reader = _require_admission_reader(admission_reader)
+        groups = await reader.admission_metrics(identity.tenant_id)
+        metrics: list[dict[str, Any]] = []
+        for group in groups:
+            labels = {
+                "outcome": group.outcome,
+                "content_policy_version": group.content_policy_version,
+            }
+            metrics.extend(
+                (
+                    {
+                        "name": "skill.admission.count",
+                        "value": group.count,
+                        "labels": labels,
+                    },
+                    {
+                        "name": "skill.admission.duration_ms.average",
+                        "value": group.average_duration_ms,
+                        "labels": labels,
+                    },
+                )
+            )
+        return {"metrics": metrics}
 
     @router.get("/skill-publishers/{publisher}")
     async def get_skill_publisher(
@@ -782,6 +862,17 @@ def _require_publisher_service(
             detail="Skill Publisher Registry is not configured",
         )
     return service
+
+
+def _require_admission_reader(
+    reader: SkillAdmissionReader | None,
+) -> SkillAdmissionReader:
+    if reader is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Skill admission reader is not configured",
+        )
+    return reader
 
 
 def _publisher_summary(

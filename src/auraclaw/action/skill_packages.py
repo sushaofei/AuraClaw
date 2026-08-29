@@ -76,10 +76,15 @@ class SkillSignatureVerifier(Protocol):
 
 
 class SkillPackageContentScanner(Protocol):
+    @property
+    def policy_version(self) -> str: ...
+
     def scan(self, package: SkillPackage) -> tuple[str, ...]: ...
 
 
 class DefaultSkillPackageContentScanner:
+    policy_version = "skill-content-v1"
+
     _forbidden_extensions = frozenset(
         {
             ".bash",

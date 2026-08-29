@@ -2,15 +2,24 @@ from __future__ import annotations
 
 import base64
 from contextlib import suppress
+from datetime import datetime
 from uuid import uuid4
 
 import httpx
 
+from auraclaw.action.skill_lifecycle import (
+    SkillAdmissionAuditRecord,
+    SkillAdmissionMetricRecord,
+)
 from auraclaw.action.skill_packages import SkillPackage, SkillPackageRegistry
 from auraclaw.contracts.errors import NotFoundError
 from auraclaw.contracts.internal import (
     InternalRequestContext,
     ServiceIdentity,
+    SkillAdmissionListInternalRequest,
+    SkillAdmissionListInternalResponse,
+    SkillAdmissionMetricsInternalRequest,
+    SkillAdmissionMetricsInternalResponse,
     SkillInstallationInternalRequest,
     SkillInstallationInternalResponse,
     SkillPackageStateInternalRequest,
@@ -130,6 +139,52 @@ class RemoteSkillPublicationClient:
         )
         publication = PublishedSkill.model_validate(response.publication)
         return publication
+
+    async def list_admissions(
+        self,
+        tenant_id: str,
+        *,
+        outcome: str | None = None,
+        stage: str | None = None,
+        content_policy_version: str | None = None,
+        limit: int = 100,
+    ) -> tuple[SkillAdmissionAuditRecord, ...]:
+        request_id = f"skill-admissions-{uuid4().hex}"
+        response = await self._contract.call(
+            "/internal/v1/skill-publications/admissions",
+            SkillAdmissionListInternalRequest(
+                context=_query_context(tenant_id, request_id),
+                outcome=outcome,
+                stage=stage,
+                content_policy_version=content_policy_version,
+                limit=limit,
+            ),
+            SkillAdmissionListInternalResponse,
+        )
+        records: list[SkillAdmissionAuditRecord] = []
+        for payload in response.admissions:
+            values = dict(payload)
+            occurred_at = values.get("occurred_at")
+            if isinstance(occurred_at, str):
+                values["occurred_at"] = datetime.fromisoformat(occurred_at)
+            records.append(SkillAdmissionAuditRecord(**values))
+        return tuple(records)
+
+    async def admission_metrics(
+        self, tenant_id: str
+    ) -> tuple[SkillAdmissionMetricRecord, ...]:
+        request_id = f"skill-admission-metrics-{uuid4().hex}"
+        response = await self._contract.call(
+            "/internal/v1/skill-publications/admission-metrics",
+            SkillAdmissionMetricsInternalRequest(
+                context=_query_context(tenant_id, request_id)
+            ),
+            SkillAdmissionMetricsInternalResponse,
+        )
+        return tuple(
+            SkillAdmissionMetricRecord(**dict(payload))
+            for payload in response.metrics
+        )
 
     async def change_installation(
         self,
@@ -426,6 +481,16 @@ def _context(
         request_id=command.command_id,
         correlation_id=command.correlation_id,
         causation_id=command.causation_id,
+    )
+
+
+def _query_context(tenant_id: str, request_id: str) -> InternalRequestContext:
+    return InternalRequestContext(
+        tenant_id=tenant_id,
+        service_identity=ServiceIdentity.TASK_API,
+        request_id=request_id,
+        correlation_id=request_id,
+        causation_id=request_id,
     )
 
 
