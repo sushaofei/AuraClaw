@@ -14,6 +14,7 @@ from auraclaw.action.skill_lifecycle import (
     SkillPublishCommit,
     SkillPublishCommitResult,
     SkillRestoreCommit,
+    SkillSourceConfigCommit,
     SkillSourceLease,
     SkillSourcePackageIdentity,
     SkillSourceSnapshotCommit,
@@ -211,6 +212,56 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
                 publication,
                 expected_revision=commit.expected_publication_revision,
             )
+            await connection.execute(
+                """INSERT INTO hands.skill_publication_source
+                (tenant_id,publisher,name,version,source_id,available,
+                 first_seen_at,last_seen_at,unavailable_at)
+                VALUES ($1,$2,$3,$4,$5,true,$6,$6,NULL)
+                ON CONFLICT (tenant_id,publisher,name,version,source_id)
+                DO UPDATE SET available=true,last_seen_at=EXCLUDED.last_seen_at,
+                  unavailable_at=NULL""",
+                package.tenant_id,
+                publication.publisher,
+                publication.name,
+                publication.version,
+                commit.source_id,
+                commit.occurred_at,
+            )
+            selected_source = await connection.fetchval(
+                """SELECT ps.source_id
+                FROM hands.skill_publication_source ps
+                JOIN hands.skill_source s
+                  ON s.tenant_id=ps.tenant_id AND s.source_id=ps.source_id
+                WHERE ps.tenant_id=$1 AND ps.publisher=$2 AND ps.name=$3
+                  AND ps.version=$4 AND ps.available
+                  AND s.desired_state='enabled'
+                ORDER BY s.priority DESC,ps.source_id
+                LIMIT 1""",
+                package.tenant_id,
+                publication.publisher,
+                publication.name,
+                publication.version,
+            )
+            if (
+                selected_source is not None
+                and str(selected_source) != committed_publication.source_id
+            ):
+                selected_row = await connection.fetchrow(
+                    """UPDATE hands.skill_publication SET source_id=$1,
+                    revision=revision+1,updated_by=$2,updated_at=$3
+                    WHERE tenant_id=$4 AND publisher=$5 AND name=$6 AND version=$7
+                    RETURNING *""",
+                    str(selected_source),
+                    commit.actor_id,
+                    commit.occurred_at,
+                    package.tenant_id,
+                    publication.publisher,
+                    publication.name,
+                    publication.version,
+                )
+                if selected_row is None:
+                    raise VersionConflictError("Skill publication source selection failed")
+                committed_publication = _publication(dict(selected_row))
             committed_installation = await _put_installation_transaction(
                 connection, commit.installation
             )
@@ -683,8 +734,8 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
                 """INSERT INTO hands.skill_source
                 (source_id,tenant_id,kind,desired_state,publisher_allowlist,
                  credential_ref,config_metadata,revision,created_by,updated_by,
-                 created_at,updated_at)
-                VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7::jsonb,$8,$9,$10,$11,$12)
+                 created_at,updated_at,priority)
+                VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7::jsonb,$8,$9,$10,$11,$12,$13)
                 ON CONFLICT (tenant_id,source_id) DO NOTHING RETURNING *""",
                 *_source_values(record),
             )
@@ -693,8 +744,8 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
                 """UPDATE hands.skill_source SET
                 desired_state=$1,publisher_allowlist=$2::jsonb,
                 credential_ref=$3,config_metadata=$4::jsonb,revision=$5,
-                updated_by=$6,updated_at=$7
-                WHERE tenant_id=$8 AND source_id=$9 AND revision=$10 AND kind=$11
+                updated_by=$6,updated_at=$7,priority=$8
+                WHERE tenant_id=$9 AND source_id=$10 AND revision=$11 AND kind=$12
                 RETURNING *""",
                 record.desired_state.value,
                 json_dumps(record.publisher_allowlist),
@@ -703,6 +754,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
                 record.revision,
                 record.updated_by,
                 record.updated_at,
+                record.priority,
                 record.tenant_id,
                 record.source_id,
                 expected_revision,
@@ -711,6 +763,153 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
         if row is None:
             raise VersionConflictError("Skill Source revision conflict")
         return _source(dict(row))
+
+    async def commit_source_config(
+        self, commit: SkillSourceConfigCommit
+    ) -> SkillSourceRecord:
+        record = commit.source
+        pool = await self.pool()
+        async with pool.acquire() as connection, connection.transaction():
+            replay = await connection.fetchrow(
+                """SELECT request_digest,source_id
+                FROM hands.skill_source_command
+                WHERE tenant_id=$1 AND command_id=$2""",
+                record.tenant_id,
+                commit.command_id,
+            )
+            if replay is not None:
+                if str(replay["request_digest"]) != commit.request_digest:
+                    raise VersionConflictError("Skill Source command id was reused")
+                current = await connection.fetchrow(
+                    """SELECT * FROM hands.skill_source
+                    WHERE tenant_id=$1 AND source_id=$2""",
+                    record.tenant_id,
+                    str(replay["source_id"]),
+                )
+                if current is None:
+                    raise VersionConflictError("Skill Source command result is incomplete")
+                return _source(dict(current))
+            _require_next_revision(record.revision, commit.expected_revision, "source")
+            if commit.expected_revision == 0:
+                row = await connection.fetchrow(
+                    """INSERT INTO hands.skill_source
+                    (source_id,tenant_id,kind,desired_state,publisher_allowlist,
+                     credential_ref,config_metadata,revision,created_by,updated_by,
+                     created_at,updated_at,priority)
+                    VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7::jsonb,$8,$9,$10,$11,$12,$13)
+                    ON CONFLICT (tenant_id,source_id) DO NOTHING RETURNING *""",
+                    *_source_values(record),
+                )
+            else:
+                row = await connection.fetchrow(
+                    """UPDATE hands.skill_source SET desired_state=$1,
+                    publisher_allowlist=$2::jsonb,credential_ref=$3,
+                    config_metadata=$4::jsonb,revision=$5,updated_by=$6,
+                    updated_at=$7,priority=$8
+                    WHERE tenant_id=$9 AND source_id=$10 AND revision=$11
+                      AND kind=$12 RETURNING *""",
+                    record.desired_state.value,
+                    json_dumps(record.publisher_allowlist),
+                    record.credential_ref,
+                    json_dumps(record.config_metadata),
+                    record.revision,
+                    record.updated_by,
+                    record.updated_at,
+                    record.priority,
+                    record.tenant_id,
+                    record.source_id,
+                    commit.expected_revision,
+                    record.kind.value,
+                )
+            if row is None:
+                raise VersionConflictError("Skill Source revision conflict")
+            if record.desired_state is SkillSourceDesiredState.RETIRED:
+                await connection.execute(
+                    """UPDATE hands.skill_publication_source
+                    SET available=false,unavailable_at=$3
+                    WHERE tenant_id=$1 AND source_id=$2 AND available""",
+                    record.tenant_id,
+                    record.source_id,
+                    commit.occurred_at,
+                )
+            affected = await connection.fetch(
+                """SELECT DISTINCT publisher,name,version
+                FROM hands.skill_publication_source
+                WHERE tenant_id=$1 AND source_id=$2""",
+                record.tenant_id,
+                record.source_id,
+            )
+            for reference in affected:
+                publication_row = await connection.fetchrow(
+                    """SELECT * FROM hands.skill_publication
+                    WHERE tenant_id=$1 AND publisher=$2 AND name=$3 AND version=$4
+                      AND status NOT IN ('retired','revoked') FOR UPDATE""",
+                    record.tenant_id,
+                    str(reference["publisher"]),
+                    str(reference["name"]),
+                    str(reference["version"]),
+                )
+                if publication_row is None:
+                    continue
+                selected = await connection.fetchval(
+                    """SELECT ps.source_id
+                    FROM hands.skill_publication_source ps
+                    JOIN hands.skill_source s
+                      ON s.tenant_id=ps.tenant_id AND s.source_id=ps.source_id
+                    WHERE ps.tenant_id=$1 AND ps.publisher=$2 AND ps.name=$3
+                      AND ps.version=$4 AND ps.available
+                      AND s.desired_state='enabled'
+                    ORDER BY s.priority DESC,ps.source_id LIMIT 1""",
+                    record.tenant_id,
+                    str(reference["publisher"]),
+                    str(reference["name"]),
+                    str(reference["version"]),
+                )
+                if selected is not None and str(selected) == str(
+                    publication_row["source_id"]
+                ):
+                    continue
+                await connection.execute(
+                    """UPDATE hands.skill_publication SET source_id=$1,
+                    status=$2,revision=revision+1,updated_by=$3,updated_at=$4,
+                    reason_code=$5 WHERE publication_id=$6""",
+                    (
+                        str(selected)
+                        if selected is not None
+                        else str(publication_row["source_id"])
+                    ),
+                    (
+                        str(publication_row["status"])
+                        if selected is not None
+                        else SkillPublicationStatus.RETIRED.value
+                    ),
+                    commit.actor_id,
+                    commit.occurred_at,
+                    (
+                        publication_row["reason_code"]
+                        if selected is not None
+                        else commit.reason_code or "source_unavailable"
+                    ),
+                    str(publication_row["publication_id"]),
+                )
+            await connection.execute(
+                """INSERT INTO hands.skill_source_command
+                (tenant_id,command_id,request_digest,source_id,operation,actor_id,
+                 correlation_id,causation_id,reason_code,resulting_revision,created_at)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)""",
+                record.tenant_id,
+                commit.command_id,
+                commit.request_digest,
+                record.source_id,
+                commit.operation,
+                commit.actor_id,
+                commit.correlation_id,
+                commit.causation_id,
+                commit.reason_code,
+                record.revision,
+                commit.occurred_at,
+            )
+            return _source(dict(row))
 
     async def get_source(self, tenant_id: str, source_id: str) -> SkillSourceRecord | None:
         pool = await self.pool()
@@ -721,6 +920,15 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
             source_id,
         )
         return None if row is None else _source(dict(row))
+
+    async def list_sources(self, tenant_id: str) -> tuple[SkillSourceRecord, ...]:
+        pool = await self.pool()
+        rows = await pool.fetch(
+            """SELECT * FROM hands.skill_source
+            WHERE tenant_id=$1 ORDER BY priority DESC,source_id""",
+            tenant_id,
+        )
+        return tuple(_source(dict(row)) for row in rows)
 
     async def put_sync_state(self, state: SkillSourceSyncState) -> None:
         pool = await self.pool()
@@ -883,10 +1091,13 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
             if previous_generation is not None and state.generation <= int(previous_generation):
                 raise VersionConflictError("Skill Source complete snapshot generation must advance")
             rows = await connection.fetch(
-                """SELECT * FROM hands.skill_publication
-                WHERE tenant_id=$1 AND source_id=$2
-                  AND status NOT IN ('retired','revoked')
-                ORDER BY publisher,name,version FOR UPDATE""",
+                """SELECT p.* FROM hands.skill_publication p
+                JOIN hands.skill_publication_source ps
+                  ON ps.tenant_id=p.tenant_id AND ps.publisher=p.publisher
+                 AND ps.name=p.name AND ps.version=p.version
+                WHERE p.tenant_id=$1 AND ps.source_id=$2
+                  AND p.status NOT IN ('retired','revoked')
+                ORDER BY p.publisher,p.name,p.version FOR UPDATE OF p""",
                 state.tenant_id,
                 state.source_id,
             )
@@ -898,6 +1109,18 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
                     publication.version,
                 )
                 if identity in observed:
+                    await connection.execute(
+                        """UPDATE hands.skill_publication_source
+                        SET available=true,last_seen_at=$6,unavailable_at=NULL
+                        WHERE tenant_id=$1 AND source_id=$2 AND publisher=$3
+                          AND name=$4 AND version=$5""",
+                        state.tenant_id,
+                        state.source_id,
+                        identity.publisher,
+                        identity.name,
+                        identity.version,
+                        commit.occurred_at,
+                    )
                     await connection.execute(
                         """INSERT INTO hands.skill_source_inventory
                         (tenant_id,source_id,publisher,name,version,
@@ -938,6 +1161,53 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
                     commit.occurred_at,
                 )
                 if int(missing) < commit.missing_snapshot_threshold:
+                    continue
+                await connection.execute(
+                    """UPDATE hands.skill_publication_source
+                    SET available=false,unavailable_at=$6
+                    WHERE tenant_id=$1 AND source_id=$2 AND publisher=$3
+                      AND name=$4 AND version=$5""",
+                    state.tenant_id,
+                    state.source_id,
+                    identity.publisher,
+                    identity.name,
+                    identity.version,
+                    commit.occurred_at,
+                )
+                selected_source = await connection.fetchval(
+                    """SELECT ps.source_id
+                    FROM hands.skill_publication_source ps
+                    JOIN hands.skill_source s
+                      ON s.tenant_id=ps.tenant_id AND s.source_id=ps.source_id
+                    WHERE ps.tenant_id=$1 AND ps.publisher=$2 AND ps.name=$3
+                      AND ps.version=$4 AND ps.available
+                      AND s.desired_state='enabled'
+                    ORDER BY s.priority DESC,ps.source_id LIMIT 1""",
+                    state.tenant_id,
+                    identity.publisher,
+                    identity.name,
+                    identity.version,
+                )
+                if selected_source is not None:
+                    if str(selected_source) != publication.source_id:
+                        selected_row = await connection.fetchrow(
+                            """UPDATE hands.skill_publication SET source_id=$1,
+                            revision=revision+1,updated_by=$2,updated_at=$3
+                            WHERE tenant_id=$4 AND publisher=$5 AND name=$6
+                              AND version=$7 AND revision=$8 RETURNING *""",
+                            str(selected_source),
+                            commit.actor_id,
+                            commit.occurred_at,
+                            state.tenant_id,
+                            identity.publisher,
+                            identity.name,
+                            identity.version,
+                            publication.revision,
+                        )
+                        if selected_row is None:
+                            raise VersionConflictError(
+                                "Skill publication source selection conflict"
+                            )
                     continue
                 command_id = _retirement_command_id(commit.command_prefix, identity)
                 command_row = await connection.fetchrow(
@@ -1400,6 +1670,7 @@ def _source_values(record: SkillSourceRecord) -> tuple[object, ...]:
         record.updated_by,
         record.created_at,
         record.updated_at,
+        record.priority,
     )
 
 
@@ -1412,6 +1683,7 @@ def _source(row: dict[str, Any]) -> SkillSourceRecord:
         publisher_allowlist=tuple(json_loads(row["publisher_allowlist"])),
         credential_ref=row["credential_ref"],
         config_metadata=dict(json_loads(row["config_metadata"])),
+        priority=int(row.get("priority", 0)),
         revision=int(row["revision"]),
         created_by=str(row["created_by"]),
         updated_by=str(row["updated_by"]),

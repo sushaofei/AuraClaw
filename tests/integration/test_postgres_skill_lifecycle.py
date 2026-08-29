@@ -55,6 +55,7 @@ MIGRATION = "\n".join(
         (ROOT / "migrations/0034_skill_admission_operations.sql").read_text(),
         (ROOT / "migrations/0035_skill_admission_retention.sql").read_text(),
         (ROOT / "migrations/0036_skill_binding_revocation_policy.sql").read_text(),
+        (ROOT / "migrations/0037_skill_publication_sources.sql").read_text(),
     )
 )
 pytestmark = pytest.mark.skipif(DATABASE_URL is None, reason="PostgreSQL test URL not configured")
@@ -584,6 +585,13 @@ def test_postgres_skill_lifecycle_is_persistent_and_tenant_scoped() -> None:
             )
             await connection.execute(
                 "DELETE FROM hands.skill_source_retirement_command WHERE tenant_id=$1",
+                tenant_id,
+            )
+            await connection.execute(
+                "DELETE FROM hands.skill_source_command WHERE tenant_id=$1", tenant_id
+            )
+            await connection.execute(
+                "DELETE FROM hands.skill_publication_source WHERE tenant_id=$1",
                 tenant_id,
             )
             await connection.execute(

@@ -19,6 +19,7 @@ from auraclaw.contracts.skills import (
     SkillPackageRecord,
     SkillPublicationRecord,
     SkillPublicationStatus,
+    SkillSourceDesiredState,
     SkillSourceRecord,
     SkillSourceSyncState,
 )
@@ -27,6 +28,7 @@ PackageKey = tuple[str, str, str, str]
 PublicationKey = tuple[str, str, str, str]
 InstallationKey = tuple[str, str, str]
 SourceKey = tuple[str, str]
+PublicationSourceKey = tuple[str, str, str, str, str]
 CommandKey = tuple[str, str]
 
 
@@ -90,6 +92,20 @@ class SkillRestoreCommit:
     causation_id: str
     expected_revision: int
     publication: SkillPublicationRecord
+    occurred_at: datetime
+
+
+@dataclass(frozen=True)
+class SkillSourceConfigCommit:
+    command_id: str
+    request_digest: str
+    operation: str
+    actor_id: str
+    correlation_id: str
+    causation_id: str
+    reason_code: str | None
+    expected_revision: int
+    source: SkillSourceRecord
     occurred_at: datetime
 
 
@@ -273,9 +289,15 @@ class SkillLifecycleStore(Protocol):
         self, record: SkillSourceRecord, *, expected_revision: int
     ) -> SkillSourceRecord: ...
 
+    async def commit_source_config(
+        self, commit: SkillSourceConfigCommit
+    ) -> SkillSourceRecord: ...
+
     async def get_source(
         self, tenant_id: str, source_id: str
     ) -> SkillSourceRecord | None: ...
+
+    async def list_sources(self, tenant_id: str) -> tuple[SkillSourceRecord, ...]: ...
 
     async def put_sync_state(self, state: SkillSourceSyncState) -> None: ...
 
@@ -322,8 +344,14 @@ class InMemorySkillLifecycleStore:
     _source_inventory: dict[
         tuple[str, str, str, str, str], tuple[int, int]
     ] = field(default_factory=dict)
+    _publication_sources: dict[PublicationSourceKey, bool] = field(
+        default_factory=dict
+    )
     _source_retirement_commands: set[tuple[str, str]] = field(default_factory=set)
     _restore_commands: dict[CommandKey, str] = field(default_factory=dict)
+    _source_config_commands: dict[CommandKey, tuple[str, str]] = field(
+        default_factory=dict
+    )
     _commands: dict[CommandKey, tuple[str, SkillPublishCommitResult]] = field(
         default_factory=dict
     )
@@ -457,9 +485,12 @@ class InMemorySkillLifecycleStore:
                 request_digest, result = existing_command
                 if request_digest != commit.request_digest:
                     raise VersionConflictError("Skill command id was reused")
+                current_publication = self._publications.get(
+                    _publication_key(result.publication)
+                )
                 return SkillPublishCommitResult(
                     package=result.package,
-                    publication=result.publication,
+                    publication=current_publication or result.publication,
                     installation=result.installation,
                     replayed=True,
                 )
@@ -507,6 +538,26 @@ class InMemorySkillLifecycleStore:
                 self._installations = installations
                 raise
             result = SkillPublishCommitResult(package, publication, installation)
+            reference_key = (
+                package.tenant_id,
+                publication.publisher,
+                publication.name,
+                publication.version,
+                commit.source_id,
+            )
+            self._publication_sources[reference_key] = True
+            selected_source = self._select_publication_source(publication)
+            if selected_source is not None and selected_source != publication.source_id:
+                publication = publication.model_copy(
+                    update={
+                        "source_id": selected_source,
+                        "revision": publication.revision + 1,
+                        "updated_by": commit.actor_id,
+                        "updated_at": commit.occurred_at,
+                    }
+                )
+                self._publications[_publication_key(publication)] = publication
+                result = SkillPublishCommitResult(package, publication, installation)
             self._commands[key] = (commit.request_digest, result)
             outbox_id = f"{commit.package.tenant_id}:{commit.command_id}:published"
             self._outbox[outbox_id] = SkillOutboxRecord(
@@ -517,6 +568,34 @@ class InMemorySkillLifecycleStore:
                 payload=_publish_outbox_payload(result),
             )
             return result
+
+    def _select_publication_source(
+        self, publication: SkillPublicationRecord
+    ) -> str | None:
+        candidates: list[tuple[int, str]] = []
+        for key, available in self._publication_sources.items():
+            tenant_id, publisher, name, version, source_id = key
+            if not available or (
+                tenant_id,
+                publisher,
+                name,
+                version,
+            ) != (
+                publication.tenant_id,
+                publication.publisher,
+                publication.name,
+                publication.version,
+            ):
+                continue
+            source = self._sources.get((tenant_id, source_id))
+            if (
+                source is not None
+                and source.desired_state is SkillSourceDesiredState.ENABLED
+            ):
+                candidates.append((source.priority, source_id))
+        if not candidates:
+            return None
+        return min(candidates, key=lambda item: (-item[0], item[1]))[1]
 
     async def claim_outbox(
         self, *, owner: str, limit: int = 100
@@ -714,10 +793,83 @@ class InMemorySkillLifecycleStore:
         self._sources[key] = record
         return record
 
+    async def commit_source_config(
+        self, commit: SkillSourceConfigCommit
+    ) -> SkillSourceRecord:
+        key = (commit.source.tenant_id, commit.command_id)
+        async with self._lock:
+            replay = self._source_config_commands.get(key)
+            if replay is not None:
+                request_digest, source_id = replay
+                if request_digest != commit.request_digest:
+                    raise VersionConflictError("Skill Source command id was reused")
+                current = self._sources.get((commit.source.tenant_id, source_id))
+                if current is None:
+                    raise VersionConflictError("Skill Source command result is incomplete")
+                return current
+            result = await self.put_source(
+                commit.source, expected_revision=commit.expected_revision
+            )
+            if result.desired_state is SkillSourceDesiredState.RETIRED:
+                for reference_key in tuple(self._publication_sources):
+                    if (
+                        reference_key[0] == result.tenant_id
+                        and reference_key[4] == result.source_id
+                    ):
+                        self._publication_sources[reference_key] = False
+            affected_publications = {
+                reference_key[:4]
+                for reference_key in self._publication_sources
+                if reference_key[0] == result.tenant_id
+                and reference_key[4] == result.source_id
+            }
+            for publication_key in affected_publications:
+                publication = self._publications.get(publication_key)
+                if publication is None or publication.status in {
+                    SkillPublicationStatus.RETIRED,
+                    SkillPublicationStatus.REVOKED,
+                }:
+                    continue
+                selected = self._select_publication_source(publication)
+                if selected == publication.source_id:
+                    continue
+                self._publications[publication_key] = publication.model_copy(
+                    update={
+                        "source_id": selected or publication.source_id,
+                        "status": (
+                            publication.status
+                            if selected is not None
+                            else SkillPublicationStatus.RETIRED
+                        ),
+                        "revision": publication.revision + 1,
+                        "updated_by": commit.actor_id,
+                        "updated_at": commit.occurred_at,
+                        "reason_code": (
+                            publication.reason_code
+                            if selected is not None
+                            else commit.reason_code or "source_unavailable"
+                        ),
+                    }
+                )
+            self._source_config_commands[key] = (
+                commit.request_digest,
+                result.source_id,
+            )
+            return result
+
     async def get_source(
         self, tenant_id: str, source_id: str
     ) -> SkillSourceRecord | None:
         return self._sources.get((tenant_id, source_id))
+
+    async def list_sources(self, tenant_id: str) -> tuple[SkillSourceRecord, ...]:
+        return tuple(
+            source
+            for (source_tenant, _source_id), source in sorted(
+                self._sources.items(), key=lambda item: item[0]
+            )
+            if source_tenant == tenant_id
+        )
 
     async def put_sync_state(self, state: SkillSourceSyncState) -> None:
         key = (state.tenant_id, state.source_id)
@@ -820,7 +972,13 @@ class InMemorySkillLifecycleStore:
             for key, publication in tuple(self._publications.items()):
                 if (
                     publication.tenant_id != state.tenant_id
-                    or publication.source_id != state.source_id
+                    or (
+                            state.tenant_id,
+                            publication.publisher,
+                            publication.name,
+                            publication.version,
+                            state.source_id,
+                        ) not in self._publication_sources
                     or publication.status in {
                         SkillPublicationStatus.RETIRED,
                         SkillPublicationStatus.REVOKED,
@@ -841,11 +999,41 @@ class InMemorySkillLifecycleStore:
                 )
                 if identity in observed:
                     self._source_inventory[inventory_key] = (state.generation, 0)
+                    self._publication_sources[
+                        (
+                            state.tenant_id,
+                            publication.publisher,
+                            publication.name,
+                            publication.version,
+                            state.source_id,
+                        )
+                    ] = True
                     continue
                 previous = self._source_inventory.get(inventory_key)
                 missing = 1 if previous is None else previous[1] + 1
                 self._source_inventory[inventory_key] = (state.generation, missing)
                 if missing < commit.missing_snapshot_threshold:
+                    continue
+                self._publication_sources[
+                    (
+                        state.tenant_id,
+                        publication.publisher,
+                        publication.name,
+                        publication.version,
+                        state.source_id,
+                    )
+                ] = False
+                selected_source = self._select_publication_source(publication)
+                if selected_source is not None:
+                    if selected_source != publication.source_id:
+                        self._publications[key] = publication.model_copy(
+                            update={
+                                "source_id": selected_source,
+                                "revision": publication.revision + 1,
+                                "updated_by": commit.actor_id,
+                                "updated_at": now,
+                            }
+                        )
                     continue
                 command_id = _retirement_command_id(commit.command_prefix, identity)
                 command_key = (state.tenant_id, command_id)

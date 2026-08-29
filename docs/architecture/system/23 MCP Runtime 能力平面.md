@@ -388,6 +388,14 @@ MCP Skill Source 对账按 `(tenant_id, source_id)` 获取 PostgreSQL 持久租�
 响应正文。部分包已经提交但快照尚未完成时保持 `complete_snapshot=false`，下一轮依靠不可变版本和
 command digest 幂等补齐。Source disabled/retired 时不再取得租约或拉取内容。
 
+Source 配置由 task-api 管理面经内部工作负载契约写入 Action Hands，写命令包含 actor、command id、
+expected revision、correlation/causation；退役还必须包含 reason。`skill_publication_source` 保存同一
+不可变 Publication 的多来源引用和 available 状态，Publication 上的 `source_id` 只是当前选中来源。
+选择规则是 enabled、available 来源中 priority 最高者，同优先级按 source id 稳定排序。来源优先级
+变化、禁用、退役或完整快照确认缺失时都在 Lifecycle 事务内重选；存在备用来源时 Publication 保持
+原状态，只更新选中来源和 revision。没有备用来源时才进入普通 `retired`，且来源重新出现不会自动
+恢复。Installation 仍是独立 tenant 抑制事实，多来源重新发现不能绕过 disabled/uninstalled。
+
 完整快照还在同一 fenced 事务内维护 Source inventory。首次缺失只记录
 `missing_complete_snapshots=1`；连续第二个、且 generation 严格递增的完整快照仍缺失时，才写入
 `skill_source_retirement_command` 并把 Publication 原子转为 `retired`。任一中间完整快照重新观察到

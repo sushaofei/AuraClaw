@@ -40,17 +40,24 @@ from auraclaw.contracts.internal import (
     SkillRestoreInternalResponse,
     SkillRevokeInternalRequest,
     SkillRevokeInternalResponse,
+    SkillSourceConfigureInternalRequest,
+    SkillSourceInternalResponse,
+    SkillSourceReadInternalRequest,
+    SkillSourceRetireInternalRequest,
+    SkillSourceSyncInternalRequest,
     SkillStateInternalRequest,
     SkillStateInternalResponse,
 )
 from auraclaw.contracts.skills import (
     ChangeSkillInstallationCommand,
     ChangeSkillPublisherStatusCommand,
+    ConfigureSkillSourceCommand,
     PublishedSkill,
     PublishSkillCommand,
     PurgeSkillPackageCommand,
     RegisterSkillPublisherCommand,
     RestoreSkillPublicationCommand,
+    RetireSkillSourceCommand,
     RevokeSkillPublicationCommand,
     RevokeSkillPublisherKeyCommand,
     RotateSkillPublisherKeyCommand,
@@ -60,6 +67,7 @@ from auraclaw.contracts.skills import (
     SkillPublicationRecord,
     SkillPublisherKeyRecord,
     SkillPublisherRecord,
+    SkillSourceRecord,
 )
 from auraclaw.contracts.tools import ArtifactRef
 from auraclaw.internal.http import HttpContractClient
@@ -455,6 +463,78 @@ class RemoteSkillPublicationClient:
             SkillStateInternalResponse,
         )
 
+    async def configure_source(
+        self, command: ConfigureSkillSourceCommand
+    ) -> SkillSourceRecord:
+        response = await self._contract.call(
+            "/internal/v1/skill-publications/sources/configure",
+            SkillSourceConfigureInternalRequest(
+                context=_context(command),
+                actor_id=command.actor_id,
+                source_id=command.source_id,
+                kind=command.kind.value,
+                desired_state=command.desired_state.value,
+                publisher_allowlist=command.publisher_allowlist,
+                credential_ref=command.credential_ref,
+                config_metadata=command.config_metadata,
+                priority=command.priority,
+                command_id=command.command_id,
+                expected_revision=command.expected_revision,
+            ),
+            SkillSourceInternalResponse,
+        )
+        return SkillSourceRecord.model_validate(response.sources[0])
+
+    async def retire_source(
+        self, command: RetireSkillSourceCommand
+    ) -> SkillSourceRecord:
+        response = await self._contract.call(
+            "/internal/v1/skill-publications/sources/retire",
+            SkillSourceRetireInternalRequest(
+                context=_context(command),
+                actor_id=command.actor_id,
+                source_id=command.source_id,
+                reason_code=command.reason_code,
+                command_id=command.command_id,
+                expected_revision=command.expected_revision,
+            ),
+            SkillSourceInternalResponse,
+        )
+        return SkillSourceRecord.model_validate(response.sources[0])
+
+    async def list_sources(self, tenant_id: str) -> tuple[SkillSourceRecord, ...]:
+        request_id = f"skill-source-list-{uuid4().hex}"
+        response = await self._contract.call(
+            "/internal/v1/skill-publications/sources/read",
+            SkillSourceReadInternalRequest(
+                context=_query_context(tenant_id, request_id)
+            ),
+            SkillSourceInternalResponse,
+        )
+        return tuple(SkillSourceRecord.model_validate(item) for item in response.sources)
+
+    async def get_source(self, tenant_id: str, source_id: str) -> SkillSourceRecord:
+        request_id = f"skill-source-get-{uuid4().hex}"
+        response = await self._contract.call(
+            "/internal/v1/skill-publications/sources/read",
+            SkillSourceReadInternalRequest(
+                context=_query_context(tenant_id, request_id), source_id=source_id
+            ),
+            SkillSourceInternalResponse,
+        )
+        return SkillSourceRecord.model_validate(response.sources[0])
+
+    async def sync_source(self, tenant_id: str, source_id: str) -> dict[str, object]:
+        request_id = f"skill-source-sync-{uuid4().hex}"
+        response = await self._contract.call(
+            "/internal/v1/skill-publications/sources/sync",
+            SkillSourceSyncInternalRequest(
+                context=_query_context(tenant_id, request_id), source_id=source_id
+            ),
+            SkillSourceInternalResponse,
+        )
+        return dict(response.sync_result or {})
+
 
 def _context(
     command: (
@@ -467,6 +547,8 @@ def _context(
         | RevokeSkillPublisherKeyCommand
         | ChangeSkillPublisherStatusCommand
         | RestoreSkillPublicationCommand
+        | ConfigureSkillSourceCommand
+        | RetireSkillSourceCommand
     ),
 ) -> InternalRequestContext:
     return InternalRequestContext(

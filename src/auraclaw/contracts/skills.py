@@ -215,6 +215,33 @@ class ChangeSkillPublisherStatusCommand(ContractModel):
     causation_id: str = Field(min_length=1, max_length=256)
 
 
+class ConfigureSkillSourceCommand(ContractModel):
+    tenant_id: str = Field(min_length=1, max_length=128)
+    actor_id: str = Field(min_length=1, max_length=256)
+    source_id: str = Field(pattern=r"^sks_[A-Za-z0-9_.-]+$")
+    kind: SkillSourceKind
+    desired_state: SkillSourceDesiredState
+    publisher_allowlist: tuple[str, ...]
+    credential_ref: str | None = Field(default=None, max_length=512)
+    config_metadata: dict[str, Any] = Field(default_factory=dict)
+    priority: int = Field(default=0, ge=-1000, le=1000)
+    command_id: str = Field(min_length=1, max_length=256)
+    expected_revision: int = Field(ge=0)
+    correlation_id: str = Field(min_length=1, max_length=256)
+    causation_id: str = Field(min_length=1, max_length=256)
+
+
+class RetireSkillSourceCommand(ContractModel):
+    tenant_id: str = Field(min_length=1, max_length=128)
+    actor_id: str = Field(min_length=1, max_length=256)
+    source_id: str = Field(pattern=r"^sks_[A-Za-z0-9_.-]+$")
+    reason_code: str = Field(min_length=1, max_length=128)
+    command_id: str = Field(min_length=1, max_length=256)
+    expected_revision: int = Field(ge=1)
+    correlation_id: str = Field(min_length=1, max_length=256)
+    causation_id: str = Field(min_length=1, max_length=256)
+
+
 class SkillToolRequirement(ContractModel):
     name: str = Field(min_length=1, max_length=256)
     version: str = Field(default="*", min_length=1, max_length=128)
@@ -508,6 +535,7 @@ class SkillSourceRecord(ContractModel):
     publisher_allowlist: tuple[str, ...] = ()
     credential_ref: str | None = Field(default=None, max_length=512)
     config_metadata: dict[str, Any] = Field(default_factory=dict)
+    priority: int = Field(default=0, ge=-1000, le=1000)
     revision: int = Field(default=1, ge=1)
     created_by: str = Field(min_length=1, max_length=256)
     updated_by: str = Field(min_length=1, max_length=256)

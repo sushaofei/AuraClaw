@@ -77,6 +77,7 @@ from auraclaw.action.skill_publishers import (
 from auraclaw.action.skill_rebuild import SkillStateRebuilder
 from auraclaw.action.skill_reconciler import SkillPackageReconciler
 from auraclaw.action.skill_reliability import SkillPublicationReliabilityWorker
+from auraclaw.action.skill_sources import SkillSourceService
 from auraclaw.action.tool_gateway import ToolGateway, ToolRegistry
 from auraclaw.admin.internal_service import OwnerAdminService
 from auraclaw.api.dependencies import (
@@ -738,6 +739,7 @@ def _task_api_app(settings: Settings) -> FastAPI:
             compatibility_cache=skill_registry,
         )
         skill_management = skill_publication
+        skill_source_management = skill_publication
         publisher_management = skill_publication
         skill_uploads = RemoteSkillPackageUploadClient(
             settings.artifact_base_url,
@@ -759,6 +761,13 @@ def _task_api_app(settings: Settings) -> FastAPI:
             ),
             retired_activator=skill_publication,
         )
+        skill_source_management = SkillSourceService(
+            skill_lifecycle,
+            projector=InProcessSkillStateProjector(
+                lifecycle=skill_lifecycle,
+                registry=skill_registry,
+            ),
+        )
     app.include_router(
         create_skill_admin_router(
             skill_registry,
@@ -767,6 +776,7 @@ def _task_api_app(settings: Settings) -> FastAPI:
             upload_service=skill_uploads,
             publisher_service=publisher_management,
             admission_reader=skill_publication if skill_lifecycle is None else skill_lifecycle,
+            source_service=skill_source_management,
             admission_metrics_window_hours=settings.skill_admission_metrics_window_hours,
             admission_quarantine_alert_ratio=(settings.skill_admission_quarantine_alert_ratio),
             admission_quarantine_alert_min_samples=(
@@ -1665,6 +1675,11 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
                     rebuilder=skill_rebuilder,
                     publishers=skill_publishers,
                     admissions=skill_lifecycle,
+                    sources=SkillSourceService(
+                        skill_lifecycle,
+                        synchronizer=getattr(app.state, "skill_reconciler", None),
+                        projector=skill_rebuilder,
+                    ),
                 )
             ),
             workload_identities=_configured_identities(settings, (ServiceIdentity.TASK_API,))
