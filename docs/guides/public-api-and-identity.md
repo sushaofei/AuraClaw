@@ -798,6 +798,13 @@ Skill Source 管理入口只接受 MCP Source，均按当前可信 tenant 隔离
 客户端不得把 Source 列表当作 Publication 或 Installation 状态，也不得用重建/同步绕过 tenant 的
 disabled/uninstalled 抑制事实。
 
+`POST /v1/admin/skills/{publisher}/{name}:uninstall` 默认返回 `draining`：新解析立即停止，已有 Run 的固定
+binding 可完成；服务在 Canonical Event 中不再发现活动主 Skill 或依赖引用后自动转为 `uninstalled`。
+安全或紧急场景可显式添加 `?force=true`，此时响应直接为 `uninstalled`，并携带
+`uninstall_action=cancel`、policy version 与 decision id；Runtime 会在下一模型轮次或 Skill step 前取消。
+两种模式都要求 `Idempotency-Key`、`X-Expected-Revision` 和 `X-Reason-Code`。相同键不同请求会冲突，
+客户端不得通过反复更换命令键绕过 draining。重新安装只允许从最终 `uninstalled` 状态执行。
+
 外部 Publisher 可先用 `auraclaw skills sign <directory> --publisher <name> --key-id <id>` 离线签名，
 private key 只从 `AURACLAW_SKILL_SIGNING_KEY`（或指定 Secret 环境变量）读取。命令输出的 Ed25519 公钥
 需通过 Publisher key rotation API 登记；后续 validate/test/publish 用显式公钥本地验签，而服务端仍以

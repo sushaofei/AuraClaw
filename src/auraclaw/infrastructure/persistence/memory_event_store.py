@@ -108,6 +108,40 @@ class InMemoryEventStore:
                 return True
         return False
 
+    async def has_active_skill_reference(
+        self, tenant_id: str, publisher: str, name: str
+    ) -> bool:
+        active_runs: set[tuple[str, str]] = set()
+        terminal_runs: set[tuple[str, str]] = set()
+        for event in await self.load_all(tenant_id):
+            if event.run_id is None:
+                continue
+            run_key = (event.session_id, event.run_id)
+            if event.type in {"run.completed", "run.failed", "run.cancelled"}:
+                terminal_runs.add(run_key)
+                continue
+            if event.type != "skill.activated":
+                continue
+            activation = event.payload.get("activation")
+            binding = activation.get("binding") if isinstance(activation, dict) else None
+            if not isinstance(binding, dict):
+                continue
+            references = (binding, *(
+                item
+                for item in binding.get("resolved_skills", ())
+                if isinstance(item, dict)
+            ))
+            if any(
+                reference.get("publisher") == publisher
+                and (
+                    reference.get("skill_name") == name
+                    or reference.get("name") == name
+                )
+                for reference in references
+            ):
+                active_runs.add(run_key)
+        return bool(active_runs - terminal_runs)
+
     async def load_root(
         self,
         tenant_id: str,

@@ -9,6 +9,7 @@ from auraclaw.action.skill_lifecycle import (
     SkillAdmissionAuditRecord,
     SkillAdmissionMetricRecord,
     SkillAdmissionPage,
+    SkillInstallationCommit,
     SkillLifecycleStore,
     SkillOutboxRecord,
     SkillPublishCommit,
@@ -33,6 +34,7 @@ from auraclaw.contracts.skills import (
     SkillPackageRetentionStatus,
     SkillPublicationRecord,
     SkillPublicationStatus,
+    SkillRevocationAction,
     SkillSourceDesiredState,
     SkillSourceKind,
     SkillSourceRecord,
@@ -671,8 +673,11 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
                 """INSERT INTO hands.skill_installation
                 (installation_id,tenant_id,publisher,name,version_constraint,
                  pinned_package_digest,status,source_id,auto_upgrade,revision,
-                 created_by,updated_by,created_at,updated_at,reason_code)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+                 created_by,updated_by,created_at,updated_at,reason_code,
+                 uninstall_action,uninstall_policy_version,
+                 uninstall_policy_decision_id)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,
+                        $16,$17,$18)
                 ON CONFLICT (tenant_id,publisher,name) DO NOTHING RETURNING *""",
                 *_installation_values(record),
             )
@@ -680,9 +685,11 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
             row = await pool.fetchrow(
                 """UPDATE hands.skill_installation SET
                 version_constraint=$1,pinned_package_digest=$2,status=$3,source_id=$4,
-                auto_upgrade=$5,revision=$6,updated_by=$7,updated_at=$8,reason_code=$9
-                WHERE tenant_id=$10 AND publisher=$11 AND name=$12
-                  AND installation_id=$13 AND revision=$14 RETURNING *""",
+                auto_upgrade=$5,revision=$6,updated_by=$7,updated_at=$8,reason_code=$9,
+                uninstall_action=$10,uninstall_policy_version=$11,
+                uninstall_policy_decision_id=$12
+                WHERE tenant_id=$13 AND publisher=$14 AND name=$15
+                  AND installation_id=$16 AND revision=$17 RETURNING *""",
                 record.version_constraint,
                 record.pinned_package_digest,
                 record.status.value,
@@ -692,6 +699,13 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
                 record.updated_by,
                 record.updated_at,
                 record.reason_code,
+                (
+                    record.uninstall_action.value
+                    if record.uninstall_action is not None
+                    else None
+                ),
+                record.uninstall_policy_version,
+                record.uninstall_policy_decision_id,
                 record.tenant_id,
                 record.publisher,
                 record.name,
@@ -701,6 +715,114 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
         if row is None:
             raise VersionConflictError("Skill installation revision conflict")
         return _installation(dict(row))
+
+    async def commit_installation_change(
+        self, commit: SkillInstallationCommit
+    ) -> SkillInstallationRecord:
+        record = commit.installation
+        pool = await self.pool()
+        async with pool.acquire() as connection, connection.transaction():
+            replay = await connection.fetchrow(
+                """SELECT request_digest,publisher,name
+                FROM hands.skill_installation_command
+                WHERE tenant_id=$1 AND command_id=$2""",
+                record.tenant_id,
+                commit.command_id,
+            )
+            if replay is not None:
+                if str(replay["request_digest"]) != commit.request_digest:
+                    raise VersionConflictError(
+                        "Skill installation command id was reused"
+                    )
+                current = await connection.fetchrow(
+                    """SELECT * FROM hands.skill_installation
+                    WHERE tenant_id=$1 AND publisher=$2 AND name=$3""",
+                    record.tenant_id,
+                    str(replay["publisher"]),
+                    str(replay["name"]),
+                )
+                if current is None:
+                    raise VersionConflictError(
+                        "Skill installation command result is incomplete"
+                    )
+                return _installation(dict(current))
+            _require_next_revision(
+                record.revision, commit.expected_revision, "installation"
+            )
+            row = await connection.fetchrow(
+                """UPDATE hands.skill_installation SET
+                version_constraint=$1,pinned_package_digest=$2,status=$3,source_id=$4,
+                auto_upgrade=$5,revision=$6,updated_by=$7,updated_at=$8,reason_code=$9,
+                uninstall_action=$10,uninstall_policy_version=$11,
+                uninstall_policy_decision_id=$12
+                WHERE tenant_id=$13 AND publisher=$14 AND name=$15
+                  AND installation_id=$16 AND revision=$17 RETURNING *""",
+                record.version_constraint,
+                record.pinned_package_digest,
+                record.status.value,
+                record.source_id,
+                record.auto_upgrade,
+                record.revision,
+                record.updated_by,
+                record.updated_at,
+                record.reason_code,
+                (
+                    record.uninstall_action.value
+                    if record.uninstall_action is not None
+                    else None
+                ),
+                record.uninstall_policy_version,
+                record.uninstall_policy_decision_id,
+                record.tenant_id,
+                record.publisher,
+                record.name,
+                record.installation_id,
+                commit.expected_revision,
+            )
+            if row is None:
+                concurrent = await connection.fetchrow(
+                    """SELECT request_digest,publisher,name
+                    FROM hands.skill_installation_command
+                    WHERE tenant_id=$1 AND command_id=$2""",
+                    record.tenant_id,
+                    commit.command_id,
+                )
+                if (
+                    concurrent is not None
+                    and str(concurrent["request_digest"]) == commit.request_digest
+                ):
+                    current = await connection.fetchrow(
+                        """SELECT * FROM hands.skill_installation
+                        WHERE tenant_id=$1 AND publisher=$2 AND name=$3""",
+                        record.tenant_id,
+                        str(concurrent["publisher"]),
+                        str(concurrent["name"]),
+                    )
+                    if current is not None:
+                        return _installation(dict(current))
+                raise VersionConflictError("Skill installation revision conflict")
+            await connection.execute(
+                """INSERT INTO hands.skill_installation_command
+                (tenant_id,command_id,request_digest,publisher,name,operation,
+                 force_uninstall,actor_id,correlation_id,causation_id,reason_code,
+                 previous_revision,resulting_revision,created_at)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)""",
+                record.tenant_id,
+                commit.command_id,
+                commit.request_digest,
+                record.publisher,
+                record.name,
+                commit.operation,
+                commit.force_uninstall,
+                commit.actor_id,
+                commit.correlation_id,
+                commit.causation_id,
+                commit.reason_code,
+                commit.expected_revision,
+                record.revision,
+                commit.occurred_at,
+            )
+            return _installation(dict(row))
 
     async def get_installation(
         self, tenant_id: str, publisher: str, name: str
@@ -822,6 +944,25 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
                     record.kind.value,
                 )
             if row is None:
+                concurrent = await connection.fetchrow(
+                    """SELECT request_digest,source_id
+                    FROM hands.skill_source_command
+                    WHERE tenant_id=$1 AND command_id=$2""",
+                    record.tenant_id,
+                    commit.command_id,
+                )
+                if (
+                    concurrent is not None
+                    and str(concurrent["request_digest"]) == commit.request_digest
+                ):
+                    current = await connection.fetchrow(
+                        """SELECT * FROM hands.skill_source
+                        WHERE tenant_id=$1 AND source_id=$2""",
+                        record.tenant_id,
+                        str(concurrent["source_id"]),
+                    )
+                    if current is not None:
+                        return _source(dict(current))
                 raise VersionConflictError("Skill Source revision conflict")
             if record.desired_state is SkillSourceDesiredState.RETIRED:
                 await connection.execute(
@@ -1430,8 +1571,11 @@ async def _put_installation_transaction(
         """INSERT INTO hands.skill_installation
         (installation_id,tenant_id,publisher,name,version_constraint,
          pinned_package_digest,status,source_id,auto_upgrade,revision,
-         created_by,updated_by,created_at,updated_at,reason_code)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+         created_by,updated_by,created_at,updated_at,reason_code,
+         uninstall_action,uninstall_policy_version,
+         uninstall_policy_decision_id)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,
+                $16,$17,$18)
         ON CONFLICT (tenant_id,publisher,name) DO NOTHING RETURNING *""",
         *_installation_values(record),
     )
@@ -1633,6 +1777,13 @@ def _installation_values(record: SkillInstallationRecord) -> tuple[object, ...]:
         record.created_at,
         record.updated_at,
         record.reason_code,
+        (
+            record.uninstall_action.value
+            if record.uninstall_action is not None
+            else None
+        ),
+        record.uninstall_policy_version,
+        record.uninstall_policy_decision_id,
     )
 
 
@@ -1653,6 +1804,13 @@ def _installation(row: dict[str, Any]) -> SkillInstallationRecord:
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         reason_code=row["reason_code"],
+        uninstall_action=(
+            SkillRevocationAction(str(row["uninstall_action"]))
+            if row.get("uninstall_action") is not None
+            else None
+        ),
+        uninstall_policy_version=row.get("uninstall_policy_version"),
+        uninstall_policy_decision_id=row.get("uninstall_policy_decision_id"),
     )
 
 

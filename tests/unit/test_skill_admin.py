@@ -325,18 +325,33 @@ def test_skill_admin_manages_installation_and_revocation_separately() -> None:
             },
         )
         assert uninstalled.status_code == 202, uninstalled.text
-        assert uninstalled.json()["installation"]["status"] == "uninstalled"
+        assert uninstalled.json()["installation"]["status"] == "draining"
+        assert uninstalled.json()["installation"]["uninstall_action"] == "continue"
+
+        forced = client.post(
+            "/v1/admin/skills/platform/release.prepare:uninstall?force=true",
+            headers={
+                **headers,
+                "Idempotency-Key": "skill-uninstall-force-1",
+                "X-Expected-Revision": "4",
+                "X-Reason-Code": "urgent_tenant_uninstall",
+            },
+        )
+        assert forced.status_code == 202, forced.text
+        assert forced.json()["installation"]["status"] == "uninstalled"
+        assert forced.json()["installation"]["uninstall_action"] == "cancel"
 
         installed = client.post(
             "/v1/admin/skills/platform/release.prepare:install",
             headers={
                 **headers,
                 "Idempotency-Key": "skill-install-1",
-                "X-Expected-Revision": "4",
+                "X-Expected-Revision": "5",
             },
         )
         assert installed.status_code == 202, installed.text
         assert installed.json()["installation"]["status"] == "active"
+        assert installed.json()["installation"]["uninstall_action"] is None
 
         revoked = client.post(
             "/v1/admin/skill-publications/platform/release.prepare/versions/1.4.0:revoke",

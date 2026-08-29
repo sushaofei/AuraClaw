@@ -110,6 +110,21 @@ class SkillSourceConfigCommit:
 
 
 @dataclass(frozen=True)
+class SkillInstallationCommit:
+    command_id: str
+    request_digest: str
+    operation: str
+    force_uninstall: bool
+    actor_id: str
+    correlation_id: str
+    causation_id: str
+    reason_code: str | None
+    expected_revision: int
+    installation: SkillInstallationRecord
+    occurred_at: datetime
+
+
+@dataclass(frozen=True)
 class SkillAdmissionAuditRecord:
     admission_id: str
     tenant_id: str
@@ -277,6 +292,10 @@ class SkillLifecycleStore(Protocol):
         self, record: SkillInstallationRecord, *, expected_revision: int
     ) -> SkillInstallationRecord: ...
 
+    async def commit_installation_change(
+        self, commit: SkillInstallationCommit
+    ) -> SkillInstallationRecord: ...
+
     async def get_installation(
         self, tenant_id: str, publisher: str, name: str
     ) -> SkillInstallationRecord | None: ...
@@ -350,6 +369,9 @@ class InMemorySkillLifecycleStore:
     _source_retirement_commands: set[tuple[str, str]] = field(default_factory=set)
     _restore_commands: dict[CommandKey, str] = field(default_factory=dict)
     _source_config_commands: dict[CommandKey, tuple[str, str]] = field(
+        default_factory=dict
+    )
+    _installation_commands: dict[CommandKey, tuple[str, InstallationKey]] = field(
         default_factory=dict
     )
     _commands: dict[CommandKey, tuple[str, SkillPublishCommitResult]] = field(
@@ -767,6 +789,32 @@ class InMemorySkillLifecycleStore:
         self, tenant_id: str, publisher: str, name: str
     ) -> SkillInstallationRecord | None:
         return self._installations.get((tenant_id, publisher, name))
+
+    async def commit_installation_change(
+        self, commit: SkillInstallationCommit
+    ) -> SkillInstallationRecord:
+        command_key = (commit.installation.tenant_id, commit.command_id)
+        async with self._lock:
+            replay = self._installation_commands.get(command_key)
+            if replay is not None:
+                request_digest, installation_key = replay
+                if request_digest != commit.request_digest:
+                    raise VersionConflictError("Skill installation command id was reused")
+                current = self._installations.get(installation_key)
+                if current is None:
+                    raise VersionConflictError(
+                        "Skill installation command result is incomplete"
+                    )
+                return current
+            result = await self.put_installation(
+                commit.installation,
+                expected_revision=commit.expected_revision,
+            )
+            self._installation_commands[command_key] = (
+                commit.request_digest,
+                _installation_key(result),
+            )
+            return result
 
     async def list_installations(
         self, tenant_id: str

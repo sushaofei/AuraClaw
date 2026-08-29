@@ -19,6 +19,8 @@ from auraclaw.contracts.internal import (
     SessionFeedResponse,
     SessionRootFeedRequest,
     SessionRootFeedResponse,
+    SkillActiveBindingReferenceRequest,
+    SkillActiveBindingReferenceResponse,
     SkillBindingReferenceRequest,
     SkillBindingReferenceResponse,
 )
@@ -110,6 +112,19 @@ class SessionInternalService:
             referenced=await self._event_store.has_skill_package_reference(
                 request.context.tenant_id,
                 request.package_digest,
+            )
+        )
+
+    async def skill_active_binding_reference(
+        self, request: SkillActiveBindingReferenceRequest
+    ) -> SkillActiveBindingReferenceResponse:
+        if request.context.service_identity is not ServiceIdentity.ACTION_HANDS:
+            raise AuthorizationError("workload may not query active Skill bindings")
+        return SkillActiveBindingReferenceResponse(
+            referenced=await self._event_store.has_active_skill_reference(
+                request.context.tenant_id,
+                request.publisher,
+                request.name,
             )
         )
 

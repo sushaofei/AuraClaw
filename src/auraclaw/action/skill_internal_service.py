@@ -294,6 +294,7 @@ class SkillPublicationInternalService:
                 publisher=request.publisher,
                 name=request.name,
                 operation=SkillInstallationOperation(request.operation),
+                force=request.force,
                 reason_code=request.reason_code,
                 command_id=request.command_id,
                 expected_revision=request.expected_revision,

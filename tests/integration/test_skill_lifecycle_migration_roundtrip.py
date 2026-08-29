@@ -12,15 +12,21 @@ from pathlib import Path
 import asyncpg
 import pytest
 
-from auraclaw.action.skill_lifecycle import SkillPublishCommit
+from auraclaw.action.skill_lifecycle import (
+    SkillInstallationCommit,
+    SkillPublishCommit,
+)
 from auraclaw.action.skill_sources import SkillSourceService
 from auraclaw.contracts.skills import (
     ConfigureSkillSourceCommand,
     RetireSkillSourceCommand,
+    SkillInstallationRecord,
+    SkillInstallationStatus,
     SkillManifest,
     SkillPackageRecord,
     SkillPublicationRecord,
     SkillPublicationStatus,
+    SkillRevocationAction,
     SkillSourceDesiredState,
     SkillSourceKind,
 )
@@ -47,10 +53,12 @@ UP = "\n".join(
         (ROOT / "migrations/0035_skill_admission_retention.sql").read_text(),
         (ROOT / "migrations/0036_skill_binding_revocation_policy.sql").read_text(),
         (ROOT / "migrations/0037_skill_publication_sources.sql").read_text(),
+        (ROOT / "migrations/0038_skill_installation_draining.sql").read_text(),
     )
 )
 DOWN = "\n".join(
     (
+        (ROOT / "migrations/0038_skill_installation_draining.down.sql").read_text(),
         (ROOT / "migrations/0037_skill_publication_sources.down.sql").read_text(),
         (ROOT / "migrations/0036_skill_binding_revocation_policy.down.sql").read_text(),
         (ROOT / "migrations/0035_skill_admission_retention.down.sql").read_text(),
@@ -106,6 +114,7 @@ def test_skill_lifecycle_migration_roundtrip_in_isolated_postgres() -> None:
                 "skill_source_retirement_command",
                 "skill_publication_source",
                 "skill_source_command",
+                "skill_installation_command",
                 "skill_publication_restore_command",
                 "skill_admission_audit",
                 "skill_command",
@@ -239,7 +248,23 @@ def test_skill_lifecycle_migration_roundtrip_in_isolated_postgres() -> None:
                             expected_publication_revision=expected_revision,
                             package=package,
                             publication=publication,
-                            installation=None,
+                            installation=(
+                                SkillInstallationRecord(
+                                    installation_id="ski_roundtrip_source",
+                                    tenant_id=package.tenant_id,
+                                    publisher="acme",
+                                    name="release.prepare",
+                                    status=SkillInstallationStatus.ACTIVE,
+                                    source_id=source_id,
+                                    revision=1,
+                                    created_by="migration-test",
+                                    updated_by="migration-test",
+                                    created_at=now,
+                                    updated_at=now,
+                                )
+                                if expected_revision == 0
+                                else None
+                            ),
                             occurred_at=now,
                         )
                     )
@@ -283,6 +308,74 @@ def test_skill_lifecycle_migration_roundtrip_in_isolated_postgres() -> None:
                 assert fallback is not None
                 assert fallback.source_id == "sks_roundtrip_high"
                 assert fallback.status is SkillPublicationStatus.ACTIVE
+
+                installation = await lifecycle.get_installation(
+                    package.tenant_id,
+                    "acme",
+                    "release.prepare",
+                )
+                assert installation is not None
+                draining = installation.model_copy(
+                    update={
+                        "status": SkillInstallationStatus.DRAINING,
+                        "revision": 2,
+                        "updated_at": datetime.now(UTC),
+                        "reason_code": "tenant_uninstalled",
+                        "uninstall_action": SkillRevocationAction.CONTINUE,
+                        "uninstall_policy_version": "skill-uninstall-v1",
+                        "uninstall_policy_decision_id": "uninstall-drain",
+                    }
+                )
+                drain_commit = SkillInstallationCommit(
+                    command_id="uninstall-drain",
+                    request_digest=f"sha256:{'d' * 64}",
+                    operation="uninstall",
+                    force_uninstall=False,
+                    actor_id="migration-test",
+                    correlation_id="migration-installation-test",
+                    causation_id="uninstall-drain",
+                    reason_code="tenant_uninstalled",
+                    expected_revision=1,
+                    installation=draining,
+                    occurred_at=datetime.now(UTC),
+                )
+                drain_results = await asyncio.gather(
+                    lifecycle.commit_installation_change(drain_commit),
+                    lifecycle.commit_installation_change(drain_commit),
+                )
+                assert all(
+                    result.status is SkillInstallationStatus.DRAINING
+                    for result in drain_results
+                )
+                assert drain_results[0] == drain_results[1]
+
+                forced = draining.model_copy(
+                    update={
+                        "status": SkillInstallationStatus.UNINSTALLED,
+                        "revision": 3,
+                        "updated_at": datetime.now(UTC),
+                        "reason_code": "security_force_uninstall",
+                        "uninstall_action": SkillRevocationAction.CANCEL,
+                        "uninstall_policy_decision_id": "uninstall-force",
+                    }
+                )
+                assert (
+                    await lifecycle.commit_installation_change(
+                        SkillInstallationCommit(
+                            command_id="uninstall-force",
+                            request_digest=f"sha256:{'e' * 64}",
+                            operation="uninstall",
+                            force_uninstall=True,
+                            actor_id="migration-test",
+                            correlation_id="migration-installation-test",
+                            causation_id="uninstall-force",
+                            reason_code="security_force_uninstall",
+                            expected_revision=2,
+                            installation=forced,
+                            occurred_at=datetime.now(UTC),
+                        )
+                    )
+                ).uninstall_action is SkillRevocationAction.CANCEL
             finally:
                 await lifecycle.close()
             await connection.execute(DOWN)
@@ -300,6 +393,7 @@ def test_skill_lifecycle_migration_roundtrip_in_isolated_postgres() -> None:
                 "skill_source_retirement_command",
                 "skill_publication_source",
                 "skill_source_command",
+                "skill_installation_command",
                 "skill_publication_restore_command",
                 "skill_admission_audit",
                 "skill_command",

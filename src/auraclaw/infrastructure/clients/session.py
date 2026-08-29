@@ -23,6 +23,8 @@ from auraclaw.contracts.internal import (
     SessionFeedResponse,
     SessionRootFeedRequest,
     SessionRootFeedResponse,
+    SkillActiveBindingReferenceRequest,
+    SkillActiveBindingReferenceResponse,
     SkillBindingReferenceRequest,
     SkillBindingReferenceResponse,
 )
@@ -200,6 +202,29 @@ class RemoteSessionEventStore:
         )
         return response.referenced
 
+    async def has_active_skill_reference(
+        self, tenant_id: str, publisher: str, name: str
+    ) -> bool:
+        if self._identity is not ServiceIdentity.ACTION_HANDS:
+            self._unsupported("has_active_skill_reference")
+        request_id = f"skill-active-binding-reference:{publisher}:{name}"
+        response = await self._contract.call(
+            "/internal/v1/session/skill-bindings/active-reference",
+            SkillActiveBindingReferenceRequest(
+                context=InternalRequestContext(
+                    tenant_id=tenant_id,
+                    service_identity=self._identity,
+                    request_id=request_id,
+                    correlation_id=request_id,
+                    causation_id=request_id,
+                ),
+                publisher=publisher,
+                name=name,
+            ),
+            SkillActiveBindingReferenceResponse,
+        )
+        return response.referenced
+
     async def load_root(
         self,
         tenant_id: str,
@@ -352,6 +377,32 @@ class RemoteSkillBindingReferenceReader:
                 package_digest=package_digest,
             ),
             SkillBindingReferenceResponse,
+        )
+        return response.referenced
+
+    async def has_active_skill_reference(
+        self,
+        *,
+        tenant_id: str,
+        publisher: str,
+        name: str,
+        correlation_id: str,
+    ) -> bool:
+        request_id = f"skill-active-binding-reference:{publisher}:{name}"
+        response = await self._contract.call(
+            "/internal/v1/session/skill-bindings/active-reference",
+            SkillActiveBindingReferenceRequest(
+                context=InternalRequestContext(
+                    tenant_id=tenant_id,
+                    service_identity=ServiceIdentity.ACTION_HANDS,
+                    request_id=request_id,
+                    correlation_id=correlation_id,
+                    causation_id=request_id,
+                ),
+                publisher=publisher,
+                name=name,
+            ),
+            SkillActiveBindingReferenceResponse,
         )
         return response.referenced
 

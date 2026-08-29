@@ -103,10 +103,15 @@ class _Artifacts:
 class _BindingReferences:
     def __init__(self, referenced: bool = False) -> None:
         self.referenced = referenced
+        self.active = referenced
 
     async def has_reference(self, **kwargs: object) -> bool:
         del kwargs
         return self.referenced
+
+    async def has_active_skill_reference(self, **kwargs: object) -> bool:
+        del kwargs
+        return self.active
 
 
 async def _service() -> tuple[
@@ -203,6 +208,7 @@ def _installation_command(
     *,
     revision: int,
     reason: str | None = None,
+    force: bool = False,
 ) -> ChangeSkillInstallationCommand:
     return ChangeSkillInstallationCommand(
         tenant_id="tenant-a",
@@ -210,6 +216,7 @@ def _installation_command(
         publisher="platform",
         name="release.prepare",
         operation=operation,
+        force=force,
         reason_code=reason,
         command_id=f"command-{operation.value}",
         expected_revision=revision,
@@ -243,6 +250,7 @@ def test_disable_uninstall_and_reinstall_change_installation_only() -> None:
                 SkillInstallationOperation.UNINSTALL,
                 revision=2,
                 reason="tenant_uninstalled",
+                force=True,
             )
         )
         assert uninstalled.status is SkillInstallationStatus.UNINSTALLED
@@ -262,6 +270,115 @@ def test_disable_uninstall_and_reinstall_change_installation_only() -> None:
         assert installed.status is SkillInstallationStatus.ACTIVE
         assert installed.reason_code is None
         assert projector.tenants == ["tenant-a", "tenant-a", "tenant-a"]
+
+    asyncio.run(scenario())
+
+
+def test_uninstall_drains_active_bindings_before_finalizing() -> None:
+    async def scenario() -> None:
+        _unused, lifecycle, projector = await _service()
+        references = _BindingReferences(referenced=True)
+        service = SkillManagementService(
+            lifecycle=lifecycle,
+            projector=projector,
+            binding_references=references,
+        )
+        command = _installation_command(
+            SkillInstallationOperation.UNINSTALL,
+            revision=1,
+            reason="tenant_uninstalled",
+        )
+
+        draining = await service.change_installation(command)
+        assert draining.status is SkillInstallationStatus.DRAINING
+        assert draining.uninstall_action is SkillRevocationAction.CONTINUE
+        assert draining.uninstall_policy_version == "skill-uninstall-v1"
+        assert await service.change_installation(command) == draining
+        assert await service.reconcile_draining() == 0
+
+        disposition = await SkillBindingStatusExecutor(lifecycle).execute(
+            ToolInvocation(
+                tool_invocation_id="binding-status-draining",
+                tenant_id="tenant-a",
+                root_session_id="root-1",
+                session_id="session-1",
+                run_id="run-1",
+                tool_name="auraclaw.skills.binding-status",
+                tool_version="1",
+                arguments={
+                    "publisher": "platform",
+                    "name": "release.prepare",
+                    "version": "1.0.0",
+                    "package_digest": _DIGEST,
+                },
+                expected_side_effect="read",
+                idempotency_key="binding-status-draining",
+                deadline=None,
+                fencing_token=1,
+                actor_id="runtime-1",
+            ),
+            skill_binding_status_tool(),
+        )
+        assert disposition["action"] == "continue"
+        assert disposition["installation_status"] == "draining"
+
+        references.active = False
+        assert await service.reconcile_draining() == 1
+        completed = await service.get_installation(
+            "tenant-a", "platform", "release.prepare"
+        )
+        assert completed.status is SkillInstallationStatus.UNINSTALLED
+        assert completed.revision == 3
+        assert await service.reconcile_draining() == 0
+
+    asyncio.run(scenario())
+
+
+def test_force_uninstall_cancels_active_bindings_and_is_command_idempotent() -> None:
+    async def scenario() -> None:
+        service, lifecycle, _projector = await _service()
+        command = _installation_command(
+            SkillInstallationOperation.UNINSTALL,
+            revision=1,
+            reason="security_force_uninstall",
+            force=True,
+        )
+        uninstalled = await service.change_installation(command)
+        assert uninstalled.status is SkillInstallationStatus.UNINSTALLED
+        assert uninstalled.uninstall_action is SkillRevocationAction.CANCEL
+        assert await service.change_installation(command) == uninstalled
+
+        with pytest.raises(VersionConflictError, match="command id was reused"):
+            await service.change_installation(
+                command.model_copy(update={"reason_code": "different_reason"})
+            )
+
+        disposition = await SkillBindingStatusExecutor(lifecycle).execute(
+            ToolInvocation(
+                tool_invocation_id="binding-status-force-uninstall",
+                tenant_id="tenant-a",
+                root_session_id="root-1",
+                session_id="session-1",
+                run_id="run-1",
+                tool_name="auraclaw.skills.binding-status",
+                tool_version="1",
+                arguments={
+                    "publisher": "platform",
+                    "name": "release.prepare",
+                    "version": "1.0.0",
+                    "package_digest": _DIGEST,
+                },
+                expected_side_effect="read",
+                idempotency_key="binding-status-force-uninstall",
+                deadline=None,
+                fencing_token=1,
+                actor_id="runtime-1",
+            ),
+            skill_binding_status_tool(),
+        )
+        assert disposition["action"] == "cancel"
+        assert disposition["reason_code"] == "security_force_uninstall"
+        assert disposition["policy_version"] == "skill-uninstall-v1"
 
     asyncio.run(scenario())
 
@@ -517,6 +634,7 @@ def test_purge_requires_expired_uninstalled_revoked_unreferenced_package() -> No
                 SkillInstallationOperation.UNINSTALL,
                 revision=2,
                 reason="retiring",
+                force=True,
             )
         )
         await service.revoke_publication(
@@ -597,6 +715,7 @@ def test_purge_rejects_retention_period_and_legal_hold() -> None:
                 SkillInstallationOperation.UNINSTALL,
                 revision=2,
                 reason="retiring",
+                force=True,
             )
         )
         await service.revoke_publication(

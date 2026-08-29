@@ -52,6 +52,10 @@ class EventStore(Protocol):
         self, tenant_id: str, package_digest: str
     ) -> bool: ...
 
+    async def has_active_skill_reference(
+        self, tenant_id: str, publisher: str, name: str
+    ) -> bool: ...
+
     async def load_root(
         self,
         tenant_id: str,

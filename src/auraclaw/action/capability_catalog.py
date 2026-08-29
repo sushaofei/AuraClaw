@@ -14,6 +14,7 @@ from auraclaw.contracts.capabilities import (
 )
 from auraclaw.contracts.skills import (
     SkillBinding,
+    SkillInstallationRecord,
     SkillPublicationRecord,
     SkillPublicationStatus,
     SkillRevocationAction,
@@ -53,6 +54,10 @@ class SkillPublicationReader(Protocol):
     async def get_publication(
         self, tenant_id: str, publisher: str, name: str, version: str
     ) -> SkillPublicationRecord | None: ...
+
+    async def get_installation(
+        self, tenant_id: str, publisher: str, name: str
+    ) -> SkillInstallationRecord | None: ...
 
 
 class InMemoryCapabilityCatalogStore:
@@ -358,8 +363,28 @@ class SkillBindingStatusExecutor:
                 "policy_version": publication.revocation_policy_version,
                 "policy_decision_id": (publication.revocation_policy_decision_id),
             }
+        installation = await self.publications.get_installation(
+            invocation.tenant_id,
+            str(arguments["publisher"]),
+            str(arguments["name"]),
+        )
+        if (
+            installation is not None
+            and installation.uninstall_action is SkillRevocationAction.CANCEL
+        ):
+            return {
+                "publication_status": publication.status.value,
+                "installation_status": installation.status.value,
+                "action": SkillRevocationAction.CANCEL.value,
+                "reason_code": installation.reason_code,
+                "policy_version": installation.uninstall_policy_version,
+                "policy_decision_id": installation.uninstall_policy_decision_id,
+            }
         return {
             "publication_status": publication.status.value,
+            "installation_status": (
+                installation.status.value if installation is not None else "unmanaged"
+            ),
             "action": (
                 SkillRevocationAction.CONTINUE.value
                 if publication.status

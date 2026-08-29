@@ -34,6 +34,7 @@ class SkillRevocationAction(StrEnum):
 class SkillInstallationStatus(StrEnum):
     ACTIVE = "active"
     DISABLED = "disabled"
+    DRAINING = "draining"
     UNINSTALLED = "uninstalled"
 
 
@@ -97,6 +98,7 @@ class ChangeSkillInstallationCommand(ContractModel):
     publisher: str = Field(min_length=1, max_length=128, pattern=_SKILL_NAME)
     name: str = Field(min_length=1, max_length=256, pattern=_SKILL_NAME)
     operation: SkillInstallationOperation
+    force: bool = False
     reason_code: str | None = Field(default=None, min_length=1, max_length=128)
     command_id: str = Field(min_length=1, max_length=256)
     expected_revision: int = Field(ge=1)
@@ -105,6 +107,8 @@ class ChangeSkillInstallationCommand(ContractModel):
 
     @model_validator(mode="after")
     def validate_reason(self) -> ChangeSkillInstallationCommand:
+        if self.force and self.operation is not SkillInstallationOperation.UNINSTALL:
+            raise ValueError("Force is only valid for uninstall")
         if (
             self.operation
             in {
@@ -497,6 +501,9 @@ class SkillInstallationRecord(ContractModel):
     created_at: datetime
     updated_at: datetime
     reason_code: str | None = Field(default=None, max_length=128)
+    uninstall_action: SkillRevocationAction | None = None
+    uninstall_policy_version: str | None = Field(default=None, max_length=128)
+    uninstall_policy_decision_id: str | None = Field(default=None, max_length=256)
 
     @field_validator("version_constraint")
     @classmethod
@@ -519,11 +526,40 @@ class SkillInstallationRecord(ContractModel):
             self.status
             in {
                 SkillInstallationStatus.DISABLED,
+                SkillInstallationStatus.DRAINING,
                 SkillInstallationStatus.UNINSTALLED,
             }
             and not self.reason_code
         ):
-            raise ValueError("Disabled or uninstalled Skill requires a reason")
+            raise ValueError("Disabled, draining or uninstalled Skill requires a reason")
+        if self.status is SkillInstallationStatus.DRAINING and (
+            self.uninstall_action is None or not self.uninstall_policy_version
+        ):
+            raise ValueError("Draining Skill requires uninstall policy evidence")
+        if self.uninstall_action is SkillRevocationAction.PAUSE:
+            raise ValueError("Skill uninstall action cannot pause")
+        if self.uninstall_action is None and any(
+            value is not None
+            for value in (
+                self.uninstall_policy_version,
+                self.uninstall_policy_decision_id,
+            )
+        ):
+            raise ValueError("Skill uninstall policy requires an action")
+        if self.uninstall_action is not None and not self.uninstall_policy_version:
+            raise ValueError("Skill uninstall action requires a policy version")
+        if self.status not in {
+            SkillInstallationStatus.DRAINING,
+            SkillInstallationStatus.UNINSTALLED,
+        } and any(
+            value is not None
+            for value in (
+                self.uninstall_action,
+                self.uninstall_policy_version,
+                self.uninstall_policy_decision_id,
+            )
+        ):
+            raise ValueError("Only draining or uninstalled Skill may carry uninstall evidence")
         return self
 
 

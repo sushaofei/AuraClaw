@@ -2102,6 +2102,32 @@ ready Skill Artifact 建立带 fencing 的物理回收流程；不把成功命�
 - [x] README、架构、公开 API、数据库参考、运维与阶段门禁同步。
 - [x] 本阶段作为一个 intentional commit 提交并 push，不包含 `.env`、Secret、缓存或无关改动。
 
+## 阶段 M14u：Skill Installation draining 与强制卸载（Issue #56）
+
+状态：已完成。普通卸载允许既有 binding 安全排空，强制卸载以显式策略取消活动执行。
+
+### 状态与运行时语义
+
+- [x] 默认 uninstall 原子进入 `draining` 并立即停止 Catalog/Resolver 新发现，Publication 保持独立。
+- [x] draining 对已有固定 binding 返回 continue；force uninstall 持久化 cancel、policy version 与 decision id。
+- [x] Runtime 复用每轮/每 step binding-status 检查应用 force cancel，并写既有 Canonical 取消证据。
+- [x] install 仅允许从最终 uninstalled 恢复，并清除旧卸载策略；draining 只允许 force escalation。
+
+### 活动引用与多副本收敛
+
+- [x] Session 权威查询同时识别主 binding 和 resolved dependency，并以同 Run 的 Canonical 终态判断活动引用。
+- [x] Action Hands 启动及周期 drainer 在无活动引用时推进 uninstalled；查询失败保持 draining，绝不 fail open。
+- [x] optimistic revision 保证多副本并发 finalize 只有一个成功，冲突副本安全跳过。
+- [x] 0038 安装命令账本记录 force、actor、reason、command/correlation/causation 与前后 revision，并发同命令可重放。
+
+### 质量与交付
+
+- [x] 单测覆盖普通 draining、活动引用、依赖引用、终态收敛、force cancel、命令冲突与 Admin API。
+- [x] 隔离 PostgreSQL 覆盖并发同命令幂等、draining/force 策略持久化及 0038 正反迁移。
+- [x] Ruff、Mypy、unit、相关 integration 与 import-linter 通过。
+- [x] README、架构、公开 API、数据库参考、运维与阶段门禁同步。
+- [x] 本阶段作为一个 intentional commit 提交并 push，不包含 `.env`、Secret、缓存或无关改动。
+
 ## 阶段 Product Activity：产品级对话执行轨迹（AuraX Issue #2）
 
 状态：代码与定向验证完成；完整基础设施集成门禁受现有 Kafka/MySQL/PostgreSQL/Artifact 环境失败阻塞。

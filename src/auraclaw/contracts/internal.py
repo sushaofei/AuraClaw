@@ -146,6 +146,17 @@ class SkillBindingReferenceResponse(ContractModel):
     referenced: bool
 
 
+class SkillActiveBindingReferenceRequest(ContractModel):
+    context: InternalRequestContext
+    publisher: str = Field(min_length=1, max_length=128)
+    name: str = Field(min_length=1, max_length=256)
+
+
+class SkillActiveBindingReferenceResponse(ContractModel):
+    api_version: str = INTERNAL_API_VERSION
+    referenced: bool
+
+
 class CollaborationCommandRequest(ContractModel):
     context: InternalRequestContext
     lease_assertion: LeaseAssertion
@@ -699,6 +710,7 @@ class SkillInstallationInternalRequest(ContractModel):
     publisher: str = Field(min_length=1, max_length=128)
     name: str = Field(min_length=1, max_length=256)
     operation: Literal["install", "enable", "disable", "uninstall"]
+    force: bool = False
     reason_code: str | None = Field(default=None, min_length=1, max_length=128)
     command_id: str = Field(min_length=1, max_length=256)
     expected_revision: int = Field(ge=1)

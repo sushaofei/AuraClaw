@@ -432,6 +432,10 @@ suspend 同时拒绝新发布和持久包恢复，resume 只恢复仍处于 acti
 同步。一个不可变 Publication 可保留多个来源引用；目录选择 enabled 且 available 的最高优先级来源，
 同优先级按 source id 稳定排序。单个来源消失或退役时先切换到可用备用来源，只有没有备用来源时才
 普通退役 Publication；Installation 的 tenant 抑制状态不会因另一个来源重新发现而被覆盖。
+普通 uninstall 先进入不可发现的 `draining`，已有 Run 的固定 binding 按 `continue` 策略运行；Action Hands
+从 Canonical Session Events 确认所有主 Skill/依赖引用的 Run 已终态后，才收敛为 `uninstalled`。
+`POST ...:uninstall?force=true` 会持久化 `cancel` 策略并立即进入 `uninstalled`，活动 Runtime 在下一轮或
+下一 step 的 binding 检查点写入取消证据。安装管理命令有独立幂等账本，多个 Hands 副本不会重复推进 revision。
 某版本只有在连续两个完整快照中缺失才自动转为 `retired`；任一完整快照重新观察到它都会清零缺失计数。
 `retired` 不再参与新发现，但保留不可变内容供既有固定 binding 读取，并与安全 `revoked` 明确区分。
 安全 revoke 必须选择 `continue|pause|cancel`（默认 cancel）并持久化 Policy 证据。Runtime 每轮/每步检查

@@ -70,6 +70,8 @@ from auraclaw.contracts.internal import (
     SessionFeedResponse,
     SessionRootFeedRequest,
     SessionRootFeedResponse,
+    SkillActiveBindingReferenceRequest,
+    SkillActiveBindingReferenceResponse,
     SkillAdmissionListInternalRequest,
     SkillAdmissionListInternalResponse,
     SkillAdmissionMetricsInternalRequest,
@@ -134,6 +136,11 @@ def session_routes(service: SessionInternalService) -> dict[str, ContractRoute]:
             SkillBindingReferenceRequest,
             SkillBindingReferenceResponse,
             service.skill_binding_reference,
+        ),
+        "/internal/v1/session/skill-bindings/active-reference": contract_route(
+            SkillActiveBindingReferenceRequest,
+            SkillActiveBindingReferenceResponse,
+            service.skill_active_binding_reference,
         ),
         "/internal/v1/session/outbox/claim": contract_route(
             OutboxClaimRequest, OutboxClaimResponse, service.claim_outbox
