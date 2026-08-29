@@ -61,11 +61,13 @@ class SkillSourceDesiredState(StrEnum):
 class SkillPublisherStatus(StrEnum):
     ACTIVE = "active"
     SUSPENDED = "suspended"
+    REVOKED = "revoked"
 
 
 class SkillPublisherStatusOperation(StrEnum):
     SUSPEND = "suspend"
     RESUME = "resume"
+    REVOKE = "revoke"
 
 
 class SkillPublisherKeyStatus(StrEnum):
@@ -201,10 +203,19 @@ class RevokeSkillPublisherKeyCommand(ContractModel):
     publisher: str = Field(min_length=1, max_length=128, pattern=_SKILL_NAME)
     key_id: str = Field(min_length=1, max_length=128, pattern=_SKILL_NAME)
     reason_code: str = Field(min_length=1, max_length=128)
+    revocation_action: SkillRevocationAction = SkillRevocationAction.CANCEL
+    policy_version: str = Field(default="skill-revocation-v1", min_length=1, max_length=128)
+    policy_decision_id: str | None = Field(default=None, max_length=256)
     command_id: str = Field(min_length=1, max_length=256)
     expected_revision: int = Field(ge=1)
     correlation_id: str = Field(min_length=1, max_length=256)
     causation_id: str = Field(min_length=1, max_length=256)
+
+    @model_validator(mode="after")
+    def validate_runtime_action(self) -> RevokeSkillPublisherKeyCommand:
+        if self.revocation_action is SkillRevocationAction.CONTINUE:
+            raise ValueError("Publisher key revocation action cannot continue")
+        return self
 
 
 class ChangeSkillPublisherStatusCommand(ContractModel):
@@ -213,10 +224,38 @@ class ChangeSkillPublisherStatusCommand(ContractModel):
     publisher: str = Field(min_length=1, max_length=128, pattern=_SKILL_NAME)
     operation: SkillPublisherStatusOperation
     reason_code: str = Field(min_length=1, max_length=128)
+    revocation_action: SkillRevocationAction | None = None
+    policy_version: str | None = Field(default=None, max_length=128)
+    policy_decision_id: str | None = Field(default=None, max_length=256)
     command_id: str = Field(min_length=1, max_length=256)
     expected_revision: int = Field(ge=1)
     correlation_id: str = Field(min_length=1, max_length=256)
     causation_id: str = Field(min_length=1, max_length=256)
+
+    @model_validator(mode="after")
+    def validate_security_action(self) -> ChangeSkillPublisherStatusCommand:
+        if self.operation is SkillPublisherStatusOperation.RESUME:
+            if any(
+                value is not None
+                for value in (
+                    self.revocation_action,
+                    self.policy_version,
+                    self.policy_decision_id,
+                )
+            ):
+                raise ValueError("Publisher resume cannot carry security policy")
+            return self
+        if self.operation is SkillPublisherStatusOperation.REVOKE and (
+            self.revocation_action is None or not self.policy_version
+        ):
+            raise ValueError("Publisher revocation requires security policy")
+        if self.operation is SkillPublisherStatusOperation.SUSPEND and (
+            (self.revocation_action is None) != (self.policy_version is None)
+        ):
+            raise ValueError("Publisher suspension policy must be complete")
+        if self.revocation_action is SkillRevocationAction.CONTINUE:
+            raise ValueError("Publisher security action cannot continue")
+        return self
 
 
 class ConfigureSkillSourceCommand(ContractModel):
@@ -350,6 +389,9 @@ class SkillPublisherRecord(ContractModel):
     status: SkillPublisherStatus = SkillPublisherStatus.ACTIVE
     status_reason_code: str | None = Field(default=None, max_length=128)
     status_changed_at: datetime | None = None
+    security_action: SkillRevocationAction | None = None
+    security_policy_version: str | None = Field(default=None, max_length=128)
+    security_policy_decision_id: str | None = Field(default=None, max_length=256)
     revision: int = Field(default=1, ge=1)
     created_by: str = Field(min_length=1, max_length=256)
     updated_by: str = Field(min_length=1, max_length=256)
@@ -358,12 +400,26 @@ class SkillPublisherRecord(ContractModel):
 
     @model_validator(mode="after")
     def validate_status_evidence(self) -> SkillPublisherRecord:
-        if self.status is SkillPublisherStatus.SUSPENDED and (
-            not self.status_reason_code or self.status_changed_at is None
+        if self.status in {
+            SkillPublisherStatus.SUSPENDED,
+            SkillPublisherStatus.REVOKED,
+        } and (
+            not self.status_reason_code
+            or self.status_changed_at is None
+            or self.security_action is None
+            or not self.security_policy_version
         ):
-            raise ValueError("Suspended Skill Publisher requires status evidence")
-        if self.status is SkillPublisherStatus.ACTIVE and self.status_reason_code:
-            raise ValueError("Active Skill Publisher cannot carry suspension reason")
+            raise ValueError("Non-active Skill Publisher requires security evidence")
+        if self.status is SkillPublisherStatus.ACTIVE and any(
+            value is not None
+            for value in (
+                self.status_reason_code,
+                self.security_action,
+                self.security_policy_version,
+                self.security_policy_decision_id,
+            )
+        ):
+            raise ValueError("Active Skill Publisher cannot carry security evidence")
         return self
 
 
@@ -379,6 +435,9 @@ class SkillPublisherKeyRecord(ContractModel):
     retired_at: datetime | None = None
     revoked_at: datetime | None = None
     reason_code: str | None = Field(default=None, max_length=128)
+    revocation_action: SkillRevocationAction | None = None
+    revocation_policy_version: str | None = Field(default=None, max_length=128)
+    revocation_policy_decision_id: str | None = Field(default=None, max_length=256)
     created_by: str = Field(min_length=1, max_length=256)
     updated_by: str = Field(min_length=1, max_length=256)
     created_at: datetime
@@ -392,8 +451,20 @@ class SkillPublisherKeyRecord(ContractModel):
         elif self.status is SkillPublisherKeyStatus.RETIRING:
             if self.retired_at is None or self.revoked_at is not None:
                 raise ValueError("Retiring Publisher key requires retired_at")
-        elif self.revoked_at is None or not self.reason_code:
-            raise ValueError("Revoked Publisher key requires time and reason")
+        else:
+            if self.revoked_at is None or not self.reason_code:
+                raise ValueError("Revoked Publisher key requires time and reason")
+            if self.revocation_action is None or not self.revocation_policy_version:
+                raise ValueError("Revoked Publisher key requires runtime policy")
+        if self.status is not SkillPublisherKeyStatus.REVOKED and any(
+            value is not None
+            for value in (
+                self.revocation_action,
+                self.revocation_policy_version,
+                self.revocation_policy_decision_id,
+            )
+        ):
+            raise ValueError("Trusted Publisher key cannot carry revocation policy")
         return self
 
 

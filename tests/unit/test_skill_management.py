@@ -564,10 +564,44 @@ def test_management_enforces_revision_and_revoke_is_separate() -> None:
         )
         assert unavailable["action"] == "cancel"
         assert unavailable["reason_code"] == "binding_authority_unavailable"
+
+        await service.change_installation(
+            _installation_command(
+                SkillInstallationOperation.UNINSTALL,
+                revision=1,
+                reason="security_force_uninstall",
+                force=True,
+            )
+        )
+        stronger_disposition = await SkillBindingStatusExecutor(lifecycle).execute(
+            ToolInvocation(
+                tool_invocation_id="binding-status-strongest-policy",
+                tenant_id="tenant-a",
+                root_session_id="root-1",
+                session_id="session-1",
+                run_id="run-1",
+                tool_name="auraclaw.skills.binding-status",
+                tool_version="1",
+                arguments={
+                    "publisher": "platform",
+                    "name": "release.prepare",
+                    "version": "1.0.0",
+                    "package_digest": _DIGEST,
+                },
+                expected_side_effect="read",
+                idempotency_key="binding-status-strongest-policy",
+                deadline=None,
+                fencing_token=1,
+                actor_id="runtime-1",
+            ),
+            skill_binding_status_tool(),
+        )
+        assert stronger_disposition["action"] == "cancel"
+        assert stronger_disposition["reason_code"] == "security_force_uninstall"
         package = await lifecycle.get_package("tenant-a", "platform", "release.prepare", "1.0.0")
         assert package is not None
         assert package.retention_status.value == "retained"
-        assert projector.tenants == ["tenant-a"]
+        assert projector.tenants == ["tenant-a", "tenant-a"]
 
     asyncio.run(scenario())
 

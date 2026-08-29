@@ -863,6 +863,9 @@ class SkillPublisherRevokeKeyInternalRequest(ContractModel):
     publisher: str = Field(min_length=1, max_length=128)
     key_id: str = Field(min_length=1, max_length=128)
     reason_code: str = Field(min_length=1, max_length=128)
+    revocation_action: Literal["pause", "cancel"] = "cancel"
+    policy_version: str = Field(default="skill-revocation-v1", min_length=1, max_length=128)
+    policy_decision_id: str | None = Field(default=None, max_length=256)
     command_id: str = Field(min_length=1, max_length=256)
     expected_revision: int = Field(ge=1)
 
@@ -871,8 +874,11 @@ class SkillPublisherStatusInternalRequest(ContractModel):
     context: InternalRequestContext
     actor_id: str = Field(min_length=1, max_length=256)
     publisher: str = Field(min_length=1, max_length=128)
-    operation: Literal["suspend", "resume"]
+    operation: Literal["suspend", "resume", "revoke"]
     reason_code: str = Field(min_length=1, max_length=128)
+    revocation_action: Literal["pause", "cancel"] | None = None
+    policy_version: str | None = Field(default=None, max_length=128)
+    policy_decision_id: str | None = Field(default=None, max_length=256)
     command_id: str = Field(min_length=1, max_length=256)
     expected_revision: int = Field(ge=1)
 

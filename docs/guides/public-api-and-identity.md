@@ -240,9 +240,10 @@ Secret 只允许引用 `credential_ref`，响应里不会出现明文。写命�
 | `GET` | `/v1/admin/skill-publishers/{publisher}` | Publisher 与公钥状态 |
 | `POST` | `/v1/admin/skill-publishers/{publisher}` | 注册 tenant Publisher |
 | `POST` | `/v1/admin/skill-publishers/{publisher}/keys:rotate` | 原子轮换 Ed25519 公钥 |
-| `POST` | `/v1/admin/skill-publishers/{publisher}/keys/{key_id}:revoke` | 撤销泄露或不再可信的公钥 |
+| `POST` | `/v1/admin/skill-publishers/{publisher}/keys/{key_id}:revoke` | 永久撤销公钥；`X-Revocation-Action: pause|cancel`，默认 cancel |
 | `POST` | `/v1/admin/skill-publishers/{publisher}/status:suspend` | 暂停 Publisher 信任并移除其可发现 Skill |
 | `POST` | `/v1/admin/skill-publishers/{publisher}/status:resume` | 恢复 Publisher；已撤销 key 不会恢复 |
+| `POST` | `/v1/admin/skill-publishers/{publisher}/status:revoke` | 永久撤销 Publisher；显式 `pause|cancel` Policy，且不可 resume |
 
 ---
 
@@ -782,6 +783,10 @@ correlation/causation 和 revision 证据，再复验原 Artifact 与当前 Sour
 publisher/name/version/digest。`continue` 只保留已固定 digest 的 `skill://` 正文读取，不恢复 Catalog
 可发现性；`pause` 保存 checkpoint 并挂起 assignment；`cancel` 写 `skill.revocation.applied`、
 `skill.cancelled` 与 `run.cancelled` Canonical Event 后结束 assignment。状态查询会返回完整撤销策略证据。
+Publisher suspend 使用可恢复的默认 `pause`；Publisher/key revoke 通过 `X-Revocation-Action`、
+`X-Policy-Version` 和可选 `X-Policy-Decision-ID` 记录批量运行时策略。策略不会复制到每个 Publication，
+而是在固定 binding 校验时按签名 key 动态联结；多个同时生效的策略按 `cancel > pause > continue` 裁决。
+Publisher 永久 revoke 后不可 resume，key revoke 也不可逆，且两者都严格限定在当前 tenant。
 
 Skill Source 管理入口只接受 MCP Source，均按当前可信 tenant 隔离：
 

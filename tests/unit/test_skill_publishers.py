@@ -11,6 +11,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from auraclaw.action.capability_catalog import (
     CapabilityCatalog,
     InMemoryCapabilityCatalogStore,
+    SkillBindingStatusExecutor,
+    skill_binding_status_tool,
 )
 from auraclaw.action.mcp_primitives import HandsResourceRegistry
 from auraclaw.action.skill_lifecycle import InMemorySkillLifecycleStore
@@ -38,11 +40,12 @@ from auraclaw.contracts.skills import (
     SkillPublisherKeyStatus,
     SkillPublisherStatus,
     SkillPublisherStatusOperation,
+    SkillRevocationAction,
     SkillSourceDesiredState,
     SkillSourceKind,
     SkillSourceRecord,
 )
-from auraclaw.contracts.tools import ArtifactRef
+from auraclaw.contracts.tools import ArtifactRef, ToolInvocation
 from auraclaw.infrastructure.artifacts.store import ArtifactStore, InMemoryObjectStorage
 
 
@@ -228,6 +231,42 @@ def test_publisher_rotation_admission_restore_and_revocation() -> None:
         )
         with pytest.raises(PolicyDeniedError, match="not trusted"):
             await trust.verify_for_restore("tenant-a", first_package)
+
+        revoked_publisher, _keys = await service.change_status(
+            ChangeSkillPublisherStatusCommand(
+                tenant_id="tenant-a",
+                actor_id="security-admin",
+                publisher="acme",
+                operation=SkillPublisherStatusOperation.REVOKE,
+                reason_code="publisher_compromised",
+                revocation_action=SkillRevocationAction.CANCEL,
+                policy_version="skill-revocation-v2",
+                policy_decision_id="decision-publisher-revoke",
+                command_id="publisher-revoke-1",
+                expected_revision=resumed.revision,
+                correlation_id="corr-a",
+                causation_id="publisher-revoke-1",
+            )
+        )
+        assert revoked_publisher.status is SkillPublisherStatus.REVOKED
+        assert revoked_publisher.security_action is SkillRevocationAction.CANCEL
+        assert revoked_publisher.security_policy_version == "skill-revocation-v2"
+        with pytest.raises(PolicyDeniedError, match="cannot change status"):
+            await service.change_status(
+                ChangeSkillPublisherStatusCommand(
+                    tenant_id="tenant-a",
+                    actor_id="security-admin",
+                    publisher="acme",
+                    operation=SkillPublisherStatusOperation.RESUME,
+                    reason_code="unsafe_resume",
+                    command_id="resume-revoked",
+                    expected_revision=revoked_publisher.revision,
+                    correlation_id="corr-a",
+                    causation_id="resume-revoked",
+                )
+            )
+        tenant_b, _tenant_b_keys = await service.get("tenant-b", "acme")
+        assert tenant_b.status is SkillPublisherStatus.ACTIVE
         with pytest.raises(VersionConflictError, match="command id was reused"):
             await service.register(
                 _publisher_command().model_copy(
@@ -297,6 +336,39 @@ def test_ed25519_publisher_can_publish_and_key_id_is_persisted() -> None:
         assert result.manifest.publisher == "acme"
         assert record is not None and record.signature_key_id == "key-2026-a"
 
+        async def binding_status(tenant_id: str = "tenant-a") -> dict[str, object]:
+            return await SkillBindingStatusExecutor(
+                lifecycle,
+                publisher_security=publisher_store,
+            ).execute(
+                ToolInvocation(
+                    tool_invocation_id=f"binding-status-{tenant_id}",
+                    tenant_id=tenant_id,
+                    root_session_id="root-1",
+                    session_id="session-1",
+                    run_id="run-1",
+                    tool_name="auraclaw.skills.binding-status",
+                    tool_version="1",
+                    arguments={
+                        "publisher": "acme",
+                        "name": "release.prepare",
+                        "version": "1.0.0",
+                        "package_digest": result.package_digest,
+                    },
+                    expected_side_effect="read",
+                    idempotency_key=f"binding-status-{tenant_id}",
+                    deadline=None,
+                    fencing_token=1,
+                    actor_id="runtime-1",
+                ),
+                skill_binding_status_tool(),
+            )
+
+        assert (await binding_status())["action"] == "continue"
+        unavailable = await binding_status("tenant-b")
+        assert unavailable["action"] == "cancel"
+        assert unavailable["reason_code"] == "binding_authority_unavailable"
+
         second_private = Ed25519PrivateKey.generate()
         second_public = _b64(
             second_private.public_key().public_bytes(
@@ -332,6 +404,9 @@ def test_ed25519_publisher_can_publish_and_key_id_is_persisted() -> None:
                 causation_id="suspend-after-publish",
             )
         )
+        suspended_disposition = await binding_status()
+        assert suspended_disposition["action"] == "pause"
+        assert suspended_disposition["reason_code"] == "publisher_under_review"
         assert await rebuilder.rebuild_tenant("tenant-a") == (
             0,
             ("package_restore_PolicyDeniedError",),
@@ -350,10 +425,11 @@ def test_ed25519_publisher_can_publish_and_key_id_is_persisted() -> None:
                 causation_id="resume-after-publish",
             )
         )
+        assert (await binding_status())["action"] == "continue"
         assert await rebuilder.rebuild_tenant("tenant-a") == (1, ())
         _publisher, keys = await publishers.get("tenant-a", "acme")
         first_key = next(key for key in keys if key.key_id == "key-2026-a")
-        await publishers.revoke_key(
+        revoked_key, _keys = await publishers.revoke_key(
             RevokeSkillPublisherKeyCommand(
                 tenant_id="tenant-a",
                 actor_id="security-admin",
@@ -366,6 +442,11 @@ def test_ed25519_publisher_can_publish_and_key_id_is_persisted() -> None:
                 causation_id="revoke-after-publish",
             )
         )
+        assert revoked_key.status is SkillPublisherStatus.ACTIVE
+        key_disposition = await binding_status()
+        assert key_disposition["action"] == "cancel"
+        assert key_disposition["key_status"] == "revoked"
+        assert key_disposition["reason_code"] == "key_compromised"
         count, failures = await rebuilder.rebuild_tenant("tenant-a")
         assert count == 0
         assert failures == ("package_restore_PolicyDeniedError",)

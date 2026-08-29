@@ -15,8 +15,13 @@ from auraclaw.contracts.capabilities import (
 from auraclaw.contracts.skills import (
     SkillBinding,
     SkillInstallationRecord,
+    SkillPackageRecord,
     SkillPublicationRecord,
     SkillPublicationStatus,
+    SkillPublisherKeyRecord,
+    SkillPublisherKeyStatus,
+    SkillPublisherRecord,
+    SkillPublisherStatus,
     SkillRevocationAction,
 )
 from auraclaw.contracts.tools import (
@@ -58,6 +63,20 @@ class SkillPublicationReader(Protocol):
     async def get_installation(
         self, tenant_id: str, publisher: str, name: str
     ) -> SkillInstallationRecord | None: ...
+
+    async def get_package(
+        self, tenant_id: str, publisher: str, name: str, version: str
+    ) -> SkillPackageRecord | None: ...
+
+
+class SkillPublisherSecurityReader(Protocol):
+    async def get_publisher(
+        self, tenant_id: str, publisher: str
+    ) -> SkillPublisherRecord | None: ...
+
+    async def get_key(
+        self, tenant_id: str, publisher: str, key_id: str
+    ) -> SkillPublisherKeyRecord | None: ...
 
 
 class InMemoryCapabilityCatalogStore:
@@ -331,6 +350,7 @@ class SkillResolveExecutor:
 @dataclass(frozen=True)
 class SkillBindingStatusExecutor:
     publications: SkillPublicationReader
+    publisher_security: SkillPublisherSecurityReader | None = None
 
     async def execute(
         self,
@@ -353,8 +373,9 @@ class SkillBindingStatusExecutor:
                 "reason_code": "binding_authority_unavailable",
                 "policy_version": "skill-revocation-v1",
             }
+        decisions: list[dict[str, object]] = []
         if publication.status is SkillPublicationStatus.REVOKED:
-            return {
+            decisions.append({
                 "publication_status": publication.status.value,
                 "action": (
                     publication.revocation_action or SkillRevocationAction.CANCEL
@@ -362,7 +383,90 @@ class SkillBindingStatusExecutor:
                 "reason_code": publication.reason_code,
                 "policy_version": publication.revocation_policy_version,
                 "policy_decision_id": (publication.revocation_policy_decision_id),
-            }
+            })
+        if self.publisher_security is not None:
+            package = await self.publications.get_package(
+                invocation.tenant_id,
+                publication.publisher,
+                publication.name,
+                publication.version,
+            )
+            if package is None:
+                decisions.append({
+                    "publication_status": publication.status.value,
+                    "action": SkillRevocationAction.CANCEL.value,
+                    "reason_code": "package_authority_unavailable",
+                    "policy_version": "skill-revocation-v1",
+                })
+            elif package.signature_key_id is not None:
+                publisher = await self.publisher_security.get_publisher(
+                    invocation.tenant_id,
+                    publication.publisher,
+                )
+                key = await self.publisher_security.get_key(
+                    invocation.tenant_id,
+                    publication.publisher,
+                    package.signature_key_id,
+                )
+                if publisher is None or publisher.status in {
+                    SkillPublisherStatus.SUSPENDED,
+                    SkillPublisherStatus.REVOKED,
+                }:
+                    decisions.append({
+                        "publication_status": publication.status.value,
+                        "publisher_status": (
+                            publisher.status.value
+                            if publisher is not None
+                            else "unavailable"
+                        ),
+                        "action": (
+                            publisher.security_action or SkillRevocationAction.CANCEL
+                            if publisher is not None
+                            else SkillRevocationAction.CANCEL
+                        ).value,
+                        "reason_code": (
+                            publisher.status_reason_code
+                            if publisher is not None
+                            else "publisher_authority_unavailable"
+                        ),
+                        "policy_version": (
+                            publisher.security_policy_version
+                            if publisher is not None
+                            else "skill-revocation-v1"
+                        ),
+                        "policy_decision_id": (
+                            publisher.security_policy_decision_id
+                            if publisher is not None
+                            else None
+                        ),
+                    })
+                if key is None:
+                    decisions.append({
+                        "publication_status": publication.status.value,
+                        "publisher_status": (
+                            publisher.status.value
+                            if publisher is not None
+                            else "unavailable"
+                        ),
+                        "key_status": "unavailable",
+                        "action": SkillRevocationAction.CANCEL.value,
+                        "reason_code": "publisher_key_authority_unavailable",
+                        "policy_version": "skill-revocation-v1",
+                    })
+                elif key.status is SkillPublisherKeyStatus.REVOKED:
+                    decisions.append({
+                    "publication_status": publication.status.value,
+                    "publisher_status": (
+                        publisher.status.value if publisher is not None else "unavailable"
+                    ),
+                    "key_status": key.status.value,
+                    "action": (
+                        key.revocation_action or SkillRevocationAction.CANCEL
+                    ).value,
+                    "reason_code": key.reason_code,
+                    "policy_version": key.revocation_policy_version,
+                    "policy_decision_id": key.revocation_policy_decision_id,
+                    })
         installation = await self.publications.get_installation(
             invocation.tenant_id,
             str(arguments["publisher"]),
@@ -372,14 +476,26 @@ class SkillBindingStatusExecutor:
             installation is not None
             and installation.uninstall_action is SkillRevocationAction.CANCEL
         ):
-            return {
+            decisions.append({
                 "publication_status": publication.status.value,
                 "installation_status": installation.status.value,
                 "action": SkillRevocationAction.CANCEL.value,
                 "reason_code": installation.reason_code,
                 "policy_version": installation.uninstall_policy_version,
                 "policy_decision_id": installation.uninstall_policy_decision_id,
+            })
+        if decisions:
+            priority = {
+                SkillRevocationAction.CANCEL.value: 0,
+                SkillRevocationAction.PAUSE.value: 1,
+                SkillRevocationAction.CONTINUE.value: 2,
             }
+            decision = min(decisions, key=lambda item: priority[str(item["action"])])
+            decision.setdefault(
+                "installation_status",
+                installation.status.value if installation is not None else "unmanaged",
+            )
+            return decision
         return {
             "publication_status": publication.status.value,
             "installation_status": (

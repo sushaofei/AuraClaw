@@ -2128,6 +2128,27 @@ ready Skill Artifact 建立带 fencing 的物理回收流程；不把成功命�
 - [x] README、架构、公开 API、数据库参考、运维与阶段门禁同步。
 - [x] 本阶段作为一个 intentional commit 提交并 push，不包含 `.env`、Secret、缓存或无关改动。
 
+## 阶段 M14v：Skill Publisher 与密钥批量运行时撤销（Issue #56）
+
+状态：已完成。Publisher/key 安全事件以共享权威事实批量约束全部签名版本，不复制派生 Publication 状态。
+
+### 信任状态与运行时策略
+
+- [x] key revoke 持久化 `pause|cancel`、reason、policy version 与可选 decision id，并对对应 key 的全部固定 binding 生效。
+- [x] Publisher suspend 默认 pause 且可 resume；永久 Publisher revoke 显式选择 pause/cancel，且不可 resume。
+- [x] binding-status 动态联结 Package signature key 与 tenant Publisher/key 权威状态，不依赖 Catalog 收敛后才保护活动 Run。
+- [x] Publication、Publisher、key 与 force uninstall 同时生效时统一采用 `cancel > pause > continue`，缺失权威事实 fail closed。
+- [x] admission、restore 与 Catalog rebuild 继续拒绝 suspended/revoked Publisher 或 revoked key；命令重放与跨租户隔离保持不变。
+
+### 持久化、质量与交付
+
+- [x] 0039 正反迁移覆盖 Publisher revoked 状态、Publisher/key Policy 证据、安全回填和数据库约束。
+- [x] 单测覆盖 suspend/resume、永久 revoke、key revoke、活动 binding 动作、最强策略优先与 tenant 隔离。
+- [x] PostgreSQL 覆盖跨 store 幂等、策略持久化、永久状态约束及完整 migration roundtrip。
+- [x] Ruff、Mypy、unit、相关 integration 与 import-linter 通过。
+- [x] README、架构、公开 API、数据库参考、运维与阶段门禁同步。
+- [x] 本阶段作为一个 intentional commit 提交并 push，不包含 `.env`、Secret、缓存或无关改动。
+
 ## 阶段 Product Activity：产品级对话执行轨迹（AuraX Issue #2）
 
 状态：代码与定向验证完成；完整基础设施集成门禁受现有 Kafka/MySQL/PostgreSQL/Artifact 环境失败阻塞。
