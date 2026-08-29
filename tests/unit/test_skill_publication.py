@@ -243,6 +243,7 @@ def test_content_findings_quarantine_admission_without_persisting_package(
         assert audit.outcome == "quarantined"
         assert audit.stage == "content_scan"
         assert audit.safe_error_code == f"skill_content_{finding}"
+        assert audit.content_policy_version == "skill-content-v1"
         assert markdown.decode() not in repr(audit)
         assert await lifecycle.get_package(
             "tenant-a", "acme", "release.prepare", "1.0.0"
@@ -282,6 +283,26 @@ def test_content_scanner_does_not_apply_text_rules_to_binary_assets() -> None:
         )
     )
     assert findings == ()
+
+
+def test_publication_rejects_invalid_content_policy_version_at_startup() -> None:
+    class InvalidScanner:
+        policy_version = "INVALID POLICY VERSION"
+
+        def scan(self, package: SkillPackage) -> tuple[str, ...]:
+            del package
+            return ()
+
+    registry = SkillPackageRegistry(
+        artifacts=ArtifactStore(InMemoryObjectStorage(), signing_key=_KEY),
+        signature_verifier=HmacSkillSignatureVerifier({"acme": _KEY}),
+    )
+    with pytest.raises(ValueError, match="policy version is invalid"):
+        SkillPublicationService(
+            registry=registry,
+            lifecycle=InMemorySkillLifecycleStore(),
+            content_scanner=InvalidScanner(),
+        )
 
 
 def test_artifact_read_failure_audit_does_not_persist_sensitive_error() -> None:

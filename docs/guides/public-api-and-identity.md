@@ -782,14 +782,25 @@ private key 只从 `AURACLAW_SKILL_SIGNING_KEY`（或指定 Secret 环境变量�
 需通过 Publisher key rotation API 登记；后续 validate/test/publish 用显式公钥本地验签，而服务端仍以
 tenant Registry 的 active key 独立验签。CLI 不接受命令行私钥，也不允许外部签名声明 `platform`。
 
-每次 Skill publish/publish-artifact 的成功或拒绝都会进入内部 tenant 审计账本。账本包含可信身份、命令
-上下文、验证阶段、稳定错误码和耗时，不包含 Skill 正文或异常消息。它不是公开 API；产品端不得把内部
-审计详情或原始拒绝原因直接返回给非安全运维角色。
+每次 Skill publish/publish-artifact 的成功、拒绝或隔离都会进入 tenant 审计账本。账本包含可信身份、命令
+上下文、验证阶段、稳定错误码、内容策略版本和耗时，不包含 Skill 正文或异常消息。安全运维角色可通过
+`GET /v1/admin/skill-admissions` 按 `outcome`、`stage`、`content_policy_version` 查询当前 tenant，或通过
+`GET /v1/admin/skill-admissions/metrics` 获取按 outcome/策略版本聚合的 count 与平均延迟。产品端不得把
+这些管理详情或原始拒绝原因返回给普通终端用户。
 
 签名通过后，服务端还会扫描可执行扩展与 magic、高置信凭据、Secret 赋值和 Prompt Injection 模式。
 命中后 API 以受控 `skill_content_*` 策略错误拒绝，本次 admission 在内部记为 `quarantined`，但不会把
 不可信内容创建为 Package/Publication/Installation。客户端不得根据具体 finding 自动修改或重发正文；
 应由 Publisher 在本地清除风险、重新签名并以新命令提交。
+
+```bash
+curl -sS 'http://127.0.0.1:8000/v1/admin/skill-admissions?outcome=quarantined&content_policy_version=skill-content-v1' \
+  -H 'X-Tenant-ID: local' \
+  -H 'X-Actor-ID: security-operator'
+```
+
+策略版本用于解释历史 finding 和灰度期间的结果差异，不表示隔离内容可以恢复或启用。修复后的内容仍须
+重新签名并以新 Idempotency-Key 发布。
 
 ```bash
 curl -sS http://127.0.0.1:8000/v1/admin/skills \

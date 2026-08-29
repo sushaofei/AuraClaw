@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import base64
 import binascii
+from dataclasses import asdict
 
+from auraclaw.action.skill_lifecycle import SkillLifecycleStore
 from auraclaw.action.skill_management import SkillManagementService
 from auraclaw.action.skill_packages import SkillPackage
 from auraclaw.action.skill_publication import SkillPublicationService
@@ -11,6 +13,10 @@ from auraclaw.action.skill_rebuild import SkillStateRebuilder
 from auraclaw.contracts.errors import AuthorizationError, SchemaValidationError
 from auraclaw.contracts.internal import (
     ServiceIdentity,
+    SkillAdmissionListInternalRequest,
+    SkillAdmissionListInternalResponse,
+    SkillAdmissionMetricsInternalRequest,
+    SkillAdmissionMetricsInternalResponse,
     SkillInstallationInternalRequest,
     SkillInstallationInternalResponse,
     SkillPackageStateInternalRequest,
@@ -59,11 +65,46 @@ class SkillPublicationInternalService:
         management: SkillManagementService | None = None,
         rebuilder: SkillStateRebuilder | None = None,
         publishers: SkillPublisherService | None = None,
+        admissions: SkillLifecycleStore | None = None,
     ) -> None:
         self._publication = publication
         self._management = management
         self._rebuilder = rebuilder
         self._publishers = publishers
+        self._admissions = admissions
+
+    async def list_admissions(
+        self, request: SkillAdmissionListInternalRequest
+    ) -> SkillAdmissionListInternalResponse:
+        self._validate_admission_reader(request.context.service_identity)
+        if self._admissions is None:
+            raise SchemaValidationError("Skill admission reader is not configured")
+        records = await self._admissions.list_admissions(
+            request.context.tenant_id,
+            outcome=request.outcome,
+            stage=request.stage,
+            content_policy_version=request.content_policy_version,
+            limit=request.limit,
+        )
+        return SkillAdmissionListInternalResponse(
+            admissions=tuple(asdict(record) for record in records)
+        )
+
+    async def admission_metrics(
+        self, request: SkillAdmissionMetricsInternalRequest
+    ) -> SkillAdmissionMetricsInternalResponse:
+        self._validate_admission_reader(request.context.service_identity)
+        if self._admissions is None:
+            raise SchemaValidationError("Skill admission reader is not configured")
+        metrics = await self._admissions.admission_metrics(request.context.tenant_id)
+        return SkillAdmissionMetricsInternalResponse(
+            metrics=tuple(asdict(metric) for metric in metrics)
+        )
+
+    @staticmethod
+    def _validate_admission_reader(identity: ServiceIdentity) -> None:
+        if identity is not ServiceIdentity.TASK_API:
+            raise AuthorizationError("workload may not query Skill admissions")
 
     async def publish(
         self, request: SkillPublishInternalRequest

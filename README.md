@@ -440,6 +440,10 @@ command/correlation/causation、可用的 Skill identity/digest、验证阶段�
 高置信私钥或 token、Secret 赋值以及指令劫持模式。命中项只记录稳定 finding code，并把本次 admission
 记为 `quarantined`；不会创建 Package、Publication 或 Installation。已上传 Artifact 继续受 retention 与
 孤儿 GC 管理，扫描器不会执行或反序列化包内代码。
+扫描器以稳定的 `skill-content-v1` 策略版本运行，版本会随每次 admission 一并持久化。安全运维可通过
+`GET /v1/admin/skill-admissions` 按 outcome、stage 和策略版本查询当前 tenant，并通过
+`GET /v1/admin/skill-admissions/metrics` 查看按 outcome/策略版本聚合的数量和平均准入延迟；响应不会
+包含正文、匹配片段或异常消息。
 
 重建只读取 Canonical Event Log；Read Model 和 checkpoint 可以删除后恢复。真实
 PostgreSQL 集成测试使用独立测试库：

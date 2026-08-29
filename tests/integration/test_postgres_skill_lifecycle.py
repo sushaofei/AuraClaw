@@ -50,6 +50,7 @@ MIGRATION = "\n".join(
         (ROOT / "migrations/0031_skill_publication_restore.sql").read_text(),
         (ROOT / "migrations/0032_skill_admission_audit.sql").read_text(),
         (ROOT / "migrations/0033_skill_content_quarantine.sql").read_text(),
+        (ROOT / "migrations/0034_skill_admission_operations.sql").read_text(),
     )
 )
 pytestmark = pytest.mark.skipif(DATABASE_URL is None, reason="PostgreSQL test URL not configured")
@@ -86,9 +87,25 @@ def test_postgres_skill_lifecycle_is_persistent_and_tenant_scoped() -> None:
                 safe_error_code="skill_content_prompt_injection",
                 duration_ms=7,
                 occurred_at=now,
+                content_policy_version="skill-content-v1",
             )
             await store_a.record_admission(admission)
             assert await store_b.list_admissions(tenant_id) == (admission,)
+            assert await store_b.list_admissions(
+                tenant_id,
+                outcome="quarantined",
+                stage="content_scan",
+                content_policy_version="skill-content-v1",
+            ) == (admission,)
+            assert await store_b.list_admissions(
+                tenant_id, outcome="accepted"
+            ) == ()
+            metrics = await store_b.admission_metrics(tenant_id)
+            assert len(metrics) == 1
+            assert metrics[0].outcome == "quarantined"
+            assert metrics[0].content_policy_version == "skill-content-v1"
+            assert metrics[0].count == 1
+            assert metrics[0].average_duration_ms == 7
             assert await store_b.list_admissions(f"other-{tenant_id}") == ()
             package = SkillPackageRecord(
                 tenant_id=tenant_id,

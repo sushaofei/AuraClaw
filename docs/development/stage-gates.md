@@ -2001,6 +2001,31 @@ ready Skill Artifact 建立带 fencing 的物理回收流程；不把成功命�
 - [x] README、架构、公开 API、数据库参考与阶段门禁同步。
 - [x] 本阶段作为一个 intentional commit 提交并 push，不包含 `.env`、Secret、缓存或无关改动。
 
+## 阶段 M14q：Skill 扫描策略版本与准入运维面（Issue #56）
+
+状态：已完成。
+
+### 策略版本与审计
+
+- [x] `SkillPackageContentScanner` 暴露稳定策略版本，默认实现使用 `skill-content-v1`。
+- [x] 服务启动时校验并冻结策略版本；每个 accepted/rejected/quarantined admission 均记录实际版本。
+- [x] 0034 将历史记录安全标记为 `unknown`，增加格式约束、查询索引及可逆 down migration。
+
+### 查询与指标
+
+- [x] Lifecycle reader 支持按 outcome、stage、content policy version 过滤并限制最大返回数量。
+- [x] count 与平均 admission latency 从完整持久账本按 outcome/policy version 聚合，不从分页结果推导。
+- [x] task-api 仅经工作负载鉴权的 Action Hands 内部契约读取，所有查询强制使用请求 tenant。
+- [x] Admin API 暴露 admission 列表和指标端点，不返回正文、finding 匹配片段或异常消息。
+
+### 质量与交付
+
+- [x] 单测覆盖策略版本、非法版本 fail fast、过滤、tenant 隔离、指标聚合及内部远程契约。
+- [x] PostgreSQL 覆盖版本持久化、过滤、聚合、索引迁移和完整正反回滚。
+- [x] 全量 Ruff、Mypy、unit、相关 integration 与 import-linter 通过。
+- [x] README、架构、公开 API、数据库参考与阶段门禁同步。
+- [x] 本阶段作为一个 intentional commit 提交并 push，不包含 `.env`、Secret、缓存或无关改动。
+
 ## 阶段 Product Activity：产品级对话执行轨迹（AuraX Issue #2）
 
 状态：代码与定向验证完成；完整基础设施集成门禁受现有 Kafka/MySQL/PostgreSQL/Artifact 环境失败阻塞。

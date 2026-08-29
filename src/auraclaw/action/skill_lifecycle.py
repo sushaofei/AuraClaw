@@ -106,6 +106,15 @@ class SkillAdmissionAuditRecord:
     safe_error_code: str | None
     duration_ms: int
     occurred_at: datetime
+    content_policy_version: str = "unknown"
+
+
+@dataclass(frozen=True)
+class SkillAdmissionMetricRecord:
+    outcome: str
+    content_policy_version: str
+    count: int
+    average_duration_ms: float
 
 
 @dataclass(frozen=True)
@@ -130,8 +139,18 @@ class SkillLifecycleStore(Protocol):
     async def record_admission(self, record: SkillAdmissionAuditRecord) -> None: ...
 
     async def list_admissions(
-        self, tenant_id: str, *, limit: int = 100
+        self,
+        tenant_id: str,
+        *,
+        outcome: str | None = None,
+        stage: str | None = None,
+        content_policy_version: str | None = None,
+        limit: int = 100,
     ) -> tuple[SkillAdmissionAuditRecord, ...]: ...
+
+    async def admission_metrics(
+        self, tenant_id: str
+    ) -> tuple[SkillAdmissionMetricRecord, ...]: ...
 
     async def commit_publish(
         self, commit: SkillPublishCommit
@@ -254,13 +273,45 @@ class InMemorySkillLifecycleStore:
             self._admission_audits.append(record)
 
     async def list_admissions(
-        self, tenant_id: str, *, limit: int = 100
+        self,
+        tenant_id: str,
+        *,
+        outcome: str | None = None,
+        stage: str | None = None,
+        content_policy_version: str | None = None,
+        limit: int = 100,
     ) -> tuple[SkillAdmissionAuditRecord, ...]:
         return tuple(
             record
             for record in reversed(self._admission_audits)
             if record.tenant_id == tenant_id
+            and (outcome is None or record.outcome == outcome)
+            and (stage is None or record.stage == stage)
+            and (
+                content_policy_version is None
+                or record.content_policy_version == content_policy_version
+            )
         )[:limit]
+
+    async def admission_metrics(
+        self, tenant_id: str
+    ) -> tuple[SkillAdmissionMetricRecord, ...]:
+        grouped: dict[tuple[str, str], list[int]] = {}
+        for record in self._admission_audits:
+            if record.tenant_id != tenant_id:
+                continue
+            grouped.setdefault(
+                (record.outcome, record.content_policy_version), []
+            ).append(record.duration_ms)
+        return tuple(
+            SkillAdmissionMetricRecord(
+                outcome=outcome,
+                content_policy_version=policy_version,
+                count=len(durations),
+                average_duration_ms=sum(durations) / len(durations),
+            )
+            for (outcome, policy_version), durations in sorted(grouped.items())
+        )
 
     async def commit_publish(
         self, commit: SkillPublishCommit

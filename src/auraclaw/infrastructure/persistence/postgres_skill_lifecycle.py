@@ -7,6 +7,7 @@ import asyncpg  # type: ignore[import-untyped]
 
 from auraclaw.action.skill_lifecycle import (
     SkillAdmissionAuditRecord,
+    SkillAdmissionMetricRecord,
     SkillLifecycleStore,
     SkillOutboxRecord,
     SkillPublishCommit,
@@ -48,8 +49,9 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
             """INSERT INTO hands.skill_admission_audit
             (admission_id,tenant_id,command_id,operation,actor_id,source_id,
              correlation_id,causation_id,publisher,name,version,package_digest,
-             artifact_id,outcome,stage,safe_error_code,duration_ms,occurred_at)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)""",
+             artifact_id,outcome,stage,safe_error_code,duration_ms,occurred_at,
+             content_policy_version)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)""",
             record.admission_id,
             record.tenant_id,
             record.command_id,
@@ -68,19 +70,48 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
             record.safe_error_code,
             record.duration_ms,
             record.occurred_at,
+            record.content_policy_version,
         )
 
     async def list_admissions(
-        self, tenant_id: str, *, limit: int = 100
+        self,
+        tenant_id: str,
+        *,
+        outcome: str | None = None,
+        stage: str | None = None,
+        content_policy_version: str | None = None,
+        limit: int = 100,
     ) -> tuple[SkillAdmissionAuditRecord, ...]:
         pool = await self.pool()
         rows = await pool.fetch(
             """SELECT * FROM hands.skill_admission_audit
-            WHERE tenant_id=$1 ORDER BY occurred_at DESC, admission_id DESC LIMIT $2""",
+            WHERE tenant_id=$1
+              AND ($2::text IS NULL OR outcome=$2)
+              AND ($3::text IS NULL OR stage=$3)
+              AND ($4::text IS NULL OR content_policy_version=$4)
+            ORDER BY occurred_at DESC, admission_id DESC LIMIT $5""",
             tenant_id,
+            outcome,
+            stage,
+            content_policy_version,
             limit,
         )
         return tuple(SkillAdmissionAuditRecord(**dict(row)) for row in rows)
+
+    async def admission_metrics(
+        self, tenant_id: str
+    ) -> tuple[SkillAdmissionMetricRecord, ...]:
+        pool = await self.pool()
+        rows = await pool.fetch(
+            """SELECT outcome,content_policy_version,count(*) AS count,
+                      avg(duration_ms)::double precision AS average_duration_ms
+            FROM hands.skill_admission_audit
+            WHERE tenant_id=$1
+            GROUP BY outcome,content_policy_version
+            ORDER BY outcome,content_policy_version""",
+            tenant_id,
+        )
+        return tuple(SkillAdmissionMetricRecord(**dict(row)) for row in rows)
 
     async def commit_publish(
         self, commit: SkillPublishCommit

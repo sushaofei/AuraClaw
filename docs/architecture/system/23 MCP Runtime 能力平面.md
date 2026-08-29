@@ -409,20 +409,26 @@ Source allowlist/状态、Publisher suspension、签名 key 状态和签名，�
 
 统一发布服务在 `publish` 与 `publish_artifact` 边界记录追加式准入审计。审计阶段限定为 Artifact
 元数据校验/claim/read、Archive 校验、签名校验、Source 授权和 Lifecycle commit；结果只保存
-`accepted|rejected`、稳定 `safe_error_code`、耗时，以及 tenant、actor、Source、command/correlation/
+`accepted|rejected|quarantined`、稳定 `safe_error_code`、耗时、内容策略版本，以及 tenant、actor、Source、command/correlation/
 causation 和当时已安全解析出的 publisher/name/version/digest/Artifact id。未知异常统一折叠为
 `internal_error`，异常消息、响应正文、Skill 文件、Secret 与私钥一律不落表。审计写失败会使准入请求
 fail closed；若业务提交已成功但审计暂时失败，原 command 的幂等重试负责恢复响应并补写新的 attempt
-审计。审计表按 tenant/time 和失败 stage/code 建索引，只通过内部运维/Lifecycle reader 使用。
+审计。审计表按 tenant/time、失败 stage/code 和内容策略版本建索引。Action Hands 是唯一读取所有者；
+task-api 只能经工作负载鉴权的内部契约读取当前 tenant，并向安全运维角色提供受限管理查询。
 
 签名校验完成后、Source 授权与任何 Package/Publication 写入前，`SkillPackageContentScanner` 对规范包做
-有界确定性扫描。V1 拒绝脚本/可执行扩展、ELF/PE/Mach-O/WASM magic、高置信 private key/云凭据/token、
+有界确定性扫描。扫描器暴露符合稳定标识约束的 `policy_version`，服务启动时校验并冻结，且每次 admission
+记录实际版本；V1 `skill-content-v1` 拒绝脚本/可执行扩展、ELF/PE/Mach-O/WASM magic、高置信 private key/云凭据/token、
 Secret 赋值与 Prompt Injection 模式；赋值和指令规则只作用于无 NUL 的合法 UTF-8 内容，避免二进制
 asset 随机字节误报。扫描器只返回稳定 finding code，不返回匹配片段，不执行脚本、不加载二进制，也不
 调用外部扫描服务。命中时抛出 `skill_content_<finding>`，准入审计 outcome 为 `quarantined`，且不创建
 Package、Publication 或 Installation；production staged Artifact 继续由原 retention/orphan GC 治理。
 这里的 quarantine 是“准入尝试隔离证据”，不是一个可被 enable 的可信 Publication，必须修复内容、
 重新签名并用新命令发布，防止绕过不可变版本与签名边界。
+
+运维查询支持按 outcome、stage 与 `content_policy_version` 过滤，并直接从持久账本按
+`outcome + content_policy_version` 聚合 count 与平均 admission latency。聚合不从受 limit 约束的页面结果
+推导，重启后仍可重建；返回内容只有安全审计字段和稳定 labels，不包含正文、匹配片段或异常消息。
 
 Action Hands 启动及周期对账时由 `SkillStateRebuilder` 枚举 Lifecycle tenant，从受 Policy 保护的
 Artifact 下载接口读取不可变包，并再次校验大小、内容 hash、Archive、Manifest、package digest 和

@@ -70,6 +70,10 @@ from auraclaw.contracts.internal import (
     SessionFeedResponse,
     SessionRootFeedRequest,
     SessionRootFeedResponse,
+    SkillAdmissionListInternalRequest,
+    SkillAdmissionListInternalResponse,
+    SkillAdmissionMetricsInternalRequest,
+    SkillAdmissionMetricsInternalResponse,
     SkillBindingReferenceRequest,
     SkillBindingReferenceResponse,
     SkillInstallationInternalRequest,
@@ -301,6 +305,16 @@ def skill_publication_routes(
     service: SkillPublicationInternalService,
 ) -> dict[str, ContractRoute]:
     return {
+        "/admissions": contract_route(
+            SkillAdmissionListInternalRequest,
+            SkillAdmissionListInternalResponse,
+            service.list_admissions,
+        ),
+        "/admission-metrics": contract_route(
+            SkillAdmissionMetricsInternalRequest,
+            SkillAdmissionMetricsInternalResponse,
+            service.admission_metrics,
+        ),
         "/publish": contract_route(
             SkillPublishInternalRequest,
             SkillPublishInternalResponse,
