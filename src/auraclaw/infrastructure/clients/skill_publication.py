@@ -393,6 +393,9 @@ class RemoteSkillPublicationClient:
                 publisher=command.publisher,
                 key_id=command.key_id,
                 reason_code=command.reason_code,
+                revocation_action=command.revocation_action.value,
+                policy_version=command.policy_version,
+                policy_decision_id=command.policy_decision_id,
                 command_id=command.command_id,
                 expected_revision=command.expected_revision,
             ),
@@ -411,6 +414,13 @@ class RemoteSkillPublicationClient:
                 publisher=command.publisher,
                 operation=command.operation.value,
                 reason_code=command.reason_code,
+                revocation_action=(
+                    command.revocation_action.value
+                    if command.revocation_action is not None
+                    else None
+                ),
+                policy_version=command.policy_version,
+                policy_decision_id=command.policy_decision_id,
                 command_id=command.command_id,
                 expected_revision=command.expected_revision,
             ),

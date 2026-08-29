@@ -60,6 +60,7 @@ from auraclaw.contracts.skills import (
     RotateSkillPublisherKeyCommand,
     SkillInstallationOperation,
     SkillPublisherStatusOperation,
+    SkillRevocationAction,
     SkillSourceDesiredState,
     SkillSourceKind,
 )
@@ -516,6 +517,9 @@ class SkillPublicationInternalService:
                 publisher=request.publisher,
                 key_id=request.key_id,
                 reason_code=request.reason_code,
+                revocation_action=SkillRevocationAction(request.revocation_action),
+                policy_version=request.policy_version,
+                policy_decision_id=request.policy_decision_id,
                 command_id=request.command_id,
                 expected_revision=request.expected_revision,
                 correlation_id=request.context.correlation_id,
@@ -544,6 +548,13 @@ class SkillPublicationInternalService:
                 publisher=request.publisher,
                 operation=SkillPublisherStatusOperation(request.operation),
                 reason_code=request.reason_code,
+                revocation_action=(
+                    SkillRevocationAction(request.revocation_action)
+                    if request.revocation_action is not None
+                    else None
+                ),
+                policy_version=request.policy_version,
+                policy_decision_id=request.policy_decision_id,
                 command_id=request.command_id,
                 expected_revision=request.expected_revision,
                 correlation_id=request.context.correlation_id,

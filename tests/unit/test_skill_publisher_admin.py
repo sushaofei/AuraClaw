@@ -83,6 +83,11 @@ def test_admin_manages_tenant_publisher_and_key_rotation() -> None:
         )
         assert suspended.status_code == 202, suspended.text
         assert suspended.json()["publisher"]["status"] == "suspended"
+        assert suspended.json()["publisher"]["security_action"] == "pause"
+        assert (
+            suspended.json()["publisher"]["security_policy_version"]
+            == "skill-revocation-v1"
+        )
         resumed = client.post(
             "/v1/admin/skill-publishers/acme/status:resume",
             headers={
@@ -111,3 +116,33 @@ def test_admin_manages_tenant_publisher_and_key_rotation() -> None:
         )
         assert revoked.status_code == 202, revoked.text
         assert revoked.json()["keys"][0]["status"] == "revoked"
+        assert revoked.json()["keys"][0]["revocation_action"] == "cancel"
+
+        publisher_revoked = client.post(
+            "/v1/admin/skill-publishers/acme/status:revoke",
+            headers={
+                **identity,
+                "Idempotency-Key": "publisher-revoke-1",
+                "X-Expected-Revision": "4",
+                "X-Reason-Code": "publisher_compromised",
+                "X-Revocation-Action": "cancel",
+                "X-Policy-Version": "skill-revocation-v2",
+                "X-Policy-Decision-ID": "decision-publisher-revoke",
+            },
+        )
+        assert publisher_revoked.status_code == 202, publisher_revoked.text
+        publisher_payload = publisher_revoked.json()["publisher"]
+        assert publisher_payload["status"] == "revoked"
+        assert publisher_payload["security_action"] == "cancel"
+        assert publisher_payload["security_policy_version"] == "skill-revocation-v2"
+
+        rejected_resume = client.post(
+            "/v1/admin/skill-publishers/acme/status:resume",
+            headers={
+                **identity,
+                "Idempotency-Key": "resume-revoked",
+                "X-Expected-Revision": "5",
+                "X-Reason-Code": "unsafe_resume",
+            },
+        )
+        assert rejected_resume.status_code == 403, rejected_resume.text

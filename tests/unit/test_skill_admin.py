@@ -399,6 +399,7 @@ def test_task_api_service_exposes_skill_admin_routes() -> None:
     assert "/v1/admin/skill-sources" in paths
     assert "/v1/admin/skill-sources/{source_id}" in paths
     assert "/v1/admin/skill-sources/{source_id}:sync" in paths
+    assert "/v1/admin/skill-publishers/{publisher}/status:revoke" in paths
     assert "/v1/admin/skill-package-uploads" in paths
     assert "/v1/admin/skill-package-uploads/{artifact_id}:finalize" in paths
 

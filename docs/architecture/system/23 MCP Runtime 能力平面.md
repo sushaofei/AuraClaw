@@ -354,16 +354,22 @@ tenant 隔离的 Publisher Registry 独立权威验签。Manifest 必须同时�
 
 Publisher 管理通过 `POST /v1/admin/skill-publishers/{publisher}` 注册，再以
 `POST .../keys:rotate` 原子加入新 active key 并把旧 active key 切到 retiring；`POST .../keys/{key}:revoke`
-用于安全撤销。所有写入携带 command/correlation/causation、expected revision 和 actor，并由持久命令
-账本支持跨副本幂等。新包 admission 只接受 active key；retiring key 只允许恢复已经持久化且
-`SkillPackage.signature_key_id` 相同的包；revoked key 在 admission 和 restore 都 fail closed。撤销所在
-Action Hands 立即重建 tenant，其他副本由周期全量重建收敛，从 Catalog/Resolver 移除受影响包。
+用于永久安全撤销。key revoke 必须持久化 `pause|cancel`、policy version 和可选 decision id。所有写入
+携带 command/correlation/causation、expected revision 和 actor，并由持久命令账本支持跨副本幂等。
+新包 admission 只接受 active key；retiring key 只允许恢复已经持久化且 `SkillPackage.signature_key_id`
+相同的包；revoked key 在 admission 和 restore 都 fail closed。撤销所在 Action Hands 立即重建 tenant，
+其他副本由周期全量重建收敛，从 Catalog/Resolver 移除受影响包。
 
-Publisher 还提供 `/status:suspend` 与 `/status:resume` 作为 tenant 级可逆信任断路器。状态命令要求
+Publisher 还提供 `/status:suspend` 与 `/status:resume` 作为 tenant 级可逆信任断路器，并提供
+`/status:revoke` 作为不可恢复的整 Publisher 撤销。状态命令要求
 reason、expected revision、actor、command/correlation/causation，并写入同一 Publisher 命令账本；
-suspended record 持久化 reason 与变更时间。suspend 后禁止 key rotation、新包 admission 和任何签名包
+suspended/revoked record 还持久化运行时动作与 Policy 证据。suspend 后禁止 key rotation、新包 admission 和任何签名包
 restore，当前 Action Hands 立即按持久事实重建 tenant，其余副本周期收敛。resume 不改变 key 状态，
-因此只会恢复仍为 active/retiring 且验签通过的包，revoked key 及其包不会被复活。若即时重建失败，
+因此只会恢复仍为 active/retiring 且验签通过的包；revoked Publisher 不允许 resume，revoked key 及其包
+不会被复活。Publisher/key 是共享数据库中的权威信任事实，不向每条 Publication 复制派生状态；Runtime
+每次 binding-status 查询动态联结固定包的 signature key，并按 `cancel > pause > continue` 合并
+Publication、Publisher、key 与强制卸载策略，因此跨副本不会出现部分版本已撤销、部分版本未撤销。
+若即时重建失败，
 相同命令重放仍会再次触发重建，且周期任务提供最终恢复路径。
 
 发布服务先以 command id 在 Artifact metadata 获取有期限的 publication claim，再在一个数据库事务内

@@ -26,6 +26,7 @@ from auraclaw.contracts.skills import (
     SkillPublisherRecord,
     SkillPublisherStatus,
     SkillPublisherStatusOperation,
+    SkillRevocationAction,
 )
 
 
@@ -166,7 +167,9 @@ class InMemorySkillPublisherStore:
     ) -> SkillPublisherKeyRecord:
         request = (
             f"revoke:{command.publisher}:{command.key_id}:"
-            f"{command.reason_code}:{command.expected_revision}"
+            f"{command.reason_code}:{command.revocation_action.value}:"
+            f"{command.policy_version}:{command.policy_decision_id}:"
+            f"{command.expected_revision}"
         )
         replay = self._replay(command.tenant_id, command.command_id, request)
         if replay is not None:
@@ -187,6 +190,9 @@ class InMemorySkillPublisherStore:
                 "revision": record.revision + 1,
                 "revoked_at": now,
                 "reason_code": command.reason_code,
+                "revocation_action": command.revocation_action,
+                "revocation_policy_version": command.policy_version,
+                "revocation_policy_decision_id": command.policy_decision_id,
                 "updated_by": command.actor_id,
                 "updated_at": now,
             }
@@ -200,7 +206,10 @@ class InMemorySkillPublisherStore:
     ) -> SkillPublisherRecord:
         request = (
             f"status:{command.publisher}:{command.operation.value}:"
-            f"{command.reason_code}:{command.expected_revision}"
+            f"{command.reason_code}:"
+            f"{command.revocation_action.value if command.revocation_action else ''}:"
+            f"{command.policy_version}:{command.policy_decision_id}:"
+            f"{command.expected_revision}"
         )
         replay = self._replay(command.tenant_id, command.command_id, request)
         if replay is not None:
@@ -212,11 +221,15 @@ class InMemorySkillPublisherStore:
             raise NotFoundError("Skill Publisher not found")
         if current.revision != command.expected_revision:
             raise VersionConflictError("Skill Publisher revision conflict")
-        target = (
-            SkillPublisherStatus.SUSPENDED
-            if command.operation is SkillPublisherStatusOperation.SUSPEND
-            else SkillPublisherStatus.ACTIVE
-        )
+        if current.status is SkillPublisherStatus.REVOKED and (
+            command.operation is not SkillPublisherStatusOperation.REVOKE
+        ):
+            raise PolicyDeniedError("Revoked Skill Publisher cannot change status")
+        target = {
+            SkillPublisherStatusOperation.SUSPEND: SkillPublisherStatus.SUSPENDED,
+            SkillPublisherStatusOperation.RESUME: SkillPublisherStatus.ACTIVE,
+            SkillPublisherStatusOperation.REVOKE: SkillPublisherStatus.REVOKED,
+        }[command.operation]
         if current.status is target:
             self.commands[(command.tenant_id, command.command_id)] = (
                 request,
@@ -229,10 +242,26 @@ class InMemorySkillPublisherStore:
                 "status": target,
                 "status_reason_code": (
                     command.reason_code
-                    if target is SkillPublisherStatus.SUSPENDED
+                    if target is not SkillPublisherStatus.ACTIVE
                     else None
                 ),
                 "status_changed_at": now,
+                "security_action": (
+                    None
+                    if target is SkillPublisherStatus.ACTIVE
+                    else command.revocation_action
+                    or SkillRevocationAction.PAUSE
+                ),
+                "security_policy_version": (
+                    None
+                    if target is SkillPublisherStatus.ACTIVE
+                    else command.policy_version or "skill-revocation-v1"
+                ),
+                "security_policy_decision_id": (
+                    None
+                    if target is SkillPublisherStatus.ACTIVE
+                    else command.policy_decision_id
+                ),
                 "revision": current.revision + 1,
                 "updated_by": command.actor_id,
                 "updated_at": now,

@@ -423,7 +423,9 @@ digest，不输出私钥；validate/test/publish 使用 `AURACLAW_SKILL_PUBLIC_K
 Registry 当前 active key 独立执行权威验签。平台 HMAC 只保留为兼容路径。Registry 只保存公钥，私钥
 必须留在 publisher 的签名环境。
 Publisher 可通过带 expected revision、reason 和幂等命令的 suspend/resume 管理入口充当租户级信任断路器；
-suspend 同时拒绝新发布和持久包恢复，resume 只恢复仍处于 active/retiring 的有效 key。
+suspend 同时拒绝新发布和持久包恢复，resume 只恢复仍处于 active/retiring 的有效 key。Publisher 永久
+revoke 与 key revoke 均持久化 `pause|cancel`、policy version 和 decision id，并动态作用于所有由该
+Publisher/key 签名的固定 binding；永久 revoked Publisher 不可 resume。
 发布的 Package、Publication、首个 Installation、成功命令账本和 Outbox 在 Action Hands 中原子提交；
 周期可靠性任务修复 Artifact binding 与 Catalog，并在 retention 到期后对未引用的 ready Skill Artifact
 执行带 Policy 和并发 fencing 的孤儿回收。MCP Skill Source 的周期发现使用 tenant/source 级持久租约；
@@ -438,8 +440,9 @@ suspend 同时拒绝新发布和持久包恢复，resume 只恢复仍处于 acti
 下一 step 的 binding 检查点写入取消证据。安装管理命令有独立幂等账本，多个 Hands 副本不会重复推进 revision。
 某版本只有在连续两个完整快照中缺失才自动转为 `retired`；任一完整快照重新观察到它都会清零缺失计数。
 `retired` 不再参与新发现，但保留不可变内容供既有固定 binding 读取，并与安全 `revoked` 明确区分。
-安全 revoke 必须选择 `continue|pause|cancel`（默认 cancel）并持久化 Policy 证据。Runtime 每轮/每步检查
-固定 binding：continue 不恢复新发现，pause 保存 checkpoint 后挂起，cancel 写入 Canonical 终态证据。
+安全 revoke 必须选择允许的运行时动作（默认 cancel）并持久化 Policy 证据。Runtime 每轮/每步检查
+固定 binding，并在 Publication、Publisher、key 和强制卸载策略之间采用 `cancel > pause > continue`：
+continue 不恢复新发现，pause 保存 checkpoint 后挂起，cancel 写入 Canonical 终态证据。
 退役版本不会因来源重新出现而自动复活；管理员必须提交带 expected revision、reason 和幂等键的显式
 restore。服务先审计化进入不可发现的 `restoring`，再从原 Artifact 重读并复验 digest、Source、Publisher
 及签名信任，全部通过后才恢复 `active`；验证失败会停留在 `restoring`，同一命令可安全重试。

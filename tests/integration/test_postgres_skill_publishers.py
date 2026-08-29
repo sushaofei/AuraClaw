@@ -35,6 +35,7 @@ MIGRATION = "\n".join(
     (
         (ROOT / "migrations/0027_skill_publisher_registry.sql").read_text(),
         (ROOT / "migrations/0030_skill_publisher_suspension.sql").read_text(),
+        (ROOT / "migrations/0039_skill_publisher_runtime_revocation.sql").read_text(),
     )
 )
 pytestmark = pytest.mark.skipif(
@@ -133,6 +134,8 @@ def test_postgres_publisher_rotation_is_atomic_and_idempotent() -> None:
             assert await store_b.change_status(suspend) == suspended
             assert suspended.status is SkillPublisherStatus.SUSPENDED
             assert suspended.status_reason_code == "publisher_under_review"
+            assert suspended.security_action.value == "pause"
+            assert suspended.security_policy_version == "skill-revocation-v1"
             with pytest.raises(PolicyDeniedError, match="not active"):
                 await store_b.rotate_key(
                     second.model_copy(
@@ -171,7 +174,39 @@ def test_postgres_publisher_rotation_is_atomic_and_idempotent() -> None:
                 )
             )
             assert revoked.status is SkillPublisherKeyStatus.REVOKED
+            assert revoked.revocation_action.value == "cancel"
+            assert revoked.revocation_policy_version == "skill-revocation-v1"
             assert (await store_b.get_publisher(tenant_id, publisher)) == resumed
+
+            revoke_publisher = ChangeSkillPublisherStatusCommand(
+                tenant_id=tenant_id,
+                actor_id="security-admin",
+                publisher=publisher,
+                operation=SkillPublisherStatusOperation.REVOKE,
+                reason_code="publisher_compromised",
+                revocation_action="cancel",
+                policy_version="skill-revocation-v2",
+                policy_decision_id="decision-permanent-revoke",
+                command_id=f"revoke-publisher-{suffix}",
+                expected_revision=resumed.revision,
+                correlation_id=f"corr-{suffix}",
+                causation_id=f"revoke-publisher-{suffix}",
+            )
+            permanently_revoked = await store_a.change_status(revoke_publisher)
+            assert await store_b.change_status(revoke_publisher) == permanently_revoked
+            assert permanently_revoked.status is SkillPublisherStatus.REVOKED
+            assert permanently_revoked.security_action.value == "cancel"
+            assert permanently_revoked.security_policy_version == "skill-revocation-v2"
+            with pytest.raises(PolicyDeniedError, match="cannot change status"):
+                await store_b.change_status(
+                    resume.model_copy(
+                        update={
+                            "command_id": f"resume-revoked-{suffix}",
+                            "causation_id": f"resume-revoked-{suffix}",
+                            "expected_revision": permanently_revoked.revision,
+                        }
+                    )
+                )
         finally:
             await store_a.close()
             await store_b.close()

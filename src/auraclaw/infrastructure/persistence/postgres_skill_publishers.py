@@ -19,6 +19,7 @@ from auraclaw.contracts.skills import (
     SkillPublisherRecord,
     SkillPublisherStatus,
     SkillPublisherStatusOperation,
+    SkillRevocationAction,
 )
 from auraclaw.infrastructure.persistence.postgres_common import LazyPool
 
@@ -140,6 +141,9 @@ class PostgresSkillPublisherStore(LazyPool, SkillPublisherStore):
             command.publisher,
             command.key_id,
             command.reason_code,
+            command.revocation_action.value,
+            command.policy_version,
+            command.policy_decision_id or "",
             str(command.expected_revision),
         )
         pool = await self.pool()
@@ -161,7 +165,9 @@ class PostgresSkillPublisherStore(LazyPool, SkillPublisherStore):
             row = await connection.fetchrow(
                 """UPDATE hands.skill_publisher_key
                 SET status='revoked',revision=revision+1,revoked_at=now(),
-                    reason_code=$4,updated_by=$5,updated_at=now()
+                    reason_code=$4,updated_by=$5,updated_at=now(),
+                    revocation_action=$7,revocation_policy_version=$8,
+                    revocation_policy_decision_id=$9
                 WHERE tenant_id=$1 AND publisher=$2 AND key_id=$3
                   AND revision=$6 AND status<>'revoked' RETURNING *""",
                 command.tenant_id,
@@ -170,6 +176,9 @@ class PostgresSkillPublisherStore(LazyPool, SkillPublisherStore):
                 command.reason_code,
                 command.actor_id,
                 command.expected_revision,
+                command.revocation_action.value,
+                command.policy_version,
+                command.policy_decision_id,
             )
             if row is None:
                 current = await _key(
@@ -192,6 +201,13 @@ class PostgresSkillPublisherStore(LazyPool, SkillPublisherStore):
             command.publisher,
             command.operation.value,
             command.reason_code,
+            (
+                command.revocation_action.value
+                if command.revocation_action is not None
+                else ""
+            ),
+            command.policy_version or "",
+            command.policy_decision_id or "",
             str(command.expected_revision),
         )
         pool = await self.pool()
@@ -209,11 +225,11 @@ class PostgresSkillPublisherStore(LazyPool, SkillPublisherStore):
                         "Skill Publisher command result is incomplete"
                     )
                 return record
-            target = (
-                SkillPublisherStatus.SUSPENDED
-                if command.operation is SkillPublisherStatusOperation.SUSPEND
-                else SkillPublisherStatus.ACTIVE
-            )
+            target = {
+                SkillPublisherStatusOperation.SUSPEND: SkillPublisherStatus.SUSPENDED,
+                SkillPublisherStatusOperation.RESUME: SkillPublisherStatus.ACTIVE,
+                SkillPublisherStatusOperation.REVOKE: SkillPublisherStatus.REVOKED,
+            }[command.operation]
             row = await connection.fetchrow(
                 """SELECT * FROM hands.skill_publisher
                 WHERE tenant_id=$1 AND publisher=$2 FOR UPDATE""",
@@ -223,6 +239,10 @@ class PostgresSkillPublisherStore(LazyPool, SkillPublisherStore):
             if row is None:
                 raise NotFoundError("Skill Publisher not found")
             current = _publisher_record(row)
+            if current.status is SkillPublisherStatus.REVOKED and (
+                command.operation is not SkillPublisherStatusOperation.REVOKE
+            ):
+                raise PolicyDeniedError("Revoked Skill Publisher cannot change status")
             if current.revision != command.expected_revision:
                 raise VersionConflictError("Skill Publisher revision conflict")
             if current.status is target:
@@ -237,7 +257,8 @@ class PostgresSkillPublisherStore(LazyPool, SkillPublisherStore):
             updated_row = await connection.fetchrow(
                 """UPDATE hands.skill_publisher SET status=$3,
                 status_reason_code=$4,status_changed_at=now(),revision=revision+1,
-                updated_by=$5,updated_at=now()
+                updated_by=$5,updated_at=now(),security_action=$7,
+                security_policy_version=$8,security_policy_decision_id=$9
                 WHERE tenant_id=$1 AND publisher=$2 AND revision=$6
                 RETURNING *""",
                 command.tenant_id,
@@ -245,11 +266,28 @@ class PostgresSkillPublisherStore(LazyPool, SkillPublisherStore):
                 target.value,
                 (
                     command.reason_code
-                    if target is SkillPublisherStatus.SUSPENDED
+                    if target is not SkillPublisherStatus.ACTIVE
                     else None
                 ),
                 command.actor_id,
                 command.expected_revision,
+                (
+                    None
+                    if target is SkillPublisherStatus.ACTIVE
+                    else (
+                        command.revocation_action or SkillRevocationAction.PAUSE
+                    ).value
+                ),
+                (
+                    None
+                    if target is SkillPublisherStatus.ACTIVE
+                    else command.policy_version or "skill-revocation-v1"
+                ),
+                (
+                    None
+                    if target is SkillPublisherStatus.ACTIVE
+                    else command.policy_decision_id
+                ),
             )
             if updated_row is None:
                 raise VersionConflictError("Skill Publisher revision conflict")

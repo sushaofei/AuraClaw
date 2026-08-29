@@ -559,6 +559,18 @@ def create_skill_admin_router(
         command_id: str = Header(alias="Idempotency-Key"),
         expected_revision: int = Header(alias="X-Expected-Revision", ge=1),
         reason_code: str = Header(alias="X-Reason-Code", min_length=1, max_length=128),
+        revocation_action: Annotated[
+            Literal["pause", "cancel"], Header(alias="X-Revocation-Action")
+        ] = "cancel",
+        policy_version: str = Header(
+            default="skill-revocation-v1",
+            alias="X-Policy-Version",
+            min_length=1,
+            max_length=128,
+        ),
+        policy_decision_id: str | None = Header(
+            default=None, alias="X-Policy-Decision-ID", max_length=256
+        ),
     ) -> dict[str, Any]:
         service = _require_publisher_service(publisher_service)
         record, keys = await service.revoke_publisher_key(
@@ -568,6 +580,9 @@ def create_skill_admin_router(
                 publisher=publisher,
                 key_id=key_id,
                 reason_code=reason_code,
+                revocation_action=SkillRevocationAction(revocation_action),
+                policy_version=policy_version,
+                policy_decision_id=policy_decision_id,
                 command_id=command_id,
                 expected_revision=expected_revision,
                 correlation_id=identity.correlation_id,
@@ -583,6 +598,9 @@ def create_skill_admin_router(
         command_id: str,
         expected_revision: int,
         reason_code: str,
+        revocation_action: SkillRevocationAction | None = None,
+        policy_version: str | None = None,
+        policy_decision_id: str | None = None,
     ) -> dict[str, Any]:
         service = _require_publisher_service(publisher_service)
         record, keys = await service.change_publisher_status(
@@ -592,6 +610,9 @@ def create_skill_admin_router(
                 publisher=publisher,
                 operation=operation,
                 reason_code=reason_code,
+                revocation_action=revocation_action,
+                policy_version=policy_version,
+                policy_decision_id=policy_decision_id,
                 command_id=command_id,
                 expected_revision=expected_revision,
                 correlation_id=identity.correlation_id,
@@ -618,6 +639,8 @@ def create_skill_admin_router(
             command_id,
             expected_revision,
             reason_code,
+            SkillRevocationAction.PAUSE,
+            "skill-revocation-v1",
         )
 
     @router.post(
@@ -638,6 +661,41 @@ def create_skill_admin_router(
             command_id,
             expected_revision,
             reason_code,
+        )
+
+    @router.post(
+        "/skill-publishers/{publisher}/status:revoke",
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    async def revoke_skill_publisher(
+        publisher: str,
+        identity: Identity,
+        command_id: str = Header(alias="Idempotency-Key"),
+        expected_revision: int = Header(alias="X-Expected-Revision", ge=1),
+        reason_code: str = Header(alias="X-Reason-Code", min_length=1, max_length=128),
+        revocation_action: Annotated[
+            Literal["pause", "cancel"], Header(alias="X-Revocation-Action")
+        ] = "cancel",
+        policy_version: str = Header(
+            default="skill-revocation-v1",
+            alias="X-Policy-Version",
+            min_length=1,
+            max_length=128,
+        ),
+        policy_decision_id: str | None = Header(
+            default=None, alias="X-Policy-Decision-ID", max_length=256
+        ),
+    ) -> dict[str, Any]:
+        return await _change_publisher_status(
+            publisher,
+            SkillPublisherStatusOperation.REVOKE,
+            identity,
+            command_id,
+            expected_revision,
+            reason_code,
+            SkillRevocationAction(revocation_action),
+            policy_version,
+            policy_decision_id,
         )
 
     @router.get("/skills/{publisher}/{name}")

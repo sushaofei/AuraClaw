@@ -202,6 +202,9 @@ curl --fail http://127.0.0.1:8080/health/ready
 3. 不再通过 `MYSQL_DB_*` / `AURACLAW_MODEL_SKILL_*` / `AURACLAW_PRICE_INSIGHT_*` 配置外部 MySQL 源（运行时已不读取）
 4. 执行 Skill 安全撤销前显式选择活动 binding 动作；不确定时使用默认 `cancel`。`pause` 需要确认恢复流程，
    `continue` 只适用于经 Policy 证明继续执行风险低于中断风险的场景，并核对 Publication 中的 policy evidence。
+5. Publisher/key 级事件会批量影响其全部签名版本；永久 Publisher revoke 前核对 tenant、expected revision、
+   `X-Revocation-Action`、policy version 与 decision id。Publisher suspend 可 resume，Publisher/key revoke 不可逆；
+   多策略同时存在时 Runtime 采用 `cancel > pause > continue`。
 
 ---
 

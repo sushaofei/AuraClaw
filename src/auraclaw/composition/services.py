@@ -1475,7 +1475,10 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
                 capability_catalog,
             ),
             SKILL_RESOLVE_TOOL_NAME: SkillResolveExecutor(skill_resolver),
-            SKILL_BINDING_STATUS_TOOL_NAME: SkillBindingStatusExecutor(skill_lifecycle),
+            SKILL_BINDING_STATUS_TOOL_NAME: SkillBindingStatusExecutor(
+                skill_lifecycle,
+                publisher_security=skill_publisher_store,
+            ),
         },
     )
     gateway = ToolGateway(

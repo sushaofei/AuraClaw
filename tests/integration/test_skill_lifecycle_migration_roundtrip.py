@@ -54,10 +54,12 @@ UP = "\n".join(
         (ROOT / "migrations/0036_skill_binding_revocation_policy.sql").read_text(),
         (ROOT / "migrations/0037_skill_publication_sources.sql").read_text(),
         (ROOT / "migrations/0038_skill_installation_draining.sql").read_text(),
+        (ROOT / "migrations/0039_skill_publisher_runtime_revocation.sql").read_text(),
     )
 )
 DOWN = "\n".join(
     (
+        (ROOT / "migrations/0039_skill_publisher_runtime_revocation.down.sql").read_text(),
         (ROOT / "migrations/0038_skill_installation_draining.down.sql").read_text(),
         (ROOT / "migrations/0037_skill_publication_sources.down.sql").read_text(),
         (ROOT / "migrations/0036_skill_binding_revocation_policy.down.sql").read_text(),
@@ -148,6 +150,28 @@ def test_skill_lifecycle_migration_roundtrip_in_isolated_postgres() -> None:
                 assert await connection.fetchval(
                     """SELECT EXISTS(SELECT 1 FROM information_schema.columns
                     WHERE table_schema='hands' AND table_name='skill_publisher'
+                      AND column_name=$1)""",
+                    column,
+                )
+            for column in (
+                "security_action",
+                "security_policy_version",
+                "security_policy_decision_id",
+            ):
+                assert await connection.fetchval(
+                    """SELECT EXISTS(SELECT 1 FROM information_schema.columns
+                    WHERE table_schema='hands' AND table_name='skill_publisher'
+                      AND column_name=$1)""",
+                    column,
+                )
+            for column in (
+                "revocation_action",
+                "revocation_policy_version",
+                "revocation_policy_decision_id",
+            ):
+                assert await connection.fetchval(
+                    """SELECT EXISTS(SELECT 1 FROM information_schema.columns
+                    WHERE table_schema='hands' AND table_name='skill_publisher_key'
                       AND column_name=$1)""",
                     column,
                 )
