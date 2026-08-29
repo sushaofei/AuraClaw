@@ -49,6 +49,7 @@ MIGRATION = "\n".join(
         (ROOT / "migrations/0030_skill_publisher_suspension.sql").read_text(),
         (ROOT / "migrations/0031_skill_publication_restore.sql").read_text(),
         (ROOT / "migrations/0032_skill_admission_audit.sql").read_text(),
+        (ROOT / "migrations/0033_skill_content_quarantine.sql").read_text(),
     )
 )
 pytestmark = pytest.mark.skipif(DATABASE_URL is None, reason="PostgreSQL test URL not configured")
@@ -80,9 +81,9 @@ def test_postgres_skill_lifecycle_is_persistent_and_tenant_scoped() -> None:
                 version=None,
                 package_digest=digest,
                 artifact_id=f"art-{suffix}",
-                outcome="rejected",
-                stage="artifact_read",
-                safe_error_code="artifact_access_denied",
+                outcome="quarantined",
+                stage="content_scan",
+                safe_error_code="skill_content_prompt_injection",
                 duration_ms=7,
                 occurred_at=now,
             )

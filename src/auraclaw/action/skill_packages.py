@@ -75,6 +75,83 @@ class SkillSignatureVerifier(Protocol):
     def verify(self, package: SkillPackage) -> bool: ...
 
 
+class SkillPackageContentScanner(Protocol):
+    def scan(self, package: SkillPackage) -> tuple[str, ...]: ...
+
+
+class DefaultSkillPackageContentScanner:
+    _forbidden_extensions = frozenset(
+        {
+            ".bash",
+            ".bat",
+            ".cmd",
+            ".com",
+            ".dll",
+            ".dylib",
+            ".exe",
+            ".jar",
+            ".js",
+            ".mjs",
+            ".ps1",
+            ".py",
+            ".pyc",
+            ".sh",
+            ".so",
+            ".wasm",
+            ".zsh",
+        }
+    )
+    _binary_secret_patterns = (
+        re.compile(rb"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
+        re.compile(rb"\bAKIA[A-Z0-9]{16}\b"),
+        re.compile(rb"\bgh[opusr]_[A-Za-z0-9]{30,}\b"),
+    )
+    _text_secret_patterns = (
+        re.compile(
+            rb"(?i)\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret)"
+            rb"\s*[:=]\s*['\"]?[A-Za-z0-9_./+=-]{12,}"
+        ),
+    )
+    _prompt_injection_patterns = (
+        re.compile(rb"(?i)\bignore (?:all |any )?(?:previous|prior) instructions\b"),
+        re.compile(rb"(?i)\breveal (?:the )?(?:system prompt|hidden instructions)\b"),
+        re.compile(rb"(?i)\bdisregard (?:the )?(?:system|developer) (?:message|instructions)\b"),
+    )
+    _executable_magics = (
+        b"\x7fELF",
+        b"MZ",
+        b"\x00asm",
+        b"\xcf\xfa\xed\xfe",
+        b"\xce\xfa\xed\xfe",
+        b"\xfe\xed\xfa\xcf",
+        b"\xfe\xed\xfa\xce",
+    )
+
+    def scan(self, package: SkillPackage) -> tuple[str, ...]:
+        findings: set[str] = set()
+        for path, content in package.files.items():
+            suffix = PurePosixPath(path).suffix.lower()
+            if suffix in self._forbidden_extensions:
+                findings.add("executable_file")
+            if any(content.startswith(magic) for magic in self._executable_magics):
+                findings.add("executable_payload")
+            if any(pattern.search(content) for pattern in self._binary_secret_patterns):
+                findings.add("secret_like_data")
+            try:
+                is_text = b"\x00" not in content and bool(content.decode("utf-8"))
+            except UnicodeDecodeError:
+                is_text = False
+            if is_text:
+                if any(pattern.search(content) for pattern in self._text_secret_patterns):
+                    findings.add("secret_like_data")
+                if any(
+                    pattern.search(content)
+                    for pattern in self._prompt_injection_patterns
+                ):
+                    findings.add("prompt_injection")
+        return tuple(sorted(findings))
+
+
 class HmacSkillSignatureVerifier:
     def __init__(self, publisher_keys: Mapping[str, bytes]) -> None:
         self._publisher_keys = {publisher: bytes(key) for publisher, key in publisher_keys.items()}

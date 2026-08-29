@@ -92,6 +92,12 @@ class PolicyDeniedError(AuraClawError):
     status_code = 403
 
 
+class SkillContentRejectedError(PolicyDeniedError):
+    def __init__(self, finding_code: str) -> None:
+        super().__init__("Skill package failed content security policy")
+        self.code = f"skill_content_{finding_code}"
+
+
 class ApprovalValidationError(AuraClawError):
     code = "approval_invalid"
     status_code = 409

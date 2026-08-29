@@ -15,7 +15,9 @@ from auraclaw.action.skill_lifecycle import (
     SkillSourceLease,
 )
 from auraclaw.action.skill_packages import (
+    DefaultSkillPackageContentScanner,
     SkillPackage,
+    SkillPackageContentScanner,
     SkillPackageRegistry,
     skill_package_digest,
     skill_package_from_archive,
@@ -25,6 +27,7 @@ from auraclaw.contracts.errors import (
     AuraClawError,
     InvalidTransitionError,
     PolicyDeniedError,
+    SkillContentRejectedError,
     VersionConflictError,
 )
 from auraclaw.contracts.skills import (
@@ -75,6 +78,7 @@ class SkillPublicationService:
         artifacts: ArtifactContentReader | None = None,
         artifact_lifecycle: SkillArtifactLifecycle | None = None,
         publisher_trust: SkillPublisherTrustService | None = None,
+        content_scanner: SkillPackageContentScanner | None = None,
         bootstrap_sources: tuple[SkillSourceRecord, ...] = (),
     ) -> None:
         self._registry = registry
@@ -82,6 +86,7 @@ class SkillPublicationService:
         self._artifacts = artifacts
         self._artifact_lifecycle = artifact_lifecycle
         self._publisher_trust = publisher_trust
+        self._content_scanner = content_scanner or DefaultSkillPackageContentScanner()
         self._bootstrap_sources = {
             (source.tenant_id, source.source_id): source for source in bootstrap_sources
         }
@@ -101,6 +106,8 @@ class SkillPublicationService:
                 command.tenant_id, package
             )
             trace.package_digest = skill_package_digest(package)
+            trace.stage = "content_scan"
+            self._scan_content(package)
             trace.stage = "source_authorization"
             source = await self._authorized_source(command, package)
             trace.stage = "lifecycle_commit"
@@ -162,6 +169,8 @@ class SkillPublicationService:
             )
             if skill_package_digest(package) != expected_digest:
                 raise VersionConflictError("Skill package digest does not match")
+            trace.stage = "content_scan"
+            self._scan_content(package)
             trace.stage = "source_authorization"
             source = await self._authorized_source(command, package)
             trace.stage = "lifecycle_commit"
@@ -380,6 +389,11 @@ class SkillPublicationService:
         )
         return normalized, key_id, True
 
+    def _scan_content(self, package: SkillPackage) -> None:
+        findings = self._content_scanner.scan(package)
+        if findings:
+            raise SkillContentRejectedError(findings[0])
+
     async def _record_admission(
         self,
         command: PublishSkillCommand,
@@ -408,7 +422,13 @@ class SkillPublicationService:
                 version=trace.version,
                 package_digest=trace.package_digest,
                 artifact_id=trace.artifact_id,
-                outcome="rejected" if error is not None else "accepted",
+                outcome=(
+                    "quarantined"
+                    if isinstance(error, SkillContentRejectedError)
+                    else "rejected"
+                    if error is not None
+                    else "accepted"
+                ),
                 stage=trace.stage if error is not None else "completed",
                 safe_error_code=safe_error_code,
                 duration_ms=max(0, int((time.monotonic() - started) * 1000)),
