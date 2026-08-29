@@ -25,6 +25,7 @@ from auraclaw.runtime.ports import (
     RuntimeEventPublisher,
     SessionClient,
     SkillBindingResolver,
+    ToolCall,
 )
 
 
@@ -116,8 +117,7 @@ class SkillRunner:
             active_skill_names=tuple(
                 str(event.payload.get("skill_name"))
                 for event in events
-                if event.type == "skill.activated"
-                and event.run_id == assignment.run_id
+                if event.type == "skill.activated" and event.run_id == assignment.run_id
             ),
         )
         activation = SkillActivation(
@@ -158,8 +158,7 @@ class SkillRunner:
         steps_completed = 0
         if (
             checkpoint is not None
-            and checkpoint.state.get("skill_activation_id")
-            == activation.skill_activation_id
+            and checkpoint.state.get("skill_activation_id") == activation.skill_activation_id
         ):
             cursor = str(checkpoint.state.get("skill_step_cursor", "0"))
             steps_completed = int(checkpoint.state.get("skill_steps_completed", 0))
@@ -170,6 +169,37 @@ class SkillRunner:
                 assignment.budget.max_steps,
             ):
                 await self._guard(assignment)
+                disposition = await self._binding_disposition(assignment, activation)
+                action = str(disposition.get("action", "cancel"))
+                if action != "continue":
+                    await self._append_terminal_safe(
+                        assignment,
+                        event_type="skill.revocation.applied",
+                        activation=activation,
+                        payload={
+                            "action": action,
+                            "reason_code": disposition.get("reason_code"),
+                            "revocation_policy_version": disposition.get("policy_version"),
+                            "revocation_policy_decision_id": disposition.get("policy_decision_id"),
+                        },
+                    )
+                    if action == "pause":
+                        await self._save_checkpoint(
+                            assignment,
+                            activation,
+                            phase="skill.revoked_paused",
+                            cursor=cursor,
+                            steps_completed=steps_completed,
+                        )
+                        await self._control.suspend_assignment(
+                            _task_id(assignment), "skill_revoked"
+                        )
+                        return SkillStepResult(
+                            next_cursor=cursor,
+                            completed=False,
+                            output_summary="Skill execution paused by revocation policy",
+                        )
+                    raise RuntimeCancelledError("Skill execution cancelled by revocation policy")
                 if datetime.now(UTC) >= started_at + timedelta(
                     seconds=activation.binding.timeout_seconds
                 ):
@@ -190,9 +220,7 @@ class SkillRunner:
                 await self._save_checkpoint(
                     assignment,
                     activation,
-                    phase=(
-                        "skill.completed" if result.completed else "skill.running"
-                    ),
+                    phase=("skill.completed" if result.completed else "skill.running"),
                     cursor=cursor,
                     steps_completed=steps_completed,
                     result=result,
@@ -241,6 +269,35 @@ class SkillRunner:
             )
             raise
 
+    async def _binding_disposition(
+        self,
+        assignment: RuntimeAssignment,
+        activation: SkillActivation,
+    ) -> dict[str, Any]:
+        binding = activation.binding
+        execute = getattr(self._capabilities, "execute", None)
+        if not callable(execute):
+            # Compatibility for legacy in-process SkillStepExecutor tests. The
+            # production CapabilityClient always provides governed execution.
+            return {"action": "continue", "policy_version": "legacy-runtime"}
+        result = await execute(
+            assignment,
+            ToolCall(
+                tool_invocation_id=(f"binding_status_{activation.skill_activation_id}"),
+                name="auraclaw.skills.binding-status",
+                version="1",
+                arguments={
+                    "publisher": binding.publisher,
+                    "name": binding.skill_name,
+                    "version": binding.skill_version,
+                    "package_digest": binding.package_digest,
+                },
+                expected_side_effect="read",
+            ),
+        )
+        content = result.get("content")
+        return dict(content) if isinstance(content, dict) else dict(result)
+
     async def _terminal_result(
         self,
         assignment: RuntimeAssignment,
@@ -251,10 +308,8 @@ class SkillRunner:
             (
                 event
                 for event in reversed(events)
-                if event.type
-                in {"skill.completed", "skill.failed", "skill.cancelled"}
-                and event.payload.get("skill_activation_id")
-                == activation.skill_activation_id
+                if event.type in {"skill.completed", "skill.failed", "skill.cancelled"}
+                and event.payload.get("skill_activation_id") == activation.skill_activation_id
             ),
             None,
         )
@@ -281,8 +336,7 @@ class SkillRunner:
         events = await self._session.load(assignment)
         if any(
             event.type == event_type
-            and event.payload.get("skill_activation_id")
-            == activation.skill_activation_id
+            and event.payload.get("skill_activation_id") == activation.skill_activation_id
             for event in events
         ):
             return
@@ -301,9 +355,7 @@ class SkillRunner:
         await self._session.append(
             assignment,
             [NewEvent(type=event_type, payload=event_payload)],
-            command_id=(
-                f"runtime:{event_type}:{activation.skill_activation_id}"
-            ),
+            command_id=(f"runtime:{event_type}:{activation.skill_activation_id}"),
             operation=f"runtime.{event_type}",
         )
 
@@ -318,8 +370,7 @@ class SkillRunner:
                 event
                 for event in events
                 if event.type == "skill.activated"
-                and event.payload.get("skill_activation_id")
-                == activation.skill_activation_id
+                and event.payload.get("skill_activation_id") == activation.skill_activation_id
             ),
             None,
         )
@@ -371,13 +422,9 @@ class SkillRunner:
             assignment.session_id,
             assignment.run_id,
         ):
-            raise RuntimeCancelledError(
-                f"Runtime run cancelled: {assignment.run_id}"
-            )
+            raise RuntimeCancelledError(f"Runtime run cancelled: {assignment.run_id}")
         if assignment.deadline is not None and datetime.now(UTC) >= assignment.deadline:
-            raise RuntimeCancelledError(
-                f"Runtime deadline exceeded: {assignment.run_id}"
-            )
+            raise RuntimeCancelledError(f"Runtime deadline exceeded: {assignment.run_id}")
 
     async def _publish_step(
         self,
@@ -437,3 +484,7 @@ def _digest(value: dict[str, Any]) -> str:
         separators=(",", ":"),
     ).encode()
     return f"sha256:{hashlib.sha256(payload).hexdigest()}"
+
+
+def _task_id(assignment: RuntimeAssignment) -> str:
+    return f"{assignment.tenant_id}:{assignment.session_id}:{assignment.run_id}"

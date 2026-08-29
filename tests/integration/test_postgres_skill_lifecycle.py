@@ -25,6 +25,7 @@ from auraclaw.contracts.skills import (
     SkillPackageRecord,
     SkillPublicationRecord,
     SkillPublicationStatus,
+    SkillRevocationAction,
     SkillSourceDesiredState,
     SkillSourceKind,
     SkillSourceRecord,
@@ -53,6 +54,7 @@ MIGRATION = "\n".join(
         (ROOT / "migrations/0033_skill_content_quarantine.sql").read_text(),
         (ROOT / "migrations/0034_skill_admission_operations.sql").read_text(),
         (ROOT / "migrations/0035_skill_admission_retention.sql").read_text(),
+        (ROOT / "migrations/0036_skill_binding_revocation_policy.sql").read_text(),
     )
 )
 pytestmark = pytest.mark.skipif(DATABASE_URL is None, reason="PostgreSQL test URL not configured")
@@ -99,9 +101,7 @@ def test_postgres_skill_lifecycle_is_persistent_and_tenant_scoped() -> None:
                 stage="content_scan",
                 content_policy_version="skill-content-v1",
             ) == (admission,)
-            assert await store_b.list_admissions(
-                tenant_id, outcome="accepted"
-            ) == ()
+            assert await store_b.list_admissions(tenant_id, outcome="accepted") == ()
             metrics = await store_b.admission_metrics(tenant_id)
             assert len(metrics) == 1
             assert metrics[0].outcome == "quarantined"
@@ -127,9 +127,7 @@ def test_postgres_skill_lifecycle_is_persistent_and_tenant_scoped() -> None:
                 tenant_id, since=now - timedelta(days=1)
             )
             assert recent_metrics[0].count == 1
-            assert await store_a.delete_admissions_before(
-                now - timedelta(days=90), limit=1
-            ) == 1
+            assert await store_a.delete_admissions_before(now - timedelta(days=90), limit=1) == 1
             assert await store_b.list_admissions(tenant_id) == (admission,)
             assert await store_b.list_admissions(f"other-{tenant_id}") == ()
             package = SkillPackageRecord(
@@ -229,9 +227,7 @@ def test_postgres_skill_lifecycle_is_persistent_and_tenant_scoped() -> None:
             assert second_lease is not None and second_lease.fencing_token == 2
             with pytest.raises(VersionConflictError, match="revision conflict"):
                 await store_a.put_source(
-                    source.model_copy(
-                        update={"kind": SkillSourceKind.GIT, "revision": 2}
-                    ),
+                    source.model_copy(update={"kind": SkillSourceKind.GIT, "revision": 2}),
                     expected_revision=1,
                 )
             sync_state = SkillSourceSyncState(
@@ -245,12 +241,14 @@ def test_postgres_skill_lifecycle_is_persistent_and_tenant_scoped() -> None:
             )
             await store_a.put_sync_state(sync_state)
 
-            assert await store_b.get_package(
-                tenant_id, "platform", "release.prepare", "1.0.0"
-            ) == package
-            assert await store_b.get_installation(
-                tenant_id, "platform", "release.prepare"
-            ) == installation
+            assert (
+                await store_b.get_package(tenant_id, "platform", "release.prepare", "1.0.0")
+                == package
+            )
+            assert (
+                await store_b.get_installation(tenant_id, "platform", "release.prepare")
+                == installation
+            )
             assert await store_b.list_installations(tenant_id) == (installation,)
             assert tenant_id in await store_b.list_tenants()
             assert await store_b.list_publications(f"other-{tenant_id}") == ()
@@ -317,13 +315,9 @@ def test_postgres_skill_lifecycle_is_persistent_and_tenant_scoped() -> None:
                 )
             outbox = await store_a.claim_outbox(owner="integration-a")
             assert len(outbox) == 1
-            assert outbox[0].payload["package_digest"] == (
-                transactional_package.package_digest
-            )
+            assert outbox[0].payload["package_digest"] == (transactional_package.package_digest)
             assert await store_b.claim_outbox(owner="integration-b") == ()
-            await store_a.complete_outbox(
-                outbox_id=outbox[0].outbox_id, owner="integration-a"
-            )
+            await store_a.complete_outbox(outbox_id=outbox[0].outbox_id, owner="integration-a")
             await store_a.commit_source_snapshot(
                 SkillSourceSnapshotCommit(
                     state=sync_state.model_copy(
@@ -333,11 +327,7 @@ def test_postgres_skill_lifecycle_is_persistent_and_tenant_scoped() -> None:
                         }
                     ),
                     lease=second_lease,
-                    observed=(
-                        SkillSourcePackageIdentity(
-                            "platform", "release.prepare", "2.0.0"
-                        ),
-                    ),
+                    observed=(SkillSourcePackageIdentity("platform", "release.prepare", "2.0.0"),),
                     missing_snapshot_threshold=2,
                     actor_id="action-hands-skill-reconciler",
                     command_prefix=f"source-retire:{source.source_id}",
@@ -375,9 +365,7 @@ def test_postgres_skill_lifecycle_is_persistent_and_tenant_scoped() -> None:
                 )
             )
             assert first_missing_result.retired == ()
-            with pytest.raises(
-                VersionConflictError, match="snapshot generation must advance"
-            ):
+            with pytest.raises(VersionConflictError, match="snapshot generation must advance"):
                 await store_a.commit_source_snapshot(
                     SkillSourceSnapshotCommit(
                         state=sync_state.model_copy(
@@ -427,9 +415,7 @@ def test_postgres_skill_lifecycle_is_persistent_and_tenant_scoped() -> None:
                 )
             )
             assert len(retired_result.retired) == 1
-            assert retired_result.retired[0].reason_code == (
-                "source_missing_confirmed"
-            )
+            assert retired_result.retired[0].reason_code == ("source_missing_confirmed")
             audit_count = await connection.fetchval(
                 """SELECT count(*) FROM hands.skill_source_retirement_command
                 WHERE tenant_id=$1 AND source_id=$2""",
@@ -507,21 +493,21 @@ def test_postgres_skill_lifecycle_is_persistent_and_tenant_scoped() -> None:
                             "request_digest": f"sha256:{'f' * 64}",
                             "expected_publication_revision": 1,
                             "package": rollback_package,
-                                "publication": transactional_publication.model_copy(
+                            "publication": transactional_publication.model_copy(
                                 update={
-                                "publication_id": f"skp_rollback_{suffix}",
+                                    "publication_id": f"skp_rollback_{suffix}",
                                     "version": "3.0.0",
                                     "package_digest": rollback_package.package_digest,
                                     "revision": 2,
-                                    }
-                                ),
-                                "source_lease": fourth_lease,
-                            }
+                                }
+                            ),
+                            "source_lease": fourth_lease,
+                        }
                     )
                 )
-            assert await store_b.get_package(
-                tenant_id, "platform", "release.prepare", "3.0.0"
-            ) is None
+            assert (
+                await store_b.get_package(tenant_id, "platform", "release.prepare", "3.0.0") is None
+            )
 
             revoked = await store_b.put_publication(
                 publication.model_copy(
@@ -531,12 +517,17 @@ def test_postgres_skill_lifecycle_is_persistent_and_tenant_scoped() -> None:
                         "updated_by": "security-test",
                         "updated_at": datetime.now(UTC),
                         "reason_code": "publisher_key_compromised",
+                        "revocation_action": SkillRevocationAction.PAUSE,
+                        "revocation_policy_version": "skill-revocation-v1",
+                        "revocation_policy_decision_id": "policy-decision-1",
                     }
                 ),
                 expected_revision=1,
             )
             assert revoked.updated_by == "security-test"
             assert revoked.status is SkillPublicationStatus.REVOKED
+            assert revoked.revocation_action is SkillRevocationAction.PAUSE
+            assert revoked.revocation_policy_decision_id == "policy-decision-1"
 
             retained = await store_b.update_package_retention(
                 package.model_copy(
@@ -583,9 +574,7 @@ def test_postgres_skill_lifecycle_is_persistent_and_tenant_scoped() -> None:
             await connection.execute(
                 "DELETE FROM hands.skill_admission_audit WHERE tenant_id=$1", tenant_id
             )
-            await connection.execute(
-                "DELETE FROM hands.skill_outbox WHERE tenant_id=$1", tenant_id
-            )
+            await connection.execute("DELETE FROM hands.skill_outbox WHERE tenant_id=$1", tenant_id)
             await connection.execute(
                 "DELETE FROM hands.skill_command WHERE tenant_id=$1", tenant_id
             )
@@ -614,9 +603,7 @@ def test_postgres_skill_lifecycle_is_persistent_and_tenant_scoped() -> None:
             await connection.execute(
                 "DELETE FROM hands.skill_publication WHERE tenant_id=$1", tenant_id
             )
-            await connection.execute(
-                "DELETE FROM hands.skill_source WHERE tenant_id=$1", tenant_id
-            )
+            await connection.execute("DELETE FROM hands.skill_source WHERE tenant_id=$1", tenant_id)
             await connection.execute(
                 "DELETE FROM hands.skill_package WHERE tenant_id=$1", tenant_id
             )

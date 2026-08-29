@@ -63,12 +63,8 @@ def _package(*, markdown: bytes = b"# Release\n\nPrepare the audited release.") 
         version="1.4.0",
         description="Prepare an auditable release",
         applies_when=("repository release requested",),
-        required_tools=(
-            SkillToolRequirement(name="github.pull_request.get", version=">=2,<3"),
-        ),
-        required_resources=(
-            SkillResourceRequirement(uri_template="repo://{repo}/release-policy"),
-        ),
+        required_tools=(SkillToolRequirement(name="github.pull_request.get", version=">=2,<3"),),
+        required_resources=(SkillResourceRequirement(uri_template="repo://{repo}/release-policy"),),
         publisher="platform",
         signature=f"hmac-sha256:{'0' * 64}",
     )
@@ -160,8 +156,9 @@ def test_skill_admission_queries_are_tenant_scoped_filterable_and_aggregated() -
         assert second_page.status_code == 200
         assert len(second_page.json()["admissions"]) == 1
         assert second_page.json()["next_cursor"] is None
-        assert second_page.json()["admissions"][0]["admission_id"] != (
-            first_page.json()["admissions"][0]["admission_id"]
+        assert (
+            second_page.json()["admissions"][0]["admission_id"]
+            != (first_page.json()["admissions"][0]["admission_id"])
         )
 
         metrics = client.get("/v1/admin/skill-admissions/metrics", headers=headers)
@@ -269,9 +266,7 @@ def test_skill_admin_manages_installation_and_revocation_separately() -> None:
         assert skills[0]["name"] == "release.prepare"
         assert skills[0]["status"] == "active"
 
-        detail = client.get(
-            "/v1/admin/skills/platform/release.prepare", headers=headers
-        )
+        detail = client.get("/v1/admin/skills/platform/release.prepare", headers=headers)
         assert detail.status_code == 200
         assert "Prepare the audited release" in detail.json()["skill_markdown"]
 
@@ -301,9 +296,12 @@ def test_skill_admin_manages_installation_and_revocation_separately() -> None:
         )
         assert disabled.status_code == 202, disabled.text
         assert disabled.json()["installation"]["status"] == "disabled"
-        assert registry.get_publication(
-            "tenant-1", "platform", "release.prepare", "1.4.0"
-        ).status.value == "active"
+        assert (
+            registry.get_publication(
+                "tenant-1", "platform", "release.prepare", "1.4.0"
+            ).status.value
+            == "active"
+        )
 
         enabled = client.post(
             "/v1/admin/skills/platform/release.prepare:enable",
@@ -346,10 +344,12 @@ def test_skill_admin_manages_installation_and_revocation_separately() -> None:
                 "Idempotency-Key": "skill-revoke-1",
                 "X-Expected-Revision": "1",
                 "X-Reason-Code": "publisher_key_compromised",
+                "X-Skill-Revocation-Action": "pause",
             },
         )
         assert revoked.status_code == 202, revoked.text
         assert revoked.json()["publication"]["status"] == "revoked"
+        assert revoked.json()["publication"]["revocation_action"] == "pause"
         publication_state = client.get(
             "/v1/admin/skill-publications/platform/release.prepare/versions/1.4.0",
             headers=headers,
@@ -376,18 +376,9 @@ def test_task_api_service_exposes_skill_admin_routes() -> None:
     assert "/v1/admin/skills/{publisher}/{name}:install" in paths
     assert "/v1/admin/skills/{publisher}/{name}:uninstall" in paths
     assert "/v1/admin/skills/{publisher}/{name}/installation" in paths
-    assert (
-        "/v1/admin/skill-publications/{publisher}/{name}/versions/{version}"
-        in paths
-    )
-    assert (
-        "/v1/admin/skill-publications/{publisher}/{name}/versions/{version}:revoke"
-        in paths
-    )
-    assert (
-        "/v1/admin/skill-publications/{publisher}/{name}/versions/{version}:restore"
-        in paths
-    )
+    assert "/v1/admin/skill-publications/{publisher}/{name}/versions/{version}" in paths
+    assert "/v1/admin/skill-publications/{publisher}/{name}/versions/{version}:revoke" in paths
+    assert "/v1/admin/skill-publications/{publisher}/{name}/versions/{version}:restore" in paths
     assert "/v1/admin/skill-publications" in paths
     assert "/v1/admin/skill-package-uploads" in paths
     assert "/v1/admin/skill-package-uploads/{artifact_id}:finalize" in paths
@@ -426,8 +417,7 @@ def test_skill_admin_publishes_base64_package_through_application_service() -> N
         "source_id": "sks_admin_upload",
         "activate": True,
         "files": {
-            path: base64.b64encode(content).decode()
-            for path, content in package.files.items()
+            path: base64.b64encode(content).decode() for path, content in package.files.items()
         },
     }
     headers = {
@@ -437,9 +427,7 @@ def test_skill_admin_publishes_base64_package_through_application_service() -> N
         "X-Expected-Revision": "0",
     }
     with TestClient(app) as client:
-        response = client.post(
-            "/v1/admin/skill-publications", json=payload, headers=headers
-        )
+        response = client.post("/v1/admin/skill-publications", json=payload, headers=headers)
     assert response.status_code == 201, response.text
     assert response.json()["status"] == "active"
     assert response.json()["publisher"] == "platform"
@@ -485,9 +473,7 @@ def test_skill_admin_publishes_staged_artifact_through_same_admission_service() 
             ),
         ),
     )
-    app.include_router(
-        create_skill_admin_router(registry, publication_service=publication_service)
-    )
+    app.include_router(create_skill_admin_router(registry, publication_service=publication_service))
     with TestClient(app) as client:
         response = client.post(
             "/v1/admin/skill-publications",
@@ -506,7 +492,5 @@ def test_skill_admin_publishes_staged_artifact_through_same_admission_service() 
         )
     assert response.status_code == 201, response.text
     assert response.json()["package_digest"] == digest
-    stored = registry.get_publication(
-        "tenant-1", "platform", "release.prepare", "1.4.0"
-    )
+    stored = registry.get_publication("tenant-1", "platform", "release.prepare", "1.4.0")
     assert stored.artifact_ref == artifact_ref

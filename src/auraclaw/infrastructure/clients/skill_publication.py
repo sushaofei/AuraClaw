@@ -77,18 +77,14 @@ class RemoteSkillPublicationClient:
         transport: httpx.AsyncBaseTransport | None = None,
         compatibility_cache: SkillPackageRegistry | None = None,
     ) -> None:
-        self._client = httpx.AsyncClient(
-            base_url=base_url, timeout=timeout, transport=transport
-        )
+        self._client = httpx.AsyncClient(base_url=base_url, timeout=timeout, transport=transport)
         self._contract = HttpContractClient(self._client, bearer_token=bearer_token)
         self._compatibility_cache = compatibility_cache
 
     async def aclose(self) -> None:
         await self._client.aclose()
 
-    async def publish(
-        self, command: PublishSkillCommand, package: SkillPackage
-    ) -> PublishedSkill:
+    async def publish(self, command: PublishSkillCommand, package: SkillPackage) -> PublishedSkill:
         response = await self._contract.call(
             "/internal/v1/skill-publications/publish",
             SkillPublishInternalRequest(
@@ -113,9 +109,7 @@ class RemoteSkillPublicationClient:
         )
         publication = PublishedSkill.model_validate(response.publication)
         if self._compatibility_cache is not None:
-            publication = self._compatibility_cache.restore(
-                command.tenant_id, package, publication
-            )
+            publication = self._compatibility_cache.restore(command.tenant_id, package, publication)
         return publication
 
     async def publish_artifact(
@@ -173,9 +167,7 @@ class RemoteSkillPublicationClient:
             if isinstance(occurred_at, str):
                 values["occurred_at"] = datetime.fromisoformat(occurred_at)
             records.append(SkillAdmissionAuditRecord(**values))
-        return SkillAdmissionPage(
-            admissions=tuple(records), next_cursor=response.next_cursor
-        )
+        return SkillAdmissionPage(admissions=tuple(records), next_cursor=response.next_cursor)
 
     async def admission_metrics(
         self, tenant_id: str, *, since: datetime | None = None
@@ -188,10 +180,7 @@ class RemoteSkillPublicationClient:
             ),
             SkillAdmissionMetricsInternalResponse,
         )
-        return tuple(
-            SkillAdmissionMetricRecord(**dict(payload))
-            for payload in response.metrics
-        )
+        return tuple(SkillAdmissionMetricRecord(**dict(payload)) for payload in response.metrics)
 
     async def change_installation(
         self,
@@ -218,9 +207,7 @@ class RemoteSkillPublicationClient:
                     command.tenant_id,
                     command.publisher,
                     command.name,
-                    discoverable=(
-                        installation.status is SkillInstallationStatus.ACTIVE
-                    ),
+                    discoverable=(installation.status is SkillInstallationStatus.ACTIVE),
                 )
         return installation
 
@@ -237,6 +224,9 @@ class RemoteSkillPublicationClient:
                 name=command.name,
                 version=command.version,
                 reason_code=command.reason_code,
+                revocation_action=command.revocation_action.value,
+                policy_version=command.policy_version,
+                policy_decision_id=command.policy_decision_id,
                 command_id=command.command_id,
                 expected_revision=command.expected_revision,
             ),
@@ -299,9 +289,7 @@ class RemoteSkillPublicationClient:
         )
         return SkillPackageRecord.model_validate(response.package)
 
-    async def purge_package(
-        self, command: PurgeSkillPackageCommand
-    ) -> SkillPackageRecord:
+    async def purge_package(self, command: PurgeSkillPackageCommand) -> SkillPackageRecord:
         response = await self._contract.call(
             "/internal/v1/skill-publications/purge",
             SkillPurgeInternalRequest(
@@ -471,8 +459,7 @@ class RemoteSkillPublicationClient:
 def _context(
     command: (
         PublishSkillCommand
-        |
-        ChangeSkillInstallationCommand
+        | ChangeSkillInstallationCommand
         | RevokeSkillPublicationCommand
         | PurgeSkillPackageCommand
         | RegisterSkillPublisherCommand

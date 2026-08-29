@@ -2052,6 +2052,28 @@ ready Skill Artifact 建立带 fencing 的物理回收流程；不把成功命�
 - [x] README、架构、公开 API、数据库参考、运维手册与阶段门禁同步。
 - [x] 本阶段作为一个 intentional commit 提交并 push，不包含 `.env`、Secret、缓存或无关改动。
 
+## 阶段 M14s：Skill 活动 Binding 撤销动作（Issue #56）
+
+状态：已完成。安全撤销不再依赖 Resource 加载失败隐式决定活动 Run 的命运。
+
+### 契约与运行时治理
+
+- [x] Publication 持久化 `continue|pause|cancel`、policy version、可选 decision id 与 reason；旧 revoked 数据迁移为保守 cancel。
+- [x] Admin/内部契约携带显式 revocation action，N-1 调用缺省为 cancel，状态查询返回完整策略证据。
+- [x] `auraclaw.skills.binding-status` 只按可信 tenant 与固定 publisher/name/version/digest 返回当前权威动作。
+- [x] Capability Agent Loop 每个模型轮次、Skill Runner 每个 step 前检查 binding；pause 保存 checkpoint 并挂起，cancel 写 Canonical 终态并结束 assignment。
+- [x] continue 不恢复 Catalog/Resolver 新候选，只保留固定 digest 内容；普通 disable/uninstall/retired 不复用安全撤销动作。
+- [x] 修复重建时 retired 固定 binding 未重新注册 `skill://` Resource 的既有缺口，可发现性与内容可读性真正分离。
+
+### 质量与交付
+
+- [x] 0036 正反迁移覆盖撤销策略字段、旧数据安全回填、约束与索引。
+- [x] 单测覆盖 continue、pause、cancel、Canonical evidence、Runtime assignment disposition 与 tenant/digest fail closed。
+- [x] PostgreSQL 覆盖策略证据持久化与 migration roundtrip。
+- [x] 全量 Ruff、Mypy、unit、相关 integration 与 import-linter 通过。
+- [x] README、架构、公开 API、数据库参考、运维与阶段门禁同步。
+- [x] 本阶段作为一个 intentional commit 提交并 push，不包含 `.env`、Secret、缓存或无关改动。
+
 ## 阶段 Product Activity：产品级对话执行轨迹（AuraX Issue #2）
 
 状态：代码与定向验证完成；完整基础设施集成门禁受现有 Kafka/MySQL/PostgreSQL/Artifact 环境失败阻塞。

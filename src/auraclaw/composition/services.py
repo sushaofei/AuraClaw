@@ -19,15 +19,18 @@ from auraclaw import __version__
 from auraclaw.action.capability_catalog import (
     CAPABILITY_LOAD_TOOL_NAME,
     CAPABILITY_SEARCH_TOOL_NAME,
+    SKILL_BINDING_STATUS_TOOL_NAME,
     SKILL_RESOLVE_TOOL_NAME,
     CapabilityCatalog,
     CapabilityLoadExecutor,
     CapabilitySearchExecutor,
     InMemoryCapabilityCatalogStore,
     RoutedHandsExecutor,
+    SkillBindingStatusExecutor,
     SkillResolveExecutor,
     capability_load_tool,
     capability_search_tool,
+    skill_binding_status_tool,
     skill_resolve_tool,
 )
 from auraclaw.action.catalog_reconciler import CapabilityCatalogReconciler
@@ -266,7 +269,9 @@ logger = logging.getLogger(__name__)
 _SKILL_PACKAGE_REGISTRY: SkillPackageRegistry | None = None
 
 
-def _mcp_registry_service(settings: Settings) -> tuple[
+def _mcp_registry_service(
+    settings: Settings,
+) -> tuple[
     McpServerRegistryService,
     InMemoryMcpServerRegistryStore | PostgresMcpServerRegistryStore,
 ]:
@@ -281,9 +286,7 @@ def _mcp_registry_service(settings: Settings) -> tuple[
         else settings.deployment_profile == "development"
     )
     return (
-        McpServerRegistryService(
-            store, allow_private_auth_none=allow_private_none
-        ),
+        McpServerRegistryService(store, allow_private_auth_none=allow_private_none),
         store,
     )
 
@@ -309,14 +312,9 @@ def _skill_registry_service(
         if settings.skill_signing_key is not None
         else None
     )
-    signing_key = (
-        configured_signing_key or b"auraclaw-development-platform-skill-key"
-    )
+    signing_key = configured_signing_key or b"auraclaw-development-platform-skill-key"
     registry = SkillPackageRegistry(
-        artifacts=(
-            artifacts
-            or ArtifactStore(InMemoryObjectStorage(), signing_key=signing_key)
-        ),
+        artifacts=(artifacts or ArtifactStore(InMemoryObjectStorage(), signing_key=signing_key)),
         signature_verifier=HmacSkillSignatureVerifier({"platform": signing_key}),
         resources=HandsResourceRegistry(),
     )
@@ -336,9 +334,7 @@ def _skill_publication_service(
     selected_lifecycle = lifecycle
     if selected_lifecycle is None:
         if settings.sql_storage_enabled:
-            selected_lifecycle = PostgresSkillLifecycleStore(
-                settings.resolved_database_url
-            )
+            selected_lifecycle = PostgresSkillLifecycleStore(settings.resolved_database_url)
         else:
             selected_lifecycle = InMemorySkillLifecycleStore()
     now = datetime.now(UTC)
@@ -393,9 +389,7 @@ async def _hands_mcp_snapshot(
         return None
     finally:
         await client.aclose()
-    return tuple(
-        McpActiveSnapshotEntry.model_validate(item) for item in response.servers
-    )
+    return tuple(McpActiveSnapshotEntry.model_validate(item) for item in response.servers)
 
 
 def _worker_idle_interval(settings: Settings, configured: float) -> float:
@@ -508,9 +502,7 @@ class RemoteRuntimeWorker:
             self._last_heartbeat_at = time.monotonic()
         assignments = await self._control.claim(limit=1)
         for assignment in assignments:
-            task_id = (
-                f"{assignment.tenant_id}:{assignment.session_id}:{assignment.run_id}"
-            )
+            task_id = f"{assignment.tenant_id}:{assignment.session_id}:{assignment.run_id}"
             try:
                 await self._execute_with_heartbeat(assignment)
             except (FencingTokenError, LeaseConflictError):
@@ -567,8 +559,7 @@ class RemoteRuntimeWorker:
                     # exiting here leaves last_heartbeat_at stale and
                     # recover_expired can reclaim a still-running long call.
                     logger.warning(
-                        "runtime heartbeat failed during execute "
-                        "for session=%s run=%s; will retry",
+                        "runtime heartbeat failed during execute for session=%s run=%s; will retry",
                         assignment.session_id,
                         assignment.run_id,
                         exc_info=True,
@@ -621,9 +612,7 @@ def _lease_signing_key(settings: Settings) -> bytes:
     return secrets.token_bytes(32)
 
 
-def _has_workload_tokens(
-    settings: Settings, identities: tuple[ServiceIdentity, ...]
-) -> bool:
+def _has_workload_tokens(settings: Settings, identities: tuple[ServiceIdentity, ...]) -> bool:
     return all(settings.workload_token_value(identity.value) for identity in identities)
 
 
@@ -640,9 +629,7 @@ def _seed_managed_connector_credentials(
 ) -> None:
     expires_at = datetime.now(UTC) + timedelta(days=365)
     debug_tenants = (
-        ("local", "development", "1")
-        if settings.deployment_profile == "development"
-        else ()
+        ("local", "development", "1") if settings.deployment_profile == "development" else ()
     )
     for java_server in settings.java_api_servers:
         if java_server.credential_ref is None:
@@ -665,10 +652,7 @@ def _task_api_app(settings: Settings) -> FastAPI:
     config_ready = bool(
         token
         and settings.sql_storage_enabled
-        and (
-            settings.signed_identity_configured
-            or settings.insecure_identity_headers_enabled
-        )
+        and (settings.signed_identity_configured or settings.insecure_identity_headers_enabled)
     )
     remote_session = RemoteSessionEventStore(
         settings.session_base_url,
@@ -687,9 +671,7 @@ def _task_api_app(settings: Settings) -> FastAPI:
         )
     task_projection = PostgresTaskProjection(settings.resolved_database_url)
     approval_projection = PostgresApprovalProjection(settings.resolved_database_url)
-    collaboration_projection = PostgresCollaborationProjection(
-        settings.resolved_database_url
-    )
+    collaboration_projection = PostgresCollaborationProjection(settings.resolved_database_url)
     task_service = TaskService(
         event_store=remote_session,
         relay=NoOpOutboxRelay(),
@@ -715,15 +697,11 @@ def _task_api_app(settings: Settings) -> FastAPI:
     app.dependency_overrides[get_task_query_service] = lambda: query
     app.dependency_overrides[get_task_result_waiter] = lambda: waiter
     app.dependency_overrides[get_sync_invocation_gateway] = lambda: invocations
-    app.dependency_overrides[get_collaboration_projection] = lambda: (
-        collaboration_projection
-    )
+    app.dependency_overrides[get_collaboration_projection] = lambda: collaboration_projection
     app.dependency_overrides[get_observability_service] = lambda: observability
     app.state.observability_service = observability
     identity_closeables = (
-        (app.state.identity_verifier,)
-        if hasattr(app.state.identity_verifier, "close")
-        else ()
+        (app.state.identity_verifier,) if hasattr(app.state.identity_verifier, "close") else ()
     )
     app.state.closeables = (
         *identity_closeables,
@@ -756,18 +734,14 @@ def _task_api_app(settings: Settings) -> FastAPI:
     if settings.sql_storage_enabled:
         skill_publication = RemoteSkillPublicationClient(
             settings.hands_url,
-            bearer_token=_service_bearer_token(
-                settings, ServiceIdentity.TASK_API
-            ),
+            bearer_token=_service_bearer_token(settings, ServiceIdentity.TASK_API),
             compatibility_cache=skill_registry,
         )
         skill_management = skill_publication
         publisher_management = skill_publication
         skill_uploads = RemoteSkillPackageUploadClient(
             settings.artifact_base_url,
-            bearer_token=_service_bearer_token(
-                settings, ServiceIdentity.TASK_API
-            ),
+            bearer_token=_service_bearer_token(settings, ServiceIdentity.TASK_API),
         )
     else:
         publisher_store = InMemorySkillPublisherStore()
@@ -794,9 +768,7 @@ def _task_api_app(settings: Settings) -> FastAPI:
             publisher_service=publisher_management,
             admission_reader=skill_publication if skill_lifecycle is None else skill_lifecycle,
             admission_metrics_window_hours=settings.skill_admission_metrics_window_hours,
-            admission_quarantine_alert_ratio=(
-                settings.skill_admission_quarantine_alert_ratio
-            ),
+            admission_quarantine_alert_ratio=(settings.skill_admission_quarantine_alert_ratio),
             admission_quarantine_alert_min_samples=(
                 settings.skill_admission_quarantine_alert_min_samples
             ),
@@ -863,8 +835,7 @@ def _readiness(name: str, settings: Settings) -> tuple[bool, dict[str, str]]:
         ready = ready and settings.sql_storage_enabled
     if name == "task-api":
         identity_ready = (
-            settings.insecure_identity_headers_enabled
-            or settings.signed_identity_configured
+            settings.insecure_identity_headers_enabled or settings.signed_identity_configured
         )
         dependencies["chaintower_identity"] = (
             "insecure-headers"
@@ -875,16 +846,10 @@ def _readiness(name: str, settings: Settings) -> tuple[bool, dict[str, str]]:
         )
         ready = ready and identity_ready
     if name == "model-gateway":
-        dependencies["model_provider"] = (
-            "ready" if settings.model_gateway_configured else "missing"
-        )
+        dependencies["model_provider"] = "ready" if settings.model_gateway_configured else "missing"
         ready = ready and settings.model_gateway_configured
-        identity_ready = bool(
-            settings.workload_token_value(ServiceIdentity.AGENT_RUNTIME.value)
-        )
-        dependencies["runtime_workload_identity"] = (
-            "ready" if identity_ready else "missing"
-        )
+        identity_ready = bool(settings.workload_token_value(ServiceIdentity.AGENT_RUNTIME.value))
+        dependencies["runtime_workload_identity"] = "ready" if identity_ready else "missing"
         ready = ready and identity_ready
     if name == "session":
         lease_ready = _lease_key_configured(settings)
@@ -909,14 +874,11 @@ def _readiness(name: str, settings: Settings) -> tuple[bool, dict[str, str]]:
             (ServiceIdentity.AGENT_RUNTIME, ServiceIdentity.TASK_API),
         )
         dependencies["lease_signer"] = "ready" if lease_ready else "missing"
-        dependencies["control_workload_identities"] = (
-            "ready" if identity_ready else "missing"
-        )
+        dependencies["control_workload_identities"] = "ready" if identity_ready else "missing"
         ready = ready and lease_ready and identity_ready
     if name == "artifact-service":
         storage_ready = (
-            settings.object_storage_enabled
-            or settings.resolved_artifact_backend == "local"
+            settings.object_storage_enabled or settings.resolved_artifact_backend == "local"
         )
         dependencies["object_storage"] = (
             settings.resolved_artifact_backend
@@ -928,22 +890,14 @@ def _readiness(name: str, settings: Settings) -> tuple[bool, dict[str, str]]:
         policy_identity_ready = bool(
             settings.workload_token_value(ServiceIdentity.ARTIFACT_SERVICE.value)
         )
-        dependencies["policy_workload_identity"] = (
-            "ready" if policy_identity_ready else "missing"
-        )
+        dependencies["policy_workload_identity"] = "ready" if policy_identity_ready else "missing"
         ready = ready and storage_ready and policy_identity_ready
     if name == "projection-worker":
-        token_ready = bool(
-            settings.workload_token_value(ServiceIdentity.PROJECTION_WORKER.value)
-        )
-        dependencies["session_workload_identity"] = (
-            "ready" if token_ready else "missing"
-        )
+        token_ready = bool(settings.workload_token_value(ServiceIdentity.PROJECTION_WORKER.value))
+        dependencies["session_workload_identity"] = "ready" if token_ready else "missing"
         ready = ready and token_ready
     if name == "agent-runtime":
-        token_ready = bool(
-            settings.workload_token_value(ServiceIdentity.AGENT_RUNTIME.value)
-        )
+        token_ready = bool(settings.workload_token_value(ServiceIdentity.AGENT_RUNTIME.value))
         provider_secret_absent = settings.model_api_key is None
         dependencies["workload_identity"] = "ready" if token_ready else "missing"
         dependencies["provider_secret_isolation"] = (
@@ -951,9 +905,8 @@ def _readiness(name: str, settings: Settings) -> tuple[bool, dict[str, str]]:
         )
         ready = ready and token_ready and provider_secret_absent
     if name == "action-hands":
-        identity_ready = (
-            settings.runtime_workload_token is not None
-            and bool(settings.runtime_workload_token.get_secret_value())
+        identity_ready = settings.runtime_workload_token is not None and bool(
+            settings.runtime_workload_token.get_secret_value()
         )
         dependencies["workload_identity"] = "ready" if identity_ready else "missing"
         lease_ready = _lease_key_configured(settings)
@@ -964,9 +917,7 @@ def _readiness(name: str, settings: Settings) -> tuple[bool, dict[str, str]]:
         dependencies["downstream_workload_identity"] = (
             "ready" if downstream_identity_ready else "missing"
         )
-        publish_identity_ready = bool(
-            settings.workload_token_value(ServiceIdentity.TASK_API.value)
-        )
+        publish_identity_ready = bool(settings.workload_token_value(ServiceIdentity.TASK_API.value))
         dependencies["skill_publish_workload_identity"] = (
             "ready" if publish_identity_ready else "missing"
         )
@@ -988,9 +939,7 @@ def _readiness(name: str, settings: Settings) -> tuple[bool, dict[str, str]]:
             ServiceIdentity.ARTIFACT_SERVICE,
         )
         identity_ready = _has_workload_tokens(settings, identities)
-        dependencies["enforcement_identities"] = (
-            "ready" if identity_ready else "missing"
-        )
+        dependencies["enforcement_identities"] = "ready" if identity_ready else "missing"
         ready = ready and identity_ready
     if name == "credential-proxy":
         identity_ready = _has_workload_tokens(
@@ -1006,23 +955,17 @@ def _readiness(name: str, settings: Settings) -> tuple[bool, dict[str, str]]:
         )
         vault_ready = vault_configured or not settings.credential_vault_addr
         dependencies["caller_identities"] = "ready" if identity_ready else "missing"
-        dependencies["vault"] = "ready" if vault_configured else (
-            "memory" if vault_ready else "missing"
+        dependencies["vault"] = (
+            "ready" if vault_configured else ("memory" if vault_ready else "missing")
         )
         policy_identity_ready = bool(
             settings.workload_token_value(ServiceIdentity.CREDENTIAL_PROXY.value)
         )
-        dependencies["policy_workload_identity"] = (
-            "ready" if policy_identity_ready else "missing"
-        )
+        dependencies["policy_workload_identity"] = "ready" if policy_identity_ready else "missing"
         ready = ready and identity_ready and vault_ready and policy_identity_ready
     if name == "delivery-worker":
-        identity_ready = bool(
-            settings.workload_token_value(ServiceIdentity.DELIVERY_WORKER.value)
-        )
-        dependencies["delivery_workload_identity"] = (
-            "ready" if identity_ready else "missing"
-        )
+        identity_ready = bool(settings.workload_token_value(ServiceIdentity.DELIVERY_WORKER.value))
+        dependencies["delivery_workload_identity"] = "ready" if identity_ready else "missing"
         ready = ready and identity_ready
     return ready, dependencies
 
@@ -1077,9 +1020,7 @@ async def _service_lifespan(app: FastAPI) -> AsyncIterator[None]:
                     await asyncio.wait_for(stop.wait(), timeout=app.state.worker_interval)
 
     if bool(app.state.worker):
-        worker_task = asyncio.create_task(
-            worker_loop(), name=f"{app.state.service_name}-worker"
-        )
+        worker_task = asyncio.create_task(worker_loop(), name=f"{app.state.service_name}-worker")
     try:
         yield
     finally:
@@ -1258,14 +1199,10 @@ def _orchestrator_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         bearer_token=bearer_token,
     )
     runtime_wake_client = (
-        HttpWorkerWakeClient(settings.runtime_base_url)
-        if settings.worker_wake_enabled
-        else None
+        HttpWorkerWakeClient(settings.runtime_base_url) if settings.worker_wake_enabled else None
     )
     worker_id = f"orchestrator-{secrets.token_hex(8)}"
-    claim_wait = (
-        settings.worker_idle_interval if settings.worker_wake_enabled else 0.0
-    )
+    claim_wait = settings.worker_idle_interval if settings.worker_wake_enabled else 0.0
     feed = RunnableFeedConsumer(
         feed_session,
         store,
@@ -1279,9 +1216,7 @@ def _orchestrator_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         provisioner=RegisteredRuntimeProvisioner(store),
         lease_ttl=timedelta(seconds=settings.orchestrator_lease_ttl_seconds),
         runtime_wake=(
-            (lambda: runtime_wake_client.wake())
-            if runtime_wake_client is not None
-            else None
+            (lambda: runtime_wake_client.wake()) if runtime_wake_client is not None else None
         ),
         register_selected_runtime=False,
     )
@@ -1305,9 +1240,7 @@ def _orchestrator_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         spec,
         settings,
         tick=tick,
-        worker_interval=_worker_post_tick_wait(
-            settings, settings.orchestrator_worker_interval
-        ),
+        worker_interval=_worker_post_tick_wait(settings, settings.orchestrator_worker_interval),
         closeables=closeables,
     )
     service = ControlInternalService(
@@ -1361,27 +1294,21 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
     )
     skill_artifacts = RemoteSkillArtifactLifecycle(
         settings.artifact_base_url,
-        bearer_token=_service_bearer_token(
-            settings, ServiceIdentity.ACTION_HANDS
-        ),
+        bearer_token=_service_bearer_token(settings, ServiceIdentity.ACTION_HANDS),
         policy=policy,
     )
     skill_binding_references = RemoteSkillBindingReferenceReader(
         settings.session_base_url,
         bearer_token=hands_token,
     )
-    skill_publisher_store: (
-        PostgresSkillPublisherStore | InMemorySkillPublisherStore
-    )
+    skill_publisher_store: PostgresSkillPublisherStore | InMemorySkillPublisherStore
     if settings.sql_storage_enabled:
         invocation_store = PostgresInvocationStore(settings.resolved_database_url)
         tool_registry_store = PostgresToolRegistryStore(settings.resolved_database_url)
         skill_lifecycle: SkillLifecycleStore = PostgresSkillLifecycleStore(
             settings.resolved_database_url
         )
-        skill_publisher_store = PostgresSkillPublisherStore(
-            settings.resolved_database_url
-        )
+        skill_publisher_store = PostgresSkillPublisherStore(settings.resolved_database_url)
     else:
         skill_lifecycle = InMemorySkillLifecycleStore()
         skill_publisher_store = InMemorySkillPublisherStore()
@@ -1395,11 +1322,7 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         skill_binding_references,
         *((invocation_store,) if invocation_store is not None else ()),
         *((tool_registry_store,) if tool_registry_store is not None else ()),
-        *(
-            (skill_lifecycle,)
-            if isinstance(skill_lifecycle, PostgresSkillLifecycleStore)
-            else ()
-        ),
+        *((skill_lifecycle,) if isinstance(skill_lifecycle, PostgresSkillLifecycleStore) else ()),
         *(
             (skill_publisher_store,)
             if isinstance(skill_publisher_store, PostgresSkillPublisherStore)
@@ -1472,6 +1395,7 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
             capability_search_tool(),
             capability_load_tool(),
             skill_resolve_tool(),
+            skill_binding_status_tool(),
         )
     )
 
@@ -1479,6 +1403,7 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         if tool_registry_store is not None:
             await tool_registry_store.load_into(registry)
         if credential_proxy is not None and isinstance(policy, RemotePolicyClient):
+
             def _mcp_connector(server: object) -> ManagedMcpConnector:
                 from auraclaw.contracts.capabilities import McpServerDefinition
 
@@ -1517,18 +1442,14 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
             catalog_server = catalog_server_definition(java_server)
             await capability_catalog.register_server(catalog_server)
             if credential_proxy is not None and isinstance(policy, RemotePolicyClient):
-                app.state.capability_connectors[java_server.server_id] = (
-                    ManagedJavaApiConnector(
-                        java_server,
-                        credentials=credential_proxy,
-                        policy=policy,
-                    )
+                app.state.capability_connectors[java_server.server_id] = ManagedJavaApiConnector(
+                    java_server,
+                    credentials=credential_proxy,
+                    policy=policy,
                 )
         app.state.skill_rebuild_result = await skill_rebuilder.rebuild_all()
         app.state.skill_reliability_result = await skill_reliability.run_once()
-        app.state.skill_admission_maintenance_result = (
-            await skill_admission_maintenance.run_once()
-        )
+        app.state.skill_admission_maintenance_result = await skill_admission_maintenance.run_once()
 
     app.state.capability_connectors = {}
     app.state.catalog_reconciler = None
@@ -1543,6 +1464,7 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
                 capability_catalog,
             ),
             SKILL_RESOLVE_TOOL_NAME: SkillResolveExecutor(skill_resolver),
+            SKILL_BINDING_STATUS_TOOL_NAME: SkillBindingStatusExecutor(skill_lifecycle),
         },
     )
     gateway = ToolGateway(
@@ -1555,9 +1477,7 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         invocation_store=invocation_store,
         approval_controller=policy if isinstance(policy, RemotePolicyClient) else None,
     )
-    token = (
-        _agent_runtime_token(settings) or ""
-    )
+    token = _agent_runtime_token(settings) or ""
     key = _lease_signing_key(settings)
     authenticator: HandsWorkloadAuthenticator = SignedLeaseHandsAuthenticator(
         {token: "*"} if token else {},
@@ -1683,9 +1603,7 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         async def initialize_and_schedule() -> None:
             await initialize_periodic_jobs()
             now = asyncio.get_running_loop().time()
-            next_due.update(
-                {name: now + interval for name, interval, _run in periodic_jobs}
-            )
+            next_due.update({name: now + interval for name, interval, _run in periodic_jobs})
 
         async def reconcile_due_jobs() -> int:
             now = asyncio.get_running_loop().time()
@@ -1719,9 +1637,7 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
 
         app.state.initialize = initialize_and_schedule
         app.state.tick = reconcile_due_jobs
-        app.state.worker_interval = min(
-            interval for _name, interval, _run in periodic_jobs
-        )
+        app.state.worker_interval = min(interval for _name, interval, _run in periodic_jobs)
     mcp_identities = _configured_identities(
         settings,
         (
@@ -1751,9 +1667,7 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
                     admissions=skill_lifecycle,
                 )
             ),
-            workload_identities=_configured_identities(
-                settings, (ServiceIdentity.TASK_API,)
-            )
+            workload_identities=_configured_identities(settings, (ServiceIdentity.TASK_API,))
             or None,
         ),
     )
@@ -1829,9 +1743,7 @@ def _credential_proxy_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         spec,
         settings,
         closeables=closeables,
-        readiness_probe=(
-            vault.readiness if isinstance(vault, HashiCorpVault) else None
-        ),
+        readiness_probe=(vault.readiness if isinstance(vault, HashiCorpVault) else None),
     )
     proxy = CredentialProxy(vault, registry=registry)
     adapters: dict[str, Any] = {
@@ -1911,9 +1823,7 @@ def _artifact_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         spec,
         settings,
         closeables=closeables,
-        readiness_probe=(
-            storage.verifier.readiness if storage.verifier is not None else None
-        ),
+        readiness_probe=(storage.verifier.readiness if storage.verifier is not None else None),
     )
     service = ArtifactInternalService(
         storage.presigner,
@@ -1963,9 +1873,7 @@ def _artifact_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
 def _delivery_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
     token = settings.workload_token_value(ServiceIdentity.DELIVERY_WORKER.value)
     bearer_token = token or secrets.token_urlsafe(32)
-    claim_wait = (
-        settings.worker_idle_interval if settings.worker_wake_enabled else 0.0
-    )
+    claim_wait = settings.worker_idle_interval if settings.worker_wake_enabled else 0.0
     session = RemoteSessionEventStore(
         settings.session_base_url,
         service_identity=ServiceIdentity.DELIVERY_WORKER,
@@ -2023,11 +1931,7 @@ def _delivery_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
     async def delivery_status(parameters: dict[str, Any]) -> dict[str, Any]:
         tenant_id = str(parameters.get("tenant_id", ""))
         session_id = str(parameters.get("session_id", ""))
-        jobs = (
-            await store.list_jobs(tenant_id, session_id)
-            if tenant_id and session_id
-            else []
-        )
+        jobs = await store.list_jobs(tenant_id, session_id) if tenant_id and session_id else []
         return {"jobs": len(jobs)}
 
     async def delivery_redrive(parameters: dict[str, Any]) -> dict[str, Any]:
@@ -2045,9 +1949,7 @@ def _delivery_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
                 store=admin_store,
             )
         ),
-        workload_identities=_configured_identities(
-            settings, (ServiceIdentity.TASK_API,)
-        ),
+        workload_identities=_configured_identities(settings, (ServiceIdentity.TASK_API,)),
     )
     app.mount("/", admin_app)
     return app
@@ -2065,9 +1967,7 @@ def _projection_app(
     approval_projection = providers.get_approval_projection()
     collaboration_projection = providers.get_collaboration_projection()
     projector = CompositeProjection(*providers.session_outbox_projectors())
-    admin_store = PostgresAdminOperationStore(
-        settings.resolved_database_url, schema="projection"
-    )
+    admin_store = PostgresAdminOperationStore(settings.resolved_database_url, schema="projection")
     closeables: tuple[Any, ...] = ()
     token = settings.workload_token_value(ServiceIdentity.PROJECTION_WORKER.value)
     remote_session = RemoteSessionEventStore(
@@ -2076,9 +1976,7 @@ def _projection_app(
         bearer_token=token or secrets.token_urlsafe(32),
         timeout=max(10.0, settings.worker_idle_interval + 5.0),
     )
-    claim_wait = (
-        settings.worker_idle_interval if settings.worker_wake_enabled else 0.0
-    )
+    claim_wait = settings.worker_idle_interval if settings.worker_wake_enabled else 0.0
     source = RemoteSessionOutboxSource(
         remote_session,
         worker_id="projection-worker",
@@ -2137,9 +2035,7 @@ def _projection_app(
                 store=admin_store,
             )
         ),
-        workload_identities=_configured_identities(
-            settings, (ServiceIdentity.TASK_API,)
-        ),
+        workload_identities=_configured_identities(settings, (ServiceIdentity.TASK_API,)),
     )
     app.mount("/", admin_app)
     return app
@@ -2185,9 +2081,7 @@ def _model_gateway_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         "model-gateway",
         model_routes(model_service),
         stream_routes=model_stream_routes(model_service),
-        workload_identities=_configured_identities(
-            settings, (ServiceIdentity.AGENT_RUNTIME,)
-        ),
+        workload_identities=_configured_identities(settings, (ServiceIdentity.AGENT_RUNTIME,)),
     )
     app.mount("/", contract_app)
     return app

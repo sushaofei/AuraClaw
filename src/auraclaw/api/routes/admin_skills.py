@@ -38,6 +38,7 @@ from auraclaw.contracts.skills import (
     SkillPublisherKeyRecord,
     SkillPublisherRecord,
     SkillPublisherStatusOperation,
+    SkillRevocationAction,
 )
 from auraclaw.contracts.tools import ArtifactRef
 
@@ -50,13 +51,9 @@ _MAX_ENCODED_UPLOAD_BYTES = 24 * 1024 * 1024
 class PublishSkillRequest(ContractModel):
     source_id: str = Field(min_length=1, max_length=128)
     activate: bool = True
-    files: dict[str, str] | None = Field(
-        default=None, min_length=1, max_length=_MAX_UPLOAD_FILES
-    )
+    files: dict[str, str] | None = Field(default=None, min_length=1, max_length=_MAX_UPLOAD_FILES)
     artifact_ref: dict[str, Any] | None = None
-    expected_digest: str | None = Field(
-        default=None, pattern=r"^sha256:[0-9a-f]{64}$"
-    )
+    expected_digest: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
 
     @model_validator(mode="after")
     def validate_source(self) -> PublishSkillRequest:
@@ -165,9 +162,7 @@ class SkillManager(Protocol):
         self, command: RestoreSkillPublicationCommand
     ) -> SkillPublicationRecord: ...
 
-    async def purge_package(
-        self, command: PurgeSkillPackageCommand
-    ) -> SkillPackageRecord: ...
+    async def purge_package(self, command: PurgeSkillPackageCommand) -> SkillPackageRecord: ...
 
 
 class SkillPublisherManager(Protocol):
@@ -269,9 +264,7 @@ def create_skill_admin_router(
             Query(),
         ] = None,
         stage: Annotated[str | None, Query(min_length=1, max_length=128)] = None,
-        content_policy_version: Annotated[
-            str | None, Query(min_length=1, max_length=128)
-        ] = None,
+        content_policy_version: Annotated[str | None, Query(min_length=1, max_length=128)] = None,
         since: AwareDatetime | None = None,
         cursor: Annotated[str | None, Query(min_length=1, max_length=2048)] = None,
         limit: Annotated[int, Query(ge=1, le=500)] = 100,
@@ -329,12 +322,8 @@ def create_skill_admin_router(
                 )
             )
         sample_count = sum(group.count for group in groups)
-        quarantined_count = sum(
-            group.count for group in groups if group.outcome == "quarantined"
-        )
-        quarantine_ratio = (
-            quarantined_count / sample_count if sample_count else 0.0
-        )
+        quarantined_count = sum(group.count for group in groups if group.outcome == "quarantined")
+        quarantine_ratio = quarantined_count / sample_count if sample_count else 0.0
         ratio_labels = {"window_hours": str(selected_window)}
         metrics.append(
             {
@@ -370,9 +359,7 @@ def create_skill_admin_router(
         }
 
     @router.get("/skill-publishers/{publisher}")
-    async def get_skill_publisher(
-        publisher: str, identity: Identity
-    ) -> dict[str, Any]:
+    async def get_skill_publisher(publisher: str, identity: Identity) -> dict[str, Any]:
         service = _require_publisher_service(publisher_service)
         record, keys = await service.get_publisher(identity.tenant_id, publisher)
         return _publisher_summary(record, keys)
@@ -383,9 +370,7 @@ def create_skill_admin_router(
         payload: RegisterSkillPublisherRequest,
         identity: Identity,
         command_id: str = Header(alias="Idempotency-Key"),
-        expected_revision: int = Header(
-            default=0, alias="X-Expected-Revision", ge=0
-        ),
+        expected_revision: int = Header(default=0, alias="X-Expected-Revision", ge=0),
     ) -> dict[str, Any]:
         service = _require_publisher_service(publisher_service)
         record, keys = await service.register_publisher(
@@ -522,9 +507,7 @@ def create_skill_admin_router(
         )
 
     @router.get("/skills/{publisher}/{name}")
-    async def get_skill(
-        publisher: str, name: str, identity: Identity
-    ) -> dict[str, Any]:
+    async def get_skill(publisher: str, name: str, identity: Identity) -> dict[str, Any]:
         publication = registry.get_publication(identity.tenant_id, publisher, name)
         markdown = registry.skill_markdown(
             identity.tenant_id,
@@ -545,12 +528,8 @@ def create_skill_admin_router(
     async def get_skill_version(
         publisher: str, name: str, version: str, identity: Identity
     ) -> dict[str, Any]:
-        publication = registry.get_publication(
-            identity.tenant_id, publisher, name, version
-        )
-        markdown = registry.skill_markdown(
-            identity.tenant_id, publisher, name, version
-        )
+        publication = registry.get_publication(identity.tenant_id, publisher, name, version)
+        markdown = registry.skill_markdown(identity.tenant_id, publisher, name, version)
         return _summary(publication, skill_markdown=markdown)
 
     @router.get("/skills/{publisher}/{name}/installation")
@@ -571,9 +550,7 @@ def create_skill_admin_router(
         )
         return {"installation": _installation_summary(installation)}
 
-    @router.get(
-        "/skill-publications/{publisher}/{name}/versions/{version}"
-    )
+    @router.get("/skill-publications/{publisher}/{name}/versions/{version}")
     async def get_skill_publication_state(
         publisher: str,
         name: str,
@@ -605,9 +582,7 @@ def create_skill_admin_router(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Skill management service is not configured",
             )
-        package = await management_service.get_package(
-            identity.tenant_id, publisher, name, version
-        )
+        package = await management_service.get_package(identity.tenant_id, publisher, name, version)
         return {"package": _package_state_summary(package)}
 
     @router.post(
@@ -675,9 +650,7 @@ def create_skill_admin_router(
         payload: PublishSkillRequest,
         identity: Identity,
         command_id: str = Header(alias="Idempotency-Key"),
-        expected_revision: int = Header(
-            default=0, alias="X-Expected-Revision", ge=0
-        ),
+        expected_revision: int = Header(default=0, alias="X-Expected-Revision", ge=0),
     ) -> dict[str, Any]:
         if publication_service is None:
             raise HTTPException(
@@ -708,9 +681,7 @@ def create_skill_admin_router(
                     status_code=422,
                     detail="Skill package files must use valid base64",
                 ) from exc
-            publication = await publication_service.publish(
-                command, SkillPackage.from_files(files)
-            )
+            publication = await publication_service.publish(command, SkillPackage.from_files(files))
         else:
             assert payload.artifact_ref is not None
             assert payload.expected_digest is not None
@@ -821,6 +792,10 @@ def create_skill_admin_router(
         command_id: str = Header(alias="Idempotency-Key"),
         expected_revision: int = Header(alias="X-Expected-Revision", ge=1),
         reason_code: str = Header(alias="X-Reason-Code", min_length=1, max_length=128),
+        revocation_action: Annotated[
+            SkillRevocationAction,
+            Header(alias="X-Skill-Revocation-Action"),
+        ] = SkillRevocationAction.CANCEL,
     ) -> dict[str, Any]:
         if management_service is None:
             raise HTTPException(
@@ -835,15 +810,14 @@ def create_skill_admin_router(
                 name=name,
                 version=version,
                 reason_code=reason_code,
+                revocation_action=revocation_action,
                 command_id=command_id,
                 expected_revision=expected_revision,
                 correlation_id=identity.correlation_id,
                 causation_id=command_id,
             )
         )
-        return {
-            "publication": _publication_state_summary(publication)
-        }
+        return {"publication": _publication_state_summary(publication)}
 
     @router.post(
         "/skill-publications/{publisher}/{name}/versions/{version}:restore",
@@ -977,9 +951,7 @@ async def _change_installation(
             causation_id=command_id,
         )
     )
-    return {
-        "installation": _installation_summary(installation)
-    }
+    return {"installation": _installation_summary(installation)}
 
 
 def _installation_summary(
@@ -1009,6 +981,13 @@ def _publication_state_summary(
         "status": publication.status.value,
         "revision": publication.revision,
         "reason_code": publication.reason_code,
+        "revocation_action": (
+            publication.revocation_action.value
+            if publication.revocation_action is not None
+            else None
+        ),
+        "revocation_policy_version": publication.revocation_policy_version,
+        "revocation_policy_decision_id": (publication.revocation_policy_decision_id),
         "updated_by": publication.updated_by,
         "updated_at": publication.updated_at.isoformat(),
     }
@@ -1026,7 +1005,5 @@ def _package_state_summary(package: SkillPackageRecord) -> dict[str, Any]:
         "retention_revision": package.retention_revision,
         "retention_updated_by": package.retention_updated_by,
         "retention_updated_at": package.retention_updated_at.isoformat(),
-        "purged_at": (
-            None if package.purged_at is None else package.purged_at.isoformat()
-        ),
+        "purged_at": (None if package.purged_at is None else package.purged_at.isoformat()),
     }

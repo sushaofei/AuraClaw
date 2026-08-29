@@ -27,6 +27,7 @@ from auraclaw.contracts.skills import (
     SkillPackageRetentionStatus,
     SkillPublicationRecord,
     SkillPublicationStatus,
+    SkillRevocationAction,
 )
 from auraclaw.contracts.tools import ArtifactRef
 
@@ -71,9 +72,7 @@ class SkillManagementService:
         name: str,
         version: str,
     ) -> SkillPackageRecord:
-        record = await self._lifecycle.get_package(
-            tenant_id, publisher, name, version
-        )
+        record = await self._lifecycle.get_package(tenant_id, publisher, name, version)
         if record is None:
             raise NotFoundError("Skill package not found")
         return record
@@ -84,9 +83,7 @@ class SkillManagementService:
         publisher: str,
         name: str,
     ) -> SkillInstallationRecord:
-        record = await self._lifecycle.get_installation(
-            tenant_id, publisher, name
-        )
+        record = await self._lifecycle.get_installation(tenant_id, publisher, name)
         if record is None:
             raise NotFoundError("Skill installation not found")
         return record
@@ -98,9 +95,7 @@ class SkillManagementService:
         name: str,
         version: str,
     ) -> SkillPublicationRecord:
-        record = await self._lifecycle.get_publication(
-            tenant_id, publisher, name, version
-        )
+        record = await self._lifecycle.get_publication(tenant_id, publisher, name, version)
         if record is None:
             raise NotFoundError("Skill publication not found")
         return record
@@ -169,6 +164,9 @@ class SkillManagementService:
                     "updated_by": command.actor_id,
                     "updated_at": datetime.now(UTC),
                     "reason_code": command.reason_code,
+                    "revocation_action": command.revocation_action,
+                    "revocation_policy_version": command.policy_version,
+                    "revocation_policy_decision_id": command.policy_decision_id,
                 }
             ),
             expected_revision=command.expected_revision,
@@ -282,10 +280,7 @@ class SkillManagementService:
         installation = await self._lifecycle.get_installation(
             command.tenant_id, command.publisher, command.name
         )
-        if (
-            installation is None
-            or installation.status is not SkillInstallationStatus.UNINSTALLED
-        ):
+        if installation is None or installation.status is not SkillInstallationStatus.UNINSTALLED:
             raise PolicyDeniedError("Skill must be uninstalled before package purge")
         if package.legal_hold:
             raise PolicyDeniedError("Skill package is under legal hold")
@@ -351,10 +346,9 @@ class InProcessSkillStateProjector:
                         publication.publisher,
                         publication.name,
                         publication.version,
+                        action=(publication.revocation_action or SkillRevocationAction.CANCEL),
                     )
-            installation = installations.get(
-                (publication.publisher, publication.name)
-            )
+            installation = installations.get((publication.publisher, publication.name))
             self._registry.set_skill_discoverable(
                 tenant_id,
                 publication.publisher,
@@ -365,6 +359,7 @@ class InProcessSkillStateProjector:
                     and installation.status is SkillInstallationStatus.ACTIVE
                 ),
             )
+
 
 def _restore_request_digest(command: RestoreSkillPublicationCommand) -> str:
     value = "\0".join(

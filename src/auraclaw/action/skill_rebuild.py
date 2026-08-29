@@ -27,6 +27,7 @@ from auraclaw.contracts.skills import (
     SkillInstallationStatus,
     SkillPackageRetentionStatus,
     SkillPublicationStatus,
+    SkillRevocationAction,
 )
 
 _SKILL_MEDIA_TYPE = "application/vnd.auraclaw.skill-package+json"
@@ -85,15 +86,17 @@ class SkillStateRebuilder:
                 SkillPublicationStatus.ACTIVE,
                 SkillPublicationStatus.RESTORING,
                 SkillPublicationStatus.RETIRED,
-            }:
+            } and not (
+                record.status is SkillPublicationStatus.REVOKED
+                and record.revocation_action is SkillRevocationAction.CONTINUE
+            ):
                 continue
             package_record = await self._lifecycle.get_package(
                 tenant_id, record.publisher, record.name, record.version
             )
             if (
                 package_record is None
-                or package_record.retention_status
-                is not SkillPackageRetentionStatus.RETAINED
+                or package_record.retention_status is not SkillPackageRetentionStatus.RETAINED
             ):
                 failures.append("package_record_unavailable")
                 continue
@@ -112,9 +115,7 @@ class SkillStateRebuilder:
                     if self._publisher_trust is None:
                         raise ValueError("publisher registry unavailable")
                     package = self._registry.validate_content(package)
-                    key_id = await self._publisher_trust.verify_for_restore(
-                        tenant_id, package
-                    )
+                    key_id = await self._publisher_trust.verify_for_restore(tenant_id, package)
                     if key_id != package_record.signature_key_id:
                         raise ValueError("signature key mismatch")
                 else:
@@ -132,6 +133,7 @@ class SkillStateRebuilder:
                             package_digest=package_record.package_digest,
                             artifact_ref=package_record.artifact_ref,
                             status=record.status,
+                            revocation_action=record.revocation_action,
                         ),
                     )
                 )
@@ -139,9 +141,7 @@ class SkillStateRebuilder:
                 if installation is not None and _installation_allows(
                     installation, record.version, record.package_digest
                 ):
-                    discoverable.add(
-                        (record.publisher, record.name, record.version)
-                    )
+                    discoverable.add((record.publisher, record.name, record.version))
             except Exception as exc:
                 failures.append(f"package_restore_{type(exc).__name__}")
         self._registry.replace_tenant(

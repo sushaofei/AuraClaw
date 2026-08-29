@@ -119,15 +119,11 @@ class AgentHarness:
             (time.perf_counter() - execute_started) * 1_000,
         )
         if any(
-            event.type == "run.completed" and event.run_id == assignment.run_id
-            for event in events
+            event.type == "run.completed" and event.run_id == assignment.run_id for event in events
         ):
             await self._control.finish_assignment(self._task_id(assignment), "completed")
             return
-        if (
-            self._capability_controller is not None
-            or self._collaboration_controller is not None
-        ):
+        if self._capability_controller is not None or self._collaboration_controller is not None:
             await self._execute_capability_loop(
                 assignment, events=events, execute_started=execute_started
             )
@@ -164,9 +160,7 @@ class AgentHarness:
                 policy=self._policy,
                 max_output_tokens=assignment.budget.max_output_tokens,
             )
-            await self._record_model_input(
-                assignment, events, request=request, turn_index=0
-            )
+            await self._record_model_input(assignment, events, request=request, turn_index=0)
             response, sequence = await self._generate_with_live_deltas(
                 assignment,
                 request,
@@ -226,9 +220,7 @@ class AgentHarness:
         )
 
         for index, call in enumerate(response.tool_calls):
-            can_continue = await self._run_tool(
-                assignment, response, call, index, sequence
-            )
+            can_continue = await self._run_tool(assignment, response, call, index, sequence)
             if not can_continue:
                 await self._control.finish_assignment(
                     self._task_id(assignment), "waiting_for_human"
@@ -261,10 +253,7 @@ class AgentHarness:
         events: list[Any] | None = None,
         execute_started: float | None = None,
     ) -> None:
-        assert (
-            self._capability_controller is not None
-            or self._collaboration_controller is not None
-        )
+        assert self._capability_controller is not None or self._collaboration_controller is not None
         if execute_started is None:
             execute_started = time.perf_counter()
         checkpoint = await self._control.load_checkpoint(
@@ -274,8 +263,7 @@ class AgentHarness:
         )
         state: dict[str, Any] = (
             dict(checkpoint.state)
-            if checkpoint is not None
-            and checkpoint.phase.startswith(("capability.", "agent."))
+            if checkpoint is not None and checkpoint.phase.startswith(("capability.", "agent."))
             else {
                 "turn_index": 0,
                 "steps_used": 0,
@@ -327,26 +315,24 @@ class AgentHarness:
                 capability_state = dict(state.get("capability_state", {}))
                 trusted: tuple[dict[str, Any], ...] = ()
                 if self._capability_controller is not None:
+                    if await self._apply_skill_binding_disposition(
+                        assignment,
+                        state,
+                        capability_state,
+                    ):
+                        return
                     trusted += await self._capability_controller.trusted_messages(
                         assignment, capability_state
                     )
                 if self._collaboration_controller is not None:
-                    trusted += await self._collaboration_controller.trusted_messages(
-                        assignment
-                    )
+                    trusted += await self._collaboration_controller.trusted_messages(assignment)
                 model_tools: tuple[dict[str, Any], ...] = ()
                 if self._capability_controller is not None:
-                    model_tools += self._capability_controller.model_tools(
-                        capability_state
-                    )
+                    model_tools += self._capability_controller.model_tools(capability_state)
                 if self._collaboration_controller is not None:
                     model_tools += self._collaboration_controller.model_tools(assignment)
-                output_tokens_used = int(
-                    dict(state.get("usage", {})).get("output_tokens", 0)
-                )
-                remaining_output_tokens = (
-                    assignment.budget.max_output_tokens - output_tokens_used
-                )
+                output_tokens_used = int(dict(state.get("usage", {})).get("output_tokens", 0))
+                remaining_output_tokens = assignment.budget.max_output_tokens - output_tokens_used
                 if remaining_output_tokens < 1:
                     raise BudgetExceededError(
                         "Runtime cumulative output token budget was exhausted"
@@ -391,9 +377,7 @@ class AgentHarness:
                     prep=checkpoint_ready,
                 )
                 turn_events = None
-                usage = self._accumulate_usage(
-                    dict(state.get("usage", {})), response.usage
-                )
+                usage = self._accumulate_usage(dict(state.get("usage", {})), response.usage)
                 self._validate_cumulative_usage(assignment, usage)
                 state = {
                     **state,
@@ -404,9 +388,7 @@ class AgentHarness:
                     "sequence": sequence,
                     "deltas_published": True,
                 }
-                await self._save_checkpoint(
-                    assignment, "capability.model_completed", state
-                )
+                await self._save_checkpoint(assignment, "capability.model_completed", state)
                 checkpoint = await self._control.load_checkpoint(
                     assignment.tenant_id,
                     assignment.session_id,
@@ -415,10 +397,7 @@ class AgentHarness:
                 await self._inject(InjectionPoint.AFTER_MODEL)
 
             sequence = int(state.get("sequence", 0))
-            if (
-                not response.tool_calls
-                and not state.get("deltas_published")
-            ):
+            if not response.tool_calls and not state.get("deltas_published"):
                 for delta in response.deltas:
                     sequence += 1
                     await self._publish_delta(assignment, sequence, delta)
@@ -434,10 +413,7 @@ class AgentHarness:
                     "output": response.completed_output,
                     "finish_reason": response.finish_reason,
                     "usage": response.usage,
-                    "tool_calls": [
-                        self._tool_call_to_dict(call)
-                        for call in response.tool_calls
-                    ],
+                    "tool_calls": [self._tool_call_to_dict(call) for call in response.tool_calls],
                 },
                 identity=response.model_call_id,
             )
@@ -473,35 +449,27 @@ class AgentHarness:
                 is_completed_resume = (
                     checkpoint is not None
                     and checkpoint.phase == "capability.call_completed"
-                    and checkpoint.state.get("tool_invocation_id")
-                    == call.tool_invocation_id
+                    and checkpoint.state.get("tool_invocation_id") == call.tool_invocation_id
                 )
                 if is_completed_resume:
                     assert checkpoint is not None
                     result = dict(checkpoint.state["result"])
-                    capability_state = dict(
-                        checkpoint.state.get("capability_state", {})
-                    )
+                    capability_state = dict(checkpoint.state.get("capability_state", {}))
                     side_events = tuple(
                         NewEvent(
                             type=str(item["type"]),
                             payload=dict(item["payload"]),
-                            visibility=Visibility(
-                                str(item.get("visibility", "internal"))
-                            ),
+                            visibility=Visibility(str(item.get("visibility", "internal"))),
                         )
                         for item in checkpoint.state.get("side_events", ())
                     )
                     terminal = bool(checkpoint.state.get("collaboration_terminal"))
                     waiting_child_ids = tuple(
-                        str(item)
-                        for item in checkpoint.state.get("waiting_child_ids", ())
+                        str(item) for item in checkpoint.state.get("waiting_child_ids", ())
                     )
                 else:
                     if int(state.get("steps_used", 0)) >= assignment.budget.max_steps:
-                        raise BudgetExceededError(
-                            "Runtime capability step budget was exhausted"
-                        )
+                        raise BudgetExceededError("Runtime capability step budget was exhausted")
                     signature = hashlib.sha256(
                         json.dumps(
                             {"name": call.name, "arguments": call.arguments},
@@ -533,20 +501,14 @@ class AgentHarness:
                             raise CollaborationValidationError(
                                 "terminal collaboration tool must be the final tool call"
                             )
-                        collaboration_execution = (
-                            await self._collaboration_controller.execute(
-                                assignment, call
-                            )
+                        collaboration_execution = await self._collaboration_controller.execute(
+                            assignment, call
                         )
                         result = collaboration_execution.result
-                        capability_state = dict(
-                            state.get("capability_state", {})
-                        )
+                        capability_state = dict(state.get("capability_state", {}))
                         side_events = ()
                         terminal = collaboration_execution.terminal
-                        waiting_child_ids = (
-                            collaboration_execution.waiting_child_ids
-                        )
+                        waiting_child_ids = collaboration_execution.waiting_child_ids
                     else:
                         if self._capability_controller is None:
                             raise CollaborationValidationError(
@@ -579,12 +541,8 @@ class AgentHarness:
                         "steps_used": int(state.get("steps_used", 0)) + 1,
                     }
                     if int(state["steps_used"]) > assignment.budget.max_steps:
-                        raise BudgetExceededError(
-                            "Runtime capability step budget was exhausted"
-                        )
-                    await self._save_checkpoint(
-                        assignment, "capability.call_completed", state
-                    )
+                        raise BudgetExceededError("Runtime capability step budget was exhausted")
+                    await self._save_checkpoint(assignment, "capability.call_completed", state)
                     checkpoint = await self._control.load_checkpoint(
                         assignment.tenant_id,
                         assignment.session_id,
@@ -608,9 +566,7 @@ class AgentHarness:
                     return
 
                 for side_event in side_events:
-                    await self._append_capability_event(
-                        assignment, side_event
-                    )
+                    await self._append_capability_event(assignment, side_event)
                 events = await self._session.load(assignment)
                 await self._append_once(
                     assignment,
@@ -633,20 +589,14 @@ class AgentHarness:
                     }
                     waiting_state.pop("response", None)
                     waiting_state.pop("result", None)
-                    await self._save_checkpoint(
-                        assignment, "agent.waiting_children", waiting_state
-                    )
+                    await self._save_checkpoint(assignment, "agent.waiting_children", waiting_state)
                     await self._control.suspend_assignment(
                         self._task_id(assignment), "waiting_children"
                     )
                     return
                 if terminal:
-                    await self._save_checkpoint(
-                        assignment, "agent.completed", state
-                    )
-                    await self._control.finish_assignment(
-                        self._task_id(assignment), "completed"
-                    )
+                    await self._save_checkpoint(assignment, "agent.completed", state)
+                    await self._control.finish_assignment(self._task_id(assignment), "completed")
                     return
                 call_index += 1
                 state = {
@@ -655,9 +605,7 @@ class AgentHarness:
                     "call_index": call_index,
                     "side_events": [],
                 }
-                await self._save_checkpoint(
-                    assignment, "capability.model_completed", state
-                )
+                await self._save_checkpoint(assignment, "capability.model_completed", state)
                 checkpoint = await self._control.load_checkpoint(
                     assignment.tenant_id,
                     assignment.session_id,
@@ -673,9 +621,7 @@ class AgentHarness:
                 state.pop("response", None)
                 state.pop("result", None)
                 state.pop("tool_invocation_id", None)
-                await self._save_checkpoint(
-                    assignment, "capability.model_pending", state
-                )
+                await self._save_checkpoint(assignment, "capability.model_pending", state)
                 checkpoint = await self._control.load_checkpoint(
                     assignment.tenant_id,
                     assignment.session_id,
@@ -685,8 +631,8 @@ class AgentHarness:
 
             events = await self._session.load(assignment)
             if self._collaboration_controller is not None:
-                all_children, active_children = (
-                    await self._collaboration_controller.child_state(assignment)
+                all_children, active_children = await self._collaboration_controller.child_state(
+                    assignment
                 )
                 if active_children:
                     waiting_state = {
@@ -697,21 +643,15 @@ class AgentHarness:
                     }
                     waiting_state.pop("response", None)
                     waiting_state.pop("result", None)
-                    await self._save_checkpoint(
-                        assignment, "agent.waiting_children", waiting_state
-                    )
+                    await self._save_checkpoint(assignment, "agent.waiting_children", waiting_state)
                     await self._control.suspend_assignment(
                         self._task_id(assignment), "waiting_children"
                     )
                     return
                 if all_children and assignment.role in {"root", "coordinator"}:
-                    raise CollaborationValidationError(
-                        "Coordinator graph was not joined"
-                    )
+                    raise CollaborationValidationError("Coordinator graph was not joined")
                 if assignment.role in {"worker", "repair", "reviewer"}:
-                    raise CollaborationValidationError(
-                        "role output contract was not published"
-                    )
+                    raise CollaborationValidationError("role output contract was not published")
             await self._append_once(
                 assignment,
                 events,
@@ -745,18 +685,72 @@ class AgentHarness:
                 identity=assignment.run_id,
                 visibility=Visibility.USER,
             )
-            await self._save_checkpoint(
-                assignment, "capability.completed", state
-            )
-            await self._control.finish_assignment(
-                self._task_id(assignment), "completed"
-            )
+            await self._save_checkpoint(assignment, "capability.completed", state)
+            await self._control.finish_assignment(self._task_id(assignment), "completed")
             return
         raise BudgetExceededError("Runtime capability step budget was exhausted")
 
-    async def record_failure(
-        self, assignment: RuntimeAssignment, error: Exception
-    ) -> None:
+    async def _apply_skill_binding_disposition(
+        self,
+        assignment: RuntimeAssignment,
+        state: dict[str, Any],
+        capability_state: dict[str, Any],
+    ) -> bool:
+        assert self._capability_controller is not None
+        disposition = await self._capability_controller.binding_disposition(
+            assignment, capability_state
+        )
+        if disposition is None or disposition.get("action") == "continue":
+            return False
+        action = str(disposition["action"])
+        activation_id = str(disposition.get("skill_activation_id") or "unknown")
+        evidence = {
+            "skill_activation_id": activation_id,
+            "action": action,
+            "reason_code": disposition.get("reason_code"),
+            "policy_version": disposition.get("policy_version"),
+            "policy_decision_id": disposition.get("policy_decision_id"),
+            "binding": disposition.get("binding"),
+        }
+        events = await self._session.load(assignment)
+        await self._append_once(
+            assignment,
+            events,
+            "skill.revocation.applied",
+            evidence,
+            identity=f"{activation_id}:{action}",
+        )
+        state = {**state, "skill_revocation": evidence}
+        if action == "pause":
+            await self._save_checkpoint(assignment, "capability.skill_revoked_paused", state)
+            await self._control.suspend_assignment(self._task_id(assignment), "skill_revoked")
+            return True
+        events = await self._session.load(assignment)
+        await self._append_once(
+            assignment,
+            events,
+            "skill.cancelled",
+            evidence,
+            identity=activation_id,
+        )
+        events = await self._session.load(assignment)
+        await self._append_once(
+            assignment,
+            events,
+            "run.cancelled",
+            {
+                "run_id": assignment.run_id,
+                "reason": "skill_revoked",
+                "skill_activation_id": activation_id,
+            },
+            identity=assignment.run_id,
+            visibility=Visibility.USER,
+        )
+        await self._save_checkpoint(assignment, "capability.skill_revoked_cancelled", state)
+        await self._control.finish_assignment(self._task_id(assignment), "cancelled")
+        return True
+
+    async def record_failure(self, assignment: RuntimeAssignment, error: Exception) -> None:
         """Persist a terminal business fact before releasing a failed assignment."""
         events = await self._session.load(assignment)
         if any(
@@ -784,8 +778,7 @@ class AgentHarness:
                     continue
                 activation_id = str(activation["skill_activation_id"])
                 if any(
-                    event.type
-                    in {"skill.completed", "skill.failed", "skill.cancelled"}
+                    event.type in {"skill.completed", "skill.failed", "skill.cancelled"}
                     and event.payload.get("skill_activation_id") == activation_id
                     for event in events
                 ):
@@ -803,9 +796,7 @@ class AgentHarness:
                                 "skill_version": binding["skill_version"],
                                 "package_digest": binding["package_digest"],
                                 "policy_version": binding["policy_version"],
-                                "policy_decision_id": binding.get(
-                                    "policy_decision_id"
-                                ),
+                                "policy_decision_id": binding.get("policy_decision_id"),
                                 "error": _error_payload(error),
                             },
                         )
@@ -838,16 +829,10 @@ class AgentHarness:
         result: dict[str, Any],
     ) -> None:
         raw_metadata = result.get("metadata", {})
-        metadata = (
-            dict(raw_metadata) if isinstance(raw_metadata, dict) else {}
-        )
+        metadata = dict(raw_metadata) if isinstance(raw_metadata, dict) else {}
         raw_request = metadata.get("approval_request", {})
-        approval_request = (
-            dict(raw_request) if isinstance(raw_request, dict) else {}
-        )
-        approval_id = str(
-            approval_request.get("approval_id", call.tool_invocation_id)
-        )
+        approval_request = dict(raw_request) if isinstance(raw_request, dict) else {}
+        approval_id = str(approval_request.get("approval_id", call.tool_invocation_id))
         events = await self._session.load(assignment)
         await self._append_once(
             assignment,
@@ -880,9 +865,7 @@ class AgentHarness:
         }
         waiting.pop("result", None)
         waiting.pop("side_events", None)
-        await self._save_checkpoint(
-            assignment, "capability.approval_waiting", waiting
-        )
+        await self._save_checkpoint(assignment, "capability.approval_waiting", waiting)
 
     async def _append_capability_event(
         self, assignment: RuntimeAssignment, event: NewEvent
@@ -1073,9 +1056,7 @@ class AgentHarness:
             existing.extend(refreshed)
 
     @classmethod
-    def _approval_request_is_pending(
-        cls, existing: list[Any], approval_id: str
-    ) -> bool:
+    def _approval_request_is_pending(cls, existing: list[Any], approval_id: str) -> bool:
         open_request = False
         for event in existing:
             if str(event.payload.get("approval_id", "")) != approval_id:
@@ -1104,9 +1085,7 @@ class AgentHarness:
         )
 
     @staticmethod
-    def _model_input_evidence(
-        request: ModelRequest, *, turn_index: int
-    ) -> dict[str, Any]:
+    def _model_input_evidence(request: ModelRequest, *, turn_index: int) -> dict[str, Any]:
         roles: dict[str, int] = {}
         user_prompt_preview = ""
         for message in request.messages:
@@ -1150,9 +1129,7 @@ class AgentHarness:
         }
 
     @staticmethod
-    def _tool_activity_metadata(
-        capability_state: dict[str, Any], call: ToolCall
-    ) -> dict[str, Any]:
+    def _tool_activity_metadata(capability_state: dict[str, Any], call: ToolCall) -> dict[str, Any]:
         for capability_id, item in dict(capability_state.get("loaded", {})).items():
             if not isinstance(item, dict):
                 continue
@@ -1311,9 +1288,7 @@ class AgentHarness:
         messages: list[dict[str, Any]] = []
         for event in events:
             if event.type == "session.created":
-                messages.append(
-                    {"role": "user", "content": event.payload.get("goal", "")}
-                )
+                messages.append({"role": "user", "content": event.payload.get("goal", "")})
             elif event.type == "user.message.appended":
                 messages.append(
                     {
@@ -1351,9 +1326,7 @@ class AgentHarness:
                 messages.append(
                     {
                         "role": "tool",
-                        "tool_call_id": str(
-                            event.payload.get("tool_invocation_id", "")
-                        ),
+                        "tool_call_id": str(event.payload.get("tool_invocation_id", "")),
                         "content": json.dumps(
                             event.payload.get("result", {}),
                             sort_keys=True,
@@ -1435,9 +1408,7 @@ class AgentHarness:
         )
 
     @staticmethod
-    async def _validate_usage(
-        assignment: RuntimeAssignment, response: ModelResponse
-    ) -> None:
+    async def _validate_usage(assignment: RuntimeAssignment, response: ModelResponse) -> None:
         output_tokens = int(response.usage.get("output_tokens", 0))
         if output_tokens > assignment.budget.max_output_tokens:
             raise BudgetExceededError("provider output exceeded Runtime token budget")
@@ -1462,16 +1433,12 @@ class AgentHarness:
         usage: dict[str, int | float],
     ) -> None:
         if int(usage.get("output_tokens", 0)) > assignment.budget.max_output_tokens:
-            raise BudgetExceededError(
-                "provider cumulative output exceeded Runtime token budget"
-            )
+            raise BudgetExceededError("provider cumulative output exceeded Runtime token budget")
         if (
             assignment.budget.max_cost is not None
             and float(usage.get("cost", 0.0)) > assignment.budget.max_cost
         ):
-            raise BudgetExceededError(
-                "provider cumulative cost exceeded Runtime budget"
-            )
+            raise BudgetExceededError("provider cumulative cost exceeded Runtime budget")
 
     @staticmethod
     def _task_id(assignment: RuntimeAssignment) -> str:
