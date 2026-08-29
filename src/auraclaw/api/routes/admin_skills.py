@@ -902,6 +902,7 @@ def create_skill_admin_router(
         command_id: str = Header(alias="Idempotency-Key"),
         expected_revision: int = Header(alias="X-Expected-Revision", ge=1),
         reason_code: str = Header(alias="X-Reason-Code", min_length=1, max_length=128),
+        force: bool = Query(default=False),
     ) -> dict[str, Any]:
         return await _change_installation(
             management_service,
@@ -912,6 +913,7 @@ def create_skill_admin_router(
             command_id,
             expected_revision,
             reason_code,
+            force=force,
         )
 
     @router.post(
@@ -1080,6 +1082,8 @@ async def _change_installation(
     command_id: str,
     expected_revision: int,
     reason_code: str | None = None,
+    *,
+    force: bool = False,
 ) -> dict[str, Any]:
     if service is None:
         raise HTTPException(
@@ -1093,6 +1097,7 @@ async def _change_installation(
             publisher=publisher,
             name=name,
             operation=operation,
+            force=force,
             reason_code=reason_code,
             command_id=command_id,
             expected_revision=expected_revision,
@@ -1114,6 +1119,13 @@ def _installation_summary(
         "status": installation.status.value,
         "revision": installation.revision,
         "reason_code": installation.reason_code,
+        "uninstall_action": (
+            installation.uninstall_action.value
+            if installation.uninstall_action is not None
+            else None
+        ),
+        "uninstall_policy_version": installation.uninstall_policy_version,
+        "uninstall_policy_decision_id": installation.uninstall_policy_decision_id,
         "updated_by": installation.updated_by,
         "updated_at": installation.updated_at.isoformat(),
     }

@@ -107,6 +107,67 @@ class PostgresEventStore(LazyPool):
                     OR payload#>>'{activation,binding,package_digest}'=$2))"""
         return bool(await pool.fetchval(query, tenant_id, package_digest))
 
+    async def has_active_skill_reference(
+        self, tenant_id: str, publisher: str, name: str
+    ) -> bool:
+        pool = await self.pool()
+        if self.dialect == "mysql":
+            query = """SELECT EXISTS(
+                SELECT 1 FROM session_core.canonical_event a
+                WHERE a.tenant_id=$1 AND a.event_type='skill.activated'
+                  AND (
+                    (JSON_UNQUOTE(JSON_EXTRACT(
+                      a.payload, '$.activation.binding.publisher'))=$2
+                     AND COALESCE(
+                       JSON_UNQUOTE(JSON_EXTRACT(
+                         a.payload, '$.activation.binding.skill_name')),
+                       JSON_UNQUOTE(JSON_EXTRACT(
+                         a.payload, '$.activation.binding.name')))=$3)
+                    OR EXISTS(
+                      SELECT 1 FROM JSON_TABLE(
+                        COALESCE(JSON_EXTRACT(
+                          a.payload, '$.activation.binding.resolved_skills'),
+                          JSON_ARRAY()), '$[*]' COLUMNS(
+                            publisher text PATH '$.publisher',
+                            skill_name text PATH '$.skill_name',
+                            dependency_name text PATH '$.name')) AS dependency
+                      WHERE dependency.publisher=$2
+                        AND COALESCE(
+                          dependency.skill_name,dependency.dependency_name)=$3)
+                  )
+                  AND NOT EXISTS(
+                    SELECT 1 FROM session_core.canonical_event t
+                    WHERE t.tenant_id=a.tenant_id
+                      AND t.session_id=a.session_id AND t.run_id=a.run_id
+                      AND t.event_type IN
+                        ('run.completed','run.failed','run.cancelled'))
+            )"""
+        else:
+            query = """SELECT EXISTS(
+                SELECT 1 FROM session_core.canonical_event a
+                WHERE a.tenant_id=$1 AND a.event_type='skill.activated'
+                  AND (
+                    (a.payload#>>'{activation,binding,publisher}'=$2
+                     AND COALESCE(
+                       a.payload#>>'{activation,binding,skill_name}',
+                       a.payload#>>'{activation,binding,name}')=$3)
+                    OR EXISTS(
+                      SELECT 1 FROM jsonb_array_elements(COALESCE(
+                        a.payload#>'{activation,binding,resolved_skills}',
+                        '[]'::jsonb)) dependency
+                      WHERE dependency->>'publisher'=$2
+                        AND COALESCE(
+                          dependency->>'skill_name',dependency->>'name')=$3)
+                  )
+                  AND NOT EXISTS(
+                    SELECT 1 FROM session_core.canonical_event t
+                    WHERE t.tenant_id=a.tenant_id
+                      AND t.session_id=a.session_id AND t.run_id=a.run_id
+                      AND t.event_type IN
+                        ('run.completed','run.failed','run.cancelled'))
+            )"""
+        return bool(await pool.fetchval(query, tenant_id, publisher, name))
+
     async def load_root(
         self,
         tenant_id: str,

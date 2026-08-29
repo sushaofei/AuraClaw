@@ -202,6 +202,7 @@ class RemoteSkillPublicationClient:
                 publisher=command.publisher,
                 name=command.name,
                 operation=command.operation.value,
+                force=command.force,
                 reason_code=command.reason_code,
                 command_id=command.command_id,
                 expected_revision=command.expected_revision,

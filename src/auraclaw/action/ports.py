@@ -175,6 +175,15 @@ class SkillBindingReferenceReader(Protocol):
         correlation_id: str,
     ) -> bool: ...
 
+    async def has_active_skill_reference(
+        self,
+        *,
+        tenant_id: str,
+        publisher: str,
+        name: str,
+        correlation_id: str,
+    ) -> bool: ...
+
 
 class CredentialInvoker(Protocol):
     async def invoke(

@@ -1458,6 +1458,7 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
                     policy=policy,
                 )
         app.state.skill_rebuild_result = await skill_rebuilder.rebuild_all()
+        app.state.skill_installation_drained = await skill_management.reconcile_draining()
         app.state.skill_reliability_result = await skill_reliability.run_once()
         app.state.skill_admission_maintenance_result = await skill_admission_maintenance.run_once()
 
@@ -1523,6 +1524,19 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
             "skill-state",
             settings.mcp_reconcile_interval_seconds,
             rebuild_skill_state,
+        )
+    )
+
+    async def drain_skill_installations() -> int:
+        completed = await skill_management.reconcile_draining()
+        app.state.skill_installation_drained = completed
+        return completed
+
+    periodic_jobs.append(
+        (
+            "skill-installation-drain",
+            settings.mcp_reconcile_interval_seconds,
+            drain_skill_installations,
         )
     )
 

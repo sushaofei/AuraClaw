@@ -302,6 +302,19 @@ def test_source_and_installation_contracts_fail_closed() -> None:
             created_at=now,
             updated_at=now,
         )
+    with pytest.raises(ValidationError, match="uninstall policy evidence"):
+        SkillInstallationRecord(
+            installation_id="ski_draining",
+            tenant_id="tenant-a",
+            publisher="platform",
+            name="release.prepare",
+            status=SkillInstallationStatus.DRAINING,
+            reason_code="tenant_uninstalled",
+            created_by="admin",
+            updated_by="admin",
+            created_at=now,
+            updated_at=now,
+        )
     with pytest.raises(ValidationError, match="requires a reason"):
         SkillPublicationRecord(
             publication_id="skp_revoked",

@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
 from auraclaw.action.ports import ArtifactDeleter, SkillBindingReferenceReader
-from auraclaw.action.skill_lifecycle import SkillLifecycleStore, SkillRestoreCommit
+from auraclaw.action.skill_lifecycle import (
+    SkillInstallationCommit,
+    SkillLifecycleStore,
+    SkillRestoreCommit,
+)
 from auraclaw.action.skill_packages import SkillPackageRegistry
 from auraclaw.contracts.errors import (
     InvalidTransitionError,
@@ -111,26 +116,91 @@ class SkillManagementService:
         )
         if current is None:
             raise NotFoundError("Skill installation not found")
-        target = _installation_target(command.operation)
-        if current.status is target:
-            await self._projector.rebuild_tenant(command.tenant_id)
-            return current
-        _validate_installation_transition(current.status, command.operation)
+        target = _installation_target(command)
+        if current.status is not target:
+            _validate_installation_transition(current.status, command)
         now = datetime.now(UTC)
-        updated = await self._lifecycle.put_installation(
-            current.model_copy(
+        proposed = current
+        if current.status is not target:
+            uninstall_action = current.uninstall_action
+            uninstall_policy_version = current.uninstall_policy_version
+            uninstall_policy_decision_id = current.uninstall_policy_decision_id
+            if command.operation is SkillInstallationOperation.UNINSTALL:
+                uninstall_action = (
+                    SkillRevocationAction.CANCEL
+                    if command.force
+                    else SkillRevocationAction.CONTINUE
+                )
+                uninstall_policy_version = "skill-uninstall-v1"
+                uninstall_policy_decision_id = command.command_id
+            elif target is SkillInstallationStatus.ACTIVE:
+                uninstall_action = None
+                uninstall_policy_version = None
+                uninstall_policy_decision_id = None
+            proposed = current.model_copy(
                 update={
                     "status": target,
                     "revision": current.revision + 1,
                     "updated_by": command.actor_id,
                     "updated_at": now,
                     "reason_code": command.reason_code,
+                    "uninstall_action": uninstall_action,
+                    "uninstall_policy_version": uninstall_policy_version,
+                    "uninstall_policy_decision_id": uninstall_policy_decision_id,
                 }
-            ),
-            expected_revision=command.expected_revision,
+            )
+        updated = await self._lifecycle.commit_installation_change(
+            SkillInstallationCommit(
+                command_id=command.command_id,
+                request_digest=_installation_request_digest(command),
+                operation=command.operation.value,
+                force_uninstall=command.force,
+                actor_id=command.actor_id,
+                correlation_id=command.correlation_id,
+                causation_id=command.causation_id,
+                reason_code=command.reason_code,
+                expected_revision=command.expected_revision,
+                installation=proposed,
+                occurred_at=now,
+            )
         )
         await self._projector.rebuild_tenant(command.tenant_id)
         return updated
+
+    async def reconcile_draining(self) -> int:
+        if self._binding_references is None:
+            return 0
+        completed = 0
+        for tenant_id in await self._lifecycle.list_tenants():
+            for installation in await self._lifecycle.list_installations(tenant_id):
+                if installation.status is not SkillInstallationStatus.DRAINING:
+                    continue
+                correlation_id = f"skill-uninstall-drain:{installation.installation_id}"
+                if await self._binding_references.has_active_skill_reference(
+                    tenant_id=tenant_id,
+                    publisher=installation.publisher,
+                    name=installation.name,
+                    correlation_id=correlation_id,
+                ):
+                    continue
+                now = datetime.now(UTC)
+                try:
+                    await self._lifecycle.put_installation(
+                        installation.model_copy(
+                            update={
+                                "status": SkillInstallationStatus.UNINSTALLED,
+                                "revision": installation.revision + 1,
+                                "updated_by": "action-hands-skill-drainer",
+                                "updated_at": now,
+                            }
+                        ),
+                        expected_revision=installation.revision,
+                    )
+                except VersionConflictError:
+                    continue
+                await self._projector.rebuild_tenant(tenant_id)
+                completed += 1
+        return completed
 
     async def revoke_publication(
         self,
@@ -381,22 +451,35 @@ def _restore_activation_command_id(command_id: str) -> str:
     return f"skill-restore-activate:{digest}"
 
 
+def _installation_request_digest(command: ChangeSkillInstallationCommand) -> str:
+    encoded = json.dumps(
+        command.model_dump(mode="json"),
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+
+
 def _installation_target(
-    operation: SkillInstallationOperation,
+    command: ChangeSkillInstallationCommand,
 ) -> SkillInstallationStatus:
-    if operation in {
+    if command.operation in {
         SkillInstallationOperation.INSTALL,
         SkillInstallationOperation.ENABLE,
     }:
         return SkillInstallationStatus.ACTIVE
-    if operation is SkillInstallationOperation.DISABLE:
+    if command.operation is SkillInstallationOperation.DISABLE:
         return SkillInstallationStatus.DISABLED
-    return SkillInstallationStatus.UNINSTALLED
+    return (
+        SkillInstallationStatus.UNINSTALLED
+        if command.force
+        else SkillInstallationStatus.DRAINING
+    )
 
 
 def _validate_installation_transition(
     current: SkillInstallationStatus,
-    operation: SkillInstallationOperation,
+    command: ChangeSkillInstallationCommand,
 ) -> None:
     allowed = {
         SkillInstallationStatus.ACTIVE: {
@@ -407,11 +490,16 @@ def _validate_installation_transition(
             SkillInstallationOperation.ENABLE,
             SkillInstallationOperation.UNINSTALL,
         },
+        SkillInstallationStatus.DRAINING: {
+            SkillInstallationOperation.UNINSTALL,
+        },
         SkillInstallationStatus.UNINSTALLED: {
             SkillInstallationOperation.INSTALL,
         },
     }
-    if operation not in allowed[current]:
+    if command.operation not in allowed[current] or (
+        current is SkillInstallationStatus.DRAINING and not command.force
+    ):
         raise InvalidTransitionError(
-            f"Cannot {operation.value} a {current.value} Skill installation"
+            f"Cannot {command.operation.value} a {current.value} Skill installation"
         )

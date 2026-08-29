@@ -396,6 +396,14 @@ expected revision、correlation/causation；退役还必须包含 reason。`skil
 原状态，只更新选中来源和 revision。没有备用来源时才进入普通 `retired`，且来源重新出现不会自动
 恢复。Installation 仍是独立 tenant 抑制事实，多来源重新发现不能绕过 disabled/uninstalled。
 
+Installation uninstall 使用两种显式语义。默认命令事务化进入 `draining`，同时从 Catalog/Resolver 移除，
+但 `auraclaw.skills.binding-status` 对既有固定 binding 返回 `continue`。Action Hands drainer 通过 Session
+内部契约读取 Canonical Event：存在匹配主 binding 或 resolved dependency 且同一 Run 尚无
+`run.completed|run.failed|run.cancelled` 时保持 draining；全部终态后以 optimistic revision 收敛为
+`uninstalled`。多副本并发 finalize 只有一个成功，冲突副本安全跳过。force uninstall 则直接进入
+`uninstalled` 并持久化 `cancel`、policy version 和 decision id；Runtime 沿用安全撤销检查点取消活动
+assignment。普通 disable/uninstall 不改变 Publication，也不借此物理删除 Package。
+
 完整快照还在同一 fenced 事务内维护 Source inventory。首次缺失只记录
 `missing_complete_snapshots=1`；连续第二个、且 generation 严格递增的完整快照仍缺失时，才写入
 `skill_source_retirement_command` 并把 Publication 原子转为 `retired`。任一中间完整快照重新观察到

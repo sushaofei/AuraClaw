@@ -72,6 +72,7 @@ uv run auraclaw migrate up
 | `0035` | Skill admission keyset/保留清理的全局时间索引 |
 | `0036` | Skill Publication 撤销后的 `continue|pause|cancel` Runtime Policy 证据与查询索引 |
 | `0037` | Skill Source priority、Publication 多来源引用与 Source 管理命令审计账本 |
+| `0038` | Skill Installation draining/force 策略证据、drainer 索引与安装命令幂等账本 |
 
 PostgreSQL / Kingbase 序列未使用 `0017`；MySQL 方言的 `0017` 用于扩大 Task View 文本字段。
 不要为了填补编号而重命名已经发布的迁移。
