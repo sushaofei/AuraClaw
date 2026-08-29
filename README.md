@@ -430,6 +430,8 @@ Publisher/key 签名的固定 binding；永久 revoked Publisher 不可 resume�
 周期可靠性任务修复 Artifact binding 与 Catalog，并在 retention 到期后对未引用的 ready Skill Artifact
 执行带 Policy 和并发 fencing 的孤儿回收。MCP Skill Source 的周期发现使用 tenant/source 级持久租约；
 租约 fencing token 同时约束 Publication 事务与 Sync State，过期 Hands 副本不能提交迟到快照。
+对账按 Package 隔离下载、准入和发布失败：坏包只返回稳定 error code，其余包继续处理；含失败的轮次
+持久化为不完整快照，绝不据此判断来源消失或自动退役旧版本。
 管理员通过 `/v1/admin/skill-sources` 创建、调整优先级、禁用或软退役 MCP Source，并可显式触发单源
 同步。一个不可变 Publication 可保留多个来源引用；目录选择 enabled 且 available 的最高优先级来源，
 同优先级按 source id 稳定排序。单个来源消失或退役时先切换到可用备用来源，只有没有备用来源时才

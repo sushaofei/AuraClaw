@@ -138,10 +138,15 @@ class _Artifacts:
         return self.contents[artifact_ref.artifact_id]
 
 
-def _package(verifier: HmacSkillSignatureVerifier) -> SkillPackage:
+def _package(
+    verifier: HmacSkillSignatureVerifier,
+    *,
+    name: str = "release.prepare",
+    version: str = "1.4.0",
+) -> SkillPackage:
     unsigned = SkillManifest(
-        name="release.prepare",
-        version="1.4.0",
+        name=name,
+        version=version,
         description="Prepare an auditable release",
         publisher="platform",
         signature=f"hmac-sha256:{'0' * 64}",
@@ -157,6 +162,17 @@ def _package(verifier: HmacSkillSignatureVerifier) -> SkillPackage:
             "manifest.json": manifest.model_dump_json().encode(),
             **content_files,
         },
+    )
+
+
+def _resources(package: SkillPackage) -> tuple[tuple[str, str], ...]:
+    prefix = (
+        f"skill://{package.manifest.publisher}/"
+        f"{package.manifest.name}/{package.manifest.version}"
+    )
+    return (
+        (f"{prefix}/manifest", package.files["manifest.json"].decode()),
+        (f"{prefix}/SKILL.md", package.files["SKILL.md"].decode()),
     )
 
 
@@ -245,6 +261,75 @@ def test_skill_reconciler_downloads_signed_package_from_mcp_resources() -> None:
         assert sync_state.complete_snapshot
         assert sync_state.generation == 1
         assert sync_state.consecutive_failures == 0
+
+    asyncio.run(scenario())
+
+
+def test_skill_reconciler_isolates_bad_package_and_continues_snapshot() -> None:
+    async def scenario() -> None:
+        verifier = HmacSkillSignatureVerifier({"platform": _PUBLISHER_KEY})
+        bad = _package(verifier, name="release.bad")
+        bad = SkillPackage(
+            manifest=bad.manifest,
+            files={**bad.files, "SKILL.md": b"# Tampered\n"},
+        )
+        good = _package(verifier, name="release.good")
+        server = McpServerDefinition(
+            server_id="mixed-skill-server",
+            tenant_id="tenant-a",
+            title="Mixed Skill MCP",
+            endpoint="https://skills.example/mcp",
+            allowed_resource_schemes=("skill",),
+            enabled=True,
+            metadata={"skill_publisher_allowlist": ["platform"]},
+        )
+        artifacts = _Artifacts()
+        lifecycle = InMemorySkillLifecycleStore()
+        registry = SkillPackageRegistry(
+            artifacts=artifacts,
+            signature_verifier=verifier,
+        )
+        reconciler = SkillPackageReconciler(
+            store=_Store(server),
+            connectors={
+                server.server_id: _SkillMcpConnector((*_resources(bad), *_resources(good)))
+            },
+            lifecycle=lifecycle,
+            publication=SkillPublicationService(
+                registry=registry,
+                lifecycle=lifecycle,
+            ),
+            rebuilder=SkillStateRebuilder(
+                lifecycle=lifecycle,
+                artifacts=artifacts,
+                registry=registry,
+                catalog=CapabilityCatalog(InMemoryCapabilityCatalogStore()),
+            ),
+        )
+
+        result = await reconciler.reconcile_server(server)
+
+        assert result.published_count == 1
+        assert result.error == "package_failure"
+        assert len(result.package_failures) == 1
+        failure = result.package_failures[0]
+        assert (failure.publisher, failure.name, failure.version) == (
+            "platform",
+            "release.bad",
+            "1.4.0",
+        )
+        assert failure.error_code == "PolicyDeniedError"
+        assert await lifecycle.get_publication(
+            "tenant-a", "platform", "release.bad", "1.4.0"
+        ) is None
+        assert await lifecycle.get_publication(
+            "tenant-a", "platform", "release.good", "1.4.0"
+        ) is not None
+        source = next(iter(lifecycle._sources.values()))
+        state = await lifecycle.get_sync_state("tenant-a", source.source_id)
+        assert state is not None
+        assert not state.complete_snapshot
+        assert state.safe_error_code == "package_failure"
 
     asyncio.run(scenario())
 
