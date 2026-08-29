@@ -428,6 +428,10 @@ suspend 同时拒绝新发布和持久包恢复，resume 只恢复仍处于 acti
 周期可靠性任务修复 Artifact binding 与 Catalog，并在 retention 到期后对未引用的 ready Skill Artifact
 执行带 Policy 和并发 fencing 的孤儿回收。MCP Skill Source 的周期发现使用 tenant/source 级持久租约；
 租约 fencing token 同时约束 Publication 事务与 Sync State，过期 Hands 副本不能提交迟到快照。
+管理员通过 `/v1/admin/skill-sources` 创建、调整优先级、禁用或软退役 MCP Source，并可显式触发单源
+同步。一个不可变 Publication 可保留多个来源引用；目录选择 enabled 且 available 的最高优先级来源，
+同优先级按 source id 稳定排序。单个来源消失或退役时先切换到可用备用来源，只有没有备用来源时才
+普通退役 Publication；Installation 的 tenant 抑制状态不会因另一个来源重新发现而被覆盖。
 某版本只有在连续两个完整快照中缺失才自动转为 `retired`；任一完整快照重新观察到它都会清零缺失计数。
 `retired` 不再参与新发现，但保留不可变内容供既有固定 binding 读取，并与安全 `revoked` 明确区分。
 安全 revoke 必须选择 `continue|pause|cancel`（默认 cancel）并持久化 Policy 证据。Runtime 每轮/每步检查

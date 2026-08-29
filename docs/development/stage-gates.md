@@ -2074,6 +2074,34 @@ ready Skill Artifact 建立带 fencing 的物理回收流程；不把成功命�
 - [x] README、架构、公开 API、数据库参考、运维与阶段门禁同步。
 - [x] 本阶段作为一个 intentional commit 提交并 push，不包含 `.env`、Secret、缓存或无关改动。
 
+## 阶段 M14t：Skill Source 管理与多来源选择（Issue #56）
+
+状态：已完成。Source 从隐式 bootstrap 配置提升为可审计管理资源，同一版本可安全保留和切换多个来源。
+
+### 管理面与持久事实
+
+- [x] Admin 与 Action Hands 内部契约提供 Source 创建、读取、更新、显式同步和带 reason 的软退役。
+- [x] 所有配置写入包含 tenant、actor、command id、expected revision、correlation/causation，命令可跨副本幂等重放。
+- [x] Source priority、配置、Secret 引用和 desired state 持久化；metadata 继续拒绝 token/password 等敏感内容。
+- [x] 软退役保留 Source、命令审计和 Publication 引用，不提供破坏性物理删除入口。
+
+### 多来源与恢复语义
+
+- [x] `skill_publication_source` 保存同一不可变版本的多来源可用性，Publication `source_id` 表示当前选择。
+- [x] enabled/available 来源按 priority 降序、source id 升序确定性选择；优先级变化会事务化重选。
+- [x] 单源完整快照缺失或显式退役先切换备用来源；仅无备用来源时普通退役 Publication。
+- [x] 来源重现不自动恢复 retired Publication，且任何同步或重建都不能覆盖 tenant disabled/uninstalled 抑制。
+- [x] MCP 同步继续使用持久 lease/fencing；显式同步拒绝 disabled/retired 或未配置同步器的 Source。
+
+### 质量与交付
+
+- [x] 0037 正反迁移覆盖 priority、多来源引用、历史回填、约束、索引和 Source 命令账本。
+- [x] 单测覆盖命令幂等/冲突、revision、优先级切换、备用来源、最终退役、同步拒绝和 Admin API。
+- [x] 隔离 PostgreSQL 测试真实执行多来源写入、重选、退役回退及完整 migration roundtrip。
+- [x] 全量 Ruff、Mypy、unit、相关 integration 与 import-linter 通过。
+- [x] README、架构、公开 API、数据库参考、运维与阶段门禁同步。
+- [x] 本阶段作为一个 intentional commit 提交并 push，不包含 `.env`、Secret、缓存或无关改动。
+
 ## 阶段 Product Activity：产品级对话执行轨迹（AuraX Issue #2）
 
 状态：代码与定向验证完成；完整基础设施集成门禁受现有 Kafka/MySQL/PostgreSQL/Artifact 环境失败阻塞。

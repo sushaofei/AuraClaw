@@ -783,6 +783,21 @@ publisher/name/version/digest。`continue` 只保留已固定 digest 的 `skill:
 可发现性；`pause` 保存 checkpoint 并挂起 assignment；`cancel` 写 `skill.revocation.applied`、
 `skill.cancelled` 与 `run.cancelled` Canonical Event 后结束 assignment。状态查询会返回完整撤销策略证据。
 
+Skill Source 管理入口只接受 MCP Source，均按当前可信 tenant 隔离：
+
+- `POST /v1/admin/skill-sources`：创建 Source，要求 `Idempotency-Key`；
+- `GET /v1/admin/skill-sources` 与 `GET /v1/admin/skill-sources/{source_id}`：列举或读取；
+- `PATCH /v1/admin/skill-sources/{source_id}`：更新状态、allowlist、credential ref、metadata 或 priority，
+  要求 `Idempotency-Key` 与 `X-Expected-Revision`；
+- `POST /v1/admin/skill-sources/{source_id}:sync`：触发已启用 Source 的受租约保护同步；
+- `DELETE /v1/admin/skill-sources/{source_id}`：软退役，要求幂等键、expected revision 与
+  `X-Reason-Code`，不物理删除审计和来源引用。
+
+`credential_ref` 只能保存 Secret 引用，`config_metadata` 禁止 token/password 等敏感字段。一个版本可由
+多个 Source 共同提供；服务选择最高 priority 的 enabled/available 来源，并在单源下架时切换备用来源。
+客户端不得把 Source 列表当作 Publication 或 Installation 状态，也不得用重建/同步绕过 tenant 的
+disabled/uninstalled 抑制事实。
+
 外部 Publisher 可先用 `auraclaw skills sign <directory> --publisher <name> --key-id <id>` 离线签名，
 private key 只从 `AURACLAW_SKILL_SIGNING_KEY`（或指定 Secret 环境变量）读取。命令输出的 Ed25519 公钥
 需通过 Publisher key rotation API 登记；后续 validate/test/publish 用显式公钥本地验签，而服务端仍以

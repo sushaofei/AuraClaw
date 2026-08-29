@@ -156,6 +156,7 @@ multipart finalize/gc 是否排空；Hands 本地 workspace 是每个容器的�
 | Session | stop/kill 一个副本 | ingress 继续服务；command id 与 expected version 防重复写 |
 | Orchestrator/Runtime | kill 持有 claim/lease 的副本 | TTL 后重新 claim；旧 fencing token 写入失败 |
 | Model/Hands | stop owner 副本或返回 5xx | 有界重试；idempotency key 不变；不绕过 owner |
+| Skill Source | 中断一个 MCP Source、让两个 Source 同时提供同版本 | 连续完整快照阈值生效；切换最高优先级可用来源；Installation 抑制不被覆盖 |
 | Policy/Credential | stop、Vault 断连或 deny | fail closed；不执行 tool；不泄露 credential |
 | Artifact/SeaweedFS | S3 断连、multipart 中断 | metadata 保持 pending/failed；恢复后 finalize/gc 可重入 |
 | Kafka/Streaming | broker 断连、消费者暂停 | 生产端背压；SSE 可 replay；Canonical Result 不依赖 SSE |

@@ -6,10 +6,28 @@ import socket
 import subprocess
 import tempfile
 import time
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import asyncpg
 import pytest
+
+from auraclaw.action.skill_lifecycle import SkillPublishCommit
+from auraclaw.action.skill_sources import SkillSourceService
+from auraclaw.contracts.skills import (
+    ConfigureSkillSourceCommand,
+    RetireSkillSourceCommand,
+    SkillManifest,
+    SkillPackageRecord,
+    SkillPublicationRecord,
+    SkillPublicationStatus,
+    SkillSourceDesiredState,
+    SkillSourceKind,
+)
+from auraclaw.contracts.tools import ArtifactRef
+from auraclaw.infrastructure.persistence.postgres_skill_lifecycle import (
+    PostgresSkillLifecycleStore,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 UP = "\n".join(
@@ -28,10 +46,12 @@ UP = "\n".join(
         (ROOT / "migrations/0034_skill_admission_operations.sql").read_text(),
         (ROOT / "migrations/0035_skill_admission_retention.sql").read_text(),
         (ROOT / "migrations/0036_skill_binding_revocation_policy.sql").read_text(),
+        (ROOT / "migrations/0037_skill_publication_sources.sql").read_text(),
     )
 )
 DOWN = "\n".join(
     (
+        (ROOT / "migrations/0037_skill_publication_sources.down.sql").read_text(),
         (ROOT / "migrations/0036_skill_binding_revocation_policy.down.sql").read_text(),
         (ROOT / "migrations/0035_skill_admission_retention.down.sql").read_text(),
         (ROOT / "migrations/0034_skill_admission_operations.down.sql").read_text(),
@@ -84,6 +104,8 @@ def test_skill_lifecycle_migration_roundtrip_in_isolated_postgres() -> None:
                 "skill_source_lease",
                 "skill_source_inventory",
                 "skill_source_retirement_command",
+                "skill_publication_source",
+                "skill_source_command",
                 "skill_publication_restore_command",
                 "skill_admission_audit",
                 "skill_command",
@@ -125,6 +147,144 @@ def test_skill_lifecycle_migration_roundtrip_in_isolated_postgres() -> None:
                 WHERE table_schema='hands' AND table_name='skill_admission_audit'
                   AND column_name='content_policy_version'"""
             )
+            assert await connection.fetchval(
+                """SELECT is_nullable = 'NO' FROM information_schema.columns
+                WHERE table_schema='hands' AND table_name='skill_source'
+                  AND column_name='priority'"""
+            )
+            lifecycle = PostgresSkillLifecycleStore(database_url)
+            sources = SkillSourceService(lifecycle)
+            now = datetime.now(UTC)
+
+            def source_command(
+                source_id: str,
+                command_id: str,
+                priority: int,
+                expected_revision: int = 0,
+            ) -> ConfigureSkillSourceCommand:
+                return ConfigureSkillSourceCommand(
+                    tenant_id="tenant-source-roundtrip",
+                    actor_id="migration-test",
+                    source_id=source_id,
+                    kind=SkillSourceKind.MCP,
+                    desired_state=SkillSourceDesiredState.ENABLED,
+                    publisher_allowlist=("acme",),
+                    credential_ref=f"vault/migration/{source_id}",
+                    config_metadata={"server_id": source_id},
+                    priority=priority,
+                    command_id=command_id,
+                    expected_revision=expected_revision,
+                    correlation_id="migration-source-test",
+                    causation_id=command_id,
+                )
+
+            try:
+                await sources.configure(
+                    source_command("sks_roundtrip_low", "source-low", 0)
+                )
+                await sources.configure(
+                    source_command("sks_roundtrip_high", "source-high", 10)
+                )
+                package = SkillPackageRecord(
+                    tenant_id="tenant-source-roundtrip",
+                    manifest=SkillManifest(
+                        name="release.prepare",
+                        version="1.0.0",
+                        description="Prepare a release",
+                        publisher="acme",
+                        signature="hmac-sha256:test",
+                    ),
+                    package_digest=f"sha256:{'a' * 64}",
+                    artifact_ref=ArtifactRef(
+                        artifact_id="art-roundtrip-source",
+                        version=1,
+                        content_hash="a" * 64,
+                        media_type="application/vnd.auraclaw.skill-package+json",
+                        size=128,
+                    ),
+                    retention_until=now + timedelta(days=90),
+                    retention_updated_by="migration-test",
+                    retention_updated_at=now,
+                    created_at=now,
+                )
+
+                async def publish_from(
+                    source_id: str, command_id: str, expected_revision: int
+                ) -> SkillPublicationRecord:
+                    publication = SkillPublicationRecord(
+                        publication_id="skp_roundtrip_source",
+                        tenant_id=package.tenant_id,
+                        publisher="acme",
+                        name="release.prepare",
+                        version="1.0.0",
+                        package_digest=package.package_digest,
+                        source_id=source_id,
+                        status=SkillPublicationStatus.ACTIVE,
+                        revision=max(1, expected_revision),
+                        created_by="migration-test",
+                        updated_by="migration-test",
+                        created_at=now,
+                        updated_at=now,
+                    )
+                    result = await lifecycle.commit_publish(
+                        SkillPublishCommit(
+                            command_id=command_id,
+                            request_digest=(
+                                f"sha256:{command_id.encode().hex().ljust(64, '0')[:64]}"
+                            ),
+                            actor_id="migration-test",
+                            source_id=source_id,
+                            correlation_id="migration-source-test",
+                            causation_id=command_id,
+                            expected_publication_revision=expected_revision,
+                            package=package,
+                            publication=publication,
+                            installation=None,
+                            occurred_at=now,
+                        )
+                    )
+                    return result.publication
+
+                assert (
+                    await publish_from("sks_roundtrip_low", "publish-low", 0)
+                ).source_id == "sks_roundtrip_low"
+                selected = await publish_from(
+                    "sks_roundtrip_high", "publish-high", 1
+                )
+                assert selected.source_id == "sks_roundtrip_high"
+                assert selected.revision == 2
+
+                await sources.configure(
+                    source_command(
+                        "sks_roundtrip_low", "source-low-priority", 20, 1
+                    )
+                )
+                reprioritized = await lifecycle.get_publication(
+                    package.tenant_id, "acme", "release.prepare", "1.0.0"
+                )
+                assert reprioritized is not None
+                assert reprioritized.source_id == "sks_roundtrip_low"
+
+                await sources.retire(
+                    RetireSkillSourceCommand(
+                        tenant_id=package.tenant_id,
+                        actor_id="migration-test",
+                        source_id="sks_roundtrip_low",
+                        reason_code="source_decommissioned",
+                        command_id="source-low-retire",
+                        expected_revision=2,
+                        correlation_id="migration-source-test",
+                        causation_id="source-low-retire",
+                    )
+                )
+                fallback = await lifecycle.get_publication(
+                    package.tenant_id, "acme", "release.prepare", "1.0.0"
+                )
+                assert fallback is not None
+                assert fallback.source_id == "sks_roundtrip_high"
+                assert fallback.status is SkillPublicationStatus.ACTIVE
+            finally:
+                await lifecycle.close()
             await connection.execute(DOWN)
             for relation in (
                 "skill_package",
@@ -138,6 +298,8 @@ def test_skill_lifecycle_migration_roundtrip_in_isolated_postgres() -> None:
                 "skill_source_lease",
                 "skill_source_inventory",
                 "skill_source_retirement_command",
+                "skill_publication_source",
+                "skill_source_command",
                 "skill_publication_restore_command",
                 "skill_admission_audit",
                 "skill_command",

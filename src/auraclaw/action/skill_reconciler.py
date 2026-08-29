@@ -73,6 +73,26 @@ class SkillPackageReconciler:
         ]
         return sum(result.published_count for result in results)
 
+    async def reconcile_source(
+        self, tenant_id: str, source_id: str
+    ) -> SkillReconcileResult:
+        source = await self._lifecycle.get_source(tenant_id, source_id)
+        if source is None or source.kind is not SkillSourceKind.MCP:
+            return SkillReconcileResult(
+                server_id="", published_count=0, error="source_not_found"
+            )
+        server_id = source.config_metadata.get("server_id")
+        if not isinstance(server_id, str) or not server_id:
+            return SkillReconcileResult(
+                server_id="", published_count=0, error="source_config_invalid"
+            )
+        server = await self._store.get_server(server_id)
+        if server is None or (server.tenant_id or "platform") != tenant_id:
+            return SkillReconcileResult(
+                server_id=server_id, published_count=0, error="server_not_found"
+            )
+        return await self.reconcile_server(server)
+
     async def reconcile_server(
         self,
         server: McpServerDefinition,
