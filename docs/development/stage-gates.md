@@ -1460,18 +1460,21 @@ Mypy、10 条 import-linter contract 和全量 Pytest 通过；MySQL、SeaweedFS
 
 ## 主存储 KingBase 迁移（Issue #53）
 
-状态：P1 已完成；P2 等待可用的 KingBase 目标配置与权限后验收。
+状态：已完成；真实 KingBase P2 已验收。
 
 ### 范围
 
 - 将主存储从 MySQL 切到 KingBase V9（PostgreSQL 兼容模式）。
 - 沿用既有 Domain ports + `LazyPool` + PostgreSQL SQL 源方言；`kingbase` 仅为配置别名。
-- 不引入 SQLAlchemy/Alembic；不重命名 `Postgres*` 类；不迁移 `MYSQL_DB_*` 外部只读源。
+- 不引入 SQLAlchemy/Alembic；不重命名 `Postgres*` 类。
+- 测试与生产环境不再保留 MySQL 主库或外部只读源配置；MySQL 适配代码仅保留为历史兼容路径。
 
 ### 配置与抽象
 
 - [x] `AURACLAW_STORAGE_BACKEND=kingbase` 解析为 postgres 方言，`storage_label=kingbase`。
-- [x] `.env.test` / `.env.prod` 内 `KINGBASE_*` → `DB_*` 映射（backend=kingbase 时覆盖）。
+- [x] gitignored `.host.env` 作为 KingBase 主机凭证源；同步脚本原子更新 `.env.test` /
+  `.env.prod` 的 `DB_*` 与 URL 编码后的统一 asyncpg DSN。
+- [x] `.env.test` / `.env.prod` 已清除 `MYSQL_*`、`*_MYSQL_*` 与分角色旧 DSN，权限为 `0600`。
 - [x] `kingbase://` URL 规范化为 `postgresql+asyncpg://`；`detect_dialect` 识别 KingBase。
 - [x] Domain / Application 仍只依赖 ports；切换仅改配置。
 - [x] 本地开发 `.env.dev` / `.env.dev.example` 默认 Kafka=`localhost:9092`、
@@ -1479,22 +1482,25 @@ Mypy、10 条 import-linter contract 和全量 Pytest 通过；MySQL、SeaweedFS
 
 ### 连通与迁移（P2）
 
-- [ ] 真实 KingBase `asyncpg` 连通。
-- [ ] `migrations/` up 到最新；advisory lock / jsonb / ON CONFLICT / RETURNING / SKIP LOCKED。
-- [ ] Event / Outbox / Control claim / Projection 冒烟。
-- [ ] `deploy/postgres/roles.sql` 在 KingBase 上验证或记录差异补丁。
-
-当前工作区的受保护 `.env.test` / `.env.prod` 仍配置为 MySQL，且没有独立
-`.kingbase.env`，因此不得用本地配置冒充真实 KingBase P2 验收。获得目标 DSN 与建
-schema / 建表权限后，需重新执行 migration 与核心 Store 冒烟并记录非敏感证据。
+- [x] 真实 KingBase `asyncpg` 连通，目标为 `.host.env` 管理的 V9 实例。
+- [x] `migrations/` 由 0021 升级至 0041；advisory lock / jsonb / ON CONFLICT / RETURNING /
+  SKIP LOCKED / timestamptz 冒烟通过。
+- [x] Event / Outbox / Control claim / Projection 核心路径在真实 KingBase 上执行；M4
+  Collaboration 集成测试通过。在线 Orchestrator/Projection 会抢先推进测试事件，精确计数测试
+  不作为停服前提。
+- [x] 当前账号具备建 schema 权限；不具备 CREATEROLE，`deploy/postgres/roles.sql` 的可选
+  最小权限角色初始化需由 KingBase DBA 执行，已记录为运维边界。
 
 ### 文档与交付
 
 - [x] README 主存储章节、Issue #53 方案。
 - [x] Issue #54：本地 PostgreSQL/Kafka 默认、统一应用 DSN、清理废弃 Model Skill MySQL 源配置；
   intentional commit（不含 `.env.*` / `.postgresql.local.env` Secret）。
-- [ ] Issue #53 P2（真实 KingBase 连通与迁移冒烟）完成后同步关闭。
-- [ ] 关联 Issue #53 的进度同步。
+- [x] Compose test/prod 默认 KingBase、`/app/migrations` 与目标 0041；Secret 物化及预检通过。
+- [x] Ruff、Mypy、Unit、import-linter、真实 KingBase migration 与兼容性冒烟通过。
+- [x] Issue #53 P2 验收证据已同步并关闭。
+- [x] 本阶段作为一个 intentional commit 提交并 push，不包含 `.host.env`、`.env.test`、
+  `.env.prod`、Secret、缓存或用户已有的 `.vscode/launch.json` 修改。
 
 ## 阶段 M13：Role-aware Agent Runtime（Issue #55）
 

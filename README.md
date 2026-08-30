@@ -222,12 +222,13 @@ PostgreSQL 或 Kafka 运行在 Docker Host，请把相应 host 配置为 `host.d
 
 ```bash
 docker network create auraclaw-platform # 已存在时跳过
+uv run python scripts/sync_kingbase_env.py
 uv run python scripts/materialize_compose_secrets.py \
   --env-file .env.prod --output-dir .runtime/compose-secrets
 uv run python scripts/compose_preflight.py --env-file .env.prod
 docker compose --env-file .env.prod -f compose.prod.yml \
   --profile migrate run --rm migrate migrate up \
-  --target 0016 --directory /app/migrations
+  --target 0041 --directory /app/migrations
 docker compose --env-file .env.prod -f compose.prod.yml up -d --wait
 ```
 
@@ -326,10 +327,11 @@ Event 回写，并通过 Task/Result Query 的 `delivery_status`、`delivery_id`
 `AURACLAW_DB_DIALECT=postgres` 且 URL scheme 为 postgresql）。密码中的 `#`、`,` 由
 `Settings.resolved_database_url` 自动 URL 编码。
 
-**KingBase（PostgreSQL 兼容模式）**：设 `AURACLAW_STORAGE_BACKEND=kingbase`，在
-`.env.test` / `.env.prod` 的 Database 段填写 `DB_*` 与 `AURACLAW_DATABASE_URL`；
-方言与连接池复用 PostgreSQL / `asyncpg` 路径，Domain ports 与 Store 代码无需改动。
-可选：同文件内使用 `KINGBASE_*` 别名，启动时会映射到 `DB_*`。
+**KingBase（PostgreSQL 兼容模式）**：测试与生产环境固定设置
+`AURACLAW_STORAGE_BACKEND=kingbase`。数据库主机凭证只维护在 gitignored `.host.env`
+的 `KINGBASE_HOST/PORT/USER/PWD`；运行 `scripts/sync_kingbase_env.py` 会原子更新
+`.env.test` / `.env.prod` 的 `DB_*` 与 URL 编码后的统一 asyncpg DSN，并清除遗留 MySQL
+环境变量。方言与连接池复用 PostgreSQL / `asyncpg`，Domain ports 与 Store 代码无需改动。
 
 **本地 PostgreSQL**：开发默认可用 `AURACLAW_STORAGE_BACKEND=postgres`。启动时从
 `.postgresql.local.env`（或 `.postgresql.env` / `AURACLAW_POSTGRESQL_ENV_FILE`）读取
