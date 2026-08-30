@@ -165,6 +165,7 @@ class McpServerRevisionRecord(ContractModel):
 
 class McpServerRuntimeRecord(ContractModel):
     server_id: str
+    instance_id: str = Field(default="legacy", min_length=1, max_length=256)
     loaded_revision: int | None = None
     observed_state: McpObservedState = McpObservedState.PENDING
     last_test_at: datetime | None = None
@@ -186,6 +187,7 @@ class McpServerRecord(ContractModel):
     latest_config: McpServerConfig | None = None
     active_config: McpServerConfig | None = None
     runtime: McpServerRuntimeRecord | None = None
+    runtimes: tuple[McpServerRuntimeRecord, ...] = ()
 
 
 class McpServerOperationRecord(ContractModel):

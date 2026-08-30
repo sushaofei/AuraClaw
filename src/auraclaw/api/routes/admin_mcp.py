@@ -48,6 +48,10 @@ class McpServerToolCatalog(Protocol):
         self, *, tenant_id: str, server_id: str
     ) -> tuple[CapabilityDescriptor, ...]: ...
 
+    async def publication_status(
+        self, *, tenant_id: str, server_id: str
+    ) -> dict[str, object] | None: ...
+
 
 def create_mcp_admin_router(
     registry: McpServerRegistryService,
@@ -203,7 +207,9 @@ def create_mcp_admin_router(
     async def list_servers(identity: Identity) -> dict[str, Any]:
         servers = await registry.list_servers(tenant_id=identity.tenant_id)
         return {
-            "servers": [item.model_dump(mode="json") for item in servers],
+            "servers": [
+                await _server_payload(item, identity.tenant_id) for item in servers
+            ],
         }
 
     @router.get("/mcp-servers/{server_id}")
@@ -213,7 +219,18 @@ def create_mcp_admin_router(
             server_id=server_id,
             actor_id=identity.actor.id,
         )
-        return record.model_dump(mode="json")
+        return await _server_payload(record, identity.tenant_id)
+
+    async def _server_payload(record: Any, tenant_id: str) -> dict[str, Any]:
+        payload = dict(record.model_dump(mode="json"))
+        payload["catalog_publication"] = (
+            None
+            if catalog is None
+            else await catalog.publication_status(
+                tenant_id=tenant_id, server_id=str(record.server_id)
+            )
+        )
+        return payload
 
     @router.get("/mcp-servers/{server_id}/tools")
     async def list_server_tools(server_id: str, identity: Identity) -> dict[str, Any]:

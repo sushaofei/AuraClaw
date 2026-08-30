@@ -26,6 +26,10 @@ DATABASE_URL = asyncpg_url(SETTINGS.resolved_database_url) if SETTINGS.postgres_
 ROOT = Path(__file__).resolve().parents[2]
 OWNER_MIGRATION = (ROOT / "migrations/0009_s3_owner_boundaries.sql").read_text()
 MIGRATION = (ROOT / "migrations/0015_m9_capability_catalog.sql").read_text()
+REGISTRY_MIGRATION = (ROOT / "migrations/0020_mcp_server_registry.sql").read_text()
+CONSISTENCY_MIGRATION = (
+    ROOT / "migrations/0041_capability_catalog_consistency.sql"
+).read_text()
 pytestmark = pytest.mark.skipif(DATABASE_URL is None, reason="PostgreSQL test URL not configured")
 
 
@@ -35,6 +39,8 @@ def test_postgres_capability_catalog_is_shared_and_tenant_scoped() -> None:
         connection = await asyncpg.connect(DATABASE_URL)
         await connection.execute(OWNER_MIGRATION)
         await connection.execute(MIGRATION)
+        await connection.execute(REGISTRY_MIGRATION)
+        await connection.execute(CONSISTENCY_MIGRATION)
         suffix = uuid4().hex
         tenant_id = f"tenant-capability-{suffix}"
         server_id = f"server-{suffix}"
@@ -97,6 +103,12 @@ def test_postgres_capability_catalog_is_shared_and_tenant_scoped() -> None:
                     query="release docs",
                 )
             ] == [capability_id]
+            assert await store_b.get_active_generation(server_id) == 1
+            loaded = await catalog_b.get(
+                tenant_id=tenant_id, capability_id=capability_id
+            )
+            assert loaded is not None
+            assert loaded.metadata["catalog_generation"] == 1
             assert await catalog_b.search(
                 tenant_id=f"other-{suffix}",
                 query="release",

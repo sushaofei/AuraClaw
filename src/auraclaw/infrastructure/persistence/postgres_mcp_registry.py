@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from auraclaw.action.mcp_registry import McpServerRegistryStore
+from auraclaw.action.mcp_registry import McpServerRegistryStore, _aggregate_runtime
 from auraclaw.contracts.errors import NotFoundError, VersionConflictError
 from auraclaw.contracts.mcp_registry import (
     McpActiveSnapshotEntry,
@@ -141,14 +141,6 @@ class PostgresMcpServerRegistryStore(LazyPool, McpServerRegistryStore):
                     revision.created_by,
                     revision.created_at,
                 )
-                await connection.execute(
-                    """INSERT INTO hands.mcp_server_runtime
-                    (server_id,observed_state,updated_at)
-                    VALUES ($1,'pending',$2)
-                    ON CONFLICT (server_id) DO NOTHING""",
-                    record.server_id,
-                    record.updated_at,
-                )
                 await _upsert_operation(connection, operation)
 
     async def set_desired_state(
@@ -197,10 +189,10 @@ class PostgresMcpServerRegistryStore(LazyPool, McpServerRegistryStore):
         pool = await self.pool()
         await pool.execute(
             """INSERT INTO hands.mcp_server_runtime
-            (server_id,loaded_revision,observed_state,last_test_at,last_sync_at,
+            (server_id,instance_id,loaded_revision,observed_state,last_test_at,last_sync_at,
              consecutive_failures,safe_error_code,updated_at)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-            ON CONFLICT (server_id) DO UPDATE SET
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+            ON CONFLICT (server_id,instance_id) DO UPDATE SET
               loaded_revision=EXCLUDED.loaded_revision,
               observed_state=EXCLUDED.observed_state,
               last_test_at=EXCLUDED.last_test_at,
@@ -209,6 +201,7 @@ class PostgresMcpServerRegistryStore(LazyPool, McpServerRegistryStore):
               safe_error_code=EXCLUDED.safe_error_code,
               updated_at=EXCLUDED.updated_at""",
             runtime.server_id,
+            runtime.instance_id,
             runtime.loaded_revision,
             runtime.observed_state.value,
             runtime.last_test_at,
@@ -222,12 +215,23 @@ class PostgresMcpServerRegistryStore(LazyPool, McpServerRegistryStore):
         pool = await self.pool()
         rows = await pool.fetch(
             """SELECT s.server_id, s.tenant_id, s.active_revision, s.desired_state,
-                      r.config_json, rt.observed_state
+                      r.config_json,
+                      COALESCE(
+                        (array_agg(rt.observed_state ORDER BY
+                          CASE rt.observed_state
+                            WHEN 'active' THEN 0 WHEN 'degraded' THEN 1
+                            WHEN 'loading' THEN 2 WHEN 'pending' THEN 3
+                            WHEN 'unavailable' THEN 4 WHEN 'quarantined' THEN 5
+                            ELSE 6 END,
+                          rt.updated_at DESC))[1],
+                        'pending'
+                      ) AS observed_state
             FROM hands.mcp_server AS s
             JOIN hands.mcp_server_revision AS r
               ON r.server_id=s.server_id AND r.revision=s.active_revision
             LEFT JOIN hands.mcp_server_runtime AS rt ON rt.server_id=s.server_id
             WHERE s.desired_state='enabled' AND s.active_revision IS NOT NULL
+            GROUP BY s.server_id,s.tenant_id,s.active_revision,s.desired_state,r.config_json
             ORDER BY s.server_id"""
         )
         return tuple(
@@ -276,10 +280,12 @@ class PostgresMcpServerRegistryStore(LazyPool, McpServerRegistryStore):
             else await self.get_revision(server_id, int(active_revision))
         )
         pool = await self.pool()
-        runtime_row = await pool.fetchrow(
-            "SELECT * FROM hands.mcp_server_runtime WHERE server_id=$1",
+        runtime_rows = await pool.fetch(
+            """SELECT * FROM hands.mcp_server_runtime
+            WHERE server_id=$1 ORDER BY instance_id""",
             server_id,
         )
+        runtimes = tuple(_runtime(dict(item)) for item in runtime_rows)
         return McpServerRecord(
             server_id=server_id,
             tenant_id=row["tenant_id"],
@@ -291,7 +297,8 @@ class PostgresMcpServerRegistryStore(LazyPool, McpServerRegistryStore):
             updated_at=row["updated_at"],
             latest_config=None if latest is None else latest.config,
             active_config=None if active is None else active.config,
-            runtime=None if runtime_row is None else _runtime(dict(runtime_row)),
+            runtime=_aggregate_runtime(runtimes),
+            runtimes=runtimes,
         )
 
 
@@ -338,6 +345,7 @@ def _revision(row: dict[str, Any]) -> McpServerRevisionRecord:
 def _runtime(row: dict[str, Any]) -> McpServerRuntimeRecord:
     return McpServerRuntimeRecord(
         server_id=str(row["server_id"]),
+        instance_id=str(row.get("instance_id") or "legacy"),
         loaded_revision=(
             None if row["loaded_revision"] is None else int(row["loaded_revision"])
         ),

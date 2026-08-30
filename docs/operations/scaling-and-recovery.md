@@ -40,10 +40,12 @@ registration lease 内仍活跃时，新进程注册会 fail closed。因此显�
 
 ## 生产配置门禁
 
-1. 依次应用 PostgreSQL `0010`～`0040`（MySQL 应用至 `0022`）expand migration。`0040` / MySQL
+1. 依次应用 PostgreSQL `0010`～`0041`（MySQL 应用至 `0022`）expand migration。`0040` / MySQL
    `0022` 增加 registration 与 execution claim 字段和索引；先迁移 Control 数据库，再滚动升级
    Orchestrator，最后升级 Agent Runtime。可选执行 `deploy/postgres/roles.sql` 做硬化，
    当前部署不按服务注入分角色 DSN。
+   `0041` 将 MCP observed health 扩为实例级主键，并加入 Catalog generation；必须在滚动 Action Hands
+   前应用。升级后观察每个 Server 至少一个 active instance、active generation 单调增长和 stale 告警。
 2. 各服务共享统一 `AURACLAW_DATABASE_URL`（Compose `database_url` secret）；migration 使用
    独立的 `AURACLAW_MIGRATION_DATABASE_URL`。
 3. 所有 Control、Session 与 Hands 副本必须使用相同的 `AURACLAW_LEASE_SIGNING_KEY`，并通过平台
@@ -66,3 +68,7 @@ hostname）或注入唯一实例 UID。停止全部旧 Runtime，等待 30 秒�
 `running` execution claim 后，才可执行 `0040_runtime_execution_claims.down.sql`（MySQL 对应
 `0022...down.sql`）；否则旧版本可能把运行任务按 5 秒规则重复领取。生产数据库禁止在未备份、未排空
 或仍有新版本进程时执行 down migration。旧版固定 Runtime ID 只能以单副本运行，直至重新升级。
+
+回滚 Action Hands 前先停止 Catalog reconcile，确认没有 generation 切换事务，并将每个 Server 排空到
+单个 Hands 实例；随后才可执行 `0041_capability_catalog_consistency.down.sql`。down migration 会折叠
+实例健康行并移除 generation 字段，不删除当前 active Capability 行。

@@ -94,7 +94,7 @@ class InMemoryMcpServerRegistryStore:
     )
     _operations: dict[str, McpServerOperationRecord] = field(default_factory=dict)
     _operations_by_command: dict[tuple[str, str], str] = field(default_factory=dict)
-    _runtime: dict[str, McpServerRuntimeRecord] = field(default_factory=dict)
+    _runtime: dict[tuple[str, str], McpServerRuntimeRecord] = field(default_factory=dict)
 
     async def get_server(self, server_id: str) -> McpServerRecord | None:
         record = self._servers.get(server_id)
@@ -147,12 +147,6 @@ class InMemoryMcpServerRegistryStore:
         self._servers[record.server_id] = record
         self._revisions[(revision.server_id, revision.revision)] = revision
         self._save_operation(operation)
-        if record.server_id not in self._runtime:
-            self._runtime[record.server_id] = McpServerRuntimeRecord(
-                server_id=record.server_id,
-                observed_state=McpObservedState.PENDING,
-                updated_at=record.updated_at,
-            )
 
     async def set_desired_state(
         self,
@@ -187,7 +181,7 @@ class InMemoryMcpServerRegistryStore:
         return operation
 
     async def update_runtime(self, runtime: McpServerRuntimeRecord) -> None:
-        self._runtime[runtime.server_id] = runtime
+        self._runtime[(runtime.server_id, runtime.instance_id)] = runtime
 
     async def list_active_snapshot(self) -> tuple[McpActiveSnapshotEntry, ...]:
         entries: list[McpActiveSnapshotEntry] = []
@@ -198,7 +192,10 @@ class InMemoryMcpServerRegistryStore:
             ):
                 continue
             revision = self._revisions[(record.server_id, record.active_revision)]
-            runtime = self._runtime.get(record.server_id)
+            runtimes = tuple(
+                value for key, value in self._runtime.items() if key[0] == record.server_id
+            )
+            runtime = _aggregate_runtime(runtimes)
             entries.append(
                 McpActiveSnapshotEntry(
                     server_id=record.server_id,
@@ -219,13 +216,14 @@ class InMemoryMcpServerRegistryStore:
         if server_id not in self._servers:
             raise NotFoundError("MCP server was not found")
         del self._servers[server_id]
-        self._runtime.pop(server_id, None)
-        for key in [
+        for runtime_key in [key for key in self._runtime if key[0] == server_id]:
+            self._runtime.pop(runtime_key, None)
+        for revision_key in [
             revision_key
             for revision_key in self._revisions
             if revision_key[0] == server_id
         ]:
-            del self._revisions[key]
+            del self._revisions[revision_key]
 
     def _save_operation(self, operation: McpServerOperationRecord) -> None:
         self._operations[operation.operation_id] = operation
@@ -240,13 +238,41 @@ class InMemoryMcpServerRegistryStore:
             if record.active_revision is not None
             else None
         )
+        runtimes = tuple(
+            sorted(
+                (value for key, value in self._runtime.items() if key[0] == record.server_id),
+                key=lambda item: item.instance_id,
+            )
+        )
         return record.model_copy(
             update={
                 "latest_config": None if latest is None else latest.config,
                 "active_config": None if active is None else active.config,
-                "runtime": self._runtime.get(record.server_id),
+                "runtime": _aggregate_runtime(runtimes),
+                "runtimes": runtimes,
             }
         )
+
+
+def _aggregate_runtime(
+    runtimes: tuple[McpServerRuntimeRecord, ...],
+) -> McpServerRuntimeRecord | None:
+    if not runtimes:
+        return None
+    rank = {
+        McpObservedState.ACTIVE: 0,
+        McpObservedState.DEGRADED: 1,
+        McpObservedState.LOADING: 2,
+        McpObservedState.PENDING: 3,
+        McpObservedState.UNAVAILABLE: 4,
+        McpObservedState.QUARANTINED: 5,
+        McpObservedState.DISABLED: 6,
+    }
+    representative = min(
+        runtimes,
+        key=lambda item: (rank[item.observed_state], -item.updated_at.timestamp()),
+    )
+    return representative.model_copy(update={"instance_id": "aggregate"})
 
 
 class McpServerRegistryService:

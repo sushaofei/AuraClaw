@@ -53,7 +53,10 @@ from auraclaw.infrastructure.artifacts.store import (
     InMemoryObjectStorage,
 )
 from auraclaw.internal.hands import InProcessHandsClient
-from auraclaw.runtime.capability_controller import RuntimeCapabilityController
+from auraclaw.runtime.capability_controller import (
+    CapabilityAdmissionError,
+    RuntimeCapabilityController,
+)
 from auraclaw.runtime.hands_adapter import HandsRuntimeAdapter
 from auraclaw.runtime.harness import AgentHarness, InjectionPoint
 from auraclaw.runtime.ports import ModelRequest, ModelResponse, ToolCall
@@ -336,6 +339,38 @@ def _assignment() -> RuntimeAssignment:
         resource_profile={},
         budget=RuntimeBudget(max_steps=12, max_output_tokens=100),
     )
+
+
+def test_required_capabilities_preload_before_model_selection() -> None:
+    async def scenario() -> None:
+        capabilities = _Capabilities()
+        controller = RuntimeCapabilityController(capabilities)
+        assignment = _assignment()
+        assignment.resource_profile = {
+            "required_capabilities": [
+                {"capability_id": "cap-one", "version": "1.0.0"}
+            ]
+        }
+        state = await controller.preload_required(
+            assignment, controller.empty_state()
+        )
+        assert capabilities.calls == ["auraclaw.capabilities.load"]
+        assert state["required_capabilities_preloaded"] is True
+        assert "cap-one" in state["loaded"]
+        assert any(
+            item["function"]["name"] == "github.issue.get"
+            for item in controller.model_tools(state)
+        )
+
+        assignment.resource_profile = {
+            "required_capabilities": [
+                {"capability_id": "cap-one", "version": "2.0.0"}
+            ]
+        }
+        with pytest.raises(CapabilityAdmissionError, match="version_mismatch"):
+            await controller.preload_required(assignment, controller.empty_state())
+
+    asyncio.run(scenario())
 
 
 def _response(output: str, call: ToolCall | None = None) -> ModelResponse:

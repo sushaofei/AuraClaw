@@ -58,6 +58,27 @@ def test_migration_runner_is_locked_idempotent_and_detects_drift(tmp_path: Path)
         connection = await asyncpg.connect(database_url)
         try:
             await connection.execute(
+                (
+                    migration_dir
+                    / "0041_capability_catalog_consistency.down.sql"
+                ).read_text()
+            )
+            assert not await connection.fetchval(
+                """SELECT EXISTS(SELECT 1 FROM information_schema.columns
+                WHERE table_schema='hands' AND table_name='mcp_server_runtime'
+                  AND column_name='instance_id')"""
+            )
+            await connection.execute(
+                (
+                    migration_dir / "0041_capability_catalog_consistency.sql"
+                ).read_text()
+            )
+            assert await connection.fetchval(
+                """SELECT EXISTS(SELECT 1 FROM information_schema.columns
+                WHERE table_schema='hands' AND table_name='capability_catalog'
+                  AND column_name='catalog_generation')"""
+            )
+            await connection.execute(
                 (migration_dir / "0040_runtime_execution_claims.down.sql").read_text()
             )
             assert not await connection.fetchval(

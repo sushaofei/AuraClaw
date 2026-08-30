@@ -31,6 +31,14 @@ class CapabilityStatus(StrEnum):
     RETIRED = "retired"
 
 
+class RequiredCapabilityRef(ContractModel):
+    """Immutable capability identity supplied by Agent/Role/Assignment admission."""
+
+    capability_id: str = Field(min_length=1, max_length=256)
+    version: str | None = Field(default=None, min_length=1, max_length=128)
+    content_digest: str | None = Field(default=None, min_length=1, max_length=256)
+
+
 class McpAuthStrategy(StrEnum):
     OAUTH_CLIENT_CREDENTIALS = "oauth_client_credentials"
     WORKLOAD_TRUSTED_CONTEXT = "workload_trusted_context"
@@ -224,7 +232,7 @@ class CapabilityDescriptor(ContractModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     def as_search_result(self) -> dict[str, Any]:
-        return {
+        result: dict[str, Any] = {
             "capability_id": self.capability_id,
             "kind": self.kind.value,
             "canonical_name": self.canonical_name,
@@ -241,6 +249,13 @@ class CapabilityDescriptor(ContractModel):
             "server_id": self.server_id,
             "source_revision": self.source_revision,
         }
+        generation = self.metadata.get("catalog_generation")
+        if isinstance(generation, int):
+            result["catalog_generation"] = generation
+        source_type = self.metadata.get("source_type")
+        if isinstance(source_type, str):
+            result["source"] = source_type
+        return result
 
 
 def _validate_mcp_endpoint(

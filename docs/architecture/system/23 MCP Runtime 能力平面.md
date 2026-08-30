@@ -540,6 +540,17 @@ Server 注册属于管理面写操作，只允许平台或 tenant 管理员通�
 revision 持久化，验证成功后由 Action Hands 与 Credential Proxy 热加载；进程重启从 Registry 恢复。
 Runtime 无权动态注册 URL、stdio command 或环境变量。
 
+Catalog publication 与运行健康分离。每次通过完整校验的远端快照在 Server 行锁内获得单调
+`catalog_generation`，Capability 行与 active generation 在同一事务提交；失败轮次不删除、不替换
+last-known-good generation。Hands 副本启动时即使远端暂不可达，也从共享 active generation 恢复本地
+Tool Router。schema/content digest 在未 bump version 时发生变化会把本轮标记为 degraded/stale 并保留
+旧 generation。disabled/retired 是 desired governance 状态，仍立即阻止新任务发现。
+
+MCP observed state 按 `(server_id, instance_id)` 保存；Admin API 同时返回实例列表和聚合状态。聚合采用
+`active > degraded > loading > pending > unavailable > quarantined > disabled`，因此一个失败副本不能用
+最后写入覆盖仍健康的副本。desired configuration、实例 observed health 和 published Catalog generation
+是三个独立概念。
+
 ### 4.2 任务期发现
 
 标准 MCP list 操作用于可见能力枚举。为避免向模型注入全量目录，Gateway 额外提供一个普通的只读
@@ -549,8 +560,17 @@ MCP Tool：
 auraclaw.capabilities.search
 ```
 
-输入包含 `query`、`kinds`、`required_permissions`、`task_hints` 和 `limit`；tenant、Role、Run、Policy
+输入包含可选 `query`、精确 `capability_id` / `canonical_name` / `server_id`、`kinds`、
+`required_permissions` 和 `limit`；tenant、Role、Run、Policy
 上下文由传输层权威注入，模型不能覆盖。输出只返回候选摘要和稳定 `capability_id`，不返回完整技能正文。
+
+索引同时包含 Server id/title、endpoint、`source=mcp`、配置的 `search_aliases/search_tags` 和能力类型，
+因此“MCP 工具”、Server 标题/id、canonical name 与中文业务别名都有确定性命中路径。空 query 是有界
+browse；空结果返回可用领域、空结果原因和一次放宽查询建议，不能禁止后续搜索。
+
+Agent/Role 形成 Assignment 时可在 `required_capabilities` 固定 `capability_id` 及可选
+`version/content_digest`。Runtime 在首个模型调用前直接 load 并核对这些引用；缺失或摘要不一致会以
+可恢复 admission error 失败，不进入模型猜关键词的流程。
 
 检索排序综合：
 

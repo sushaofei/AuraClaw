@@ -91,13 +91,18 @@ class PostgresCapabilityCatalogStore(LazyPool):
     ) -> None:
         pool = await self.pool()
         async with pool.acquire() as connection, connection.transaction():
-            registered = await connection.fetchval(
-                """SELECT true FROM hands.downstream_mcp_server
+            current_generation = await connection.fetchval(
+                """SELECT active_catalog_generation FROM hands.downstream_mcp_server
                 WHERE server_id=$1 FOR UPDATE""",
+                server_id,
+            )
+            registered = await connection.fetchval(
+                "SELECT true FROM hands.downstream_mcp_server WHERE server_id=$1",
                 server_id,
             )
             if registered is None:
                 raise ValueError(f"MCP server is not registered: {server_id}")
+            generation = int(current_generation or 0) + 1
             capability_ids = [capability.capability_id for capability in capabilities]
             if capability_ids:
                 conflict = await connection.fetchval(
@@ -120,9 +125,9 @@ class PostgresCapabilityCatalogStore(LazyPool):
                     (capability_id,kind,server_id,canonical_name,version,content_digest,
                      title,description,tags,tenant_id,trust_level,classification,
                      permission,risk_level,required_scopes,status,source_revision,
-                     capability_metadata,updated_at)
+                     capability_metadata,updated_at,catalog_generation)
                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11,$12,$13,$14,
-                            $15::jsonb,$16,$17,$18::jsonb,$19)""",
+                            $15::jsonb,$16,$17,$18::jsonb,$19,$20)""",
                     [
                         (
                             capability.capability_id,
@@ -144,10 +149,28 @@ class PostgresCapabilityCatalogStore(LazyPool):
                             capability.source_revision,
                             json_dumps(capability.metadata),
                             capability.updated_at,
+                            generation,
                         )
                         for capability in capabilities
                     ],
                 )
+            await connection.execute(
+                """UPDATE hands.downstream_mcp_server
+                SET active_catalog_generation=$2,
+                    last_good_catalog_at=now()
+                WHERE server_id=$1""",
+                server_id,
+                generation,
+            )
+
+    async def get_active_generation(self, server_id: str) -> int | None:
+        pool = await self.pool()
+        value = await pool.fetchval(
+            """SELECT active_catalog_generation
+            FROM hands.downstream_mcp_server WHERE server_id=$1""",
+            server_id,
+        )
+        return None if value is None else int(value)
 
     async def remove_server(self, server_id: str) -> None:
         pool = await self.pool()
@@ -238,6 +261,10 @@ def _server(row: object) -> McpServerDefinition:
 
 
 def _capability(row: object) -> CapabilityDescriptor:
+    metadata = dict(json_loads(row["capability_metadata"]))  # type: ignore[index]
+    generation = row.get("catalog_generation") if hasattr(row, "get") else None
+    if generation is not None:
+        metadata["catalog_generation"] = int(generation)
     return CapabilityDescriptor(
         capability_id=str(row["capability_id"]),  # type: ignore[index]
         kind=CapabilityKind(str(row["kind"])),  # type: ignore[index]
@@ -259,5 +286,5 @@ def _capability(row: object) -> CapabilityDescriptor:
         status=CapabilityStatus(str(row["status"])),  # type: ignore[index]
         source_revision=row["source_revision"],  # type: ignore[index]
         updated_at=row["updated_at"],  # type: ignore[index]
-        metadata=dict(json_loads(row["capability_metadata"])),  # type: ignore[index]
+        metadata=metadata,
     )

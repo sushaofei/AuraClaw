@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -37,6 +38,7 @@ SKILL_RESOLVE_TOOL_NAME = "auraclaw.skills.resolve"
 SKILL_BINDING_STATUS_TOOL_NAME = "auraclaw.skills.binding-status"
 _LATIN_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_.-]+")
 _CJK_RUN_PATTERN = re.compile(r"[\u3400-\u9FFF\uF900-\uFAFF]+")
+logger = logging.getLogger(__name__)
 
 
 class SkillResolverPort(Protocol):
@@ -83,6 +85,7 @@ class InMemoryCapabilityCatalogStore:
     def __init__(self) -> None:
         self._servers: dict[str, McpServerDefinition] = {}
         self._capabilities: dict[str, CapabilityDescriptor] = {}
+        self._generations: dict[str, int] = {}
 
     async def upsert_server(self, server: McpServerDefinition) -> None:
         self._servers[server.server_id] = server
@@ -102,17 +105,34 @@ class InMemoryCapabilityCatalogStore:
         server_id: str,
         capabilities: tuple[CapabilityDescriptor, ...],
     ) -> None:
+        generation = self._generations.get(server_id, 0) + 1
+        published = tuple(
+            capability.model_copy(
+                update={
+                    "metadata": {
+                        **capability.metadata,
+                        "catalog_generation": generation,
+                    }
+                }
+            )
+            for capability in capabilities
+        )
         self._capabilities = {
             capability_id: capability
             for capability_id, capability in self._capabilities.items()
             if capability.server_id != server_id
         }
         self._capabilities.update(
-            {capability.capability_id: capability for capability in capabilities}
+            {capability.capability_id: capability for capability in published}
         )
+        self._generations[server_id] = generation
+
+    async def get_active_generation(self, server_id: str) -> int | None:
+        return self._generations.get(server_id)
 
     async def remove_server(self, server_id: str) -> None:
         self._servers.pop(server_id, None)
+        self._generations.pop(server_id, None)
         self._capabilities = {
             capability_id: capability
             for capability_id, capability in self._capabilities.items()
@@ -198,6 +218,9 @@ class CapabilityCatalog:
         query: str = "",
         kinds: tuple[CapabilityKind, ...] = (),
         required_permissions: tuple[str, ...] = (),
+        capability_id: str | None = None,
+        canonical_name: str | None = None,
+        server_id: str | None = None,
         limit: int = 10,
     ) -> tuple[CapabilityDescriptor, ...]:
         if limit < 1 or limit > 50:
@@ -215,6 +238,12 @@ class CapabilityCatalog:
             if kind_filter and capability.kind not in kind_filter:
                 continue
             if permission_filter and capability.permission not in permission_filter:
+                continue
+            if capability_id is not None and capability.capability_id != capability_id:
+                continue
+            if canonical_name is not None and capability.canonical_name != canonical_name:
+                continue
+            if server_id is not None and capability.server_id != server_id:
                 continue
             score = _score(capability, query_tokens)
             if query_tokens and score == 0:
@@ -238,6 +267,21 @@ class CapabilityCatalog:
             for capability in await self._store.list_server_capabilities(tenant_id, server_id)
             if capability.kind is CapabilityKind.TOOL
         )
+
+    async def publication_status(
+        self, *, tenant_id: str, server_id: str
+    ) -> dict[str, object] | None:
+        server = await self._store.get_server(server_id)
+        if server is None or server.tenant_id not in {None, tenant_id}:
+            return None
+        return {
+            "active_generation": await self._store.get_active_generation(server_id),
+            "status": server.status.value,
+            "stale": bool(server.metadata.get("catalog_stale", False)),
+            "last_sync_at": server.metadata.get("last_sync_at"),
+            "last_good_at": server.metadata.get("last_good_catalog_at"),
+            "last_sync_error": server.metadata.get("last_sync_error"),
+        }
 
     async def get(self, *, tenant_id: str, capability_id: str) -> CapabilityDescriptor | None:
         capability = await self._store.get_capability(tenant_id, capability_id)
@@ -269,6 +313,9 @@ class CapabilitySearchExecutor:
                 query=query,
                 kinds=kinds,
                 required_permissions=permissions,
+                capability_id=_optional(arguments.get("capability_id")),
+                canonical_name=_optional(arguments.get("canonical_name")),
+                server_id=_optional(arguments.get("server_id")),
                 limit=50,
             )
         )
@@ -285,10 +332,39 @@ class CapabilitySearchExecutor:
         page = [descriptor.as_search_result() for descriptor in results[:limit]]
         payload: dict[str, object] = {"capabilities": page}
         if not page:
+            browse = await self.catalog.search(tenant_id=invocation.tenant_id, limit=50)
+            domains = sorted(
+                {
+                    item.canonical_name.split(".", 1)[0]
+                    for item in browse
+                    if item.canonical_name
+                }
+            )[:12]
+            payload["empty_reason"] = "no_capability_matched_filters"
+            payload["available_domains"] = domains
             payload["hint"] = (
-                "No matching capabilities were found. Answer the user directly "
-                "without calling capability tools again."
+                "No matching capabilities were found. Retry once with a broader query, "
+                "an exact capability_id/canonical_name/server_id, or an empty query to browse."
             )
+        logger.info(
+            "capability_search tenant=%s query=%r kinds=%s permissions=%s hits=%s "
+            "generations=%s empty_reason=%s",
+            invocation.tenant_id,
+            "".join(character for character in query[:1024] if character >= " "),
+            tuple(kind.value for kind in kinds),
+            permissions,
+            tuple(item["capability_id"] for item in page),
+            tuple(
+                sorted(
+                    {
+                        int(item["catalog_generation"])
+                        for item in page
+                        if isinstance(item.get("catalog_generation"), int)
+                    }
+                )
+            ),
+            payload.get("empty_reason"),
+        )
         return payload
 
 
@@ -559,6 +635,9 @@ def capability_search_tool() -> ToolCapability:
             "type": "object",
             "properties": {
                 "query": {"type": "string", "maxLength": 1024},
+                "capability_id": {"type": "string", "maxLength": 256},
+                "canonical_name": {"type": "string", "maxLength": 256},
+                "server_id": {"type": "string", "maxLength": 128},
                 "kinds": {
                     "type": "array",
                     "items": {
@@ -582,6 +661,11 @@ def capability_search_tool() -> ToolCapability:
                     "items": {"type": "object"},
                 },
                 "hint": {"type": "string"},
+                "empty_reason": {"type": "string"},
+                "available_domains": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
             },
             "required": ["capabilities"],
             "additionalProperties": False,
@@ -705,7 +789,8 @@ def _load_result(descriptor: CapabilityDescriptor) -> dict[str, Any]:
 
 
 def _optional(value: object) -> str | None:
-    return None if value is None else str(value)
+    parsed = "" if value is None else str(value).strip()
+    return parsed or None
 
 
 def _tokens(value: str) -> tuple[str, ...]:
@@ -738,12 +823,21 @@ def _score(
     if not query_tokens:
         return 0
     name = capability.canonical_name.casefold()
+    capability_id = capability.capability_id.casefold()
+    server_id = capability.server_id.casefold()
     title = capability.title.casefold()
     tags = tuple(tag.casefold() for tag in capability.tags)
     tag_haystack = " ".join(tags)
     description = capability.description.casefold()
+    metadata_terms = _capability_metadata_terms(capability)
     score = 0
     for token in query_tokens:
+        if token == capability_id:
+            score += 100
+        if token == name:
+            score += 80
+        if token == server_id:
+            score += 60
         if token in name:
             score += 8
         if token in title:
@@ -752,4 +846,24 @@ def _score(
             score += 3
         if token in description:
             score += 1
+        if any(token in value for value in metadata_terms.values()):
+            score += 4
+        if token in {"mcp", "mcp工具"} and metadata_terms.get("source_type") == "mcp":
+            score += 6
+        if token in {"工具", "tool", "tools"} and capability.kind is CapabilityKind.TOOL:
+            score += 5
     return score
+
+
+def _capability_metadata_terms(capability: CapabilityDescriptor) -> dict[str, str]:
+    metadata = capability.metadata
+    aliases = metadata.get("search_aliases", ())
+    if not isinstance(aliases, (list, tuple)):
+        aliases = ()
+    return {
+        "server_id": capability.server_id.casefold(),
+        "server_title": str(metadata.get("server_title", "")).casefold(),
+        "endpoint": str(metadata.get("endpoint", "")).casefold(),
+        "source_type": str(metadata.get("source_type", "")).casefold(),
+        "aliases": " ".join(str(item).casefold() for item in aliases),
+    }

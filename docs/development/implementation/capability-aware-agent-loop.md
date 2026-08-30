@@ -37,6 +37,8 @@ Checkpoint 是恢复控制状态，不替代：
 ## 3. 安全控制
 
 - 模型初始只能看到固定 bootstrap tools，不接收全量 Tool Schema。
+- Assignment 声明的 `required_capabilities` 在首次模型调用前按 id/version/digest 直接加载；缺失时
+  admission 明确失败，模型不能用自由文本搜索绕过固定依赖。
 - `capabilities.load` 只接受当前 Run 搜索结果中的 `capability_id`，每 Run 有数量上限。
 - 未加载业务 Tool 即使由模型伪造 Tool Call，也以 `capability_not_loaded` 拒绝。
 - Skill 激活参数只有 `capability_id + inputs`；Role、tenant、Policy 和 publisher/version

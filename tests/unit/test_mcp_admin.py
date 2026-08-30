@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from auraclaw.action.capability_catalog import (
@@ -25,6 +26,20 @@ from auraclaw.contracts.capabilities import (
     McpServerDefinition,
 )
 from auraclaw.contracts.mcp_registry import McpServerConfig, McpServerWriteCommand
+
+
+class _NoOpObservability:
+    async def record_span(self, **kwargs: object) -> None:
+        del kwargs
+
+    async def metric(self, *args: object, **kwargs: object) -> None:
+        del args, kwargs
+
+
+def _task_app() -> FastAPI:
+    app = create_app(profile="task-api")
+    app.state.observability_service = _NoOpObservability()
+    return app
 
 
 def _seed() -> tuple[McpServerRegistryService, CapabilityCatalog]:
@@ -106,7 +121,7 @@ def _seed() -> tuple[McpServerRegistryService, CapabilityCatalog]:
 
 def test_mcp_admin_lists_catalogued_tools() -> None:
     registry, catalog = _seed()
-    app = create_app(profile="task-api")
+    app = _task_app()
     app.include_router(create_mcp_admin_router(registry, catalog=catalog))
     app.state.config_ready = True
     headers = {"X-Tenant-ID": "tenant-a", "X-Actor-ID": "admin-1"}
@@ -132,7 +147,7 @@ def test_mcp_admin_lists_catalogued_tools() -> None:
 
 def test_mcp_admin_hard_deletes_server_via_gateway_alias() -> None:
     registry, catalog = _seed()
-    app = create_app(profile="task-api")
+    app = _task_app()
     app.include_router(create_mcp_admin_router(registry, catalog=catalog))
     app.state.config_ready = True
     headers = {
@@ -162,7 +177,7 @@ def test_mcp_admin_hard_deletes_server_via_gateway_alias() -> None:
 
 def test_mcp_admin_hard_deletes_server() -> None:
     registry, catalog = _seed()
-    app = create_app(profile="task-api")
+    app = _task_app()
     app.include_router(create_mcp_admin_router(registry, catalog=catalog))
     app.state.config_ready = True
     headers = {

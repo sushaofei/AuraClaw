@@ -347,19 +347,94 @@ def test_catalog_reconciliation_filters_routes_invalidates_and_recovers() -> Non
         for expected in (
             CapabilityStatus.DEGRADED,
             CapabilityStatus.DEGRADED,
-            CapabilityStatus.QUARANTINED,
+            CapabilityStatus.DEGRADED,
         ):
             failure = await reconciler.reconcile_server(current)
             assert failure.status == expected
             current = await store.get_server(server.server_id)
             assert current is not None
-        with pytest.raises(PolicyDeniedError):
-            tools.get("github.issue.get", "2.2.0")
+        assert tools.get("github.issue.get", "2.2.0")
+        assert [item.capability_id for item in await catalog.search(tenant_id="tenant-a")]
 
         credentials.failed = False
         recovered = await reconciler.reconcile_server(current)
         assert recovered.status == CapabilityStatus.ACTIVE
         assert tools.get("github.issue.get", "2.2.0")
+
+    asyncio.run(scenario())
+
+
+def test_reconcile_rejects_configuration_that_filters_every_remote_capability() -> None:
+    async def scenario() -> None:
+        store = InMemoryCapabilityCatalogStore()
+        catalog = CapabilityCatalog(store)
+        server = _server().model_copy(
+            update={
+                "allowed_tool_prefixes": ("missing.",),
+                "allowed_prompt_prefixes": ("missing.",),
+                "allowed_resource_schemes": ("missing",),
+            }
+        )
+        await catalog.register_server(server)
+        connector = ManagedMcpConnector(
+            server,
+            credentials=_RemoteCredentials(),
+            policy=_AllowPolicy(),
+        )
+        result = await CapabilityCatalogReconciler(
+            catalog=catalog,
+            store=store,
+            connectors={server.server_id: connector},
+        ).reconcile_server(server)
+        assert result.status is CapabilityStatus.DEGRADED
+        assert result.error == "CapabilityAllowlistError"
+        assert result.capability_count == 0
+        assert await store.get_active_generation(server.server_id) is None
+
+    asyncio.run(scenario())
+
+
+def test_unreachable_replica_restores_last_known_good_catalog_routes() -> None:
+    async def scenario() -> None:
+        store = InMemoryCapabilityCatalogStore()
+        catalog = CapabilityCatalog(store)
+        server = _server()
+        await catalog.register_server(server)
+        healthy_credentials = _RemoteCredentials()
+        healthy = ManagedMcpConnector(
+            server, credentials=healthy_credentials, policy=_AllowPolicy()
+        )
+        first = CapabilityCatalogReconciler(
+            catalog=catalog,
+            store=store,
+            connectors={server.server_id: healthy},
+        )
+        assert (await first.reconcile_server(server)).status is CapabilityStatus.ACTIVE
+        generation = await store.get_active_generation(server.server_id)
+
+        failed_credentials = _RemoteCredentials()
+        failed_credentials.failed = True
+        unavailable = ManagedMcpConnector(
+            server, credentials=failed_credentials, policy=_AllowPolicy()
+        )
+        tools = ToolRegistry()
+        router = RoutedHandsExecutor(_UnexpectedHands(), {})
+        second = CapabilityCatalogReconciler(
+            catalog=catalog,
+            store=store,
+            connectors={server.server_id: unavailable},
+            tool_registry=tools,
+            hands_router=router,
+        )
+        result = await second.reconcile_server(server)
+        assert result.status is CapabilityStatus.DEGRADED
+        assert result.capability_count == 4
+        assert await store.get_active_generation(server.server_id) == generation
+        assert tools.get("github.issue.get", "2.1.0")
+        assert [
+            item.capability_id
+            for item in await catalog.search(tenant_id="tenant-a", query="MCP 工具")
+        ]
 
     asyncio.run(scenario())
 
