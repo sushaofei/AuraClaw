@@ -13,6 +13,8 @@ _KINGBASE_KEYS = (
     "KINGBASE_PORT",
     "KINGBASE_DB_USER",
     "KINGBASE_DB_PWD",
+    "KINGBASE_USER",
+    "KINGBASE_PWD",
     "KINGBASE_AURACLAW_DB",
 )
 
@@ -69,6 +71,33 @@ def test_kingbase_env_aliases_overwrite_db_when_backend_kingbase(
     assert settings.db_password == "Chain@2026"
     assert settings.db_name == "chaintower_agent"
     assert "Chain%402026" in settings.resolved_database_url
+
+
+def test_host_env_kingbase_user_aliases_are_supported(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    host_env = tmp_path / ".host.env"
+    host_env.write_text(
+        "KINGBASE_HOST=10.244.72.1\n"
+        "KINGBASE_PORT=54321\n"
+        "KINGBASE_USER=kb_host_user\n"
+        "KINGBASE_PWD=host-password\n"
+        "KINGBASE_AURACLAW_DB=chaintower_agent\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("AURACLAW_STORAGE_BACKEND", "kingbase")
+    monkeypatch.setenv("AURACLAW_KINGBASE_ENV_FILE", str(host_env))
+    for key in (*_KINGBASE_KEYS, "DB_HOST", "DB_PORT", "DB_USER", "DB_PWD", "DB_NAME"):
+        monkeypatch.delenv(key, raising=False)
+
+    apply_kingbase_env_aliases()
+    settings = Settings(_env_file=None)
+    assert settings.db_host == "10.244.72.1"
+    assert settings.db_port == 54321
+    assert settings.db_user == "kb_host_user"
+    assert settings.db_password == "host-password"
+    assert settings.db_name == "chaintower_agent"
+    assert settings.resolved_db_dialect == "postgres"
 
 
 def test_kingbase_inline_db_credentials_in_settings_env(

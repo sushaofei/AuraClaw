@@ -15,10 +15,11 @@ Docker Compose 不提供 Kubernetes HPA、PDB 或 NetworkPolicy。本方案以�
 
 - Docker Engine 与 Compose v2；
 - 已推送且使用 digest 或不可变 Git SHA 标记的 AuraClaw 镜像；
-- 主存储使用统一 `AURACLAW_DATABASE_URL`（Compose 共享 `database_url` secret；`mysql+aiomysql://`
-  或 `postgresql://`）。`deploy/*/roles.sql` 为可选硬化参考，当前部署不按服务注入分角色 DSN；
-- Compose `migrate` 默认目录为 `/app/migrations/mysql`（目标 `0016`）。PostgreSQL
-  部署需设置 `AURACLAW_MIGRATIONS_DIRECTORY=/app/migrations`；
+- 测试与生产主存储固定为 KingBase V9 PostgreSQL 兼容模式，使用统一
+  `postgresql+asyncpg://` DSN；`deploy/postgres/roles.sql` 为可选硬化参考；
+- `.host.env` 保存 `KINGBASE_HOST/PORT/USER/PWD`，运行
+  `scripts/sync_kingbase_env.py` 后再物化 Compose Secret；
+- Compose `migrate` 使用 `/app/migrations`，当前目标 `0041`；
 - Kafka/Replay Router、SeaweedFS、Vault 和模型出口可从 `auraclaw-platform` 网络访问；
 - 部署机存在被 `.gitignore` 排除的 `.env.prod`，从 `.env.prod.example` 复制后填真实密钥；
 - Secret 不写入 Compose、镜像、命令参数或日志。
@@ -39,6 +40,8 @@ docker network inspect auraclaw-platform >/dev/null 2>&1 ||
 ## 3. 预检与迁移
 
 ```bash
+uv run python scripts/sync_kingbase_env.py
+
 uv run python scripts/materialize_compose_secrets.py \
   --env-file .env.prod --output-dir .runtime/compose-secrets
 
@@ -49,15 +52,15 @@ docker compose --env-file .env.prod \
 
 docker compose --env-file .env.prod \
   -f compose.prod.yml run --rm migrate migrate status \
-  --directory /app/migrations/mysql
+  --directory /app/migrations
 
 docker compose --env-file .env.prod \
   -f compose.prod.yml run --rm migrate migrate up \
-  --target 0016 --directory /app/migrations/mysql
+  --target 0041 --directory /app/migrations
 ```
 
-迁移进程只挂载 migration admin DSN。MySQL 使用 `GET_LOCK`、PostgreSQL 使用 advisory lock
-防止并发迁移，checksum ledger 阻止已执行文件漂移；重复运行是幂等的。当前 `0001`–`0016`
+迁移进程只挂载 migration admin DSN。KingBase 使用 PostgreSQL advisory lock 防止并发迁移，
+checksum ledger 阻止已执行文件漂移；重复运行是幂等的。当前 `0001`–`0041`
 均为 expand 迁移。滚动窗口内不得删除 N-1 仍读取的列、事件字段或内部 API；contract 迁移
 只能在旧版本实例归零且兼容窗口结束后，以后续显式迁移执行。
 
@@ -66,13 +69,9 @@ Secret 生成目录必须与 `.env.prod` 的 `AURACLAW_SECRET_DIR` 一致；目�
 尚无 migration ledger，先确认 `status` 全部显示 pending，再且仅再执行一次：
 
 ```bash
-# MySQL（默认）
 docker compose --env-file .env.prod -f compose.prod.yml \
   --profile migrate run --rm migrate migrate baseline \
-  --target 0016 --confirm-existing-schema --directory /app/migrations/mysql
-
-# PostgreSQL：把 directory 换成 /app/migrations，并设置
-# AURACLAW_MIGRATIONS_DIRECTORY=/app/migrations
+  --target 0041 --confirm-existing-schema --directory /app/migrations
 ```
 
 全新库、未知来源库、部分迁移库或 checksum 不一致时禁止 baseline。

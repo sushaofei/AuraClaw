@@ -13,8 +13,8 @@
 | 场景 | env 文件 | Compose 文件 | 主存储 | 说明 |
 |------|----------|--------------|--------|------|
 | 本地开发 | `.env.dev` | —（`auraclaw serve`） | 本机 PostgreSQL | 非 Docker；`AURACLAW_STORAGE_BACKEND=postgres` |
-| DEV_SERVICE / 测试 | `.env.test` | `compose.test.yml` | 云 KingBase V9 | 部署在 `10.244.16.131`；凭证在 `.env.test` |
-| 生产 | `.env.prod` | `compose.prod.yml` | 云 KingBase V9 | 当前与测试对齐；镜像等后续单独维护 |
+| DEV_SERVICE / 测试 | `.env.test` | `compose.test.yml` | 云 KingBase V9 | 部署在 `10.244.16.131`；数据库凭证源为 `.host.env` |
+| 生产 | `.env.prod` | `compose.prod.yml` | 云 KingBase V9 | 数据库凭证源为 `.host.env`，镜像等单独维护 |
 
 不要混用 env。本地开发用 `.env.dev`；服务器测试用 `.env.test`；生产用 `.env.prod`（均来自对应 `.example`，勿提交）。
 
@@ -27,6 +27,7 @@
 ```bash
 # 仓库根目录
 cp .env.test.example .env.test
+uv run python scripts/sync_kingbase_env.py
 docker --version
 docker compose version
 ```
@@ -103,7 +104,7 @@ docker image inspect "${AURACLAW_IMAGE:-auraclaw:s5}" >/dev/null
 确认：
 
 1. 若尚无 `.env.prod`：`cp .env.prod.example .env.prod`，填入不可变镜像与真实密钥（0600，不进 Git）
-2. DB 角色已授权：`deploy/mysql/roles.sql` 或 `deploy/postgres/roles.sql`
+2. KingBase DB 角色已按 `deploy/postgres/roles.sql` 的权限意图授权
 3. Kafka / SeaweedFS / Vault / 模型出口可从 `auraclaw-platform` 访问
 4. Secret **不**写进 Compose、镜像、命令行
 
@@ -120,19 +121,17 @@ Secret 目录权限：目录 `0700`，文件 `0600`。
 
 ### B3. 数据库迁移（先于应用）
 
-MySQL（默认）：
+KingBase（PostgreSQL 兼容模式）：
 
 ```bash
 docker compose --env-file .env.prod \
   -f compose.prod.yml --profile migrate run --rm migrate \
-  migrate status --directory /app/migrations/mysql
+  migrate status --directory /app/migrations
 
 docker compose --env-file .env.prod \
   -f compose.prod.yml --profile migrate run --rm migrate \
-  migrate up --target 0016 --directory /app/migrations/mysql
+  migrate up --target 0041 --directory /app/migrations
 ```
-
-PostgreSQL：目录改为 `/app/migrations`，并设 `AURACLAW_MIGRATIONS_DIRECTORY=/app/migrations`。
 
 规则：只做 expand 迁移；发布窗口内不删 N-1 仍依赖的列/事件字段。
 
@@ -229,12 +228,13 @@ curl -sf http://127.0.0.1:8006/health/ready
 
 # --- 生产 ---
 docker network create auraclaw-platform   # 已存在可忽略
+uv run python scripts/sync_kingbase_env.py
 uv run python scripts/materialize_compose_secrets.py \
   --env-file .env.prod --output-dir .runtime/compose-secrets
 uv run python scripts/compose_preflight.py --env-file .env.prod
 docker compose --env-file .env.prod -f compose.prod.yml \
   --profile migrate run --rm migrate migrate up \
-  --target 0016 --directory /app/migrations/mysql
+  --target 0041 --directory /app/migrations
 docker compose --env-file .env.prod -f compose.prod.yml \
   up -d --wait --remove-orphans
 curl --fail http://127.0.0.1:8080/health/ready

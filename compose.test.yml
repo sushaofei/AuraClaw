@@ -30,7 +30,7 @@ x-common-environment: &common-environment
   AURACLAW_MCP_ALLOW_PRIVATE_AUTH_NONE: ${AURACLAW_MCP_ALLOW_PRIVATE_AUTH_NONE:-false}
   AURACLAW_HOST: 0.0.0.0
   AURACLAW_LOG_LEVEL: ${AURACLAW_LOG_LEVEL:-INFO}
-  AURACLAW_STORAGE_BACKEND: ${AURACLAW_STORAGE_BACKEND:-mysql}
+  AURACLAW_STORAGE_BACKEND: ${AURACLAW_STORAGE_BACKEND:-kingbase}
   AURACLAW_SESSION_BASE_URL: http://session:8001
   AURACLAW_PROJECTION_BASE_URL: http://projection-worker:8002
   AURACLAW_CONTROL_BASE_URL: http://orchestrator:8003
@@ -87,9 +87,9 @@ services:
         "migrate",
         "up",
         "--target",
-        "${AURACLAW_MIGRATE_TARGET:-0017}",
+        "${AURACLAW_MIGRATE_TARGET:-0041}",
         "--directory",
-        "${AURACLAW_MIGRATIONS_DIRECTORY:-/app/migrations/mysql}",
+        "${AURACLAW_MIGRATIONS_DIRECTORY:-/app/migrations}",
       ]
     deploy:
       restart_policy:
