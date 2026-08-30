@@ -55,6 +55,27 @@ def test_migration_runner_is_locked_idempotent_and_detects_drift(tmp_path: Path)
         assert await runner.apply() == ()
         assert {item.state for item in await runner.status()} == {"applied"}
 
+        connection = await asyncpg.connect(database_url)
+        try:
+            await connection.execute(
+                (migration_dir / "0040_runtime_execution_claims.down.sql").read_text()
+            )
+            assert not await connection.fetchval(
+                """SELECT EXISTS(SELECT 1 FROM information_schema.columns
+                WHERE table_schema='control' AND table_name='assignment'
+                  AND column_name='execution_claim_token')"""
+            )
+            await connection.execute(
+                (migration_dir / "0040_runtime_execution_claims.sql").read_text()
+            )
+            assert await connection.fetchval(
+                """SELECT EXISTS(SELECT 1 FROM information_schema.columns
+                WHERE table_schema='control' AND table_name='runtime_instance'
+                  AND column_name='registration_id')"""
+            )
+        finally:
+            await connection.close()
+
         migration = migration_dir / "0014_s4_policy_version.sql"
         migration.write_text(migration.read_text() + "\n-- simulated drift\n")
         drifted = PostgresMigrationRunner(database_url, migration_dir)

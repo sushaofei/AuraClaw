@@ -11,6 +11,8 @@ from auraclaw.contracts.internal import (
     AssignmentDispositionRequest,
     AssignmentDispositionResponse,
     AssignmentRecord,
+    AssignmentRenewRequest,
+    AssignmentRenewResponse,
     CancellationRequest,
     CancellationResponse,
     CheckpointResponse,
@@ -55,6 +57,16 @@ class ControlInternalService:
             session_id=request.session_id,
             run_id=request.run_id,
         )
+        assignment = await self._store.get_assignment(
+            f"{request.context.tenant_id}:{request.session_id}:{request.run_id}"
+        )
+        if assertion.execution_claim_token is not None and (
+            assignment is None
+            or assignment.execution_claim_token != assertion.execution_claim_token
+            or assignment.execution_claim_expires_at is None
+            or assignment.execution_claim_expires_at <= datetime.now(UTC)
+        ):
+            raise AuthorizationError("checkpoint execution claim is stale")
         updated_at = datetime.now(UTC)
         checkpoint = RuntimeCheckpoint(
             tenant_id=request.context.tenant_id,
@@ -145,6 +157,7 @@ class ControlInternalService:
                 node_id=request.node_id,
                 capabilities=dict(request.capabilities),
                 capacity=request.capacity,
+                registration_id=request.registration_id,
             )
         )
         return RuntimeHeartbeatResponse(accepted=True, observed_at=datetime.now(UTC))
@@ -153,7 +166,9 @@ class ControlInternalService:
         self, request: RuntimeHeartbeatRequest
     ) -> RuntimeHeartbeatResponse:
         self._require_runtime(request.context.service_identity)
-        await self._store.heartbeat(request.runtime_id)
+        await self._store.heartbeat(
+            request.runtime_id, registration_id=request.registration_id
+        )
         return RuntimeHeartbeatResponse(accepted=True, observed_at=datetime.now(UTC))
 
     async def claim_assignments(
@@ -163,13 +178,20 @@ class ControlInternalService:
         if self._lease_signer is None:
             raise AuthorizationError("lease assertion signer is unavailable")
         claimed = await self._store.claim_assignments(
-            request.runtime_id, request.role, limit=request.limit
+            request.runtime_id,
+            request.role,
+            registration_id=request.registration_id,
+            limit=request.limit,
         )
         records: list[AssignmentRecord] = []
         for item in claimed:
             assignment = item.assignment
-            if assignment.lease_expires_at is None:
-                raise AuthorizationError("assignment lease expiry is unavailable")
+            if (
+                assignment.lease_expires_at is None
+                or assignment.execution_claim_token is None
+                or assignment.execution_claim_expires_at is None
+            ):
+                raise AuthorizationError("assignment claim expiry is unavailable")
             assertion = self._lease_signer.sign(
                 LeaseAssertion(
                     key_id="pending",
@@ -186,6 +208,7 @@ class ControlInternalService:
                     fencing_token=assignment.fencing_token,
                     expires_at=assignment.lease_expires_at,
                     signature="",
+                    execution_claim_token=assignment.execution_claim_token,
                 )
             )
             records.append(
@@ -205,9 +228,54 @@ class ControlInternalService:
                         "max_cost": assignment.budget.max_cost,
                     },
                     deadline=assignment.deadline,
+                    execution_claim_token=assignment.execution_claim_token,
+                    execution_claim_expires_at=assignment.execution_claim_expires_at,
                 )
             )
         return AssignmentClaimResponse(assignments=tuple(records))
+
+    async def renew_assignment(
+        self, request: AssignmentRenewRequest
+    ) -> AssignmentRenewResponse:
+        self._require_runtime(request.context.service_identity)
+        if self._lease_signer is None:
+            raise AuthorizationError("lease assertion signer is unavailable")
+        assignment = await self._store.renew_assignment_claim(
+            request.task_id,
+            runtime_id=request.runtime_id,
+            registration_id=request.registration_id,
+            execution_claim_token=request.execution_claim_token,
+            lease_id=request.lease_id,
+            fencing_token=request.fencing_token,
+        )
+        if (
+            assignment.lease_expires_at is None
+            or assignment.execution_claim_expires_at is None
+        ):
+            raise AuthorizationError("renewed assignment expiry is unavailable")
+        assertion = self._lease_signer.sign(
+            LeaseAssertion(
+                key_id="pending",
+                audience="runtime",
+                tenant_id=assignment.tenant_id,
+                root_session_id=assignment.root_session_id,
+                session_id=assignment.session_id,
+                run_id=assignment.run_id,
+                runtime_id=assignment.runtime_id,
+                role=assignment.role,
+                user_id=assignment.user_id,
+                dept_id=assignment.dept_id,
+                lease_id=assignment.lease_id,
+                fencing_token=assignment.fencing_token,
+                expires_at=assignment.lease_expires_at,
+                signature="",
+                execution_claim_token=assignment.execution_claim_token,
+            )
+        )
+        return AssignmentRenewResponse(
+            lease_assertion=assertion,
+            execution_claim_expires_at=assignment.execution_claim_expires_at,
+        )
 
     async def disposition_assignment(
         self, request: AssignmentDispositionRequest
@@ -219,6 +287,14 @@ class ControlInternalService:
             or assignment.runtime_id != request.runtime_id
             or assignment.lease_id != request.lease_id
             or assignment.fencing_token != request.fencing_token
+            or (
+                assignment.execution_claim_token is not None
+                and (
+                    assignment.execution_claim_token != request.execution_claim_token
+                    or assignment.execution_claim_expires_at is None
+                    or assignment.execution_claim_expires_at <= datetime.now(UTC)
+                )
+            )
         ):
             raise AuthorizationError("assignment ownership does not match Runtime")
         await self._store.assert_fencing(

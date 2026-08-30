@@ -79,6 +79,7 @@ Control Projection runnable@version
 ## 故障恢复
 
 - Runtime 心跳超时：标记 suspect，确认后回收 Lease。
+- Runtime execution claim 到期：同时失效 Session lease，旧尝试由 fencing 拒绝，新实例从 checkpoint 接管。
 - Sandbox 故障：重建环境；是否重放有副作用工具由 Agent 判断。
 - Orchestrator 实例故障：其他实例在 Lease 到期后接管。
 - Projection 暂时落后：等待 `min_version`，不基于旧状态调度。
@@ -97,7 +98,9 @@ Orchestrator 不读取自然语言任务后自行创建 Child Session。
 
 - 资源操作使用服务身份和最小权限。
 - 每次控制动作记录 session、runtime、fencing token、原因和结果。
-- 指标：queue wait、schedule latency、lease conflict、runtime startup、recovery count、orphan assignment。
+- 容量饱和：保留原 priority/tenant partition，带 jitter 延迟重排；这是正常背压而非调度异常。
+- 指标：queue wait、schedule latency、lease/claim conflict、duplicate attempt prevented、lease renewal
+  failure、capacity saturation、runtime startup、recovery count、orphan assignment。
 
 ## 验收条件
 

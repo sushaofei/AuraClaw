@@ -14,7 +14,7 @@ from auraclaw.config import get_settings
 from auraclaw.contracts.commands import CommandContext
 from auraclaw.contracts.events import Actor, NewEvent
 from auraclaw.contracts.state import Visibility
-from auraclaw.control.ports import RunnableItem
+from auraclaw.control.ports import RunnableItem, RuntimeAssignment, RuntimeInstance
 from auraclaw.infrastructure.persistence.postgres_control_store import (
     PostgresControlStateStore,
 )
@@ -268,6 +268,90 @@ async def test_mysql_control_lease_and_capacity() -> None:
         await control.release_capacity(scope, 3)
         assert await control.reserve_capacity(scope, 3, limit=3)
     finally:
+        await control.close()
+
+
+@pytest.mark.asyncio
+async def test_mysql_runtime_execution_claim_is_exclusive_and_renewable() -> None:
+    assert MYSQL_URL is not None
+    control = PostgresControlStateStore(MYSQL_URL)
+    suffix = uuid4().hex[:8]
+    tenant = f"mysql-runtime-{suffix}"
+    session = f"session-{suffix}"
+    run_id = f"run-{suffix}"
+    task_id = f"{tenant}:{session}:{run_id}"
+    resource_id = f"session:{tenant}:{session}"
+    runtime = RuntimeInstance(
+        runtime_id=f"runtime-{suffix}",
+        runtime_type="agent",
+        role="root",
+        node_id=f"node-{suffix}",
+        capabilities={},
+        capacity=1,
+        registration_id=f"registration-{suffix}",
+    )
+    try:
+        item = RunnableItem(
+            task_id=task_id,
+            tenant_id=tenant,
+            root_session_id=session,
+            session_id=session,
+            run_id=run_id,
+            source_version=1,
+        )
+        await control.enqueue(item)
+        runnable = (await control.claim("mysql-orchestrator"))[0]
+        lease = await control.acquire_lease(
+            resource_id, runnable.claimed_by, ttl=timedelta(minutes=1)
+        )
+        assert lease is not None
+        await control.register_runtime(runtime)
+        assignment = RuntimeAssignment(
+            tenant_id=tenant,
+            root_session_id=session,
+            session_id=session,
+            run_id=run_id,
+            runtime_id=runtime.runtime_id,
+            lease_id=lease.lease_id,
+            fencing_token=lease.fencing_token,
+            role="root",
+            resource_profile={},
+        )
+        assert await control.assign(
+            task_id, assignment, claim_token=runnable.claim_token
+        )
+        claimed = await control.claim_assignments(
+            runtime.runtime_id,
+            runtime.role,
+            registration_id=runtime.registration_id,
+        )
+        assert len(claimed) == 1
+        execution = claimed[0].assignment
+        assert execution.execution_claim_token is not None
+        assert await control.claim_assignments(
+            runtime.runtime_id,
+            runtime.role,
+            registration_id=runtime.registration_id,
+        ) == []
+        renewed = await control.renew_assignment_claim(
+            task_id,
+            runtime_id=runtime.runtime_id,
+            registration_id=runtime.registration_id,
+            execution_claim_token=execution.execution_claim_token,
+            lease_id=execution.lease_id,
+            fencing_token=execution.fencing_token,
+        )
+        assert renewed.lease_expires_at is not None
+    finally:
+        pool = await control.pool()
+        await pool.execute("DELETE FROM control.assignment WHERE task_id=$1", task_id)
+        await pool.execute("DELETE FROM control.runnable_item WHERE task_id=$1", task_id)
+        await pool.execute(
+            "DELETE FROM control.runtime_instance WHERE runtime_id=$1", runtime.runtime_id
+        )
+        await pool.execute(
+            "DELETE FROM control.runtime_lease WHERE resource_id=$1", resource_id
+        )
         await control.close()
 
 

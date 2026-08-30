@@ -360,7 +360,7 @@ def test_runtime_worker_renews_lease_during_slow_model_calls() -> None:
     asyncio.run(scenario())
 
 
-def test_claim_reclaims_orphan_running_assignment_after_grace() -> None:
+def test_claim_does_not_reclaim_a_running_assignment_by_elapsed_time() -> None:
     async def scenario() -> None:
         control = InMemoryControlStateStore()
         control.orphan_running_grace = timedelta(0)
@@ -400,8 +400,7 @@ def test_claim_reclaims_orphan_running_assignment_after_grace() -> None:
         )
 
         claimed = await control.claim_assignments(runtime.runtime_id, "root", limit=1)
-        assert len(claimed) == 1
-        assert claimed[0].task_id == task_id
+        assert claimed == []
 
     asyncio.run(scenario())
 

@@ -64,7 +64,9 @@ Tool/Resource 依赖和 Policy 版本；Catalog 更新不得在同一 Run 内静
 
 ## 幂等与所有权
 
-- 每次运行携带 `run_id`、`lease_id` 和 `fencing_token`。
+- 每次运行携带 `run_id`、`lease_id`、`fencing_token` 和持久化的 `execution_claim_token`。
+- Runtime 注册携带进程 incarnation；同一 `runtime_id` 的活跃 incarnation 只能有一个。
+- `running` Assignment 只在 execution claim、registration 或 Session lease 失效后恢复，不能按执行时长猜测孤儿。
 - Session 写入携带 `expected_version`。
 - Tool Call 携带稳定 `tool_invocation_id`。
 - Runtime 失去 Lease 后立即停止写入和外部副作用。
@@ -82,6 +84,8 @@ Tool/Resource 依赖和 Policy 版本；Catalog 更新不得在同一 Run 内静
 - 高风险 Tool Profile 使用独立执行域。
 - Runtime 实例无黏性；任何实例可根据 Session 恢复。
 - 单实例故障只影响当前运行尝试，不影响 Session。
+- `runtime_capacity=N` 对应进程内有界并发 N，Control 的 `assigned|running` 数不得超过同一上限。
+- 执行心跳刷新 registration、execution claim、Session lease 和签名 assertion；续租超过安全窗口即停止副作用。
 
 ## 观测指标
 
@@ -92,6 +96,8 @@ model_latency / token_usage
 tool_calls / tool_failures
 checkpoint_age
 lease_lost
+lease_renewal_failure / claim_conflict / duplicate_attempt_prevented
+capacity_saturation / active_harness / queue_wait
 run_steps / budget_exhausted
 ```
 

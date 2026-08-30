@@ -21,7 +21,7 @@ class RuntimeBudget:
     max_cost: float | None = None
 
 
-@dataclass(frozen=True)
+@dataclass
 class RuntimeAssignment:
     tenant_id: str
     root_session_id: str
@@ -38,6 +38,8 @@ class RuntimeAssignment:
     lease_assertion: LeaseAssertion | None = None
     user_id: str | None = None
     dept_id: str | None = None
+    execution_claim_token: str | None = None
+    execution_claim_expires_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -89,6 +91,7 @@ class RuntimeInstance:
     node_id: str
     capabilities: dict[str, Any]
     capacity: int
+    registration_id: str = "legacy"
 
 
 @dataclass(frozen=True)
@@ -119,6 +122,7 @@ class ControlStateStore(Protocol):
         *,
         worker_id: str | None = None,
         claim_token: str | None = None,
+        delay: timedelta = timedelta(0),
     ) -> None: ...
 
     async def acquire_lease(
@@ -140,8 +144,24 @@ class ControlStateStore(Protocol):
     async def select_runtime(self, item: RunnableItem) -> RuntimeInstance | None: ...
 
     async def claim_assignments(
-        self, runtime_id: str, role: str, *, limit: int = 1
+        self,
+        runtime_id: str,
+        role: str,
+        *,
+        registration_id: str = "legacy",
+        limit: int = 1,
     ) -> list[ClaimedAssignment]: ...
+
+    async def renew_assignment_claim(
+        self,
+        task_id: str,
+        *,
+        runtime_id: str,
+        registration_id: str,
+        execution_claim_token: str,
+        lease_id: str,
+        fencing_token: int,
+    ) -> RuntimeAssignment: ...
 
     async def finish_assignment(self, task_id: str, outcome: str) -> None: ...
 
@@ -160,7 +180,13 @@ class ControlStateStore(Protocol):
 
     async def register_runtime(self, instance: RuntimeInstance) -> None: ...
 
-    async def heartbeat(self, runtime_id: str, fencing_token: int | None = None) -> None: ...
+    async def heartbeat(
+        self,
+        runtime_id: str,
+        fencing_token: int | None = None,
+        *,
+        registration_id: str = "legacy",
+    ) -> None: ...
 
     async def reserve_capacity(self, scope: str, amount: int, *, limit: int) -> bool: ...
 

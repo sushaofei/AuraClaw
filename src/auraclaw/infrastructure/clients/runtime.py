@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
+from uuid import uuid4
 
 import httpx
 
@@ -15,6 +16,8 @@ from auraclaw.contracts.internal import (
     AssignmentClaimResponse,
     AssignmentDispositionRequest,
     AssignmentDispositionResponse,
+    AssignmentRenewRequest,
+    AssignmentRenewResponse,
     CancellationRequest,
     CancellationResponse,
     CheckpointResponse,
@@ -378,6 +381,7 @@ class RemoteRuntimeControlClient:
         role: str,
         node_id: str,
         capacity: int,
+        registration_id: str | None = None,
         timeout: float = 10.0,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
@@ -385,6 +389,7 @@ class RemoteRuntimeControlClient:
         self.role = role
         self.node_id = node_id
         self.capacity = capacity
+        self.registration_id = registration_id or uuid4().hex
         self._client = httpx.AsyncClient(
             base_url=base_url, timeout=timeout, transport=transport
         )
@@ -404,6 +409,7 @@ class RemoteRuntimeControlClient:
                 role=self.role,
                 node_id=self.node_id,
                 capacity=self.capacity,
+                registration_id=self.registration_id,
             ),
             RuntimeHeartbeatResponse,
         )
@@ -415,6 +421,7 @@ class RemoteRuntimeControlClient:
                 context=_context("system", f"heartbeat:{self.runtime_id}", self.runtime_id),
                 runtime_id=self.runtime_id,
                 capacity_available=self.capacity,
+                registration_id=self.registration_id,
             ),
             RuntimeHeartbeatResponse,
         )
@@ -426,6 +433,7 @@ class RemoteRuntimeControlClient:
                 context=_context("system", f"claim:{self.runtime_id}", self.runtime_id),
                 runtime_id=self.runtime_id,
                 role=self.role,
+                registration_id=self.registration_id,
                 limit=limit,
             ),
             AssignmentClaimResponse,
@@ -457,12 +465,41 @@ class RemoteRuntimeControlClient:
                 lease_assertion=record.lease_assertion,
                 user_id=record.lease_assertion.user_id,
                 dept_id=record.lease_assertion.dept_id,
+                execution_claim_token=record.execution_claim_token,
+                execution_claim_expires_at=record.execution_claim_expires_at,
             )
             self._assignments[
                 (assignment.tenant_id, assignment.session_id, assignment.run_id)
             ] = (record.task_id, assignment)
             assignments.append(assignment)
         return assignments
+
+    async def renew_assignment(self, assignment: RuntimeAssignment) -> None:
+        task_id, _ = self._assignment(
+            assignment.tenant_id, assignment.session_id, assignment.run_id
+        )
+        if assignment.execution_claim_token is None:
+            raise RuntimeError("Runtime assignment has no execution claim")
+        response = await self._contract.call(
+            "/internal/v1/control/assignments/renew",
+            AssignmentRenewRequest(
+                context=_context(
+                    assignment.tenant_id,
+                    f"renew:{task_id}",
+                    assignment.run_id,
+                ),
+                task_id=task_id,
+                runtime_id=assignment.runtime_id,
+                registration_id=self.registration_id,
+                execution_claim_token=assignment.execution_claim_token,
+                lease_id=assignment.lease_id,
+                fencing_token=assignment.fencing_token,
+            ),
+            AssignmentRenewResponse,
+        )
+        assignment.lease_assertion = response.lease_assertion
+        assignment.lease_expires_at = response.lease_assertion.expires_at
+        assignment.execution_claim_expires_at = response.execution_claim_expires_at
 
     def _assignment(
         self, tenant_id: str, session_id: str, run_id: str
@@ -576,6 +613,7 @@ class RemoteRuntimeControlClient:
                 fencing_token=entry.fencing_token,
                 disposition=disposition,
                 outcome=outcome,
+                execution_claim_token=entry.execution_claim_token or "",
             ),
             AssignmentDispositionResponse,
         )
@@ -609,6 +647,7 @@ class RemoteRuntimeControlClient:
                 runtime_id=runtime_id,
                 lease_id=lease_id,
                 fencing_token=fencing_token,
+                execution_claim_token=entry.execution_claim_token,
             ),
             AssignmentAbandonResponse,
         )
@@ -639,6 +678,7 @@ class RemoteRuntimeControlClient:
                 fencing_token=entry.fencing_token,
                 disposition="suspend",
                 outcome=reason,
+                execution_claim_token=entry.execution_claim_token or "",
             ),
             AssignmentDispositionResponse,
         )
