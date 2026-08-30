@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import secrets
+import socket
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
@@ -501,61 +503,80 @@ class RemoteRuntimeWorker:
         elif now - self._last_heartbeat_at >= self._heartbeat_interval.total_seconds():
             await self._control.heartbeat()
             self._last_heartbeat_at = time.monotonic()
-        assignments = await self._control.claim(limit=1)
-        for assignment in assignments:
-            task_id = f"{assignment.tenant_id}:{assignment.session_id}:{assignment.run_id}"
-            try:
-                await self._execute_with_heartbeat(assignment)
-            except (FencingTokenError, LeaseConflictError):
-                logger.warning(
-                    "runtime lost lease for %s; abandoning stale assignment",
-                    task_id,
-                    exc_info=True,
-                )
-                try:
-                    await self._control.abandon_assignment(
-                        task_id,
-                        runtime_id=assignment.runtime_id,
-                        lease_id=assignment.lease_id,
-                        fencing_token=assignment.fencing_token,
-                    )
-                except Exception:
-                    logger.exception(
-                        "failed to abandon stale assignment %s",
-                        task_id,
-                    )
-                continue
-            except Exception as exc:
-                try:
-                    await self._harness.record_failure(assignment, exc)
-                except Exception:
-                    # Keep assignment running so reclaim/lease recovery can retry.
-                    # Finishing here without a terminal Session event leaves the
-                    # Session stuck in runnable forever.
-                    logger.exception(
-                        "failed to record run failure for %s; leaving assignment running",
-                        task_id,
-                    )
-                    raise
-                try:
-                    await self._control.finish_assignment(task_id, "failed")
-                except Exception:
-                    logger.exception(
-                        "failed to disposition assignment %s after recorded failure",
-                        task_id,
-                    )
-                raise
+        assignments = await self._control.claim(
+            limit=max(1, int(getattr(self._control, "capacity", 1)))
+        )
+        if assignments:
+            await asyncio.gather(
+                *(self._run_assignment(assignment) for assignment in assignments)
+            )
         return len(assignments)
+
+    async def _run_assignment(self, assignment: RuntimeAssignment) -> None:
+        task_id = f"{assignment.tenant_id}:{assignment.session_id}:{assignment.run_id}"
+        try:
+            await self._execute_with_heartbeat(assignment)
+        except (FencingTokenError, LeaseConflictError):
+            logger.warning(
+                "runtime lost lease for %s; abandoning stale assignment",
+                task_id,
+                exc_info=True,
+            )
+            try:
+                await self._control.abandon_assignment(
+                    task_id,
+                    runtime_id=assignment.runtime_id,
+                    lease_id=assignment.lease_id,
+                    fencing_token=assignment.fencing_token,
+                )
+            except Exception:
+                logger.exception("failed to abandon stale assignment %s", task_id)
+            return
+        except Exception as exc:
+            try:
+                await self._harness.record_failure(assignment, exc)
+            except Exception:
+                logger.exception(
+                    "failed to record run failure for %s; leaving assignment running",
+                    task_id,
+                )
+                raise
+            try:
+                await self._control.finish_assignment(task_id, "failed")
+            except Exception:
+                logger.exception(
+                    "failed to disposition assignment %s after recorded failure", task_id
+                )
+            raise
 
     async def _execute_with_heartbeat(self, assignment: RuntimeAssignment) -> None:
         stop = asyncio.Event()
+        execute = asyncio.create_task(
+            self._harness.execute(assignment),
+            name=f"runtime-harness-{assignment.run_id}",
+        )
 
         async def keep_alive() -> None:
+            failures = 0
             while not stop.is_set():
+                delay = self._heartbeat_interval.total_seconds()
                 try:
-                    await self._control.heartbeat()
+                    renew = getattr(self._control, "renew_assignment", None)
+                    if callable(renew):
+                        await renew(assignment)
+                    else:
+                        await self._control.heartbeat()
                     self._last_heartbeat_at = time.monotonic()
-                except Exception:
+                    failures = 0
+                except Exception as exc:
+                    failures += 1
+                    retry_base = min(
+                        self._heartbeat_interval.total_seconds(), 1.0
+                    )
+                    delay = min(
+                        self._heartbeat_interval.total_seconds(),
+                        retry_base * (2 ** (failures - 1)),
+                    )
                     # Transient control-plane blips must not stop keep-alive;
                     # exiting here leaves last_heartbeat_at stale and
                     # recover_expired can reclaim a still-running long call.
@@ -565,10 +586,16 @@ class RemoteRuntimeWorker:
                         assignment.run_id,
                         exc_info=True,
                     )
+                    expires_at = assignment.execution_claim_expires_at
+                    if expires_at is not None and expires_at <= datetime.now(UTC):
+                        execute.cancel()
+                        raise LeaseConflictError(
+                            "execution claim renewal safety window elapsed"
+                        ) from exc
                 try:
                     await asyncio.wait_for(
                         stop.wait(),
-                        timeout=self._heartbeat_interval.total_seconds(),
+                        timeout=delay,
                     )
                     return
                 except TimeoutError:
@@ -576,14 +603,33 @@ class RemoteRuntimeWorker:
 
         heartbeats = asyncio.create_task(keep_alive(), name="remote-runtime-heartbeat")
         try:
-            await self._harness.execute(assignment)
+            done, _ = await asyncio.wait(
+                {execute, heartbeats}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if heartbeats in done:
+                await heartbeats
+            await execute
         finally:
             stop.set()
-            await heartbeats
+            if not heartbeats.done():
+                await heartbeats
 
 
 def _runtime_instance_identity(settings: Settings) -> tuple[str, str]:
-    return settings.runtime_id, settings.runtime_node_id
+    hostname = (
+        os.getenv("AURACLAW_RUNTIME_INSTANCE_UID")
+        or os.getenv("POD_UID")
+        or socket.gethostname()
+    )
+    if settings.deployment_profile == "production":
+        runtime_id = settings.runtime_id or f"runtime-{hostname}"
+        node_id = (
+            hostname
+            if settings.runtime_node_id in {None, "local"}
+            else settings.runtime_node_id or hostname
+        )
+        return runtime_id, node_id
+    return settings.runtime_id or "runtime-local-1", settings.runtime_node_id or "local"
 
 
 def _configured_identities(

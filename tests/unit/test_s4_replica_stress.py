@@ -13,6 +13,34 @@ from auraclaw.infrastructure.persistence.memory_control_store import (
     InMemoryControlStateStore,
 )
 from auraclaw.infrastructure.persistence.memory_event_store import InMemoryEventStore
+from auraclaw.runtime.clients import (
+    FencedSessionClient,
+    FencedToolClient,
+    IdempotentToolClient,
+    InMemoryRuntimeEventBus,
+)
+from auraclaw.runtime.harness import AgentHarness
+from auraclaw.runtime.model_gateway import ModelGateway, StaticCredentialResolver
+from auraclaw.runtime.ports import ModelRequest, ModelResponse
+
+
+class _StressProvider:
+    name = "stress"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def generate(self, request: ModelRequest, *, credential: str) -> ModelResponse:
+        del credential
+        self.calls += 1
+        return ModelResponse(
+            model_call_id=request.model_call_id,
+            provider=self.name,
+            model="stress-model",
+            completed_output="done",
+            deltas=("done",),
+            usage={"input_tokens": 1, "output_tokens": 1},
+        )
 
 
 class _SessionRecorder:
@@ -131,3 +159,31 @@ async def test_four_replicas_process_200_sessions_without_duplicates_or_reorderi
     }
     assert len(session.assignments) == len(task_ids) == session_count
     assert len({item.runtime_id for item in session.assignments}) == 4
+
+    provider = _StressProvider()
+    harness = AgentHarness(
+        control_store=control,
+        session=FencedSessionClient(events, control),
+        model=ModelGateway(
+            (provider,),
+            StaticCredentialResolver({provider.name: "test-only"}),
+            default_provider=provider.name,
+        ),
+        tools=FencedToolClient(IdempotentToolClient(), control),
+        runtime_events=InMemoryRuntimeEventBus(),
+    )
+    claimed = []
+    for index in range(4):
+        claimed.extend(
+            await control.claim_assignments(
+                f"runtime-stress-{index}", "root", limit=session_count
+            )
+        )
+    assert len(claimed) == session_count
+    await asyncio.gather(*(harness.execute(item.assignment) for item in claimed))
+    assert provider.calls == session_count
+    completed = 0
+    for index in range(session_count):
+        canonical = await events.load("tenant-stress", f"session-stress-{index}")
+        completed += sum(event.type == "run.completed" for event in canonical)
+    assert completed == session_count

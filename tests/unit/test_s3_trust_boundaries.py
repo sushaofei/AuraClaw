@@ -341,9 +341,12 @@ async def test_runtime_claims_signed_assignment_only_through_control_api() -> No
                 task_id="task-a",
                 runtime_id="runtime-a",
                 lease_id=lease.lease_id,
-                fencing_token=lease.fencing_token,
-                disposition="finish",
-            ),
+                    fencing_token=lease.fencing_token,
+                    disposition="finish",
+                    execution_claim_token=claimed.assignments[
+                        0
+                    ].execution_claim_token,
+                ),
             AssignmentDispositionResponse,
         )
         assert completed.accepted

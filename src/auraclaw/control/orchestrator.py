@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -22,6 +23,10 @@ from auraclaw.control.ports import (
 from auraclaw.runtime.ports import SessionClient
 
 logger = logging.getLogger(__name__)
+
+
+class RuntimeCapacityUnavailable(RuntimeError):
+    """Normal scheduler backpressure; the queue item should be retried later."""
 
 
 class ManagedOrchestrator:
@@ -109,7 +114,22 @@ class ManagedOrchestrator:
             )
             return None
         try:
-            runtime = await self._provisioner.provision(item, lease)
+            try:
+                runtime = await self._provisioner.provision(item, lease)
+            except RuntimeCapacityUnavailable:
+                await self._control.release_lease(lease)
+                await self._control.reschedule(
+                    item.task_id,
+                    worker_id=self._id,
+                    claim_token=claim.claim_token,
+                    delay=timedelta(seconds=random.uniform(0.1, 0.5)),
+                )
+                logger.info(
+                    "runtime.capacity_saturated role=%s partition=%s",
+                    item.role,
+                    item.queue_partition,
+                )
+                return None
             if self._register_selected_runtime:
                 await self._control.register_runtime(runtime)
             assignment = RuntimeAssignment(
@@ -268,7 +288,9 @@ class RegisteredRuntimeProvisioner:
         del lease
         runtime = await self._store.select_runtime(item)
         if runtime is None:
-            raise RuntimeError(f"no Runtime capacity is available for role={item.role}")
+            raise RuntimeCapacityUnavailable(
+                f"no Runtime capacity is available for role={item.role}"
+            )
         return runtime
 
     async def cancel(self, runtime_id: str) -> None:

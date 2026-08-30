@@ -12,7 +12,9 @@ Compose 不提供 HPA/PDB/NetworkPolicy，跨故障域高可用由两套独立 C
 Agent Runtime 在生产模式下若未显式配置 `AURACLAW_RUNTIME_ID`，会使用容器/Pod hostname 生成
 实例 ID；`AURACLAW_RUNTIME_NODE_ID=local` 同样解析为 hostname。Lease Assertion 对 runtime ID、
 tenant、session、run、lease 和 fencing token 签名，Action Hands 不再把共享 workload token 误当成
-单个 Runtime 身份。显式 Runtime ID 必须保证副本间唯一。
+单个 Runtime 身份。每个进程还生成独立 `registration_id`；同一 `runtime_id` 的上一注册在 30 秒
+registration lease 内仍活跃时，新进程注册会 fail closed。因此显式 Runtime ID 必须保证副本间唯一，
+滚动替换固定 ID 时必须先等待旧实例退出和 registration lease 到期。
 
 ## 调度与消费恢复
 
@@ -21,6 +23,14 @@ tenant、session、run、lease 和 fencing token 签名，Action Hands 不再把
 - Orchestrator 使用可过期 claim、Session lease 与单调 fencing token；任一副本可回收过期
   Assignment。Runtime 从共享 checkpoint 恢复，旧实例的 Session、Tool、heartbeat 和 checkpoint
   写入均被拒绝。
+- Runtime 为每个 Assignment 原子创建 `execution_claim_token`，不再按 `running.started_at + 5s`
+  猜测孤儿。活跃 claim、Runtime registration 与 Session lease 必须同时匹配；执行心跳每 10 秒续租
+  claim、Session lease 和签名 Lease Assertion。超过 claim 安全窗口后 Runtime 取消 Harness，停止新副作用。
+- `AURACLAW_RUNTIME_CAPACITY=N` 表示同一 Runtime tick 最多同时执行 N 个 Harness；Control 的
+  `assigned|running` 计数与此槽位上限一致。关闭 Runtime 前先停止领取，并给在途 Harness 至少一个
+  lease TTL 的排空时间；强制退出的任务在 registration/claim lease 到期后从 checkpoint 恢复。
+- 无可用 Runtime 槽位是背压而非故障。Orchestrator 将原队列项延迟 100–500ms（带 jitter）后按原
+  priority/partition 重排，避免多副本热循环且不改变公平顺序。
 - Projection Outbox 每个 destination/tenant/session 只释放最早未完成记录。claim、retry delay 或
   poison 会阻断后续版本，避免多个 Worker 产生 version gap。
 - Delivery 在 Outbox ingestion 后按 tenant/session/sink 串行领取 Job；attempting、retry_wait 和过期
@@ -30,7 +40,9 @@ tenant、session、run、lease 和 fencing token 签名，Action Hands 不再把
 
 ## 生产配置门禁
 
-1. 依次应用 `0010`～`0014` expand migration。可选执行 `deploy/postgres/roles.sql` 做硬化，
+1. 依次应用 PostgreSQL `0010`～`0040`（MySQL 应用至 `0022`）expand migration。`0040` / MySQL
+   `0022` 增加 registration 与 execution claim 字段和索引；先迁移 Control 数据库，再滚动升级
+   Orchestrator，最后升级 Agent Runtime。可选执行 `deploy/postgres/roles.sql` 做硬化，
    当前部署不按服务注入分角色 DSN。
 2. 各服务共享统一 `AURACLAW_DATABASE_URL`（Compose `database_url` secret）；migration 使用
    独立的 `AURACLAW_MIGRATION_DATABASE_URL`。
@@ -40,10 +52,17 @@ tenant、session、run、lease 和 fencing token 签名，Action Hands 不再把
    多字段引用必须使用 `path#field`。集成测试通过 `TEST_VAULT_CREDENTIAL_FIELD` 指定一次性测试值
    的字段名。
 5. `AURACLAW_ORCHESTRATOR_LEASE_TTL_SECONDS` 必须大于正常单次模型/工具网络超时；默认 300 秒。
-   到期任务由新 Runtime 从 checkpoint 接管，旧 fencing 不能继续提交结果。
+   健康执行会自动续租；到期任务由新 Runtime 从 checkpoint 接管，旧 fencing 不能继续提交结果。
+
+升级前检查并修复旧数据：同一部署中若多个容器显式共享 `AURACLAW_RUNTIME_ID`，先改为未配置（使用
+hostname）或注入唯一实例 UID。停止全部旧 Runtime，等待 30 秒，然后将无对应健康实例且状态为
+`assigned|running` 的 Assignment 交给 `recover_expired()`，不要手工复制或重置 fencing token。
+观察 `runtime.capacity_saturated`、claim conflict、lease renewal failure、queue wait 与 active Harness；
+升级期间 duplicate-attempt prevented 应只在故障注入时增长。
 
 ## 回滚
 
-先停止新版本 Worker 并等待 claim/Assignment 排空，再回滚应用。只有确认无 S4 状态仍被新版本使用
-时，才能按 `0014`→`0010` 执行 down migration；生产数据库禁止在未备份和未排空时直接执行 down。
-S4 的 down migration 已在隔离 PostgreSQL 完成 roundtrip 验证。
+先停止新版本 Runtime 领取并等待 claim/Assignment 排空，再回滚 Runtime 与 Orchestrator。确认没有
+`running` execution claim 后，才可执行 `0040_runtime_execution_claims.down.sql`（MySQL 对应
+`0022...down.sql`）；否则旧版本可能把运行任务按 5 秒规则重复领取。生产数据库禁止在未备份、未排空
+或仍有新版本进程时执行 down migration。旧版固定 Runtime ID 只能以单副本运行，直至重新升级。

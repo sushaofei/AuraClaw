@@ -2174,6 +2174,29 @@ ready Skill Artifact 建立带 fencing 的物理回收流程；不把成功命�
 - [x] README、架构、API、运维、回滚、数据保留和阶段门禁保持同步。
 - [x] 本阶段作为一个 intentional commit 提交并 push，不包含 `.env`、Secret、缓存或无关改动。
 
+## 阶段 Runtime execution fencing 与真实并发（Issue #57）
+
+状态：已完成。生产多副本身份、执行所有权、容量、续租与背压使用同一持久协议。
+
+### 功能与架构
+
+- [x] 生产 Runtime 默认从平台实例 UID/hostname 派生唯一 runtime/node ID，活跃重复注册 fail closed。
+- [x] Assignment 持久化 execution claim token/expiry；running 不再因经过 5 秒被健康副本重领。
+- [x] Runtime 按 `runtime_capacity` 并发执行 Harness，Control 活跃计数继续作为槽位分配上限。
+- [x] 执行 keepalive 同时刷新 registration、execution claim、Session lease 与签名 assertion；超出安全窗口停止执行。
+- [x] Session、Checkpoint、Tool 与 disposition 继续由 lease ID、execution owner 和 fencing token fail closed。
+- [x] 容量饱和按原 priority/partition 带 jitter 延迟重排，不进入异常热循环。
+
+### 测试、安全、文档与迁移
+
+- [x] 单测覆盖 hostname 身份、重复注册、capacity=N 真实并发、running 防重领和长执行续租。
+- [x] PostgreSQL/MySQL 原子 claim、续租、恢复与 registration SQL 使用相同所有权条件。
+- [x] 0040 PostgreSQL 与 0022 MySQL 正反迁移覆盖 registration/execution claim 字段和恢复索引。
+- [x] 运维说明覆盖升级顺序、旧重复 ID/stale Assignment 修复、排空、观测与安全回滚。
+- [x] Canonical Event、checkpoint、Tool 幂等和依赖边界未降低；用户环境文件及 Secret 不进入提交。
+- [x] Ruff、Mypy、393 项 Unit、import-linter、Compose 渲染、PostgreSQL/MySQL claim/renew 与迁移 roundtrip 门禁通过。
+- [x] 本阶段作为一个 intentional commit 提交并 push，不包含 `.env`、Secret、缓存或无关改动。
+
 ## 阶段 Product Activity：产品级对话执行轨迹（AuraX Issue #2）
 
 状态：代码与定向验证完成；完整基础设施集成门禁受现有 Kafka/MySQL/PostgreSQL/Artifact 环境失败阻塞。

@@ -31,6 +31,8 @@ from auraclaw.contracts.internal import (
     AssignmentClaimResponse,
     AssignmentDispositionRequest,
     AssignmentDispositionResponse,
+    AssignmentRenewRequest,
+    AssignmentRenewResponse,
     CancellationRequest,
     CancellationResponse,
     CheckpointResponse,
@@ -186,6 +188,11 @@ def control_routes(service: ControlInternalService) -> dict[str, ContractRoute]:
             AssignmentDispositionRequest,
             AssignmentDispositionResponse,
             service.disposition_assignment,
+        ),
+        "/internal/v1/control/assignments/renew": contract_route(
+            AssignmentRenewRequest,
+            AssignmentRenewResponse,
+            service.renew_assignment,
         ),
         "/internal/v1/control/assignments/abandon": contract_route(
             AssignmentAbandonRequest,

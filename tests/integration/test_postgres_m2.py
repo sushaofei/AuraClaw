@@ -8,7 +8,7 @@ import pytest
 
 from auraclaw.config import get_settings
 from auraclaw.contracts.commands import CommandContext
-from auraclaw.contracts.errors import FencingTokenError
+from auraclaw.contracts.errors import FencingTokenError, LeaseConflictError
 from auraclaw.contracts.events import Actor, CanonicalEvent, NewEvent
 from auraclaw.control.orchestrator import (
     ManagedOrchestrator,
@@ -35,6 +35,7 @@ MIGRATIONS = tuple(
         "migrations/0002_m1_fact_query.sql",
         "migrations/0003_m2_managed_runtime.sql",
         "migrations/0010_s4_claim_recovery.sql",
+        "migrations/0040_runtime_execution_claims.sql",
     )
 )
 pytestmark = pytest.mark.skipif(DATABASE_URL is None, reason="PostgreSQL test URL not configured")
@@ -79,6 +80,12 @@ async def _apply_migrations() -> None:
               AND column_name='claim_token'"""
         ) is None:
             await connection.execute(MIGRATIONS[3])
+        if await connection.fetchval(
+            """SELECT 1 FROM information_schema.columns
+            WHERE table_schema='control' AND table_name='runtime_instance'
+              AND column_name='registration_id'"""
+        ) is None:
+            await connection.execute(MIGRATIONS[4])
     finally:
         await connection.close()
 
@@ -130,6 +137,15 @@ def test_postgres_control_claim_lease_fencing_checkpoint_and_capacity() -> None:
                 capacity=1,
             )
             await store_a.register_runtime(runtime)
+            with pytest.raises(LeaseConflictError, match="already registered"):
+                await store_b.register_runtime(
+                    RuntimeInstance(
+                        **{
+                            **runtime.__dict__,
+                            "registration_id": f"replacement-{suffix}",
+                        }
+                    )
+                )
             assignment = RuntimeAssignment(
                 tenant_id=tenant_id,
                 root_session_id=session_id,
@@ -148,6 +164,23 @@ def test_postgres_control_claim_lease_fencing_checkpoint_and_capacity() -> None:
             )
             assert await store_a.get_assignment(task_id) == assignment
             await store_a.heartbeat(runtime.runtime_id, lease.fencing_token)
+            claimed_assignments = await store_a.claim_assignments(
+                runtime.runtime_id, runtime.role
+            )
+            assert len(claimed_assignments) == 1
+            execution = claimed_assignments[0].assignment
+            assert execution.execution_claim_token is not None
+            assert await store_b.claim_assignments(runtime.runtime_id, runtime.role) == []
+            renewed = await store_a.renew_assignment_claim(
+                task_id,
+                runtime_id=runtime.runtime_id,
+                registration_id=runtime.registration_id,
+                execution_claim_token=execution.execution_claim_token,
+                lease_id=execution.lease_id,
+                fencing_token=execution.fencing_token,
+            )
+            assert renewed.lease_expires_at is not None
+            assert renewed.execution_claim_expires_at is not None
             assert await store_a.reserve_capacity(scope, 2, limit=2)
             assert not await store_b.reserve_capacity(scope, 1, limit=2)
             await store_a.release_capacity(scope, 1)

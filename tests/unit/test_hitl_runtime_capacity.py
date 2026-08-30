@@ -49,6 +49,7 @@ async def _assigned_store() -> tuple[
         node_id="node-hitl",
         capabilities={},
         capacity=1,
+        registration_id="legacy",
     )
     await store.register_runtime(runtime)
     assert await store.enqueue(item)
@@ -102,6 +103,7 @@ async def test_remote_waiting_for_human_ack_releases_runtime_capacity() -> None:
         role="root",
         node_id="node-hitl",
         capacity=1,
+        registration_id="legacy",
         transport=httpx.ASGITransport(app=app),
     )
     await client.register()

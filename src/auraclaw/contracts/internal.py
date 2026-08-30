@@ -80,6 +80,7 @@ class LeaseAssertion(ContractModel):
     fencing_token: int = Field(ge=1)
     expires_at: datetime
     signature: str
+    execution_claim_token: str | None = None
 
 
 class EventInput(ContractModel):
@@ -279,6 +280,7 @@ class RuntimeRegistrationRequest(ContractModel):
     capabilities: dict[str, Any] = Field(default_factory=dict)
     capacity: int = Field(ge=0)
     draining: bool = False
+    registration_id: str = "legacy"
 
 
 class RuntimeHeartbeatRequest(ContractModel):
@@ -287,6 +289,7 @@ class RuntimeHeartbeatRequest(ContractModel):
     capacity_available: int = Field(ge=0)
     active_lease_ids: tuple[str, ...] = ()
     draining: bool = False
+    registration_id: str = "legacy"
 
 
 class RuntimeHeartbeatResponse(ContractModel):
@@ -301,6 +304,7 @@ class AssignmentClaimRequest(ContractModel):
     role: str
     capabilities: dict[str, Any] = Field(default_factory=dict)
     limit: int = Field(default=1, ge=1, le=100)
+    registration_id: str = "legacy"
 
 
 class AssignmentRecord(ContractModel):
@@ -315,6 +319,8 @@ class AssignmentRecord(ContractModel):
     resource_profile: dict[str, Any] = Field(default_factory=dict)
     budget: dict[str, Any] = Field(default_factory=dict)
     deadline: datetime | None = None
+    execution_claim_token: str
+    execution_claim_expires_at: datetime
 
 
 class AssignmentClaimResponse(ContractModel):
@@ -330,6 +336,23 @@ class AssignmentDispositionRequest(ContractModel):
     fencing_token: int = Field(ge=1)
     disposition: Literal["ack", "finish", "fail", "suspend"]
     outcome: str | None = None
+    execution_claim_token: str | None = None
+
+
+class AssignmentRenewRequest(ContractModel):
+    context: InternalRequestContext
+    task_id: str
+    runtime_id: str
+    registration_id: str
+    execution_claim_token: str
+    lease_id: str
+    fencing_token: int = Field(ge=1)
+
+
+class AssignmentRenewResponse(ContractModel):
+    api_version: str = INTERNAL_API_VERSION
+    lease_assertion: LeaseAssertion
+    execution_claim_expires_at: datetime
 
 
 class AssignmentDispositionResponse(ContractModel):
@@ -343,6 +366,7 @@ class AssignmentAbandonRequest(ContractModel):
     runtime_id: str
     lease_id: str
     fencing_token: int = Field(ge=1)
+    execution_claim_token: str | None = None
 
 
 class AssignmentAbandonResponse(ContractModel):

@@ -415,9 +415,9 @@ class Settings(BaseSettings):
     sync_invoke_max_timeout_seconds: int = Field(default=120, ge=1, le=3600)
     sync_invoke_poll_interval_seconds: float = Field(default=0.25, ge=0.05, le=5.0)
     sync_invoke_max_concurrent: int = Field(default=32, ge=1, le=1000)
-    runtime_id: str = "runtime-local-1"
+    runtime_id: str | None = None
     runtime_role: str = RUNTIME_POOL_ROLE
-    runtime_node_id: str = "local"
+    runtime_node_id: str | None = None
     runtime_capacity: int = Field(default=1, ge=1)
     model_api_key: str | None = None
     model_base_url: str | None = None
