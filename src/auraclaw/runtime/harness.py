@@ -278,6 +278,15 @@ class AgentHarness:
                 "call_signatures": {},
             }
         )
+        capability_state = dict(state.get("capability_state", {}))
+        if (
+            self._capability_controller is not None
+            and not capability_state.get("required_capabilities_preloaded")
+        ):
+            state["capability_state"] = await self._capability_controller.preload_required(
+                assignment,
+                capability_state,
+            )
         if checkpoint is not None and checkpoint.phase == "capability.approval_waiting":
             approval_id = str(state.get("approval_id", ""))
             session_events = await self._session.load(assignment)

@@ -103,6 +103,7 @@ from auraclaw.composition.object_storage import (
 )
 from auraclaw.composition.worker_wake import WorkerWakeGate
 from auraclaw.config import Settings, get_settings
+from auraclaw.contracts.capabilities import CapabilityStatus
 from auraclaw.contracts.errors import FencingTokenError, LeaseConflictError
 from auraclaw.contracts.internal import (
     InternalRequestContext,
@@ -1477,6 +1478,7 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
                 catalog=capability_catalog,
                 reconciler=app.state.catalog_reconciler,
                 egress=mcp_egress_client,
+                instance_id=f"action-hands-{secrets.token_hex(8)}",
             )
             mcp_registry.bind_runtime(manager)
             app.state.mcp_connection_manager = manager
@@ -1630,6 +1632,7 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
             lifecycle=skill_lifecycle,
             publication=skill_publication,
             rebuilder=skill_rebuilder,
+            snapshot_provider=reconciler.snapshot_for,
         )
         app.state.catalog_reconciler = reconciler
         app.state.skill_reconciler = skill_reconciler
@@ -1644,9 +1647,14 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
             await skill_reconciler.reconcile_all()
 
         async def reconcile_catalog_and_skills() -> int:
-            active = await reconciler.reconcile_all()
+            results = await reconciler.reconcile_all_results()
+            manager = getattr(app.state, "mcp_connection_manager", None)
+            if manager is not None:
+                await manager.record_reconcile_results(results)
             await skill_reconciler.reconcile_all()
-            return active
+            return sum(
+                result.status is CapabilityStatus.ACTIVE for result in results
+            )
 
         async def reconcile_mcp_revisions() -> int:
             manager = getattr(app.state, "mcp_connection_manager", None)

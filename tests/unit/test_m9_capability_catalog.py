@@ -22,6 +22,7 @@ from auraclaw.contracts.capabilities import (
     CapabilityTrustLevel,
     McpServerDefinition,
 )
+from auraclaw.contracts.tools import ToolInvocation
 from auraclaw.control.ports import RuntimeAssignment
 from auraclaw.infrastructure.artifacts.store import ArtifactStore, InMemoryObjectStorage
 from auraclaw.internal.hands import InProcessHandsClient
@@ -268,6 +269,116 @@ def test_catalog_search_matches_chinese_query_without_year_token() -> None:
             limit=10,
         )
         assert [item.capability_id for item in matches] == ["cap-price-profile"]
+
+    asyncio.run(scenario())
+
+
+def test_catalog_search_resolves_mcp_metadata_exact_refs_and_stable_browse() -> None:
+    async def scenario() -> None:
+        store = InMemoryCapabilityCatalogStore()
+        catalog = CapabilityCatalog(store)
+        server = McpServerDefinition(
+            server_id="pricing-mcp",
+            tenant_id="tenant-a",
+            title="价格洞察服务",
+            endpoint="https://pricing.example/mcp",
+            trust_level=CapabilityTrustLevel.TENANT_VERIFIED,
+            status=CapabilityStatus.ACTIVE,
+            enabled=True,
+            metadata={"search_aliases": ["采购行情"]},
+        )
+        await catalog.register_server(server)
+        descriptor = _descriptor(
+            "cap-price", "procurement.price.profile", tenant_id="tenant-a"
+        ).model_copy(
+            update={
+                "server_id": server.server_id,
+                "metadata": {
+                    "source_type": "mcp",
+                    "server_title": server.title,
+                    "endpoint": server.endpoint,
+                    "search_aliases": ["采购行情"],
+                },
+            }
+        )
+        await catalog.replace_server_capabilities(server.server_id, (descriptor,))
+
+        for query in ("MCP 工具", "价格洞察服务", "采购行情"):
+            matches = await catalog.search(tenant_id="tenant-a", query=query)
+            assert [item.capability_id for item in matches] == ["cap-price"]
+        assert [
+            item.capability_id
+            for item in await catalog.search(
+                tenant_id="tenant-a", capability_id="cap-price"
+            )
+        ] == ["cap-price"]
+        assert [
+            item.capability_id
+            for item in await catalog.search(
+                tenant_id="tenant-a", canonical_name="procurement.price.profile"
+            )
+        ] == ["cap-price"]
+        assert [
+            item.capability_id
+            for item in await catalog.search(
+                tenant_id="tenant-a", server_id="pricing-mcp"
+            )
+        ] == ["cap-price"]
+        repeated = [
+            tuple(
+                item.capability_id
+                for item in await catalog.search(tenant_id="tenant-a", query="")
+            )
+            for _ in range(100)
+        ]
+        assert len(set(repeated)) == 1
+        assert descriptor.metadata.get("catalog_generation") is None
+        stored = await catalog.get(tenant_id="tenant-a", capability_id="cap-price")
+        assert stored is not None
+        assert stored.metadata["catalog_generation"] == 1
+
+    asyncio.run(scenario())
+
+
+def test_search_executor_empty_result_recommends_broader_retry() -> None:
+    async def scenario() -> None:
+        store = InMemoryCapabilityCatalogStore()
+        catalog = CapabilityCatalog(store)
+        await catalog.register_server(
+            McpServerDefinition(
+                server_id="server-global",
+                title="Platform",
+                endpoint="https://platform.example/mcp",
+                trust_level=CapabilityTrustLevel.PLATFORM,
+                status=CapabilityStatus.ACTIVE,
+                enabled=True,
+            )
+        )
+        await catalog.replace_server_capabilities(
+            "server-global", (_descriptor("cap-global", "github.issue.read"),)
+        )
+        result = await CapabilitySearchExecutor(catalog).execute(
+            ToolInvocation(
+                tool_invocation_id="search-empty",
+                tenant_id="tenant-a",
+                root_session_id="root",
+                session_id="session",
+                run_id="run",
+                tool_name=CAPABILITY_SEARCH_TOOL_NAME,
+                tool_version="1",
+                arguments={"query": "unfindable"},
+                expected_side_effect="read",
+                idempotency_key="search-empty",
+                deadline=None,
+                fencing_token=1,
+                actor_id="runtime",
+            ),
+            capability_search_tool(),
+        )
+        assert result["empty_reason"] == "no_capability_matched_filters"
+        assert result["available_domains"] == ["github"]
+        assert "broader query" in str(result["hint"])
+        assert "without calling" not in str(result["hint"])
 
     asyncio.run(scenario())
 

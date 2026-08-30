@@ -2197,6 +2197,42 @@ ready Skill Artifact 建立带 fencing 的物理回收流程；不把成功命�
 - [x] Ruff、Mypy、393 项 Unit、import-linter、Compose 渲染、PostgreSQL/MySQL claim/renew 与迁移 roundtrip 门禁通过。
 - [x] 本阶段作为一个 intentional commit 提交并 push，不包含 `.env`、Secret、缓存或无关改动。
 
+## 阶段 M15：MCP/Skill 稳定发现与多副本一致目录（Issue #58）
+
+状态：已完成。Capability publication、MCP 实例健康和 desired configuration 已拆分，失败对账继续
+服务 last-known-good generation。
+
+### 确定性发现与准入
+
+- [x] 搜索支持 capability id、canonical name、server id 精确过滤，并索引 Server title/id、endpoint、
+  `source=mcp`、业务别名、search tags 和能力类型。
+- [x] 空 query 提供最多 50 条的有界 browse；空结果返回原因、可用领域和放宽重试建议，不再禁止重试。
+- [x] Assignment `required_capabilities` 固定 capability id 与可选 version/content digest；Runtime 在首次模型
+  调用前直接 load，缺失/漂移以明确 admission error 失败。
+- [x] 非空远端快照被 allowlist 全过滤时返回 `CapabilityAllowlistError`，不发布空目录。
+- [x] 搜索审计记录 tenant、query、filters、命中 id 和 generation，不记录 Tool 参数、Secret 或资源正文。
+
+### 原子目录与故障恢复
+
+- [x] 0041 为 Server 和 Capability 增加单调 active catalog generation；Capability 替换与 generation
+  切换在同一数据库事务和 Server 行锁内完成。
+- [x] 对账 timeout、鉴权错误、schema drift 或内容校验失败不替换 active generation；连续失败只标记
+  stale/degraded，不撤销 last-known-good Catalog 或 Tool Router。
+- [x] 新 Hands 副本对账失败时从共享 active Catalog 恢复本地 Tool Registry/Router。
+- [x] Catalog 和 Skill reconciler 复用同一份已校验远端 snapshot，避免同一轮重复 discover 形成代际差异。
+- [x] Tool schema/content digest 未 bump version 时产生明确 `CapabilitySchemaDriftError` 并保留旧 generation。
+
+### 多副本健康与运维
+
+- [x] MCP runtime observed state 以 `(server_id, instance_id)` 持久化，单副本失败不再覆盖健康副本。
+- [x] Admin MCP Server 响应同时包含各实例 `runtimes` 和确定性 `runtime` 聚合状态。
+- [x] desired state 继续独立治理 disabled/retired 的目录可见性；Catalog stale 不改变 Session 事实边界。
+- [x] 单测覆盖精确查询、中文别名、MCP 通用词、100 次稳定排序、空结果回退、全过滤、required preload、
+  last-known-good 恢复和双副本健康聚合。
+- [x] PostgreSQL 集成覆盖共享 generation、跨 Store 查询和实例级 runtime schema；0041 提供正反迁移。
+- [x] Ruff、Mypy、Unit、相关 PostgreSQL integration 与 import-linter 门禁通过。
+- [x] 本阶段作为一个 intentional commit 提交并 push，不包含 `.env`、Secret、缓存或无关改动。
+
 ## 阶段 Product Activity：产品级对话执行轨迹（AuraX Issue #2）
 
 状态：代码与定向验证完成；完整基础设施集成门禁受现有 Kafka/MySQL/PostgreSQL/Artifact 环境失败阻塞。

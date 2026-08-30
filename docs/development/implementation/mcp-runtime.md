@@ -143,6 +143,8 @@ M9 新增：
 - `0015_m9_capability_catalog.sql`：受管 Server 和 Capability Catalog。
 - `0016_m9_skill_projection.sql`：Task Projection 的 `skill_activations`。
 - `0018_mcp_protocol_revision.sql`：新注册远端 Server 的数据库默认 revision 升为 `2026-07-28`。
+- `0041_capability_catalog_consistency.sql`：实例级 MCP observed state、Catalog generation 和
+  last-known-good publication 时间。
 
 发布顺序是先执行 expand migration，再滚动 Credential Proxy、Action Hands、Runtime 和
 Projection。回滚应用时先停用远端 Server 配置，再回滚服务；只有确认没有旧版本读取

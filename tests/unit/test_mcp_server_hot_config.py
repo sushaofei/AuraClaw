@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import UTC, datetime
 
 import httpx
 import pytest
@@ -33,6 +34,7 @@ from auraclaw.contracts.mcp_registry import (
     McpObservedState,
     McpServerConfig,
     McpServerLifecycleCommand,
+    McpServerRuntimeRecord,
     McpServerWriteCommand,
 )
 from auraclaw.infrastructure.clients.mcp_egress import RemoteMcpEgressClient
@@ -463,6 +465,46 @@ def test_connection_manager_reconcile_continues_after_unreachable_server() -> No
         )
         assert down.runtime is not None
         assert down.runtime.observed_state is McpObservedState.UNAVAILABLE
+
+    asyncio.run(scenario())
+
+
+def test_runtime_health_is_instance_scoped_and_aggregated_without_last_writer_wins() -> None:
+    async def scenario() -> None:
+        store = InMemoryMcpServerRegistryStore()
+        service = McpServerRegistryService(store)
+        await service.create(_write(_config()))
+        now = datetime.now(UTC)
+        await service.record_runtime(
+            McpServerRuntimeRecord(
+                server_id="local-order-mcp",
+                instance_id="hands-a",
+                loaded_revision=1,
+                observed_state=McpObservedState.ACTIVE,
+                updated_at=now,
+            )
+        )
+        await service.record_runtime(
+            McpServerRuntimeRecord(
+                server_id="local-order-mcp",
+                instance_id="hands-b",
+                observed_state=McpObservedState.UNAVAILABLE,
+                consecutive_failures=3,
+                updated_at=now,
+            )
+        )
+        record = await service.get_server(
+            tenant_id="tenant-a",
+            server_id="local-order-mcp",
+            actor_id="admin-1",
+        )
+        assert {item.instance_id for item in record.runtimes} >= {
+            "hands-a",
+            "hands-b",
+        }
+        assert record.runtime is not None
+        assert record.runtime.instance_id == "aggregate"
+        assert record.runtime.observed_state is McpObservedState.ACTIVE
 
     asyncio.run(scenario())
 

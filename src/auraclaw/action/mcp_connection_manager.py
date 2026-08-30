@@ -7,7 +7,10 @@ from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from auraclaw.action.capability_catalog import CapabilityCatalog
-from auraclaw.action.catalog_reconciler import CapabilityCatalogReconciler
+from auraclaw.action.catalog_reconciler import (
+    CapabilityCatalogReconciler,
+    McpReconcileResult,
+)
 from auraclaw.action.mcp_registry import McpServerRegistryService
 from auraclaw.action.ports import CapabilityConnector
 from auraclaw.contracts.capabilities import CapabilityStatus, McpServerDefinition
@@ -42,6 +45,7 @@ class McpConnectionManager:
         reconciler: CapabilityCatalogReconciler | None = None,
         egress: McpEgressLoader | None = None,
         drain_seconds: float = 5.0,
+        instance_id: str = "legacy",
     ) -> None:
         self._registry = registry
         self._connectors = connectors
@@ -50,6 +54,7 @@ class McpConnectionManager:
         self._reconciler = reconciler
         self._egress = egress
         self._drain_seconds = drain_seconds
+        self._instance_id = instance_id
         self._generations: dict[str, int] = {}
         self._draining: list[CapabilityConnector] = []
 
@@ -107,6 +112,7 @@ class McpConnectionManager:
         await self._registry.record_runtime(
             McpServerRuntimeRecord(
                 server_id=entry.server_id,
+                instance_id=self._instance_id,
                 loaded_revision=entry.revision,
                 observed_state=(
                     McpObservedState.LOADING if restore else McpObservedState.ACTIVE
@@ -127,6 +133,7 @@ class McpConnectionManager:
             await self._registry.record_runtime(
                 McpServerRuntimeRecord(
                     server_id=entry.server_id,
+                    instance_id=self._instance_id,
                     loaded_revision=entry.revision,
                     observed_state=observed,
                     last_test_at=tested_at,
@@ -149,6 +156,7 @@ class McpConnectionManager:
         await self._registry.record_runtime(
             McpServerRuntimeRecord(
                 server_id=server_id,
+                instance_id=self._instance_id,
                 loaded_revision=None,
                 observed_state=McpObservedState.DISABLED,
                 updated_at=datetime.now(UTC),
@@ -183,6 +191,34 @@ class McpConnectionManager:
                 if await self._apply_isolated(entry):
                     changed += 1
         return changed
+
+    async def record_reconcile_results(
+        self, results: tuple[McpReconcileResult, ...]
+    ) -> None:
+        """Heartbeat this instance's catalog load state without global last-writer state."""
+        now = datetime.now(UTC)
+        for result in results:
+            revision = self._generations.get(result.server_id)
+            if revision is None:
+                continue
+            await self._registry.record_runtime(
+                McpServerRuntimeRecord(
+                    server_id=result.server_id,
+                    instance_id=self._instance_id,
+                    loaded_revision=revision,
+                    observed_state=(
+                        McpObservedState.ACTIVE
+                        if result.status is CapabilityStatus.ACTIVE
+                        else McpObservedState.DEGRADED
+                    ),
+                    last_sync_at=now,
+                    consecutive_failures=result.consecutive_failures,
+                    safe_error_code=(
+                        None if result.error is None else "mcp_catalog_degraded"
+                    ),
+                    updated_at=now,
+                )
+            )
 
     async def _apply_isolated(
         self,
@@ -226,6 +262,7 @@ class McpConnectionManager:
             await self._registry.record_runtime(
                 McpServerRuntimeRecord(
                     server_id=entry.server_id,
+                    instance_id=self._instance_id,
                     loaded_revision=self._generations.get(entry.server_id),
                     observed_state=McpObservedState.UNAVAILABLE,
                     consecutive_failures=1,
@@ -250,6 +287,7 @@ class McpConnectionManager:
         await self._registry.record_runtime(
             McpServerRuntimeRecord(
                 server_id=entry.server_id,
+                instance_id=self._instance_id,
                 loaded_revision=(
                     previous.loaded_revision if previous is not None else None
                 ),

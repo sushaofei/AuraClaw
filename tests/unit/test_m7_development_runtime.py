@@ -4,12 +4,22 @@ from auraclaw.config import Settings, get_settings
 from auraclaw.main import create_app
 
 
+class _NoOpObservability:
+    async def record_span(self, **kwargs: object) -> None:
+        del kwargs
+
+    async def metric(self, *args: object, **kwargs: object) -> None:
+        del args, kwargs
+
+
 def test_local_browser_origin_passes_cors_preflight() -> None:
     settings = get_settings()
     previous = settings.cors_allow_origins
     settings.cors_allow_origins = "http://127.0.0.1:3000"
     try:
-        with TestClient(create_app(profile="task-api")) as client:
+        app = create_app(profile="task-api")
+        app.state.observability_service = _NoOpObservability()
+        with TestClient(app) as client:
             response = client.options(
                 "/v1/tasks",
                 headers={

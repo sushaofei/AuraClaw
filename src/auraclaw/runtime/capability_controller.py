@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote
 
+from auraclaw.contracts.capabilities import RequiredCapabilityRef
 from auraclaw.contracts.events import NewEvent
 from auraclaw.contracts.skills import SkillActivation
 from auraclaw.control.ports import RuntimeAssignment
@@ -27,6 +28,10 @@ class CapabilityExecution:
     result: dict[str, Any]
     state: dict[str, Any]
     events: tuple[NewEvent, ...] = ()
+
+
+class CapabilityAdmissionError(RuntimeError):
+    """Raised before the first model call when a fixed capability cannot be loaded."""
 
 
 class RuntimeCapabilityController:
@@ -69,6 +74,9 @@ class RuntimeCapabilityController:
                     "type": "object",
                     "properties": {
                         "query": {"type": "string", "maxLength": 1024},
+                        "capability_id": {"type": "string", "maxLength": 256},
+                        "canonical_name": {"type": "string", "maxLength": 256},
+                        "server_id": {"type": "string", "maxLength": 128},
                         "kinds": {
                             "type": "array",
                             "items": {
@@ -91,7 +99,6 @@ class RuntimeCapabilityController:
                             "maximum": self._max_candidates,
                         },
                     },
-                    "required": ["query"],
                     "additionalProperties": False,
                 },
             ),
@@ -148,6 +155,74 @@ class RuntimeCapabilityController:
             if isinstance(model_tool, dict):
                 tools.append(copy.deepcopy(model_tool))
         return tuple(tools)
+
+    async def preload_required(
+        self,
+        assignment: RuntimeAssignment,
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Deterministically load Assignment refs before the model can run."""
+        raw_refs = assignment.resource_profile.get("required_capabilities", ())
+        if not raw_refs:
+            return copy.deepcopy(state)
+        try:
+            refs = tuple(RequiredCapabilityRef.model_validate(item) for item in raw_refs)
+        except Exception as exc:
+            raise CapabilityAdmissionError("required capability refs are invalid") from exc
+        if len(refs) > self._max_loaded:
+            raise CapabilityAdmissionError("required capability count exceeds runtime limit")
+        ids = tuple(dict.fromkeys(item.capability_id for item in refs))
+        result = await self._client.execute(
+            assignment,
+            ToolCall(
+                tool_invocation_id=(
+                    "required_capabilities_"
+                    + hashlib.sha256("\0".join(ids).encode()).hexdigest()[:24]
+                ),
+                name=CAPABILITY_LOAD,
+                version="1",
+                arguments={"capability_ids": list(ids)},
+                expected_side_effect="read",
+            ),
+        )
+        payload = _result_content(result)
+        returned = {
+            str(item.get("capability_id")): dict(item)
+            for item in payload.get("capabilities", ())
+            if isinstance(item, dict) and item.get("capability_id")
+        }
+        failures: list[str] = []
+        for ref in refs:
+            descriptor = returned.get(ref.capability_id)
+            if descriptor is None:
+                failures.append(f"{ref.capability_id}:missing")
+                continue
+            if ref.version is not None and descriptor.get("version") != ref.version:
+                failures.append(f"{ref.capability_id}:version_mismatch")
+            if (
+                ref.content_digest is not None
+                and descriptor.get("content_digest") != ref.content_digest
+            ):
+                failures.append(f"{ref.capability_id}:content_digest_mismatch")
+        if failures:
+            raise CapabilityAdmissionError(
+                "required capability admission failed: " + ", ".join(failures)
+            )
+        current = copy.deepcopy(state)
+        current["candidates"] = {**dict(current.get("candidates", {})), **returned}
+        current["loaded"] = self._merge_loaded(
+            current,
+            tuple(returned.values()),
+            allowed_ids=set(ids),
+        )
+        omitted = [item for item in ids if item not in current["loaded"]]
+        if omitted:
+            raise CapabilityAdmissionError(
+                "required capability admission failed: runtime load limit for "
+                + ", ".join(omitted)
+            )
+        current["required_capabilities_preloaded"] = True
+        return current
 
     async def binding_disposition(
         self,

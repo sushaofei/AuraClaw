@@ -4,6 +4,7 @@ import base64
 import hashlib
 import re
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -19,7 +20,11 @@ from auraclaw.action.skill_publication import SkillPublicationService
 from auraclaw.action.skill_rebuild import SkillStateRebuilder
 from auraclaw.contracts.capabilities import McpServerDefinition
 from auraclaw.contracts.errors import VersionConflictError
-from auraclaw.contracts.hands import HandsResourceDescriptor, HandsTrustedContext
+from auraclaw.contracts.hands import (
+    CapabilitySnapshot,
+    HandsResourceDescriptor,
+    HandsTrustedContext,
+)
 from auraclaw.contracts.skills import (
     PublishSkillCommand,
     SkillSourceDesiredState,
@@ -62,6 +67,7 @@ class SkillPackageReconciler:
         publication: SkillPublicationService,
         rebuilder: SkillStateRebuilder,
         owner: str | None = None,
+        snapshot_provider: Callable[[str], CapabilitySnapshot | None] | None = None,
     ) -> None:
         self._store = store
         self._connectors = connectors
@@ -69,6 +75,7 @@ class SkillPackageReconciler:
         self._publication = publication
         self._rebuilder = rebuilder
         self._owner = owner or f"skill-reconciler-{uuid.uuid4().hex}"
+        self._snapshot_provider = snapshot_provider
 
     async def reconcile_all(self) -> int:
         servers = {
@@ -137,7 +144,13 @@ class SkillPackageReconciler:
                     published_count=0,
                     error="lease_contended",
                 )
-            snapshot = await connector.snapshot(trusted)
+            snapshot = (
+                self._snapshot_provider(server.server_id)
+                if self._snapshot_provider is not None
+                else None
+            )
+            if snapshot is None:
+                snapshot = await connector.snapshot(trusted)
             lease = await self._renew(lease)
             grouped = _group_skill_resource_uris(snapshot.resources)
             published = 0
