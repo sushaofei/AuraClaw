@@ -1460,7 +1460,7 @@ Mypy、10 条 import-linter contract 和全量 Pytest 通过；MySQL、SeaweedFS
 
 ## 主存储 KingBase 迁移（Issue #53）
 
-状态：P1 进行中（配置与方言别名）。
+状态：P1 已完成；P2 等待可用的 KingBase 目标配置与权限后验收。
 
 ### 范围
 
@@ -1483,6 +1483,10 @@ Mypy、10 条 import-linter contract 和全量 Pytest 通过；MySQL、SeaweedFS
 - [ ] `migrations/` up 到最新；advisory lock / jsonb / ON CONFLICT / RETURNING / SKIP LOCKED。
 - [ ] Event / Outbox / Control claim / Projection 冒烟。
 - [ ] `deploy/postgres/roles.sql` 在 KingBase 上验证或记录差异补丁。
+
+当前工作区的受保护 `.env.test` / `.env.prod` 仍配置为 MySQL，且没有独立
+`.kingbase.env`，因此不得用本地配置冒充真实 KingBase P2 验收。获得目标 DSN 与建
+schema / 建表权限后，需重新执行 migration 与核心 Store 冒烟并记录非敏感证据。
 
 ### 文档与交付
 
@@ -1525,7 +1529,7 @@ Mypy、10 条 import-linter contract 和全量 Pytest 通过；MySQL、SeaweedFS
   runtime budget、工具白名单和角色 fail-closed。
 - [x] Coordinator、Worker/Reviewer 架构文档与代码梳理已同步。
 - [x] `ruff check .`、`mypy src/auraclaw`、完整单元测试与 import lint 通过。
-- [ ] 本阶段 intentional commit 已完成；待网络恢复后 push，并在 Issue #55 同步实现与验证结果。
+- [x] 本阶段 intentional commit `8d00b67` 已完成并推送；Issue #55 的实现与验证结果已同步。
 
 ## 阶段 M14a：Skill 生命周期持久化基础（Issue #56）
 
