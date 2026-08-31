@@ -77,30 +77,16 @@ class DatabaseAssertionReplayGuard(LazyPool):
         now = datetime.now(UTC)
         expiry = datetime.fromtimestamp(expires_at, UTC)
         jti_hash = hashlib.sha256(jti.encode()).hexdigest()
-        table = (
-            "security_agent_context_replay"
-            if self.dialect == "mysql"
-            else "security.agent_context_replay"
-        )
+        table = "security.agent_context_replay"
         await pool.execute(f"DELETE FROM {table} WHERE expires_at <= $1", now)
-        if self.dialect == "mysql":
-            await pool.execute(
-                f"""INSERT INTO {table} (jti_hash, command_id, expires_at)
-                VALUES ($1, $2, $3)
-                ON DUPLICATE KEY UPDATE jti_hash = jti_hash""",
-                jti_hash,
-                command_id,
-                expiry,
-            )
-        else:
-            await pool.execute(
-                f"""INSERT INTO {table} (jti_hash, command_id, expires_at)
-                VALUES ($1, $2, $3)
-                ON CONFLICT (jti_hash) DO NOTHING""",
-                jti_hash,
-                command_id,
-                expiry,
-            )
+        await pool.execute(
+            f"""INSERT INTO {table} (jti_hash, command_id, expires_at)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (jti_hash) DO NOTHING""",
+            jti_hash,
+            command_id,
+            expiry,
+        )
         return await pool.fetchrow(
             f"SELECT command_id FROM {table} WHERE jti_hash = $1", jti_hash
         )

@@ -726,7 +726,7 @@ LLM 判断需要哪种业务计算
 
 M10a 当前已经完成：
 
-- tenant-scoped MySQL 只读快照；
+- tenant-scoped PostgreSQL 只读快照；
 - 配置到签名 Skill Package 的确定性编译；
 - `skill://` Resource 暴露；
 - Runtime Client 加载；

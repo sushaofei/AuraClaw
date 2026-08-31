@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -52,18 +51,8 @@ class PostgresEventStore(LazyPool):
             "aggregate_version >= $3",
         ]
         if event_types is not None:
-            if self.dialect == "mysql":
-                placeholders: list[str] = []
-                for event_type in event_types:
-                    params.append(event_type)
-                    placeholders.append(f"${len(params)}")
-                if placeholders:
-                    clauses.append(f"event_type IN ({', '.join(placeholders)})")
-                else:
-                    clauses.append("1=0")
-            else:
-                params.append(list(event_types))
-                clauses.append(f"event_type = ANY(${len(params)}::text[])")
+            params.append(list(event_types))
+            clauses.append(f"event_type = ANY(${len(params)}::text[])")
         query = f"""
             SELECT * FROM session_core.canonical_event
             WHERE {' AND '.join(clauses)}
@@ -94,78 +83,39 @@ class PostgresEventStore(LazyPool):
         self, tenant_id: str, package_digest: str
     ) -> bool:
         pool = await self.pool()
-        if self.dialect == "mysql":
-            query = """SELECT EXISTS(SELECT 1 FROM session_core.canonical_event
-                WHERE tenant_id=$1 AND event_type='skill.activated'
-                  AND (JSON_UNQUOTE(JSON_EXTRACT(payload, '$.package_digest'))=$2
-                    OR JSON_UNQUOTE(JSON_EXTRACT(
-                        payload, '$.activation.binding.package_digest'))=$2))"""
-        else:
-            query = """SELECT EXISTS(SELECT 1 FROM session_core.canonical_event
-                WHERE tenant_id=$1 AND event_type='skill.activated'
-                  AND (payload->>'package_digest'=$2
-                    OR payload#>>'{activation,binding,package_digest}'=$2))"""
+        query = """SELECT EXISTS(SELECT 1 FROM session_core.canonical_event
+            WHERE tenant_id=$1 AND event_type='skill.activated'
+              AND (payload->>'package_digest'=$2
+                OR payload#>>'{activation,binding,package_digest}'=$2))"""
         return bool(await pool.fetchval(query, tenant_id, package_digest))
 
     async def has_active_skill_reference(
         self, tenant_id: str, publisher: str, name: str
     ) -> bool:
         pool = await self.pool()
-        if self.dialect == "mysql":
-            query = """SELECT EXISTS(
-                SELECT 1 FROM session_core.canonical_event a
-                WHERE a.tenant_id=$1 AND a.event_type='skill.activated'
-                  AND (
-                    (JSON_UNQUOTE(JSON_EXTRACT(
-                      a.payload, '$.activation.binding.publisher'))=$2
-                     AND COALESCE(
-                       JSON_UNQUOTE(JSON_EXTRACT(
-                         a.payload, '$.activation.binding.skill_name')),
-                       JSON_UNQUOTE(JSON_EXTRACT(
-                         a.payload, '$.activation.binding.name')))=$3)
-                    OR EXISTS(
-                      SELECT 1 FROM JSON_TABLE(
-                        COALESCE(JSON_EXTRACT(
-                          a.payload, '$.activation.binding.resolved_skills'),
-                          JSON_ARRAY()), '$[*]' COLUMNS(
-                            publisher text PATH '$.publisher',
-                            skill_name text PATH '$.skill_name',
-                            dependency_name text PATH '$.name')) AS dependency
-                      WHERE dependency.publisher=$2
-                        AND COALESCE(
-                          dependency.skill_name,dependency.dependency_name)=$3)
-                  )
-                  AND NOT EXISTS(
-                    SELECT 1 FROM session_core.canonical_event t
-                    WHERE t.tenant_id=a.tenant_id
-                      AND t.session_id=a.session_id AND t.run_id=a.run_id
-                      AND t.event_type IN
-                        ('run.completed','run.failed','run.cancelled'))
-            )"""
-        else:
-            query = """SELECT EXISTS(
-                SELECT 1 FROM session_core.canonical_event a
-                WHERE a.tenant_id=$1 AND a.event_type='skill.activated'
-                  AND (
-                    (a.payload#>>'{activation,binding,publisher}'=$2
-                     AND COALESCE(
-                       a.payload#>>'{activation,binding,skill_name}',
-                       a.payload#>>'{activation,binding,name}')=$3)
-                    OR EXISTS(
-                      SELECT 1 FROM jsonb_array_elements(COALESCE(
-                        a.payload#>'{activation,binding,resolved_skills}',
-                        '[]'::jsonb)) dependency
-                      WHERE dependency->>'publisher'=$2
-                        AND COALESCE(
-                          dependency->>'skill_name',dependency->>'name')=$3)
-                  )
-                  AND NOT EXISTS(
-                    SELECT 1 FROM session_core.canonical_event t
-                    WHERE t.tenant_id=a.tenant_id
-                      AND t.session_id=a.session_id AND t.run_id=a.run_id
-                      AND t.event_type IN
-                        ('run.completed','run.failed','run.cancelled'))
-            )"""
+        query = """SELECT EXISTS(
+            SELECT 1 FROM session_core.canonical_event a
+            WHERE a.tenant_id=$1 AND a.event_type='skill.activated'
+              AND (
+                (a.payload#>>'{activation,binding,publisher}'=$2
+                 AND COALESCE(
+                   a.payload#>>'{activation,binding,skill_name}',
+                   a.payload#>>'{activation,binding,name}')=$3)
+                OR EXISTS(
+                  SELECT 1 FROM jsonb_array_elements(COALESCE(
+                    a.payload#>'{activation,binding,resolved_skills}',
+                    '[]'::jsonb)) dependency
+                  WHERE dependency->>'publisher'=$2
+                    AND COALESCE(
+                      dependency->>'skill_name',dependency->>'name')=$3)
+              )
+              AND NOT EXISTS(
+                SELECT 1 FROM session_core.canonical_event t
+                WHERE t.tenant_id=a.tenant_id
+                  AND t.session_id=a.session_id AND t.run_id=a.run_id
+                  AND t.event_type IN
+                    ('run.completed','run.failed','run.cancelled'))
+        )"""
         return bool(await pool.fetchval(query, tenant_id, publisher, name))
 
     async def load_root(
@@ -180,19 +130,8 @@ class PostgresEventStore(LazyPool):
         params: list[Any] = [tenant_id, root_session_id]
         clauses = ["tenant_id = $1", "root_session_id = $2"]
         if event_types is not None:
-            if self.dialect == "mysql":
-                placeholders: list[str] = []
-                for event_type in event_types:
-                    params.append(event_type)
-                    placeholders.append(f"${len(params)}")
-                clauses.append(
-                    f"event_type IN ({', '.join(placeholders)})"
-                    if placeholders
-                    else "1=0"
-                )
-            else:
-                params.append(list(event_types))
-                clauses.append(f"event_type = ANY(${len(params)}::text[])")
+            params.append(list(event_types))
+            clauses.append(f"event_type = ANY(${len(params)}::text[])")
         query = f"""
             SELECT * FROM session_core.canonical_event
             WHERE {' AND '.join(clauses)}
@@ -252,16 +191,9 @@ class PostgresEventStore(LazyPool):
         pool = await self.pool()
         async with pool.acquire() as connection, connection.transaction():
             lock_key = f"{context.tenant_id}:{context.operation}:{context.command_id}"
-            mysql_lock = hashlib.sha256(lock_key.encode("utf-8")).hexdigest()
-            if self.dialect == "mysql":
-                # MySQL GET_LOCK names are capped at 64 chars.
-                locked = await connection.fetchval("SELECT GET_LOCK($1, 30)", mysql_lock)
-                if not locked:
-                    raise RuntimeError("failed to acquire command lock")
-            else:
-                await connection.execute(
-                    "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", lock_key
-                )
+            await connection.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", lock_key
+            )
             try:
                 previous = await connection.fetchrow(
                     """SELECT response FROM session_core.command_dedup
@@ -379,8 +311,7 @@ class PostgresEventStore(LazyPool):
                 )
                 return AppendResult(events=canonical, command_result=dict(command_result))
             finally:
-                if self.dialect == "mysql":
-                    await connection.execute("SELECT RELEASE_LOCK($1)", mysql_lock)
+                pass
 
     async def pending_outbox(self) -> list[PostgresOutboxRecord]:
         pool = await self.pool()
@@ -429,19 +360,6 @@ class PostgresEventStore(LazyPool):
 
     async def mark_outbox_failed(self, outbox_id: int) -> None:
         pool = await self.pool()
-        # Cap the exponent: MySQL evaluates POWER() before LEAST(), so unbounded
-        # publish_attempt overflows DOUBLE (~2^1024) and breaks disposition.
-        if self.dialect == "mysql":
-            await pool.execute(
-                """UPDATE session_core.outbox SET publish_attempt = publish_attempt + 1,
-                next_attempt_at = DATE_ADD(
-                    UTC_TIMESTAMP(6),
-                    INTERVAL LEAST(60, POWER(2, LEAST(publish_attempt, 6))) SECOND
-                )
-                WHERE outbox_id = $1""",
-                outbox_id,
-            )
-            return
         await pool.execute(
             """UPDATE session_core.outbox SET publish_attempt = publish_attempt + 1,
             next_attempt_at = now() + interval '1 second' * LEAST(
@@ -483,16 +401,8 @@ class PostgresEventStore(LazyPool):
         pool = await self.pool()
         claimed: list[ClaimedOutboxRecord] = []
         async with pool.acquire() as connection, connection.transaction():
-            lock_clause = (
-                "FOR UPDATE SKIP LOCKED LIMIT $2"
-                if self.dialect == "mysql"
-                else "FOR UPDATE OF o SKIP LOCKED LIMIT $2"
-            )
-            claim_ttl_sql = (
-                "claim_expires_at=DATE_ADD(UTC_TIMESTAMP(6), INTERVAL $4 MICROSECOND)"
-                if self.dialect == "mysql"
-                else "claim_expires_at=now() + $4::interval"
-            )
+            lock_clause = "FOR UPDATE OF o SKIP LOCKED LIMIT $2"
+            claim_ttl_sql = "claim_expires_at=now() + $4::interval"
             rows = await connection.fetch(
                 f"""SELECT o.outbox_id, o.event_id, o.publish_attempt, e.*
                 FROM session_core.outbox o
@@ -554,13 +464,8 @@ class PostgresEventStore(LazyPool):
         assignments = {
             "ack": "published_at=now()",
             "nack": (
-                "next_attempt_at=DATE_ADD(UTC_TIMESTAMP(6), "
-                "INTERVAL LEAST(60, POWER(2, LEAST(publish_attempt, 6))) SECOND)"
-                if self.dialect == "mysql"
-                else (
-                    "next_attempt_at=now() + interval '1 second' * "
-                    "LEAST(60, power(2, LEAST(publish_attempt, 6)))"
-                )
+                "next_attempt_at=now() + interval '1 second' * "
+                "LEAST(60, power(2, LEAST(publish_attempt, 6)))"
             ),
             "poison": "poisoned_at=now()",
         }

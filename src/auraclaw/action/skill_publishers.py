@@ -51,6 +51,10 @@ class SkillPublisherStore(Protocol):
         self, tenant_id: str, publisher: str
     ) -> SkillPublisherRecord | None: ...
 
+    async def list_publishers(
+        self, tenant_id: str
+    ) -> tuple[SkillPublisherRecord, ...]: ...
+
     async def get_key(
         self, tenant_id: str, publisher: str, key_id: str
     ) -> SkillPublisherKeyRecord | None: ...
@@ -276,6 +280,15 @@ class InMemorySkillPublisherStore:
     ) -> SkillPublisherRecord | None:
         return self.publishers.get((tenant_id, publisher))
 
+    async def list_publishers(
+        self, tenant_id: str
+    ) -> tuple[SkillPublisherRecord, ...]:
+        return tuple(
+            record
+            for key, record in sorted(self.publishers.items())
+            if key[0] == tenant_id
+        )
+
     async def get_key(
         self, tenant_id: str, publisher: str, key_id: str
     ) -> SkillPublisherKeyRecord | None:
@@ -363,6 +376,19 @@ class SkillPublisherService:
         self, tenant_id: str, publisher: str
     ) -> tuple[SkillPublisherRecord, tuple[SkillPublisherKeyRecord, ...]]:
         return await self.get(tenant_id, publisher)
+
+    async def list_publishers(
+        self, tenant_id: str
+    ) -> tuple[tuple[SkillPublisherRecord, tuple[SkillPublisherKeyRecord, ...]], ...]:
+        records = await self._store.list_publishers(tenant_id)
+        result: list[
+            tuple[SkillPublisherRecord, tuple[SkillPublisherKeyRecord, ...]]
+        ] = []
+        for record in records:
+            result.append(
+                (record, await self._store.list_keys(tenant_id, record.publisher))
+            )
+        return tuple(result)
 
 
 class SkillPublisherTrustService:

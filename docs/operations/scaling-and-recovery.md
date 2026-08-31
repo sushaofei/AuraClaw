@@ -40,7 +40,7 @@ registration lease 内仍活跃时，新进程注册会 fail closed。因此显�
 
 ## 生产配置门禁
 
-1. 依次应用 PostgreSQL `0010`～`0041`（MySQL 应用至 `0022`）expand migration。`0040` / MySQL
+1. 依次应用 PostgreSQL/KingBase `0010`～`0041` expand migration。`0040`
    `0022` 增加 registration 与 execution claim 字段和索引；先迁移 Control 数据库，再滚动升级
    Orchestrator，最后升级 Agent Runtime。可选执行 `deploy/postgres/roles.sql` 做硬化，
    当前部署不按服务注入分角色 DSN。
@@ -65,7 +65,7 @@ hostname）或注入唯一实例 UID。停止全部旧 Runtime，等待 30 秒�
 ## 回滚
 
 先停止新版本 Runtime 领取并等待 claim/Assignment 排空，再回滚 Runtime 与 Orchestrator。确认没有
-`running` execution claim 后，才可执行 `0040_runtime_execution_claims.down.sql`（MySQL 对应
+`running` execution claim 后，才可执行 `0040_runtime_execution_claims.down.sql`（KingBase 对应
 `0022...down.sql`）；否则旧版本可能把运行任务按 5 秒规则重复领取。生产数据库禁止在未备份、未排空
 或仍有新版本进程时执行 down migration。旧版固定 Runtime ID 只能以单副本运行，直至重新升级。
 

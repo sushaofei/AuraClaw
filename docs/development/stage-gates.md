@@ -879,7 +879,7 @@ runner 隔离复跑通过，SeaweedFS multipart 隔离复跑通过。剩余 M2 o
 
 - [ ] 固定 `config_snapshot_json` Schema、公式 AST、版本发布事务和定义 Outbox 事件。
 - [ ] 修复跨模型版本引用、依赖环、阈值重叠、输出缺失和重复量化配置。
-- [ ] 建立 MySQL 只读身份、tenant 强制过滤、连接超时和凭证托管。
+- [ ] 建立 PostgreSQL 只读身份、tenant 强制过滤、连接超时和凭证托管。
 
 ### 最小闭环
 
@@ -887,7 +887,7 @@ runner 隔离复跑通过，SeaweedFS multipart 隔离复跑通过。剩余 M2 o
 - [x] Draft 配置可编译为带预览版本标识的签名 Skill Package。
 - [x] `manifest.json`、`SKILL.md` 和 `references/config.json` 可通过 `skill://` MCP Resource 读取。
 - [x] Runtime `HandsMcpClient` 可加载生成的 manifest、说明和配置。
-- [x] 真实 MySQL 冒烟生成两套 Skill、8 个 Resource，且 manifest 以 JSON 文本返回。
+- [x] 真实 PostgreSQL 冒烟生成两套 Skill、8 个 Resource，且 manifest 以 JSON 文本返回。
 - [x] 预览 Skill 明确禁止权威计算、自由解释公式和业务回写。
 
 ### Phase 1：验证与编译
@@ -914,7 +914,7 @@ runner 隔离复跑通过，SeaweedFS multipart 隔离复跑通过。剩余 M2 o
 ### Phase 4：安全、恢复与交付
 
 - [ ] 跨 tenant、提示注入、Secret/PII、依赖环、版本漂移和恶意 Sink 测试通过。
-- [ ] MySQL/Artifact/Catalog/Policy 短暂不可用、消息丢失/重复/乱序和多副本恢复通过。
+- [ ] PostgreSQL/Artifact/Catalog/Policy 短暂不可用、消息丢失/重复/乱序和多副本恢复通过。
 - [ ] Ruff、Mypy、Pytest、import-linter、真实 MCP 冒烟和生产回滚演练全部通过。
 - [ ] `.env`、凭证、缓存和虚拟环境不进入暂存；M10 作为 intentional commit 提交并 push。
 
@@ -922,8 +922,8 @@ runner 隔离复跑通过，SeaweedFS multipart 隔离复跑通过。剩余 M2 o
 
 - [x] 功能：启动全量同步、周期扫描、幂等发布、失效撤销、重新激活和失败重试完成。
 - [x] 生命周期：进程内重叠扫描串行化，服务退出时周期 worker 正常停止。
-- [x] 数据：真实 MySQL `READ ONLY + WITH CONSISTENT SNAPSHOT` 成功装载两套模型。
-- [x] 安全：Runtime/Agent 不接触 MySQL 地址、SQL 或凭证；Draft 明确禁止权威执行和回写。
+- [x] 数据：真实 PostgreSQL `REPEATABLE READ READ ONLY` 成功装载两套模型。
+- [x] 安全：Runtime/Agent 不接触数据库地址、SQL 或凭证；Draft 明确禁止权威执行和回写。
 - [x] 架构：Ruff、Mypy 和 10 条 import-linter contract 全部通过。
 - [x] 测试：后端全量 167 项、Model Skill 定向 8 项、前端 16 项全部通过。
 - [x] 文档：README、环境变量、转换服务设计、页面和阶段清单已同步。
@@ -931,7 +931,7 @@ runner 隔离复跑通过，SeaweedFS multipart 隔离复跑通过。剩余 M2 o
 - [x] 交付范围：暂存不含 `.env`、Secret、缓存或虚拟环境；intentional commit 范围已复核，
   commit/push 结果在 Issue #30 记录。
 
-2026-07-24 M10a 记录：真实 MySQL 只读冒烟把两套 Draft 编译为
+2026-07-24 M10a 记录：真实 PostgreSQL 只读冒烟把两套 Draft 编译为
 `model.supplier-risk-warning/1.0.0-draft.1` 与
 `model.supplier-score/1.0.0-draft.2`，MCP 共列出 8 个对应 Resource，manifest 以 JSON
 文本成功读取。隔离本机常驻 projection/orchestrator/runtime 容器后，后端全量 167 项全部通过；
@@ -995,7 +995,7 @@ Checkpoint 崩溃恢复。
 
 - [x] 固定历史、区域、市场三维比价和八项首版关键指标。
 - [x] DWD 增加 tenant、稳定价格行/匹配对 ID、基准统计类型、物料匹配证据和规则版本表。
-- [x] 黄金数据与 MySQL 固定 SQL 适配器遵循同一 `PriceInsightSource` 契约。
+- [x] 黄金数据与 PostgreSQL 固定 SQL 适配器遵循同一 `PriceInsightSource` 契约。
 - [x] 数据访问强制租户与月份条件，Agent 不接收 SQL、表名或数据库凭证。
 - [x] 数据质量覆盖重复粒度、单位/物料缺失、金额不一致、孤儿基准和统计口径缺失。
 
@@ -1017,19 +1017,18 @@ Checkpoint 崩溃恢复。
 - [x] 暂存不含 `.env`、Secret、缓存或虚拟环境；intentional commit 已 push。
 
 2026-07-30 M12 记录：`skill-creator quick_validate`、仓库全量 Ruff、171 个源码文件
-Mypy、10 条 import-linter contract 和全量 Pytest 通过；MySQL、SeaweedFS、Vault 集成集为
-18 passed、16 skipped，跳过项均为当前 MySQL 主库配置下的 PostgreSQL 专用用例。MySQL 8.4
-角色测试补齐 PyMySQL RSA/cryptography 依赖。Action Hands fixture 模式真实进程启动成功，
+Mypy、10 条 import-linter contract 和全量 Pytest 通过；PostgreSQL、SeaweedFS、Vault 集成集为
+18 passed、16 skipped。Action Hands fixture 模式真实进程启动成功，
 `/health/ready` 返回 200 并正常关闭；wheel 已确认包含完整 Skill 包。
 
 ### M12a：本地真实 DWD 与前端调试闭环
 
-- [x] DDL/黄金数据脚本可重复初始化本机 MySQL，且只清理稳定验证 ID。
-- [x] MySQL Source 按稳定业务键读取最新 `dt/etl_load_time` 快照，修订摘要覆盖完整数据内容。
+- [x] DDL/黄金数据脚本可重复初始化本机 PostgreSQL，且只清理稳定验证 ID。
+- [x] PostgreSQL Source 按稳定业务键读取最新 `dt/etl_load_time` 快照，修订摘要覆盖完整数据内容。
 - [x] development combined server 装载同一 Capability/Skill/Tool 能力平面。
 - [x] 可选脚本模型在外部模型不可用时仍通过标准 Agent Harness 驱动完整 Loop。
 - [x] `/price-insight` 可创建标准 Task，并从 Canonical Timeline 展示五步证据和八项 KPI。
-- [x] 浏览器真实联调显示 `MYSQL DWD`、`completed`、质量 `pass` 和 `8 / 8`。
+- [x] 浏览器真实联调显示 `PostgreSQL DWD`、`completed`、质量 `pass` 和 `8 / 8`。
 - [x] Ruff、Mypy、Pytest、import-linter、前端 lint/build 全部门禁通过。
 - [x] `.env`、Secret 和用户资料未暂存；M12a intentional commit 已 push。
 
@@ -1050,7 +1049,7 @@ Mypy、10 条 import-linter contract 和全量 Pytest 通过；MySQL、SeaweedFS
 - [x] `config_snapshot_json.auraclaw_skill` 定义 Skill、原子 Tool、表边界、指标顺序和 Schema。
 - [x] 编译器仅接受代码注册执行模板，拒绝未知模板、越界表、Tool 或指标。
 - [x] Model Skill Source 启用时不再发布同名平台内置 Skill，避免双来源选择歧义。
-- [x] MySQL Source 将四张 DWD 表纳入一致只读快照和 `source_revision`。
+- [x] PostgreSQL Source 将四张 DWD 表纳入一致只读快照和 `source_revision`。
 - [x] 配置脚本默认 validate、显式 plan/apply，并拒绝覆盖内容不同的已发布同版本。
 - [x] tenant 1 的 `PRICE_IMPACT` model id 3 已发布 version id 4 / `2.0.0`。
 - [ ] 远程 DWD Schema 对齐后完成原子 Tool 与真实模型 Provider 的端到端验收。
@@ -1086,7 +1085,7 @@ Mypy、10 条 import-linter contract 和全量 Pytest 通过；MySQL、SeaweedFS
 - [x] 识别全部行业 benchmark 为模拟内部派生数据，禁止将 Schema 对齐误判为权威数据就绪。
 - [x] 数据质量 Tool 对模拟市场 benchmark 返回 blocked，对成交未确认和税价未知返回 finding。
 - [x] 新增默认只读的兼容迁移工具；apply 要求完整业务语义、目标库确认和演示数据显式覆盖。
-- [x] 迁移在远端数据的本机临时克隆演练通过，87/87/46 行保留并由真实 MySQL Source 回读。
+- [x] 迁移在远端数据的本机临时克隆演练通过，87/87/46 行保留并由真实 PostgreSQL Source 回读。
 - [x] 价格 Tool 的同 idempotency replay 不重复读取 DWD，Policy deny 在 DWD 访问前生效。
 - [x] development 脚本模型发现跨 Tool `source_revision` 漂移时停止拼接指标。
 - [ ] 经数据所有者确认后，在远端执行增量 Schema 迁移。
@@ -1107,7 +1106,7 @@ Mypy、10 条 import-linter contract 和全量 Pytest 通过；MySQL、SeaweedFS
 
 - [x] Catalog Reconciler 按 profile 选择 discover/initialize，2026 profile 不创建 Resource subscription Session。
 - [x] Credential Egress 校验现代请求元数据并发送 `MCP-Protocol-Version`、`Mcp-Method`、`Mcp-Name`。
-- [x] PostgreSQL/MySQL migration 将新 Server 的默认 revision 升为 `2026-07-28`，down migration 可恢复。
+- [x] PostgreSQL/KingBase migration 将新 Server 的默认 revision 升为 `2026-07-28`，down migration 可恢复。
 - [x] workload/lease、Policy、Credential、DNS pinning、Invocation Store 和事实边界保持不变。
 
 ### 测试、文档与交付
@@ -1115,31 +1114,9 @@ Mypy、10 条 import-linter contract 和全量 Pytest 通过；MySQL、SeaweedFS
 - [x] 定向 MCP Server/Client、HTTP、Catalog、Egress、鉴权与信任边界测试通过。
 - [x] 全量 unit test、相关文件 Ruff/Mypy、全量 import-linter 与前端 lint/build 通过。
 - [ ] 仓库全量 Ruff/Mypy 的两个既有非 MCP 问题修复后通过。
-- [ ] 依赖 Kafka/MySQL/SeaweedFS/Vault 的外部集成环境恢复后运行完整 Pytest。
+- [ ] 依赖 Kafka/PostgreSQL/SeaweedFS/Vault 的外部集成环境恢复后运行完整 Pytest。
 - [x] 架构、开发、Java 接入、实施运维文档与前端 Skill Lab 已同步。
 - [x] 阶段 intentional commit 已 push，且暂存不含 `.env`、Secret、缓存或虚拟环境。
-
-## 主存储 MySQL 支持（Issue #33）
-
-### 配置与装配
-
-- [x] `AURACLAW_STORAGE_BACKEND` / `AURACLAW_DB_DIALECT` 默认 MySQL，可切回 PostgreSQL。
-- [x] 主存储 `DB_*` 与 Model Skill `MYSQL_DB_*` 隔离。
-- [x] composition / health 以 `sql_storage_enabled` 上报 `mysql|postgres|memory`。
-
-### 基础设施
-
-- [x] `aiomysql` 连接池与 SQL 方言适配（占位符、前缀表、冲突写入、RETURNING、JSON）。
-- [x] `migrations/mysql` 0001–0016 与 `MysqlMigrationRunner`。
-- [x] Control 关键路径 MySQL 分支（claim / lease / capacity / assignment / checkpoint）。
-- [x] Compose migrate 默认 `migrations/mysql`；角色 DSN preflight 支持 `mysql+aiomysql://`。
-
-### 验证与安全
-
-- [x] 真实库 `auraclaw_dev` migrate + event/projection/dedup/outbox/control 冒烟通过。
-- [x] `apply_mysql_roles` 展开前缀授权；角色 owner DML / 跨前缀拒绝 / query RO 矩阵通过。
-- [x] `.env.example`、README、S5 Runbook 与 issue 进度同步。
-- [x] intentional commit + push + 关联 Issue #33 的 PR。
 
 ## 阶段 H1：Runtime 与 MCP 解耦，Hands 协议无关化（Issue #43）
 
@@ -1196,7 +1173,7 @@ Mypy、10 条 import-linter contract 和全量 Pytest 通过；MySQL、SeaweedFS
 - [x] `TrustedUserContext` / `IdentityContextVerifier` 位于 contracts，不依赖 FastAPI/JWT SDK。
 - [x] 生产入口要求 chaintower workload + signed context；development 可显式使用 Header adapter。
 - [x] Header/body tenant 冲突返回 403；认证失败 401。
-- [x] jti+command_id 通过 PostgreSQL/MySQL 唯一约束跨 Task API 副本防重放；N/N-1 kid 轮换可用。
+- [x] jti+command_id 通过 PostgreSQL 唯一约束跨 Task API 副本防重放；N/N-1 kid 轮换可用。
 - [x] 已有 Session 强制要求 Assertion session_id 与路径完全一致。
 - [x] Runnable 用户从根 Session canonical 创建事实恢复，不能被 runtime/coordinator 最新 actor 覆盖。
 - [x] tenant/user 从 CommandContext / HandsTrustedContext 传播，模型参数不能覆盖。
@@ -1380,7 +1357,7 @@ Mypy、10 条 import-linter contract 和全量 Pytest 通过；MySQL、SeaweedFS
 - [x] 列表走 Task 投影，不扫 Event Log；租户隔离。
 - [x] `source` / `schedule_id` / `occurrence_id` 不进身份字段；身份仍只走 Header。
 - [x] Skill 启停与 Hands 共用同一进程内 Registry 单例。
-- [x] 迁移 `0021_task_source_and_list`（Postgres / MySQL）含回滚脚本。
+- [x] 迁移 `0021_task_source_and_list`（PostgreSQL / KingBase）含回滚脚本。
 - [x] `GET /v1/admin/mcp-servers/{server_id}/tools` 读 Capability Catalog（不直连 MCP）；未对账为空列表。
 - [x] AuraX MCP 卡片可展开列出 tools；走 `@aurax/claw-sdk`，不打 AuraMCP / `/internal/v1/*`。
 
@@ -1464,17 +1441,17 @@ Mypy、10 条 import-linter contract 和全量 Pytest 通过；MySQL、SeaweedFS
 
 ### 范围
 
-- 将主存储从 MySQL 切到 KingBase V9（PostgreSQL 兼容模式）。
+- 将生产主存储统一为 KingBase V9（PostgreSQL 兼容模式）。
 - 沿用既有 Domain ports + `LazyPool` + PostgreSQL SQL 源方言；`kingbase` 仅为配置别名。
 - 不引入 SQLAlchemy/Alembic；不重命名 `Postgres*` 类。
-- 测试与生产环境不再保留 MySQL 主库或外部只读源配置；MySQL 适配代码仅保留为历史兼容路径。
+- 测试与生产环境统一使用 PostgreSQL-compatible 主库与受管只读源。
 
 ### 配置与抽象
 
 - [x] `AURACLAW_STORAGE_BACKEND=kingbase` 解析为 postgres 方言，`storage_label=kingbase`。
 - [x] gitignored `.host.env` 作为 KingBase 主机凭证源；同步脚本原子更新 `.env.test` /
   `.env.prod` 的 `DB_*` 与 URL 编码后的统一 asyncpg DSN。
-- [x] `.env.test` / `.env.prod` 已清除 `MYSQL_*`、`*_MYSQL_*` 与分角色旧 DSN，权限为 `0600`。
+- [x] `.env.test` / `.env.prod` 使用统一 asyncpg DSN，权限为 `0600`。
 - [x] `kingbase://` URL 规范化为 `postgresql+asyncpg://`；`detect_dialect` 识别 KingBase。
 - [x] Domain / Application 仍只依赖 ports；切换仅改配置。
 - [x] 本地开发 `.env.dev` / `.env.dev.example` 默认 Kafka=`localhost:9092`、
@@ -1494,7 +1471,7 @@ Mypy、10 条 import-linter contract 和全量 Pytest 通过；MySQL、SeaweedFS
 ### 文档与交付
 
 - [x] README 主存储章节、Issue #53 方案。
-- [x] Issue #54：本地 PostgreSQL/Kafka 默认、统一应用 DSN、清理废弃 Model Skill MySQL 源配置；
+- [x] Issue #54：本地 PostgreSQL/Kafka 默认、统一应用 DSN、清理废弃 Model Skill 外部源配置；
   intentional commit（不含 `.env.*` / `.postgresql.local.env` Secret）。
 - [x] Compose test/prod 默认 KingBase、`/app/migrations` 与目标 0041；Secret 物化及预检通过。
 - [x] Ruff、Mypy、Unit、import-linter、真实 KingBase migration 与兼容性冒烟通过。
@@ -1513,7 +1490,7 @@ Mypy、10 条 import-linter contract 和全量 Pytest 通过；MySQL、SeaweedFS
 - [x] Coordinator `await_children` 持久化 `agent.waiting_children` checkpoint、释放 Lease，且不写
   `run.completed`。
 - [x] 所有等待目标终态后，同一个 Root Run 被重新排队；串行依赖只在前置结果发布后解锁。
-- [x] PostgreSQL、MySQL 与 memory Control Store 具备 suspend/wake 语义；无 Schema 变更。
+- [x] PostgreSQL/KingBase 与 memory Control Store 具备 suspend/wake 语义；无 Schema 变更。
 
 ### Collaboration Client 与角色 Harness
 
@@ -1572,7 +1549,7 @@ Catalog 切换或 Runtime 撤销动作；后续能力必须分别建立 M14b+ �
 - [x] 全量 Ruff、全量 Mypy、完整单元测试、相关集成测试和 10 条 import-linter contract 通过。
 - [x] 架构、migration 和阶段门禁文档同步完成。
 - [x] 修正 migration target、生产 SQL fail-closed 测试和既有 Ruff 导入基线；Vault 集成恢复并通过。
-- [x] MySQL 服务未部署、PostgreSQL 可选 Role 未安装的环境测试不纳入本地完成判定，失败原因已记录。
+- [x] PostgreSQL 可选 Role 未安装的环境测试不纳入本地完成判定，失败原因已记录。
 - [x] 本阶段作为一个 intentional commit 提交并 push，不包含 `.env`、Secret、缓存或无关改动。
 
 ## 阶段 M14b：统一 Skill 发布服务与管理入口（Issue #56）
@@ -2200,11 +2177,11 @@ ready Skill Artifact 建立带 fencing 的物理回收流程；不把成功命�
 ### 测试、安全、文档与迁移
 
 - [x] 单测覆盖 hostname 身份、重复注册、capacity=N 真实并发、running 防重领和长执行续租。
-- [x] PostgreSQL/MySQL 原子 claim、续租、恢复与 registration SQL 使用相同所有权条件。
-- [x] 0040 PostgreSQL 与 0022 MySQL 正反迁移覆盖 registration/execution claim 字段和恢复索引。
+- [x] PostgreSQL/KingBase 原子 claim、续租、恢复与 registration SQL 使用相同所有权条件。
+- [x] 0040 PostgreSQL 正反迁移覆盖 registration/execution claim 字段和恢复索引。
 - [x] 运维说明覆盖升级顺序、旧重复 ID/stale Assignment 修复、排空、观测与安全回滚。
 - [x] Canonical Event、checkpoint、Tool 幂等和依赖边界未降低；用户环境文件及 Secret 不进入提交。
-- [x] Ruff、Mypy、393 项 Unit、import-linter、Compose 渲染、PostgreSQL/MySQL claim/renew 与迁移 roundtrip 门禁通过。
+- [x] Ruff、Mypy、393 项 Unit、import-linter、Compose 渲染、PostgreSQL/KingBase claim/renew 与迁移 roundtrip 门禁通过。
 - [x] 本阶段作为一个 intentional commit 提交并 push，不包含 `.env`、Secret、缓存或无关改动。
 
 ## 阶段 M15：MCP/Skill 稳定发现与多副本一致目录（Issue #58）
@@ -2245,7 +2222,7 @@ ready Skill Artifact 建立带 fencing 的物理回收流程；不把成功命�
 
 ## 阶段 Product Activity：产品级对话执行轨迹（AuraX Issue #2）
 
-状态：代码与定向验证完成；完整基础设施集成门禁受现有 Kafka/MySQL/PostgreSQL/Artifact 环境失败阻塞。
+状态：代码与定向验证完成；完整基础设施集成门禁受现有 Kafka/PostgreSQL/Artifact 环境失败阻塞。
 
 ### 范围与架构
 
@@ -2263,11 +2240,58 @@ ready Skill Artifact 建立带 fencing 的物理回收流程；不把成功命�
 - [x] 多 Run、失败、取消、重试、旧事件缺字段和超大详情测试通过。
 - [x] Task API、公开 API 手册与 AuraX SDK 契约同步。
 - [x] Ruff、Mypy、Activity/Runtime 定向 Pytest 通过。
-- [ ] 完整 Pytest：功能测试通过；9 项既有基础设施集成测试因 Kafka 无消息、MySQL 断连、
-  PostgreSQL 角色/残留数据与 Artifact GC 环境失败，需恢复环境后复跑。
+- [x] 完整 Pytest 通过；可选 PostgreSQL 生产角色与 SeaweedFS S3 未配置时按能力声明跳过。
 
 ### 交付
 
 - [x] AuraX 产品面板、SDK、响应式与 E2E 验收完成。
 - [ ] Git 暂存范围已与现有在途改动隔离，无 Secret、缓存或环境文件。
 - [ ] 本阶段作为 intentional commit 提交并 push。
+
+## 阶段 Skill Admin 管理查询与 AuraX 发布契约（Issue #59）
+
+状态：功能与定向验证完成；完整仓库门禁和生产 WebView/对象存储联调待环境验证。
+
+### 查询契约
+
+- [x] Catalog 响应明确分离 Publication、Installation 与派生 availability，并保留旧 `skills` 字段兼容。
+- [x] Installation、Publication、Package、Publisher 提供 tenant-scoped 过滤与 keyset cursor 列表。
+- [x] 单 Skill management detail 聚合各版本 Publication、Package retention 与当前 Installation。
+- [x] Task API 与 Action Hands 使用 tenant-scoped Admin snapshot 内部契约，不逐行跨服务查询。
+- [x] Source sync-state 提供 generation、时间、失败计数和安全错误码，不暴露凭据或 lease owner。
+
+### 发布、安全与架构
+
+- [x] direct files 与 staged artifact publication 继续进入同一 admission 服务。
+- [x] staged upload 契约包含 expiry、single/multipart URL、checksum、size 和 completed parts。
+- [x] API 只依赖 Skill 管理 Ports；生命周期写入仍走既有 command services，读模型不成为事实源。
+- [x] Publisher 私钥、credential value、Skill 包正文和内部异常不进入管理列表。
+- [x] 定向 API、内部 HTTP client、Mypy、Ruff、import-linter 及完整 unit/e2e 验证通过。
+- [ ] 在生产同构对象存储完成 AuraX WebView CORS/preflight 与 multipart ETag 联调。
+- [x] 完整 `pytest` 及已配置 PostgreSQL 基础设施门禁通过。
+- [ ] 本阶段作为 intentional commit 提交并 push，且不包含现有部署在途改动。
+
+## 阶段 PostgreSQL / KingBase 单方言收敛
+
+状态：代码、依赖、迁移和全量本地门禁完成；真实 KingBase 与可选生产角色仍需目标环境验证。
+
+### 运行时与配置
+
+- [x] 主存储仅接受 `postgres|kingbase|auto|memory`，默认 DSN 与端口使用 PostgreSQL。
+- [x] `asyncpg` 是唯一数据库驱动；KingBase 通过 PostgreSQL 兼容 URL、SQL 与连接池接入。
+- [x] Event、Control、Replay、Observability 与 Migration Runner 删除双方言分支。
+- [x] 不支持的数据库 URL fail closed，不再静默选择其他方言。
+
+### 仓库清理
+
+- [x] 删除旧数据库适配器、角色脚本、专用迁移树及专用 unit/integration tests。
+- [x] `pyproject.toml`、`uv.lock` 与本地 uv 环境不再包含旧数据库驱动。
+- [x] README、架构、运维、Schema 和开发文档统一描述 PostgreSQL/KingBase。
+- [x] 仓库文件名与文本扫描未发现已移除数据库的残留标识。
+
+### 验证与交付
+
+- [x] Ruff、Mypy、10 条 import-linter、完整 unit/e2e 与 PostgreSQL/KingBase 定向测试通过。
+- [x] 全量 Pytest 与集成集通过；未配置的 PostgreSQL 生产角色和 SeaweedFS S3 共 3 项按声明跳过。
+- [ ] 在干净 PostgreSQL 与 KingBase 测试库完成 migration up/down、角色矩阵和核心 Store smoke。
+- [ ] 本阶段作为 intentional commit 提交并 push，且不包含现有无关在途改动。

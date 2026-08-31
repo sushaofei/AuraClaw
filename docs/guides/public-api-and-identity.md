@@ -825,6 +825,28 @@ tenant Registry 的 active key 独立验签。CLI 不接受命令行私钥，也
 必须保持相同 filters 与 since。指标端点接受 `window_hours`（1–2160），同时返回 quarantine ratio 和
 `ok|firing|insufficient_data` 告警状态；低于最小样本数不会告警。
 
+面向管理工作台的 Skill 查询使用以下 tenant-scoped 入口，列表均为稳定 keyset cursor，`limit` 范围
+为 1–500：
+
+- `GET /v1/admin/skills`：聚合 Catalog、Publication 和 Installation；支持 `q`、publisher、risk、
+  publication/installation status、source 过滤。兼容字段 `skills` 保留，新增权威管理字段 `items` 与
+  `next_cursor`；
+- `GET /v1/admin/skill-installations`：包含 disabled、draining 和 uninstalled；
+- `GET /v1/admin/skill-publications`：按 publisher/name/source/status 查询所有版本；
+- `GET /v1/admin/skill-packages`：查询 retention、legal hold 和 purge 状态；
+- `GET /v1/admin/skill-publishers`：查询 Publisher 与公钥状态；
+- `GET /v1/admin/skills/{publisher}/{name}/management`：单 Skill 的 Installation、各版本 Publication
+  与 Package retention 聚合详情；
+- `GET /v1/admin/skill-sources/{source_id}/sync-state`：安全同步状态，不暴露 lease owner 或凭据。
+
+`items[].publication.status`、`items[].installation.status` 与 `items[].availability` 含义不同：前两者仍是
+各自权威生命周期状态，`availability` 只是服务端根据两者派生的管理展示结果。客户端不得把 Publication
+的 `active` 当成 tenant 已启用，也不得逐行查询 Installation 或从 Source allowlist 反推 Publisher。
+
+已签名大包使用 `skill-package-uploads` 创建预签名 single/multipart 上传计划，客户端上传 canonical archive
+后以 checksum、size、parts finalize，再用 `artifact_ref + expected_digest` 发布。WebView 只向短期预签名 URL
+上传对象，私钥和长期凭据不得进入 AuraX；最终路径、签名、digest 与内容扫描仍由 AuraClaw admission 完成。
+
 签名通过后，服务端还会扫描可执行扩展与 magic、高置信凭据、Secret 赋值和 Prompt Injection 模式。
 命中后 API 以受控 `skill_content_*` 策略错误拒绝，本次 admission 在内部记为 `quarantined`，但不会把
 不可信内容创建为 Package/Publication/Installation。客户端不得根据具体 finding 自动修改或重发正文；

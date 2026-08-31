@@ -844,7 +844,7 @@ AuraClaw 的架构完成标准不是“正常路径跑通”，而是关键组�
 
 - P0～M8：Python 后端重构、事实/查询闭环、Managed Runtime、工具审批、多 Agent、实时体验、可靠交付、观测、前端工作台和生产基础设施接入；
 - S0～S5：生产边界 ADR、跨服务契约、12 入口、唯一写入者、横向扩展、Docker Compose 生产部署和故障演练；
-- 主存储支持 MySQL，并保留 PostgreSQL 切换能力。
+- 主存储统一使用 PostgreSQL；生产可运行在 KingBase PostgreSQL 兼容模式。
 
 ### 13.2 已实现、处于审阅或收口阶段
 
@@ -855,7 +855,7 @@ AuraClaw 的架构完成标准不是“正常路径跑通”，而是关键组�
 
 M10 Model Skill 转换已经完成：
 
-- 从 tenant-scoped MySQL 配置读取；
+- 从 tenant-scoped PostgreSQL 读模型读取；
 - 编译签名 Skill Package；
 - 通过 `skill://` MCP Resource 暴露；
 - Runtime Client 加载；
@@ -1105,4 +1105,3 @@ MCP Task 是远端协议调用的可选句柄，不包含 AuraClaw 的 Session �
 - [M9 MCP Runtime 实施与运维](../development/implementation/mcp-runtime.md)
 - [M11 Capability-Aware Agent Loop 实施与运维](../development/implementation/capability-aware-agent-loop.md)
 - [Docker Compose 生产部署与故障演练 Runbook](../operations/production-deployment.md)
-

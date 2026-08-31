@@ -715,7 +715,7 @@ def _task_api_app(settings: Settings) -> FastAPI:
     if not settings.sql_storage_enabled:
         raise ValueError(
             "task-api requires SQL storage; use `auraclaw serve` with .env.dev "
-            "configured for postgres, mysql, or kingbase"
+            "configured for PostgreSQL or Kingbase"
         )
     task_projection = PostgresTaskProjection(settings.resolved_database_url)
     approval_projection = PostgresApprovalProjection(settings.resolved_database_url)
@@ -853,7 +853,7 @@ def _streaming_app(settings: Settings) -> FastAPI:
     if not settings.sql_storage_enabled:
         raise ValueError(
             "streaming-gateway requires SQL storage; use `auraclaw serve` with .env.dev "
-            "configured for postgres, mysql, or kingbase"
+            "configured for PostgreSQL or Kingbase"
         )
     app = create_app(profile="streaming-gateway")
     projection = PostgresTaskProjection(settings.resolved_database_url)

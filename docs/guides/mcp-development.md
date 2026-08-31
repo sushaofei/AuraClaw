@@ -270,7 +270,7 @@ routed_hands = RoutedHandsExecutor(
 )
 ```
 
-`price_insight_source`（fixture JSON 或 MySQL）在 new executor 时就已经注入。调用时不会再按名字去「发现服务」。
+`price_insight_source`（fixture JSON 或受管 PostgreSQL 读模型）在 new executor 时就已经注入。调用时不会再按名字去「发现服务」。
 
 **④ 发现**
 

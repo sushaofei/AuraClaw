@@ -25,7 +25,7 @@ AuraClaw 的技术路线不是“找一个现成 Agent 框架，再在外面包�
                          ▼
 成熟开源软件或外部基础设施
   FastAPI / Pydantic / httpx
-  MySQL / PostgreSQL / Kafka
+  PostgreSQL / KingBase / Kafka
   SeaweedFS / Vault / Nginx / Docker
   React / TypeScript / Vite
 ```
@@ -156,8 +156,8 @@ AuraClaw 没有把所有逻辑放进 Agent Runtime：
 | Web | FastAPI、Uvicorn | HTTP API、内部服务入口、OpenAPI |
 | Schema/配置 | Pydantic、pydantic-settings | 边界校验、DTO、配置加载 |
 | HTTP 客户端 | httpx、socksio | 内部服务、模型、Vault、S3、MCP 调用 |
-| 数据库 | MySQL 或 PostgreSQL | Canonical Event、Control、Projection、Invocation |
-| 数据库驱动 | aiomysql/PyMySQL、asyncpg | 异步运行与迁移 |
+| 数据库 | PostgreSQL 或 KingBase PostgreSQL 兼容模式 | Canonical Event、Control、Projection、Invocation |
+| 数据库驱动 | asyncpg | 异步运行与迁移 |
 | 消息流 | Kafka、aiokafka | Runtime Event 等低延迟流 |
 | 对象存储 | SeaweedFS 的 S3 兼容接口 | Artifact 正文与大对象 |
 | 密钥管理 | HashiCorp Vault KV v2 | 外部凭据托管 |
@@ -172,7 +172,7 @@ AuraClaw 没有把所有逻辑放进 Agent Runtime：
 这里要注意三点：
 
 1. 数据库、Kafka、SeaweedFS、Vault 和 Nginx 是外部基础设施，不属于 Python 进程内库。
-2. MySQL 是当前生产配置的默认数据库，代码同时保留 PostgreSQL 适配能力。
+2. PostgreSQL 是开发基线，生产可使用 KingBase PostgreSQL 兼容模式，两者共用 asyncpg 与迁移树。
 3. 使用 MCP 协议不等于把第三方 MCP Server 直接暴露给 Runtime；它仍要经过平台受控边界。
 
 ---
@@ -272,7 +272,7 @@ Pydantic 主要用于不可信边界：
 
 ---
 
-## 7. 为什么使用关系数据库，而且同时支持 MySQL 与 PostgreSQL
+## 7. 为什么使用 PostgreSQL 兼容关系数据库
 
 ### 7.1 为什么 Canonical State 必须进关系数据库
 
@@ -300,24 +300,18 @@ AuraClaw 的核心写入需要同时满足：
 - 丰富的约束、索引和 SQL 能力；
 - 很适合事件表、Outbox 和 Projection。
 
-### 7.3 为什么现在也支持 MySQL
+### 7.3 KingBase 兼容边界
 
-当前部署环境需要 MySQL，因此项目没有让业务层绑定单一数据库，而是：
-
-- 在稳定 Port 后提供 MySQL/PostgreSQL 适配；
-- 迁移脚本按方言管理；
-- 用契约测试验证两种实现的相同行为；
-- 把必须依赖的事务、锁和 upsert 差异显式封装。
-
-当前生产配置默认 MySQL，但“默认”不等于“领域代码依赖 MySQL”。
+KingBase 仅以 PostgreSQL 兼容模式接入：复用 asyncpg、PostgreSQL SQL 与同一迁移树。兼容性差异
+必须在基础设施适配层和目标实例集成测试中解决，领域与 contracts 不感知数据库品牌。
 
 ### 7.4 为什么没有使用 SQLAlchemy ORM
 
-当前仓库直接使用 `asyncpg`、`aiomysql`/`PyMySQL` 和显式 SQL。原因是核心数据访问包含大量：
+当前仓库直接使用 `asyncpg` 和显式 SQL。原因是核心数据访问包含大量：
 
 - 条件事件追加；
 - 行锁；
-- 数据库方言差异；
+- PostgreSQL 事务与锁语义；
 - 原子状态转移；
 - fencing 条件；
 - outbox claim；
@@ -329,7 +323,7 @@ AuraClaw 的核心写入需要同时满足：
 
 直接 SQL 的成本同样真实：
 
-- MySQL/PostgreSQL 双方言维护量更大；
+- Schema 重构依赖高质量集成测试；
 - Schema 重构更依赖高质量集成测试；
 - 普通 CRUD 的开发效率低于 ORM；
 - SQL 拼装和结果映射需要严格审查。
@@ -343,16 +337,16 @@ AuraClaw 当前采用自有迁移运行器和显式 SQL，包含：
 
 - migration ledger；
 - checksum；
-- PostgreSQL/MySQL 锁；
+- PostgreSQL advisory lock；
 - baseline；
 - up/down 文件；
 - expand/contract 发布纪律。
 
-原因不是 Alembic 不成熟，而是项目需要双数据库方言、明确 SQL、生产启动门禁和可逆迁移约束，
+原因不是 Alembic 不成熟，而是项目需要明确 SQL、生产启动门禁和可逆迁移约束，
 同时没有使用 SQLAlchemy 元数据作为 Schema 真相。
 
 代价是迁移框架本身也需要维护。若未来组织统一采用 Flyway、Liquibase 或 Alembic，并且能完整
-满足双方言、checksum、锁、回滚和发布门禁，可以替换自研 runner；迁移语义不能因此降低。
+满足 checksum、锁、回滚和发布门禁，可以替换自研 runner；迁移语义不能因此降低。
 
 ---
 
@@ -955,7 +949,7 @@ api/gateway 不选择具体基础设施
 | HTTP Server | 使用 FastAPI/Uvicorn |
 | JSON/配置校验 | 使用 Pydantic |
 | HTTP Client | 使用 httpx |
-| 数据持久化引擎 | 使用 MySQL/PostgreSQL |
+| 数据持久化引擎 | 使用 PostgreSQL/KingBase 兼容模式 |
 | Event Broker | 使用 Kafka |
 | Artifact 对象存储 | 使用 SeaweedFS S3 |
 | Secret Store | 使用 Vault |
@@ -987,7 +981,7 @@ api/gateway 不选择具体基础设施
 
 | 当前实现 | 可替换候选 | 不可改变的不变量 |
 |---|---|---|
-| MySQL/PostgreSQL Adapter | 其他关系数据库/托管数据库 | Event 版本、事务、Outbox、幂等 |
+| PostgreSQL-compatible Adapter | 其他关系数据库/托管数据库 | Event 版本、事务、Outbox、幂等 |
 | Kafka | 其他 Event Bus | Runtime Event 不能成为唯一事实 |
 | SeaweedFS | S3/MinIO/其他对象存储 | Artifact digest、租户、lineage |
 | Vault | 云 Secret Manager | Runtime 不见明文秘密 |

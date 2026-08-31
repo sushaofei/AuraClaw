@@ -234,7 +234,7 @@ services:
 
   agent-runtime:
     <<: *auraclaw-service
-    # platform network is required to reach host Kafka / Redis / MySQL CIDRs
+    # platform network is required to reach host Kafka / Redis / PostgreSQL CIDRs
     networks: [auraclaw, platform]
     environment:
       <<: *common-environment
@@ -307,12 +307,14 @@ services:
       AURACLAW_RUNTIME_WORKLOAD_TOKEN_FILE: /run/secrets/runtime_workload_token
       AURACLAW_ACTION_HANDS_WORKLOAD_TOKEN_FILE: /run/secrets/action_hands_workload_token
       AURACLAW_TASK_API_WORKLOAD_TOKEN_FILE: /run/secrets/task_api_workload_token
+      AURACLAW_CREDENTIAL_PROXY_WORKLOAD_TOKEN_FILE: /run/secrets/credential_proxy_workload_token
     secrets:
       - database_url
       - lease_signing_key
       - runtime_workload_token
       - action_hands_workload_token
       - task_api_workload_token
+      - credential_proxy_workload_token
     command: ["hands", "run", "--host", "0.0.0.0", "--port", "8006"]
     expose: ["8006"]
     healthcheck: *healthcheck

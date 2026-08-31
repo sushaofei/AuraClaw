@@ -516,6 +516,15 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
         )
         return None if row is None else _package(dict(row))
 
+    async def list_packages(self, tenant_id: str) -> tuple[SkillPackageRecord, ...]:
+        pool = await self.pool()
+        rows = await pool.fetch(
+            """SELECT * FROM hands.skill_package WHERE tenant_id=$1
+            ORDER BY publisher,name,version""",
+            tenant_id,
+        )
+        return tuple(_package(dict(row)) for row in rows)
+
     async def update_package_retention(
         self, record: SkillPackageRecord, *, expected_revision: int
     ) -> SkillPackageRecord:

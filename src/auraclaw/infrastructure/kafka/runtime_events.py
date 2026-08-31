@@ -392,10 +392,10 @@ class PostgresRuntimeEventStore(LazyPool):
                     event.durable,
                     event.visibility,
                 )
-                # asyncpg: "INSERT 0 0"; aiomysql: "OK 0"
+                # asyncpg returns "INSERT 0 0" for an idempotent conflict.
                 if status.rsplit(" ", 1)[-1] == "0":
                     return
-                # MySQL rejects LIMIT inside IN-subquery; keep newest N via anti-join.
+                # Keep the newest N events without exposing deleted sequence gaps.
                 await connection.execute(
                     """DELETE FROM streaming.runtime_event AS victim
                        WHERE victim.tenant_id = $1 AND victim.session_id = $2
@@ -416,13 +416,6 @@ class PostgresRuntimeEventStore(LazyPool):
             raise RuntimeEventRejectedError(
                 "runtime event sequence is already occupied"
             ) from exc
-        except Exception as exc:
-            # aiomysql / PyMySQL duplicate key on (tenant, session, sequence)
-            if type(exc).__name__ in {"IntegrityError", "UniqueViolationError"}:
-                raise RuntimeEventRejectedError(
-                    "runtime event sequence is already occupied"
-                ) from exc
-            raise
 
     async def ingest(self, event: RuntimeEvent) -> RuntimeEvent:
         """Assign the public cursor at the shared Kafka ingestion boundary."""

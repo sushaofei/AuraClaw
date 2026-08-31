@@ -17,6 +17,8 @@ from auraclaw.contracts.errors import NotFoundError
 from auraclaw.contracts.internal import (
     InternalRequestContext,
     ServiceIdentity,
+    SkillAdminSnapshotInternalRequest,
+    SkillAdminSnapshotInternalResponse,
     SkillAdmissionListInternalRequest,
     SkillAdmissionListInternalResponse,
     SkillAdmissionMetricsInternalRequest,
@@ -68,6 +70,7 @@ from auraclaw.contracts.skills import (
     SkillPublisherKeyRecord,
     SkillPublisherRecord,
     SkillSourceRecord,
+    SkillSourceSyncState,
 )
 from auraclaw.contracts.tools import ArtifactRef
 from auraclaw.internal.http import HttpContractClient
@@ -298,6 +301,10 @@ class RemoteSkillPublicationClient:
         )
         return SkillPackageRecord.model_validate(response.package)
 
+    async def list_packages(self, tenant_id: str) -> tuple[SkillPackageRecord, ...]:
+        response = await self._admin_snapshot(tenant_id)
+        return tuple(SkillPackageRecord.model_validate(item) for item in response.packages)
+
     async def purge_package(self, command: PurgeSkillPackageCommand) -> SkillPackageRecord:
         response = await self._contract.call(
             "/internal/v1/skill-publications/purge",
@@ -330,6 +337,15 @@ class RemoteSkillPublicationClient:
             raise NotFoundError("Skill installation not found")
         return SkillInstallationRecord.model_validate(response.installation)
 
+    async def list_installations(
+        self, tenant_id: str
+    ) -> tuple[SkillInstallationRecord, ...]:
+        response = await self._admin_snapshot(tenant_id)
+        return tuple(
+            SkillInstallationRecord.model_validate(item)
+            for item in response.installations
+        )
+
     async def get_publication(
         self,
         tenant_id: str,
@@ -346,6 +362,15 @@ class RemoteSkillPublicationClient:
         if response.publication is None:
             raise NotFoundError("Skill publication not found")
         return SkillPublicationRecord.model_validate(response.publication)
+
+    async def list_publications(
+        self, tenant_id: str
+    ) -> tuple[SkillPublicationRecord, ...]:
+        response = await self._admin_snapshot(tenant_id)
+        return tuple(
+            SkillPublicationRecord.model_validate(item)
+            for item in response.publications
+        )
 
     async def register_publisher(
         self, command: RegisterSkillPublisherCommand
@@ -448,6 +473,21 @@ class RemoteSkillPublicationClient:
         )
         return _publisher_state(response)
 
+    async def list_publishers(
+        self, tenant_id: str
+    ) -> tuple[tuple[SkillPublisherRecord, tuple[SkillPublisherKeyRecord, ...]], ...]:
+        response = await self._admin_snapshot(tenant_id)
+        return tuple(
+            (
+                SkillPublisherRecord.model_validate(item["publisher"]),
+                tuple(
+                    SkillPublisherKeyRecord.model_validate(key)
+                    for key in item.get("keys", ())
+                ),
+            )
+            for item in response.publishers
+        )
+
     async def _state(
         self,
         *,
@@ -545,6 +585,27 @@ class RemoteSkillPublicationClient:
             SkillSourceInternalResponse,
         )
         return dict(response.sync_result or {})
+
+    async def get_source_sync_state(
+        self, tenant_id: str, source_id: str
+    ) -> SkillSourceSyncState | None:
+        response = await self._admin_snapshot(tenant_id)
+        for item in response.source_sync_states:
+            if item.get("source_id") == source_id:
+                return SkillSourceSyncState.model_validate(item)
+        return None
+
+    async def _admin_snapshot(
+        self, tenant_id: str
+    ) -> SkillAdminSnapshotInternalResponse:
+        request_id = f"skill-admin-snapshot-{uuid4().hex}"
+        return await self._contract.call(
+            "/internal/v1/skill-publications/admin-snapshot",
+            SkillAdminSnapshotInternalRequest(
+                context=_query_context(tenant_id, request_id)
+            ),
+            SkillAdminSnapshotInternalResponse,
+        )
 
 
 def _context(

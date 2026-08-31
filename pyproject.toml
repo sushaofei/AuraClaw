@@ -15,11 +15,9 @@ dependencies = [
   "cryptography>=45,<50",
   "fastapi>=0.115,<1",
   "httpx>=0.27,<1",
-  "pymysql[rsa]>=1.1,<2",
   "pydantic-settings>=2.6,<3",
   "socksio>=1.0,<2",
   "uvicorn[standard]>=0.32,<1",
-  "aiomysql>=0.2,<1",
 ]
 
 [project.optional-dependencies]

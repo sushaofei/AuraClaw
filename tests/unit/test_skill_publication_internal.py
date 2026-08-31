@@ -389,6 +389,11 @@ def test_task_api_client_publishes_through_action_hands_service() -> None:
             )
             assert package_state.retention_revision == 1
             assert package_state.retention_updated_by == "admin-a"
+            assert len(await client.list_packages("tenant-a")) == 1
+            assert len(await client.list_publications("tenant-a")) == 1
+            assert len(await client.list_installations("tenant-a")) == 1
+            listed_publishers = await client.list_publishers("tenant-a")
+            assert listed_publishers[0][0].publisher == "acme"
         finally:
             await client.aclose()
 

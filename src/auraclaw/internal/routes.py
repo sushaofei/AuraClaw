@@ -74,6 +74,8 @@ from auraclaw.contracts.internal import (
     SessionRootFeedResponse,
     SkillActiveBindingReferenceRequest,
     SkillActiveBindingReferenceResponse,
+    SkillAdminSnapshotInternalRequest,
+    SkillAdminSnapshotInternalResponse,
     SkillAdmissionListInternalRequest,
     SkillAdmissionListInternalResponse,
     SkillAdmissionMetricsInternalRequest,
@@ -418,6 +420,11 @@ def skill_publication_routes(
             SkillPublisherStateInternalRequest,
             SkillPublisherInternalResponse,
             service.publisher_state,
+        ),
+        "/admin-snapshot": contract_route(
+            SkillAdminSnapshotInternalRequest,
+            SkillAdminSnapshotInternalResponse,
+            service.admin_snapshot,
         ),
     }
 

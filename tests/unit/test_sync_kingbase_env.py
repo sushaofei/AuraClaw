@@ -4,27 +4,25 @@ from dotenv import dotenv_values
 from scripts.sync_kingbase_env import ensure_database_name, sync_environment
 
 
-def test_sync_environment_replaces_database_and_removes_mysql_settings(
+def test_sync_environment_replaces_postgresql_database_settings(
     tmp_path: Path,
 ) -> None:
     env_file = tmp_path / ".env.test"
     env_file.write_text(
-        "AURACLAW_STORAGE_BACKEND=mysql\n"
-        "AURACLAW_MIGRATIONS_DIRECTORY=/app/migrations/mysql\n"
-        "AURACLAW_MIGRATE_TARGET=0017\n"
+        "AURACLAW_STORAGE_BACKEND=postgres\n"
+        "AURACLAW_MIGRATIONS_DIRECTORY=/app/migrations\n"
+        "AURACLAW_MIGRATE_TARGET=0040\n"
         "# --- Database ---\n"
-        "AURACLAW_DB_DIALECT=mysql\n"
-        "DB_HOST=mysql.internal\n"
-        "DB_PORT=3306\n"
+        "AURACLAW_DB_DIALECT=postgres\n"
+        "DB_HOST=postgres.internal\n"
+        "DB_PORT=5432\n"
         "DB_USER=root\n"
         "DB_PWD=old-password\n"
         "DB_NAME=auraclaw_dev\n"
-        "AURACLAW_DATABASE_URL=mysql+aiomysql://old\n"
-        "AURACLAW_MIGRATION_DATABASE_URL=mysql+aiomysql://old\n"
+        "AURACLAW_DATABASE_URL=postgresql+asyncpg://old\n"
+        "AURACLAW_MIGRATION_DATABASE_URL=postgresql+asyncpg://old\n"
         "# --- Workload tokens / Agent Context ---\n"
-        "AURACLAW_RUNTIME_WORKLOAD_TOKEN=test-token\n"
-        "MYSQL_DB_HOST=legacy-source\n"
-        "AURACLAW_PRICE_INSIGHT_MYSQL_HOST=legacy-source\n",
+        "AURACLAW_RUNTIME_WORKLOAD_TOKEN=test-token\n",
         encoding="utf-8",
     )
     sync_environment(
@@ -38,9 +36,7 @@ def test_sync_environment_replaces_database_and_removes_mysql_settings(
         },
     )
 
-    text = env_file.read_text(encoding="utf-8")
     values = dotenv_values(env_file)
-    assert "MYSQL" not in text
     assert values["AURACLAW_STORAGE_BACKEND"] == "kingbase"
     assert values["AURACLAW_DB_DIALECT"] == "postgres"
     assert values["DB_HOST"] == "10.244.72.1"

@@ -55,13 +55,6 @@ def _database_block(values: dict[str, str | None]) -> list[str]:
     ]
 
 
-def _is_mysql_assignment(line: str) -> bool:
-    if "=" not in line or line.lstrip().startswith("#"):
-        return False
-    key = line.split("=", 1)[0].strip().upper()
-    return key.startswith("MYSQL_") or "_MYSQL_" in key
-
-
 def sync_environment(path: Path, host_values: dict[str, str | None]) -> None:
     original = path.read_text(encoding="utf-8")
     lines = original.splitlines()
@@ -82,7 +75,6 @@ def sync_environment(path: Path, host_values: dict[str, str | None]) -> None:
     if end is None:
         raise ValueError(f"{path} has no Workload tokens section after Database")
     lines[start:end] = _database_block(host_values)
-    lines = [line for line in lines if not _is_mysql_assignment(line)]
     _replace_assignment(lines, "AURACLAW_STORAGE_BACKEND", "kingbase")
     _replace_assignment(lines, "AURACLAW_MIGRATIONS_DIRECTORY", "/app/migrations")
     _replace_assignment(lines, "AURACLAW_MIGRATE_TARGET", CURRENT_MIGRATION_TARGET)
@@ -108,7 +100,7 @@ def ensure_database_name(path: Path, values: dict[str, str | None]) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="replace test/production MySQL settings with .host.env KingBase settings"
+        description="synchronize test/production database settings from .host.env KingBase values"
     )
     parser.add_argument("--host-env", default=".host.env")
     parser.add_argument(
