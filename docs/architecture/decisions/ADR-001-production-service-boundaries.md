@@ -60,6 +60,11 @@ Orchestrator 签发短期 Lease Assertion，至少包含 audience、tenant/sessi
 Session 与 Hands 使用轮换公钥验签，并在持久层维护每个资源已接受的最高 fencing token。旧 token 不能覆盖新 Checkpoint、
 追加 Canonical Event 或继续外部副作用。
 
+高水位分别由 `session_core`、`hands` 和 `control` owner schema 按 `(tenant_id, resource_id)` 持久化。
+接受 token 使用单条原子 upsert：相同 token 幂等，更高 token 单调推进，低 token 即使落到其他副本或服务重启后也被拒绝。
+Control 的 Assignment/Lease 数据仍是执行归属权威来源；其高水位只加强 assertion replay 防护，不替代当前 lease 校验。
+生产 Session、Orchestrator 和 Hands 缺少 SQL-backed ledger 时必须拒绝启动，不能回退到进程内 ledger。
+
 ### 4. Query 与 Runnable
 
 生产 Query 采用以下唯一方案：

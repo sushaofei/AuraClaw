@@ -175,7 +175,7 @@ def test_production_readiness_fails_when_hard_dependencies_are_missing() -> None
         storage_backend="memory",
         artifact_backend="local",
     )
-    for command in ("session", "model-gateway"):
+    for command in ("model-gateway",):
         app = create_service_app(command, production)
         with TestClient(app) as client:
             response = client.get("/health/ready")
@@ -184,6 +184,23 @@ def test_production_readiness_fails_when_hard_dependencies_are_missing() -> None
             serialized = json.dumps(response.json())
             assert "secret" not in serialized.lower()
             assert "api_key" not in serialized.lower()
+
+
+@pytest.mark.parametrize("command", ["session", "orchestrator", "hands"])
+def test_fencing_services_reject_process_local_ledger_in_production(command: str) -> None:
+    values: dict[str, object] = {
+        "deployment_profile": "production",
+        "storage_backend": "memory",
+        "artifact_backend": "local",
+    }
+    if command == "hands":
+        values.update(
+            task_api_workload_token="task-token",
+            credential_proxy_workload_token="credential-token",
+            action_hands_workload_token="hands-token",
+        )
+    with pytest.raises(ValueError, match="persistent fencing token ledger"):
+        create_service_app(command, _settings(**values))
 
 
 @pytest.mark.parametrize(
