@@ -4,7 +4,11 @@ import asyncio
 import hashlib
 import json
 from collections.abc import AsyncIterator
+from contextlib import suppress
+from dataclasses import dataclass
+from datetime import timedelta
 from typing import Protocol
+from uuid import uuid4
 
 from auraclaw.action.ports import PolicyEvaluation
 from auraclaw.contracts.errors import (
@@ -26,7 +30,20 @@ from auraclaw.contracts.internal import (
 from auraclaw.contracts.tools import PolicyDecision
 from auraclaw.model_gateway.ports import ModelCallReservation, ModelStateStore
 from auraclaw.runtime.model_stream import iter_model_stream
-from auraclaw.runtime.ports import ModelClient, ModelPolicy, ModelRequest, ModelResponse
+from auraclaw.runtime.ports import (
+    ModelClient,
+    ModelPolicy,
+    ModelRequest,
+    ModelResponse,
+    ProviderCancellationResult,
+)
+
+
+@dataclass
+class _ExecutionMonitorState:
+    cancel_requested: bool = False
+    cancel_outcome: ProviderCancellationResult | None = None
+    ownership_lost: bool = False
 
 
 class ModelPolicyEnforcer(Protocol):
@@ -51,11 +68,17 @@ class ModelGatewayInternalService:
         policy: ModelPolicyEnforcer | None = None,
         state: ModelStateStore | None = None,
         tenant_token_limit: int = 1_000_000,
+        gateway_id: str | None = None,
+        claim_ttl: timedelta = timedelta(seconds=30),
+        heartbeat_interval: float = 5.0,
     ) -> None:
         self._model = model
         self._policy = policy
         self._state = state
         self._tenant_token_limit = tenant_token_limit
+        self._gateway_id = gateway_id or f"model-gateway-{uuid4().hex}"
+        self._claim_ttl = claim_ttl
+        self._heartbeat_interval = heartbeat_interval
 
     @staticmethod
     def _require_runtime(identity: ServiceIdentity) -> None:
@@ -89,6 +112,27 @@ class ModelGatewayInternalService:
                 raise LeaseConflictError("model call is already in progress")
             if reservation.status == "quota_exceeded":
                 raise BudgetExceededError("tenant model token quota is exhausted")
+            if reservation.status == "cancelled":
+                raise LeaseConflictError("model call was cancelled")
+            if reservation.status == "reconciling":
+                raise LeaseConflictError("model call outcome requires reconciliation")
+        claim_token = reservation.claim_token if reservation is not None else None
+        monitor_stop = asyncio.Event()
+        monitor_state = _ExecutionMonitorState()
+        parent_task = asyncio.current_task()
+        monitor = (
+            asyncio.create_task(
+                self._monitor_execution(
+                    request,
+                    claim_token=claim_token,
+                    stop=monitor_stop,
+                    state=monitor_state,
+                    parent_task=parent_task,
+                )
+            )
+            if self._state is not None and claim_token is not None
+            else None
+        )
         sequence = 0
         response: ModelResponse | None = None
         try:
@@ -121,23 +165,103 @@ class ModelGatewayInternalService:
                     )
                 elif chunk.kind == "completed":
                     response = chunk.response
+        except asyncio.CancelledError:
+            if self._state is not None and claim_token is not None:
+                outcome = monitor_state.cancel_outcome
+                if monitor_state.cancel_requested and outcome is not None and outcome.stopped:
+                    if outcome.usage_final:
+                        await self._state.mark_cancelled(
+                            tenant_id=request.context.tenant_id,
+                            model_call_id=request.model_call_id,
+                            execution_owner=self._gateway_id,
+                            claim_token=claim_token,
+                            usage=outcome.usage,
+                        )
+                    else:
+                        await self._state.mark_reconciling(
+                            tenant_id=request.context.tenant_id,
+                            model_call_id=request.model_call_id,
+                            execution_owner=self._gateway_id,
+                            claim_token=claim_token,
+                            error_code="cancel_usage_unknown",
+                        )
+                else:
+                    await self._state.mark_reconciling(
+                        tenant_id=request.context.tenant_id,
+                        model_call_id=request.model_call_id,
+                        execution_owner=self._gateway_id,
+                        claim_token=claim_token,
+                        error_code=(
+                            "execution_owner_lost"
+                            if monitor_state.ownership_lost
+                            else "consumer_disconnected"
+                        ),
+                    )
+            raise
+        except GeneratorExit:
+            if self._state is not None and claim_token is not None:
+                await self._state.mark_reconciling(
+                    tenant_id=request.context.tenant_id,
+                    model_call_id=request.model_call_id,
+                    execution_owner=self._gateway_id,
+                    claim_token=claim_token,
+                    error_code="consumer_disconnected",
+                )
+            raise
         except Exception as exc:
             if self._state is not None:
                 await self._state.fail(
                     tenant_id=request.context.tenant_id,
                     model_call_id=request.model_call_id,
                     error_code=type(exc).__name__,
+                    claim_token=claim_token,
                 )
             raise
+        finally:
+            monitor_stop.set()
+            if monitor is not None:
+                monitor.cancel()
+                with suppress(asyncio.CancelledError):
+                    await monitor
         if response is None:
+            if self._state is not None:
+                await self._state.fail(
+                    tenant_id=request.context.tenant_id,
+                    model_call_id=request.model_call_id,
+                    error_code="missing_completed_response",
+                    claim_token=claim_token,
+                )
             raise ModelProviderError("model stream ended without a completed response")
         result = self._to_generate_response(response)
         if self._state is not None:
-            await self._state.complete(
-                tenant_id=request.context.tenant_id,
-                model_call_id=request.model_call_id,
-                response=result,
-            )
+            try:
+                await self._state.complete(
+                    tenant_id=request.context.tenant_id,
+                    model_call_id=request.model_call_id,
+                    response=result,
+                    claim_token=claim_token,
+                )
+            except LeaseConflictError:
+                if claim_token is not None:
+                    await self._state.mark_reconciling(
+                        tenant_id=request.context.tenant_id,
+                        model_call_id=request.model_call_id,
+                        execution_owner=self._gateway_id,
+                        claim_token=claim_token,
+                        error_code="completion_claim_lost",
+                    )
+                raise
+            except Exception:
+                if claim_token is not None:
+                    with suppress(Exception):
+                        await self._state.mark_reconciling(
+                            tenant_id=request.context.tenant_id,
+                            model_call_id=request.model_call_id,
+                            execution_owner=self._gateway_id,
+                            claim_token=claim_token,
+                            error_code="completion_persistence_failed",
+                        )
+                raise
         sequence += 1
         yield ModelStreamEvent(
             model_call_id=request.model_call_id,
@@ -148,10 +272,87 @@ class ModelGatewayInternalService:
 
     async def cancel(self, request: ModelCancelRequest) -> ModelCancelResponse:
         self._require_runtime(request.context.service_identity)
+        provider_cancellable = callable(getattr(self._model, "cancel", None))
+        if self._state is None:
+            outcome = await self._cancel_provider(request.model_call_id)
+            cancelled = outcome.stopped and outcome.usage_final
+            return ModelCancelResponse(
+                model_call_id=request.model_call_id,
+                cancelled=cancelled,
+                status=(
+                    "cancelled"
+                    if cancelled
+                    else "cancel_usage_unknown"
+                    if outcome.stopped
+                    else "provider_not_cancellable"
+                ),
+                provider_cancellable=provider_cancellable,
+            )
+        cancellation = await self._state.request_cancel(
+            tenant_id=request.context.tenant_id,
+            model_call_id=request.model_call_id,
+            run_id=request.run_id,
+            actor=request.context.service_identity.value,
+            correlation_id=request.context.correlation_id,
+            causation_id=request.context.causation_id,
+        )
         return ModelCancelResponse(
             model_call_id=request.model_call_id,
-            cancelled=False,
+            cancelled=cancellation.status == "cancelled",
+            status=cancellation.status,
+            provider_cancellable=provider_cancellable,
         )
+
+    async def _monitor_execution(
+        self,
+        request: ModelGenerateRequest,
+        *,
+        claim_token: str,
+        stop: asyncio.Event,
+        state: _ExecutionMonitorState,
+        parent_task: asyncio.Task[object] | None,
+    ) -> None:
+        assert self._state is not None
+        while not stop.is_set():
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=self._heartbeat_interval)
+                return
+            except TimeoutError:
+                pass
+            try:
+                execution = await self._state.heartbeat(
+                    tenant_id=request.context.tenant_id,
+                    model_call_id=request.model_call_id,
+                    execution_owner=self._gateway_id,
+                    claim_token=claim_token,
+                    claim_ttl=self._claim_ttl,
+                )
+            except Exception:
+                state.ownership_lost = True
+                await self._cancel_provider(request.model_call_id)
+                if parent_task is not None:
+                    parent_task.cancel()
+                return
+            if not execution.owned:
+                state.ownership_lost = True
+                await self._cancel_provider(request.model_call_id)
+                if parent_task is not None:
+                    parent_task.cancel()
+                return
+            if execution.cancel_requested:
+                state.cancel_requested = True
+                state.cancel_outcome = await self._cancel_provider(request.model_call_id)
+                if state.cancel_outcome.stopped:
+                    return
+
+    async def _cancel_provider(self, model_call_id: str) -> ProviderCancellationResult:
+        cancel = getattr(self._model, "cancel", None)
+        if not callable(cancel):
+            return ProviderCancellationResult(stopped=False)
+        result = await cancel(model_call_id)
+        if isinstance(result, ProviderCancellationResult):
+            return result
+        return ProviderCancellationResult(stopped=bool(result))
 
     async def _prepare_stream(
         self, request: ModelGenerateRequest, request_digest: str
@@ -171,6 +372,12 @@ class ModelGatewayInternalService:
                     request_digest=request_digest,
                     reserved_tokens=request.max_output_tokens,
                     token_limit=self._tenant_token_limit,
+                    execution_owner=self._gateway_id,
+                    provider_request_ref=request.model_call_id,
+                    actor=request.context.service_identity.value,
+                    correlation_id=request.context.correlation_id,
+                    causation_id=request.context.causation_id,
+                    claim_ttl=self._claim_ttl,
                 )
                 if self._state is not None
                 else _no_reservation()
@@ -191,6 +398,7 @@ class ModelGatewayInternalService:
                     tenant_id=request.context.tenant_id,
                     model_call_id=request.model_call_id,
                     error_code=type(policy_result).__name__,
+                    claim_token=reservation.claim_token,
                 )
             raise policy_result
         return reservation if isinstance(reservation, ModelCallReservation) else None

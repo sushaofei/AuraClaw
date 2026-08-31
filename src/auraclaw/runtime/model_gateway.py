@@ -9,6 +9,7 @@ from auraclaw.runtime.ports import (
     ModelResponse,
     ModelStreamChunk,
     ProviderAdapter,
+    ProviderCancellationResult,
 )
 
 
@@ -25,6 +26,7 @@ class ModelGateway:
         self._adapters = {adapter.name: adapter for adapter in adapters}
         self._credentials = credentials
         self._default_provider = default_provider
+        self._active_adapters: dict[str, ProviderAdapter] = {}
 
     async def prewarm(self) -> None:
         for provider, adapter in self._adapters.items():
@@ -60,14 +62,35 @@ class ModelGateway:
             raise AuthorizationError(f"model provider is not configured: {provider}")
         credential = await self._credentials.resolve(provider, request.tenant_id)
         stream = getattr(adapter, "generate_stream", None)
-        if callable(stream):
-            async for chunk in stream(request, credential=credential):
-                yield chunk
-            return
-        response = await adapter.generate(request, credential=credential)
-        for delta in response.deltas:
-            yield ModelStreamChunk(kind="delta", delta=str(delta))
-        yield ModelStreamChunk(kind="completed", response=response)
+        self._active_adapters[request.model_call_id] = adapter
+        try:
+            if callable(stream):
+                async for chunk in stream(request, credential=credential):
+                    yield chunk
+                return
+            response = await adapter.generate(request, credential=credential)
+            for delta in response.deltas:
+                yield ModelStreamChunk(kind="delta", delta=str(delta))
+            yield ModelStreamChunk(kind="completed", response=response)
+        finally:
+            if self._active_adapters.get(request.model_call_id) is adapter:
+                self._active_adapters.pop(request.model_call_id, None)
+
+    async def cancel(
+        self, model_call_id: str | ModelRequest
+    ) -> ProviderCancellationResult:
+        if isinstance(model_call_id, ModelRequest):
+            model_call_id = model_call_id.model_call_id
+        adapter = self._active_adapters.get(model_call_id)
+        if adapter is None:
+            return ProviderCancellationResult(stopped=False)
+        cancel = getattr(adapter, "cancel", None)
+        if not callable(cancel):
+            return ProviderCancellationResult(stopped=False)
+        result = await cancel(model_call_id)
+        if isinstance(result, ProviderCancellationResult):
+            return result
+        return ProviderCancellationResult(stopped=bool(result))
 
     async def aclose(self) -> None:
         for adapter in self._adapters.values():

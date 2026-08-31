@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -15,7 +16,13 @@ from auraclaw.contracts.errors import (
     ModelRateLimitError,
     ModelTimeoutError,
 )
-from auraclaw.runtime.ports import ModelRequest, ModelResponse, ModelStreamChunk, ToolCall
+from auraclaw.runtime.ports import (
+    ModelRequest,
+    ModelResponse,
+    ModelStreamChunk,
+    ProviderCancellationResult,
+    ToolCall,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +47,7 @@ class OpenAICompatibleProvider:
         self._thinking_enabled = thinking_enabled
         self._client = client
         self._owns_client = client is None
+        self._active_tasks: dict[str, asyncio.Task[object]] = {}
 
     async def aclose(self) -> None:
         if self._client is not None and self._owns_client:
@@ -96,6 +104,28 @@ class OpenAICompatibleProvider:
         return response
 
     async def generate_stream(
+        self, request: ModelRequest, *, credential: str
+    ) -> AsyncIterator[ModelStreamChunk]:
+        task = asyncio.current_task()
+        if task is not None:
+            self._active_tasks[request.model_call_id] = task
+        try:
+            async for chunk in self._generate_stream(request, credential=credential):
+                yield chunk
+        finally:
+            if self._active_tasks.get(request.model_call_id) is task:
+                self._active_tasks.pop(request.model_call_id, None)
+
+    async def cancel(self, model_call_id: str) -> ProviderCancellationResult:
+        task = self._active_tasks.get(model_call_id)
+        if task is None or task.done():
+            return ProviderCancellationResult(stopped=False)
+        task.cancel()
+        # Chat Completions does not provide authoritative partial usage when an
+        # HTTP stream is interrupted. The caller must reconcile accounting.
+        return ProviderCancellationResult(stopped=True, usage_final=False)
+
+    async def _generate_stream(
         self, request: ModelRequest, *, credential: str
     ) -> AsyncIterator[ModelStreamChunk]:
         model = request.policy.preferred_model or self._model

@@ -72,8 +72,15 @@ class _State:
         self.reserved = True
         return ModelCallReservation(status="reserved")
 
-    async def fail(self, *, tenant_id: str, model_call_id: str, error_code: str) -> None:
-        del tenant_id, model_call_id
+    async def fail(
+        self,
+        *,
+        tenant_id: str,
+        model_call_id: str,
+        error_code: str,
+        claim_token: str | None = None,
+    ) -> None:
+        del tenant_id, model_call_id, claim_token
         self.failed = error_code
 
     async def complete(self, **kwargs: Any) -> None:
