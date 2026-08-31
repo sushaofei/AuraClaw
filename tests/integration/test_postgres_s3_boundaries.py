@@ -7,9 +7,13 @@ import asyncpg
 import pytest
 
 from auraclaw.action.tool_gateway import ToolRegistry
-from auraclaw.admin.internal_service import OwnerAdminService
+from auraclaw.admin.internal_service import (
+    OwnerAdminService,
+    admin_operation_request_digest,
+)
 from auraclaw.artifact.internal_service import PendingUpload
 from auraclaw.config import get_settings
+from auraclaw.contracts.errors import VersionConflictError
 from auraclaw.contracts.internal import (
     AdminOperationRequest,
     InternalRequestContext,
@@ -25,6 +29,7 @@ from auraclaw.contracts.tools import (
     ToolResultStatus,
 )
 from auraclaw.infrastructure.persistence.postgres_admin_store import (
+    AdminSchema,
     PostgresAdminOperationStore,
 )
 from auraclaw.infrastructure.persistence.postgres_artifact_repository import (
@@ -52,6 +57,7 @@ MIGRATION = "\n".join(
     for path in (
         "migrations/0009_s3_owner_boundaries.sql",
         "migrations/0013_s4_artifact_lifecycle.sql",
+        "migrations/0043_admin_operation_claims.sql",
     )
 )
 pytestmark = pytest.mark.skipif(DATABASE_URL is None, reason="PostgreSQL test URL not configured")
@@ -73,6 +79,7 @@ def test_s3_owner_state_survives_process_local_clients() -> None:
         credential_store = PostgresCredentialRegistry(DATABASE_URL)
         artifact_store = PostgresArtifactRepository(DATABASE_URL)
         admin_store = PostgresAdminOperationStore(DATABASE_URL, schema="projection")
+        admin_store_b = PostgresAdminOperationStore(DATABASE_URL, schema="projection")
         tool_registry_store = PostgresToolRegistryStore(DATABASE_URL)
         try:
             invocation = ToolInvocation(
@@ -189,10 +196,14 @@ def test_s3_owner_state_survives_process_local_clients() -> None:
             assert registry.get(f"tool-{suffix}", "1").owner == "integration"
 
             calls = 0
+            handler_started = asyncio.Event()
+            release_handler = asyncio.Event()
 
             async def admin_handler(parameters: dict[str, object]) -> dict[str, object]:
                 nonlocal calls
                 calls += 1
+                handler_started.set()
+                await release_handler.wait()
                 return parameters
 
             admin_request = AdminOperationRequest(
@@ -212,14 +223,45 @@ def test_s3_owner_state_survives_process_local_clients() -> None:
                 ServiceIdentity.PROJECTION_WORKER,
                 {"status": admin_handler},
                 store=admin_store,
+                instance_id="projection-a",
             )
-            await first_admin.execute(admin_request)
             restarted_admin = OwnerAdminService(
                 ServiceIdentity.PROJECTION_WORKER,
                 {"status": admin_handler},
-                store=admin_store,
+                store=admin_store_b,
+                instance_id="projection-b",
             )
-            await restarted_admin.execute(admin_request)
+            executing = asyncio.create_task(first_admin.execute(admin_request))
+            await handler_started.wait()
+            concurrent = await restarted_admin.execute(admin_request)
+            assert concurrent.status == "running"
+            release_handler.set()
+            completed = await executing
+            assert completed.status == "completed"
+            replayed = await restarted_admin.execute(admin_request)
+            assert replayed == completed
+            assert calls == 1
+            with pytest.raises(VersionConflictError):
+                await restarted_admin.execute(
+                    admin_request.model_copy(
+                        update={"parameters": {"tenant_id": "different"}}
+                    )
+                )
+
+            abandoned_request = admin_request.model_copy(
+                update={"operation_id": f"admin-abandoned-{suffix}"}
+            )
+            await admin_store.claim(
+                abandoned_request,
+                request_digest=admin_operation_request_digest(abandoned_request),
+                claimed_by="projection-crashed",
+                claim_token="abandoned-claim",
+                claim_ttl=timedelta(microseconds=1),
+            )
+            await asyncio.sleep(0.01)
+            recovery = await restarted_admin.execute(abandoned_request)
+            assert recovery.status == "failed"
+            assert recovery.result["error_code"] == "unknown_side_effect"
             assert calls == 1
 
             assert not await connection.fetchval(
@@ -231,6 +273,7 @@ def test_s3_owner_state_survives_process_local_clients() -> None:
             await credential_store.close()
             await artifact_store.close()
             await admin_store.close()
+            await admin_store_b.close()
             await tool_registry_store.close()
             await connection.execute(
                 "DELETE FROM hands.invocation WHERE tenant_id=$1", tenant_id
@@ -249,8 +292,90 @@ def test_s3_owner_state_survives_process_local_clients() -> None:
                 f"admin-{suffix}",
             )
             await connection.execute(
+                "DELETE FROM projection.admin_operation WHERE operation_id=$1",
+                f"admin-abandoned-{suffix}",
+            )
+            await connection.execute(
                 "DELETE FROM hands.tool_capability WHERE tool_name=$1",
                 f"tool-{suffix}",
+            )
+            await connection.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("schema", "owner"),
+    [
+        ("projection", ServiceIdentity.PROJECTION_WORKER),
+        ("delivery", ServiceIdentity.DELIVERY_WORKER),
+        ("artifact", ServiceIdentity.ARTIFACT_SERVICE),
+    ],
+)
+def test_admin_operation_claim_is_atomic_for_each_owner_schema(
+    schema: AdminSchema,
+    owner: ServiceIdentity,
+) -> None:
+    async def scenario() -> None:
+        assert DATABASE_URL is not None
+        connection = await asyncpg.connect(DATABASE_URL)
+        await connection.execute(MIGRATION)
+        suffix = uuid4().hex
+        operation_id = f"admin-claim-{suffix}"
+        store_a = PostgresAdminOperationStore(DATABASE_URL, schema=schema)
+        store_b = PostgresAdminOperationStore(DATABASE_URL, schema=schema)
+        started = asyncio.Event()
+        release = asyncio.Event()
+        calls = 0
+
+        async def handler(parameters: dict[str, object]) -> dict[str, object]:
+            nonlocal calls
+            calls += 1
+            started.set()
+            await release.wait()
+            return parameters
+
+        request = AdminOperationRequest(
+            context=InternalRequestContext(
+                tenant_id=f"tenant-admin-{suffix}",
+                service_identity=ServiceIdentity.TASK_API,
+                request_id=operation_id,
+                correlation_id=operation_id,
+                causation_id=operation_id,
+            ),
+            operation_id=operation_id,
+            owner_service=owner,
+            operation="maintenance",
+            parameters={"scope": suffix},
+        )
+        service_a = OwnerAdminService(
+            owner,
+            {"maintenance": handler},
+            store=store_a,
+            instance_id=f"{schema}-a",
+        )
+        service_b = OwnerAdminService(
+            owner,
+            {"maintenance": handler},
+            store=store_b,
+            instance_id=f"{schema}-b",
+        )
+        try:
+            executing = asyncio.create_task(service_a.execute(request))
+            await started.wait()
+            assert (await service_b.execute(request)).status == "running"
+            release.set()
+            completed = await executing
+            assert completed.status == "completed"
+            assert await service_b.execute(request) == completed
+            assert calls == 1
+        finally:
+            release.set()
+            await store_a.close()
+            await store_b.close()
+            await connection.execute(
+                f"DELETE FROM {schema}.admin_operation WHERE operation_id=$1",
+                operation_id,
             )
             await connection.close()
 

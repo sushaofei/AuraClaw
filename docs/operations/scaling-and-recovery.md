@@ -42,7 +42,7 @@ registration lease 内仍活跃时，新进程注册会 fail closed。因此显�
 
 ## 生产配置门禁
 
-1. 依次应用 PostgreSQL/KingBase `0010`～`0042` expand migration。`0040`
+1. 依次应用 PostgreSQL/KingBase `0010`～`0043` expand migration。`0040`
    `0022` 增加 registration 与 execution claim 字段和索引；先迁移 Control 数据库，再滚动升级
    Orchestrator，最后升级 Agent Runtime。可选执行 `deploy/postgres/roles.sql` 做硬化，
    当前部署不按服务注入分角色 DSN。
@@ -50,6 +50,8 @@ registration lease 内仍活跃时，新进程注册会 fail closed。因此显�
    前应用。升级后观察每个 Server 至少一个 active instance、active generation 单调增长和 stale 告警。
    `0042` 增加 Session、Control、Hands fencing 高水位表；必须先迁移数据库，再滚动三个服务，
    不允许新版本在生产环境回退到内存 ledger。
+   `0043` 扩展 Projection、Delivery、Artifact Admin Operation claim；迁移后先滚动 owner 服务，
+   再恢复 Task API/CLI 运维流量。
 2. 各服务共享统一 `AURACLAW_DATABASE_URL`（Compose `database_url` secret）；migration 使用
    独立的 `AURACLAW_MIGRATION_DATABASE_URL`。
 3. 所有 Control、Session 与 Hands 副本必须使用相同的 `AURACLAW_LEASE_SIGNING_KEY`，并通过平台
@@ -79,3 +81,6 @@ hostname）或注入唯一实例 UID。停止全部旧 Runtime，等待 30 秒�
 
 回滚 `0042` 前必须停止所有 Runtime 和 Session/Orchestrator/Hands 新请求并完成排空；删除高水位表会失去
 对仍未过期旧 assertion 的重放防护，因此只允许在所有旧 Lease Assertion 都已过期后执行 down migration。
+
+回滚 `0043` 前停止新的 Owner Admin 请求并等待所有 `running` claim 完成。存在未完成 claim 或
+`unknown_side_effect` 时禁止删除 claim/audit 字段；先完成人工核对并记录恢复结果。
