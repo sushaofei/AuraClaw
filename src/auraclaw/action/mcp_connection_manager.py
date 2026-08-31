@@ -5,7 +5,9 @@ import logging
 from collections.abc import Callable, MutableMapping
 from datetime import UTC, datetime
 from typing import Any, Protocol
+from urllib.parse import urlsplit
 
+from auraclaw.action.bounded import bounded_partition_map
 from auraclaw.action.capability_catalog import CapabilityCatalog
 from auraclaw.action.catalog_reconciler import (
     CapabilityCatalogReconciler,
@@ -46,7 +48,24 @@ class McpConnectionManager:
         egress: McpEgressLoader | None = None,
         drain_seconds: float = 5.0,
         instance_id: str = "legacy",
+        max_concurrent: int = 8,
+        max_concurrent_per_tenant: int | None = None,
+        max_concurrent_per_host: int | None = None,
+        server_timeout_seconds: float = 60.0,
     ) -> None:
+        tenant_limit = (
+            max_concurrent if max_concurrent_per_tenant is None else max_concurrent_per_tenant
+        )
+        host_limit = (
+            max_concurrent if max_concurrent_per_host is None else max_concurrent_per_host
+        )
+        if (
+            max_concurrent < 1
+            or not 1 <= tenant_limit <= max_concurrent
+            or not 1 <= host_limit <= max_concurrent
+            or server_timeout_seconds <= 0
+        ):
+            raise ValueError("MCP connection capacity and timeout must be positive")
         self._registry = registry
         self._connectors = connectors
         self._factory = factory
@@ -57,14 +76,31 @@ class McpConnectionManager:
         self._instance_id = instance_id
         self._generations: dict[str, int] = {}
         self._draining: list[CapabilityConnector] = []
+        self._max_concurrent = max_concurrent
+        self._max_concurrent_per_tenant = tenant_limit
+        self._max_concurrent_per_host = host_limit
+        self._server_timeout_seconds = server_timeout_seconds
+        self._server_locks: dict[str, asyncio.Lock] = {}
 
     async def restore(self) -> int:
         snapshot = await self._registry.active_snapshot()
-        loaded = 0
-        for entry in snapshot:
-            if await self._apply_isolated(entry, restore=True):
-                loaded += 1
-        return loaded
+        results = await bounded_partition_map(
+            snapshot,
+            lambda entry: self._apply_isolated(entry, restore=True),
+            max_concurrent=self._max_concurrent,
+            partitions=(
+                (
+                    lambda entry: entry.tenant_id or "platform",
+                    self._max_concurrent_per_tenant,
+                ),
+                (
+                    lambda entry: urlsplit(entry.config.endpoint).hostname
+                    or entry.server_id,
+                    self._max_concurrent_per_host,
+                ),
+            ),
+        )
+        return sum(results)
 
     async def test(
         self, entry: McpActiveSnapshotEntry, *, persist_egress: bool = False
@@ -177,21 +213,54 @@ class McpConnectionManager:
             entry.server_id: entry
             for entry in await self._registry.active_snapshot()
         }
-        changed = 0
+        operations: list[tuple[str, McpActiveSnapshotEntry | str]] = []
+        scheduled: set[str] = set()
         for server_id, revision in list(self._generations.items()):
             desired = snapshot.get(server_id)
             if desired is None:
-                if await self._revoke_isolated(server_id):
-                    changed += 1
+                operations.append(("revoke", server_id))
+                scheduled.add(server_id)
                 continue
             if desired.revision != revision:
-                if await self._apply_isolated(desired):
-                    changed += 1
+                operations.append(("apply", desired))
+                scheduled.add(server_id)
         for server_id, entry in snapshot.items():
-            if self._generations.get(server_id) != entry.revision:
-                if await self._apply_isolated(entry):
-                    changed += 1
-        return changed
+            if server_id not in scheduled and self._generations.get(server_id) != entry.revision:
+                operations.append(("apply", entry))
+
+        async def execute(operation: tuple[str, McpActiveSnapshotEntry | str]) -> bool:
+            action, target = operation
+            if action == "revoke":
+                assert isinstance(target, str)
+                return await self._revoke_isolated(target)
+            assert not isinstance(target, str)
+            return await self._apply_isolated(target)
+
+        results = await bounded_partition_map(
+            operations,
+            execute,
+            max_concurrent=self._max_concurrent,
+            partitions=(
+                (
+                    lambda operation: (
+                        operation[1].tenant_id or "platform"
+                        if isinstance(operation[1], McpActiveSnapshotEntry)
+                        else operation[1]
+                    ),
+                    self._max_concurrent_per_tenant,
+                ),
+                (
+                    lambda operation: (
+                        urlsplit(operation[1].config.endpoint).hostname
+                        or operation[1].server_id
+                        if isinstance(operation[1], McpActiveSnapshotEntry)
+                        else operation[1]
+                    ),
+                    self._max_concurrent_per_host,
+                ),
+            ),
+        )
+        return sum(results)
 
     async def record_reconcile_results(
         self, results: tuple[McpReconcileResult, ...]
@@ -229,8 +298,13 @@ class McpConnectionManager:
         *,
         restore: bool = False,
     ) -> bool:
+        lock = self._server_locks.setdefault(entry.server_id, asyncio.Lock())
         try:
-            await self.apply(entry, restore=restore)
+            async with lock:
+                await asyncio.wait_for(
+                    self.apply(entry, restore=restore),
+                    timeout=self._server_timeout_seconds,
+                )
             return True
         except Exception as exc:
             logger.warning(
@@ -242,8 +316,12 @@ class McpConnectionManager:
             return False
 
     async def _revoke_isolated(self, server_id: str) -> bool:
+        lock = self._server_locks.setdefault(server_id, asyncio.Lock())
         try:
-            await self.revoke(server_id)
+            async with lock:
+                await asyncio.wait_for(
+                    self.revoke(server_id), timeout=self._server_timeout_seconds
+                )
             return True
         except Exception as exc:
             logger.warning(

@@ -1,5 +1,5 @@
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
@@ -16,6 +16,7 @@ from auraclaw.contracts.capabilities import (
     McpOAuthConfiguration,
     McpServerDefinition,
 )
+from auraclaw.contracts.errors import StaleCapabilitySnapshotError
 from auraclaw.infrastructure.persistence.postgres_capability_catalog import (
     PostgresCapabilityCatalogStore,
 )
@@ -31,6 +32,9 @@ CONSISTENCY_MIGRATION = (
     ROOT / "migrations/0041_capability_catalog_consistency.sql"
 ).read_text()
 HEALTH_MIGRATION = (ROOT / "migrations/0045_mcp_catalog_sync_health.sql").read_text()
+FENCING_MIGRATION = (
+    ROOT / "migrations/0051_mcp_catalog_reconcile_fencing.sql"
+).read_text()
 pytestmark = pytest.mark.skipif(DATABASE_URL is None, reason="PostgreSQL test URL not configured")
 
 
@@ -43,6 +47,7 @@ def test_postgres_capability_catalog_is_shared_and_tenant_scoped() -> None:
         await connection.execute(REGISTRY_MIGRATION)
         await connection.execute(CONSISTENCY_MIGRATION)
         await connection.execute(HEALTH_MIGRATION)
+        await connection.execute(FENCING_MIGRATION)
         suffix = uuid4().hex
         tenant_id = f"tenant-capability-{suffix}"
         server_id = f"server-{suffix}"
@@ -76,6 +81,7 @@ def test_postgres_capability_catalog_is_shared_and_tenant_scoped() -> None:
                     trust_level=CapabilityTrustLevel.TENANT_VERIFIED,
                     status=CapabilityStatus.ACTIVE,
                     enabled=True,
+                    config_revision=1,
                 )
             )
             await catalog_a.replace_server_capabilities(
@@ -120,6 +126,74 @@ def test_postgres_capability_catalog_is_shared_and_tenant_scoped() -> None:
             assert loaded_server.oauth is not None
             assert loaded_server.oauth.resource == "https://tenant.example/mcp"
 
+            old_lease = await store_a.claim_catalog_reconcile(
+                server_id=server_id,
+                owner="reconciler-old",
+                ttl=timedelta(milliseconds=20),
+            )
+            assert old_lease is not None
+            await asyncio.sleep(0.03)
+            new_lease = await store_b.claim_catalog_reconcile(
+                server_id=server_id,
+                owner="reconciler-new",
+                ttl=timedelta(seconds=30),
+            )
+            assert new_lease is not None
+            new_descriptor = loaded.model_copy(
+                update={"content_digest": f"sha256:new-{suffix}"}
+            )
+            committed = await catalog_b.replace_server_capabilities(
+                server_id,
+                (new_descriptor,),
+                lease=new_lease,
+                snapshot_digest=f"sha256:snapshot-new-{suffix}",
+                source_revision="2",
+            )
+            assert committed.committed and committed.generation == 2
+            with pytest.raises(StaleCapabilitySnapshotError):
+                await catalog_a.replace_server_capabilities(
+                    server_id,
+                    (loaded,),
+                    lease=old_lease,
+                    snapshot_digest=f"sha256:snapshot-old-{suffix}",
+                    source_revision="1",
+                )
+            await store_b.release_catalog_reconcile(new_lease)
+            replay_lease = await store_a.claim_catalog_reconcile(
+                server_id=server_id,
+                owner="reconciler-replay",
+                ttl=timedelta(seconds=30),
+            )
+            assert replay_lease is not None
+            replayed = await catalog_a.replace_server_capabilities(
+                server_id,
+                (new_descriptor,),
+                lease=replay_lease,
+                snapshot_digest=f"sha256:snapshot-new-{suffix}",
+                source_revision="2",
+            )
+            assert not replayed.committed and replayed.generation == 2
+            await store_a.release_catalog_reconcile(replay_lease)
+            config_lease = await store_a.claim_catalog_reconcile(
+                server_id=server_id,
+                owner="reconciler-old-config",
+                ttl=timedelta(seconds=30),
+            )
+            assert config_lease is not None
+            await catalog_b.register_server(
+                loaded_server.model_copy(update={"config_revision": 2})
+            )
+            with pytest.raises(StaleCapabilitySnapshotError):
+                await catalog_a.replace_server_capabilities(
+                    server_id,
+                    (loaded,),
+                    lease=config_lease,
+                    snapshot_digest=f"sha256:old-config-{suffix}",
+                    source_revision="1",
+                )
+            await store_a.release_catalog_reconcile(config_lease)
+            assert await store_b.get_active_generation(server_id) == 2
+
             first_failure = await store_a.record_catalog_sync(
                 server_id,
                 succeeded=False,
@@ -145,7 +219,15 @@ def test_postgres_capability_catalog_is_shared_and_tenant_scoped() -> None:
                     quarantine_after_failures=3,
                 ),
             )
-            assert {item.consecutive_failures for item in concurrent} == {2, 3}
+            assert all(item.consecutive_failures >= 2 for item in concurrent)
+            third_failure = await store_a.record_catalog_sync(
+                server_id,
+                succeeded=False,
+                attempted_at=datetime.now(UTC) + timedelta(seconds=1),
+                safe_error_code="snapshot_failed",
+                quarantine_after_failures=3,
+            )
+            assert third_failure.consecutive_failures == 3
             persisted = await store_b.get_server(server_id)
             assert persisted is not None
             assert persisted.status is CapabilityStatus.QUARANTINED
@@ -155,7 +237,7 @@ def test_postgres_capability_catalog_is_shared_and_tenant_scoped() -> None:
             recovered = await store_b.record_catalog_sync(
                 server_id,
                 succeeded=True,
-                attempted_at=datetime.now(UTC),
+                attempted_at=datetime.now(UTC) + timedelta(seconds=2),
                 safe_error_code=None,
                 quarantine_after_failures=3,
             )

@@ -1,19 +1,29 @@
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import json
 import logging
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
-from auraclaw.action.ports import CapabilityCatalogStore, CatalogSyncHealth, HandsExecutor
+from auraclaw.action.ports import (
+    CapabilityCatalogStore,
+    CatalogCommitResult,
+    CatalogReconcileLease,
+    CatalogSyncHealth,
+    HandsExecutor,
+)
 from auraclaw.contracts.capabilities import (
     CapabilityDescriptor,
     CapabilityKind,
     CapabilityStatus,
     McpServerDefinition,
 )
+from auraclaw.contracts.errors import StaleCapabilitySnapshotError
 from auraclaw.contracts.skills import (
     SkillBinding,
     SkillInstallationRecord,
@@ -88,9 +98,21 @@ class InMemoryCapabilityCatalogStore:
         self._capabilities: dict[str, CapabilityDescriptor] = {}
         self._generations: dict[str, int] = {}
         self._sync_failures: dict[str, int] = {}
+        self._reconcile_leases: dict[str, CatalogReconcileLease] = {}
+        self._snapshot_digests: dict[str, str] = {}
+        self._lock = asyncio.Lock()
 
     async def upsert_server(self, server: McpServerDefinition) -> None:
-        self._servers[server.server_id] = server
+        async with self._lock:
+            current = self._servers.get(server.server_id)
+            if (
+                current is not None
+                and current.config_revision is not None
+                and server.config_revision is not None
+                and server.config_revision < current.config_revision
+            ):
+                return
+            self._servers[server.server_id] = server
 
     async def get_server(self, server_id: str) -> McpServerDefinition | None:
         return self._servers.get(server_id)
@@ -106,8 +128,29 @@ class InMemoryCapabilityCatalogStore:
         self,
         server_id: str,
         capabilities: tuple[CapabilityDescriptor, ...],
-    ) -> None:
-        generation = self._generations.get(server_id, 0) + 1
+        *,
+        lease: CatalogReconcileLease,
+        snapshot_digest: str,
+        source_revision: str | None,
+    ) -> CatalogCommitResult:
+        del source_revision
+        current_lease = self._reconcile_leases.get(server_id)
+        server = self._servers.get(server_id)
+        if (
+            current_lease != lease
+            or lease.expires_at <= datetime.now(UTC)
+            or server is None
+            or int(server.config_revision or 0) != lease.config_revision
+            or self._generations.get(server_id, 0) != lease.previous_generation
+        ):
+            raise StaleCapabilitySnapshotError("Capability snapshot ownership is stale")
+        if self._snapshot_digests.get(server_id) == snapshot_digest:
+            return CatalogCommitResult(
+                generation=self._generations.get(server_id, 0),
+                committed=False,
+                snapshot_digest=snapshot_digest,
+            )
+        generation = lease.previous_generation + 1
         published = tuple(
             capability.model_copy(
                 update={
@@ -128,6 +171,35 @@ class InMemoryCapabilityCatalogStore:
             {capability.capability_id: capability for capability in published}
         )
         self._generations[server_id] = generation
+        self._snapshot_digests[server_id] = snapshot_digest
+        return CatalogCommitResult(generation, True, snapshot_digest)
+
+    async def claim_catalog_reconcile(
+        self, *, server_id: str, owner: str, ttl: timedelta
+    ) -> CatalogReconcileLease | None:
+        now = datetime.now(UTC)
+        async with self._lock:
+            current = self._reconcile_leases.get(server_id)
+            if current is not None and current.expires_at > now:
+                return None
+            server = self._servers.get(server_id)
+            if server is None:
+                return None
+            lease = CatalogReconcileLease(
+                server_id=server_id,
+                owner=owner,
+                fencing_token=(0 if current is None else current.fencing_token) + 1,
+                config_revision=int(server.config_revision or 0),
+                previous_generation=self._generations.get(server_id, 0),
+                expires_at=now + ttl,
+            )
+            self._reconcile_leases[server_id] = lease
+            return lease
+
+    async def release_catalog_reconcile(self, lease: CatalogReconcileLease) -> None:
+        async with self._lock:
+            if self._reconcile_leases.get(lease.server_id) == lease:
+                self._reconcile_leases.pop(lease.server_id, None)
 
     async def get_active_generation(self, server_id: str) -> int | None:
         return self._generations.get(server_id)
@@ -173,6 +245,8 @@ class InMemoryCapabilityCatalogStore:
         self._servers.pop(server_id, None)
         self._generations.pop(server_id, None)
         self._sync_failures.pop(server_id, None)
+        self._reconcile_leases.pop(server_id, None)
+        self._snapshot_digests.pop(server_id, None)
         self._capabilities = {
             capability_id: capability
             for capability_id, capability in self._capabilities.items()
@@ -238,7 +312,11 @@ class CapabilityCatalog:
         self,
         server_id: str,
         capabilities: tuple[CapabilityDescriptor, ...],
-    ) -> None:
+        *,
+        lease: CatalogReconcileLease | None = None,
+        snapshot_digest: str | None = None,
+        source_revision: str | None = None,
+    ) -> CatalogCommitResult:
         server = await self._store.get_server(server_id)
         if server is None:
             raise ValueError(f"MCP server is not registered: {server_id}")
@@ -249,7 +327,46 @@ class CapabilityCatalog:
                 raise ValueError("Capability tenant does not match the MCP server")
             if capability.trust_level != server.trust_level:
                 raise ValueError("Capability trust level does not match the MCP server")
-        await self._store.replace_capabilities(server_id, capabilities)
+        owned_lease = lease is None
+        if lease is None:
+            lease = await self._store.claim_catalog_reconcile(
+                server_id=server_id,
+                owner=f"catalog-direct-{id(self)}",
+                ttl=timedelta(seconds=30),
+            )
+            if lease is None:
+                raise StaleCapabilitySnapshotError(
+                    "Capability catalog reconcile is already owned"
+                )
+        if snapshot_digest is None:
+            encoded = json.dumps(
+                [
+                    item.model_dump(mode="json")
+                    for item in sorted(
+                        capabilities,
+                        key=lambda value: (
+                            value.kind.value,
+                            value.canonical_name,
+                            value.version,
+                            value.capability_id,
+                        ),
+                    )
+                ],
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+            snapshot_digest = f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+        try:
+            return await self._store.replace_capabilities(
+                server_id,
+                capabilities,
+                lease=lease,
+                snapshot_digest=snapshot_digest,
+                source_revision=source_revision,
+            )
+        finally:
+            if owned_lease:
+                await self._store.release_catalog_reconcile(lease)
 
     async def search(
         self,

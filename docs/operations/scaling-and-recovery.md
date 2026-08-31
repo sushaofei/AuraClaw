@@ -73,7 +73,7 @@ registration lease 内仍活跃时，新进程注册会 fail closed。因此显�
 
 ## 生产配置门禁
 
-1. 依次应用 PostgreSQL/KingBase `0010`～`0050` expand migration。`0040`
+1. 依次应用 PostgreSQL/KingBase `0010`～`0051` expand migration。`0040`
    `0022` 增加 registration 与 execution claim 字段和索引；先迁移 Control 数据库，再滚动升级
    Orchestrator，最后升级 Agent Runtime。可选执行 `deploy/postgres/roles.sql` 做硬化，
    当前部署不按服务注入分角色 DSN。
@@ -97,6 +97,8 @@ registration lease 内仍活跃时，新进程注册会 fail closed。因此显�
    Artifact Service。升级窗口不得混跑会用旧 `_ready` 授权或在过期 claim 后直接重放对象操作的副本。
    `0050` 增加 Delivery/Skill Outbox claim heartbeat、Delivery side-effect marker 与 reconciliation 原因；
    先迁移，再滚动 Delivery Worker 与 Action Hands。升级窗口不得混跑不会续租的旧批处理 Worker。
+   `0051` 增加 MCP Catalog config revision、reconcile owner/fencing/expiry、active snapshot digest/source
+   revision；先迁移再滚动 Action Hands。升级窗口不得混跑会绕过 Catalog CAS 的旧 Reconciler。
 2. 各服务共享统一 `AURACLAW_DATABASE_URL`（Compose `database_url` secret）；migration 使用
    独立的 `AURACLAW_MIGRATION_DATABASE_URL`。
 3. 所有 Control、Session 与 Hands 副本必须使用相同的 `AURACLAW_LEASE_SIGNING_KEY`，并通过平台
@@ -121,6 +123,10 @@ registration lease 内仍活跃时，新进程注册会 fail closed。因此显�
 9. Skill 事务默认最多重试 3 次，基础抖动延迟 10ms。调大重试预算前先检查 PostgreSQL
    `deadlocks`、`pg_stat_activity.wait_event`、statement/lock timeout 和最慢事务；预算耗尽返回可重试
    conflict，调用方应保留同一 command id/request digest，不能生成新命令绕过幂等检查。
+10. MCP Catalog/Skill/Connection reconcile 默认全局 8、每 tenant 4、每 host 2 个槽，每 server timeout
+    60 秒。调整 `AURACLAW_MCP_RECONCILE_*` 前先核对 Credential Proxy、Policy 和远端 host 限额；单 host
+    变慢应只造成该 partition 排队。`stale_capability_snapshot` 表示 owner/config/generation CAS 被拒绝，
+    不得人工递增 generation 或清空 last-good，应等待当前 owner 完成或下一轮 reconcile。
 
 升级前检查并修复旧数据：同一部署中若多个容器显式共享 `AURACLAW_RUNTIME_ID`，先改为未配置（使用
 hostname）或注入唯一实例 UID。停止全部旧 Runtime，等待 30 秒，然后将无对应健康实例且状态为

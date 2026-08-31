@@ -561,6 +561,18 @@ last-known-good generation。Hands 副本启动时即使远端暂不可达，也
 Tool Router。schema/content digest 在未 bump version 时发生变化会把本轮标记为 degraded/stale 并保留
 旧 generation。disabled/retired 是 desired governance 状态，仍立即阻止新任务发现。
 
+每轮 snapshot 在远程读取前先取得 per-server PostgreSQL reconcile lease 与单调 fencing token；提交时同时
+CAS `config_revision`、previous catalog generation、owner/token/expiry。相同 config revision 与 snapshot
+digest 的重复提交是 generation 不变的幂等 no-op；旧 owner、旧 config 或旧 previous generation 返回
+`stale_capability_snapshot`，不删除 last-good。Tool Registry、Hands Router、validated Skill snapshot 和
+Resource cache invalidation 只在权威 commit 成功后发布。健康元数据按 attempted time 单调更新，旧失败不能
+覆盖较新的成功。
+
+Catalog、Skill 和 Connection restore/reconcile 使用固定 worker 数量，并同时限制 global、per-tenant、
+per-host 并发；同 server 由持久 lease（Catalog）或 keyed serialization/source lease（Connection/Skill）
+串行化。每个 server 有独立 timeout 和错误隔离，一个挂起 server 不阻塞其他 server。Skill 只消费同一
+config revision 的 validated catalog snapshot，不另行重复 discovery。
+
 连续同步失败计数不是 Reconciler 进程内状态。每个失败轮次在
 `hands.downstream_mcp_server` 原子递增 `consecutive_sync_failures`，成功轮次清零；进程重启和多副本
 并发不能使计数倒退。达到配置阈值后 Server 进入 `quarantined`，保留 last-known-good generation 作为

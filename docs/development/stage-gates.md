@@ -2698,3 +2698,28 @@ ready Skill Artifact 建立带 fencing 的物理回收流程；不把成功命�
 - [x] 故障注入覆盖 deadlock/serialization 的成功重试、预算耗尽和指标。
 - [x] Ruff、Mypy、import-linter、Compose、定向与完整 Pytest 通过。
 - [x] Git 暂存范围审查、intentional commit 与 push 完成；Issue #70 关闭。
+
+## 阶段 MCP Catalog 单调发布与有界 Reconcile（Issue #71）
+
+状态：代码、迁移、测试和文档完成。
+
+### Catalog 权威提交
+
+- [x] `0051` 正反迁移增加 config revision、reconcile owner/fencing/expiry 与 active snapshot/source revision。
+- [x] Snapshot commit 同时 CAS owner/token/expiry、config revision 和 previous generation；旧 owner/config 稳定 stale。
+- [x] 相同 revision/digest 重放为 generation 不变的幂等 no-op，失败不删除 last-good。
+- [x] Tool/Router/validated Skill snapshot/cache invalidation 均在权威 commit 后发布；健康更新时间单调。
+
+### 有界并发与隔离
+
+- [x] Catalog、Skill 与 Connection restore/reconcile 使用固定 worker 数量，不按 Server 无界创建 task。
+- [x] global/per-tenant/per-host 三层容量限制可配置；同 server 使用 durable lease 或 keyed serialization。
+- [x] 每 Server 独立 timeout/error isolation；慢 Server 不阻塞其他 Server，取消会释放 lease/lock。
+- [x] Skill 复用相同 config revision 的 validated Catalog snapshot，不重复远端 discovery。
+
+### 验证与交付
+
+- [x] PostgreSQL 覆盖旧 snapshot 延迟提交、config update race、digest 幂等和 last-good generation。
+- [x] 单元测试覆盖 bounded concurrency、慢 Server timeout、commit 后 invalidation 与现有恢复路径。
+- [x] Ruff、Mypy、import-linter、Compose、定向与完整 Pytest 通过。
+- [x] Git 暂存范围审查、intentional commit 与 push 完成；Issue #71 关闭。

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from time import perf_counter
 from typing import Any
 
 import pytest
@@ -22,7 +23,7 @@ from auraclaw.contracts.capabilities import (
     McpServerDefinition,
 )
 from auraclaw.contracts.errors import PolicyDeniedError
-from auraclaw.contracts.hands import HandsTrustedContext
+from auraclaw.contracts.hands import CapabilitySnapshot, HandsTrustedContext
 from auraclaw.contracts.tools import (
     PolicyDecision,
     ToolCapability,
@@ -265,6 +266,23 @@ class _Cache:
         return 1
 
 
+class _TimedConnector:
+    def __init__(self, connector_id: str, delay: float, tracker: dict[str, int]) -> None:
+        self.connector_id = connector_id
+        self.delay = delay
+        self.tracker = tracker
+
+    async def snapshot(self, trusted: HandsTrustedContext) -> CapabilitySnapshot:
+        del trusted
+        self.tracker["active"] += 1
+        self.tracker["peak"] = max(self.tracker["peak"], self.tracker["active"])
+        try:
+            await asyncio.sleep(self.delay)
+            return CapabilitySnapshot(connector_id=self.connector_id)
+        finally:
+            self.tracker["active"] -= 1
+
+
 def _invocation(
     capability: ToolCapability,
     *,
@@ -363,7 +381,7 @@ def test_catalog_reconciliation_filters_routes_invalidates_and_recovers() -> Non
             "notifications/resources/updated",
             {"uri": "github://issue/21"},
         )
-        assert cache.invalidated == [("github://issue/21", "tenant-a")]
+        assert cache.invalidated == []
         assert await reconciler.handle_notification(
             server.server_id,
             "notifications/tools/list_changed",
@@ -371,6 +389,7 @@ def test_catalog_reconciliation_filters_routes_invalidates_and_recovers() -> Non
         )
         credentials.tool_version = "2.2.0"
         assert await reconciler.reconcile_dirty() == 1
+        assert cache.invalidated == [("github://issue/21", "tenant-a")]
         assert tools.get("github.issue.get", "2.2.0").version == "2.2.0"
         assert tools.get("github.issue.get", "2.1.0").version == "2.1.0"
         assert [item.version for item in tools.discover()] == ["2.2.0"]
@@ -395,6 +414,48 @@ def test_catalog_reconciliation_filters_routes_invalidates_and_recovers() -> Non
         recovered = await reconciler.reconcile_server(current)
         assert recovered.status == CapabilityStatus.ACTIVE
         assert tools.get("github.issue.get", "2.2.0")
+
+    asyncio.run(scenario())
+
+
+def test_catalog_reconcile_is_bounded_and_isolates_server_timeout() -> None:
+    async def scenario() -> None:
+        store = InMemoryCapabilityCatalogStore()
+        catalog = CapabilityCatalog(store)
+        tracker = {"active": 0, "peak": 0}
+        servers = tuple(
+            _server().model_copy(
+                update={
+                    "server_id": f"server-{index}",
+                    "config_revision": 1,
+                }
+            )
+            for index in range(3)
+        )
+        for server in servers:
+            await catalog.register_server(server)
+        connectors = {
+            server.server_id: _TimedConnector(
+                f"mcp:{server.server_id}",
+                0.2 if index == 0 else 0.01,
+                tracker,
+            )
+            for index, server in enumerate(servers)
+        }
+        reconciler = CapabilityCatalogReconciler(
+            catalog=catalog,
+            store=store,
+            connectors=connectors,  # type: ignore[arg-type]
+            max_concurrent=2,
+            server_timeout_seconds=0.05,
+        )
+        started = perf_counter()
+        results = await reconciler.reconcile_all_results()
+        elapsed = perf_counter() - started
+        assert tracker["peak"] == 2
+        assert sum(result.status is CapabilityStatus.ACTIVE for result in results) == 2
+        assert sum(result.error == "TimeoutError" for result in results) == 1
+        assert elapsed < 0.15
 
     asyncio.run(scenario())
 
