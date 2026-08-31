@@ -1399,6 +1399,7 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
     artifacts: RemoteArtifactWriter
     invocation_store: PostgresInvocationStore | None = None
     tool_registry_store: PostgresToolRegistryStore | None = None
+    hands_metric_store: PostgresObservabilityStore | None = None
     capability_catalog_store = _capability_catalog_store(settings)
     mcp_registry, mcp_registry_store = _mcp_registry_service(settings)
     remote_clients: list[Any] = []
@@ -1433,6 +1434,7 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
     if settings.sql_storage_enabled:
         invocation_store = PostgresInvocationStore(settings.resolved_database_url)
         tool_registry_store = PostgresToolRegistryStore(settings.resolved_database_url)
+        hands_metric_store = PostgresObservabilityStore(settings.resolved_database_url)
         skill_lifecycle: SkillLifecycleStore = PostgresSkillLifecycleStore(
             settings.resolved_database_url
         )
@@ -1450,6 +1452,7 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         skill_binding_references,
         *((invocation_store,) if invocation_store is not None else ()),
         *((tool_registry_store,) if tool_registry_store is not None else ()),
+        *((hands_metric_store,) if hands_metric_store is not None else ()),
         *((skill_lifecycle,) if isinstance(skill_lifecycle, PostgresSkillLifecycleStore) else ()),
         *(
             (skill_publisher_store,)
@@ -1611,6 +1614,12 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         invocation_store=invocation_store,
         approval_controller=policy if isinstance(policy, RemotePolicyClient) else None,
         instance_id=f"action-hands-{secrets.token_hex(8)}",
+        max_concurrent=settings.hands_max_concurrent,
+        max_concurrent_per_tenant=settings.hands_max_concurrent_per_tenant,
+        max_queued=settings.hands_max_queued,
+        max_queued_per_tenant=settings.hands_max_queued_per_tenant,
+        queue_timeout=settings.hands_queue_timeout_seconds,
+        metric_writer=hands_metric_store,
     )
     token = _agent_runtime_token(settings) or ""
     key = _lease_signing_key(settings)

@@ -2598,3 +2598,28 @@ ready Skill Artifact 建立带 fencing 的物理回收流程；不把成功命�
 - [x] PostgreSQL/Object Storage 集成覆盖跨副本删除、续租、防旧 owner 提交、unknown fencing 和 `0049` roundtrip。
 - [x] Ruff、Mypy、import-linter、定向与完整 Pytest 通过。
 - [x] Git 暂存范围审查、intentional commit 与 push 完成；Issue #66 关闭。
+
+## 阶段 Action Hands 并发隔离与有界背压（Issue #67）
+
+状态：代码、测试和文档完成。
+
+### 并发与正确性
+
+- [x] replica-wide execution lock 已移除；本地 single-flight 仅按 `(tenant_id, idempotency_key)` 协调。
+- [x] PostgreSQL Invocation Store 的原子 claim 仍是跨副本副作用 ownership 边界。
+- [x] 不同 tenant/key 的 Policy、Approval、MCP、Connector 与 Tool I/O 可并行。
+- [x] 相同 key 的 waiter 有队列上限与等待超时，完成、失败、取消或超时后可靠清理。
+
+### 容量、公平性与观测
+
+- [x] 全局与 per-tenant semaphore 独立限流，单 tenant 不能占满所有执行槽。
+- [x] 全局与 per-tenant 等待队列均有硬上限；满载或超时返回无副作用、可重试背压结果。
+- [x] 配置校验保证 per-tenant 执行/队列上限不超过对应全局上限。
+- [x] PostgreSQL 指标覆盖全局/per-tenant queue depth、in-flight、queue latency 与 backpressure reason。
+
+### 验证与交付
+
+- [x] 单元测试覆盖不同 key 并发、慢 Policy 跨 tenant 隔离、tenant fairness、队列满载和同 key 超时。
+- [x] PostgreSQL 集成继续覆盖双副本同 key claim、取消、waiting approval 与 owner-loss recovery。
+- [x] Ruff、Mypy、import-linter、性能并发测试及完整 Pytest 通过。
+- [x] Git 暂存范围审查、intentional commit 与 push 完成；Issue #67 关闭。
