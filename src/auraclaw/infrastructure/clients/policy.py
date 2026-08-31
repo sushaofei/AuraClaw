@@ -8,7 +8,7 @@ import httpx
 
 from auraclaw.action.ports import PolicyEvaluation
 from auraclaw.contracts.commands import CommandContext
-from auraclaw.contracts.errors import PolicyDeniedError
+from auraclaw.contracts.errors import ApprovalValidationError, PolicyDeniedError
 from auraclaw.contracts.internal import (
     ApprovalCommandRequest,
     ApprovalValidationResponse,
@@ -148,7 +148,11 @@ class RemotePolicyClient:
         return response.valid
 
     async def request_approval(self, record: ApprovalRecord) -> None:
-        await self._approval_command(record, operation="request")
+        response = await self._approval_command(record, operation="request")
+        if response.status == "conflict":
+            raise ApprovalValidationError(
+                "approval id is already bound to a different request"
+            )
 
     async def validate_approval(
         self,
@@ -183,14 +187,25 @@ class RemotePolicyClient:
         return response.valid
 
     async def record_human_response(
-        self, record: ApprovalRecord, *, decision: str, feedback: str | None
+        self,
+        record: ApprovalRecord,
+        *,
+        decision: str,
+        feedback: str | None,
+        actor_id: str | None = None,
     ) -> None:
-        await self._approval_command(
+        expected_status = "approved" if decision == "approved" else "rejected"
+        response = await self._approval_command(
             record,
             operation="record_human_response",
-            decision="approve" if decision == "approved" else "reject",
+            decision="approve" if expected_status == "approved" else "reject",
             feedback=feedback,
+            actor_id=actor_id,
         )
+        if response.status != expected_status:
+            raise ApprovalValidationError(
+                f"approval decision was not committed: {response.status}"
+            )
 
     async def _approval_command(
         self,
@@ -199,6 +214,7 @@ class RemotePolicyClient:
         operation: str,
         decision: str | None = None,
         feedback: str | None = None,
+        actor_id: str | None = None,
     ) -> ApprovalValidationResponse:
         request_id = str(uuid.uuid4())
         return await self._contract.call(
@@ -219,6 +235,7 @@ class RemotePolicyClient:
                 policy_version=record.policy_version,
                 decision=decision,
                 feedback=feedback,
+                actor_id=actor_id,
                 expires_at=record.expires_at,
             ),
             ApprovalValidationResponse,

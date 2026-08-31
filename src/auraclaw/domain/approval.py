@@ -30,6 +30,35 @@ def action_digest(tool_name: str, tool_version: str, arguments: dict[str, Any]) 
     return hashlib.sha256(normalized).hexdigest()
 
 
+def approval_request_digest(
+    *,
+    tenant_id: str,
+    approval_id: str,
+    session_id: str,
+    run_id: str,
+    action_digest: str,
+    policy_version: str,
+    expires_at: datetime,
+) -> str:
+    """Return the immutable identity of one approval request generation."""
+    normalized_expiry = expires_at.astimezone(UTC).isoformat(timespec="microseconds")
+    normalized = json.dumps(
+        {
+            "action_digest": action_digest,
+            "approval_id": approval_id,
+            "expires_at": normalized_expiry,
+            "policy_version": policy_version,
+            "run_id": run_id,
+            "session_id": session_id,
+            "tenant_id": tenant_id,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode()
+    return hashlib.sha256(normalized).hexdigest()
+
+
 class ApprovalAggregate:
     @staticmethod
     def from_events(

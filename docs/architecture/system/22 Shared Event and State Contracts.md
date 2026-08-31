@@ -108,10 +108,15 @@ requested -> attempting -> succeeded
 requested -> waiting -> approved | rejected | expired | cancelled
 ```
 
+`approved|rejected|expired|cancelled` 均为单调终态。Policy Store 使用数据库行锁与
+`WHERE status='waiting'` CAS 选出唯一 winner；同决定重放幂等，相反决定返回 conflict。expire 以数据库
+时间判断，cancel 不能覆盖任何终态。相同 Approval ID 的 request payload 由稳定 request digest 约束；
+需要再次审批时创建新的 Approval ID/generation，而不是改写旧事实。
+
 批准必须绑定：
 
 ```text
-approval_id + session_id + action_digest + policy_version
+tenant_id + approval_id + session_id + run_id + action_digest + policy_version
 ```
 
 执行前由 Tool Gateway 再次校验，参数发生变化必须重新审批。

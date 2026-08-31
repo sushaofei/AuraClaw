@@ -16,6 +16,7 @@ from auraclaw.config import get_settings
 from auraclaw.contracts.errors import VersionConflictError
 from auraclaw.contracts.internal import (
     AdminOperationRequest,
+    ApprovalCommandRequest,
     InternalRequestContext,
     PolicyEvaluateRequest,
     PolicyEvaluateResponse,
@@ -59,9 +60,285 @@ MIGRATION = "\n".join(
         "migrations/0013_s4_artifact_lifecycle.sql",
         "migrations/0043_admin_operation_claims.sql",
         "migrations/0044_hands_invocation_claims.sql",
+        "migrations/0052_policy_approval_cas.sql",
     )
 )
 pytestmark = pytest.mark.skipif(DATABASE_URL is None, reason="PostgreSQL test URL not configured")
+
+
+def _approval_command(
+    *,
+    tenant_id: str,
+    approval_id: str,
+    operation: str,
+    request_id: str,
+    expires_at: datetime | None,
+    decision: str | None = None,
+    action_digest: str = "approval-action-digest",
+) -> ApprovalCommandRequest:
+    return ApprovalCommandRequest(
+        context=InternalRequestContext(
+            tenant_id=tenant_id,
+            service_identity=(
+                ServiceIdentity.TASK_API
+                if operation == "record_human_response"
+                else ServiceIdentity.ACTION_HANDS
+            ),
+            request_id=request_id,
+            correlation_id="approval-run",
+            causation_id=approval_id,
+        ),
+        operation=operation,
+        approval_id=approval_id,
+        session_id="approval-session",
+        run_id="approval-run",
+        action_digest=action_digest,
+        policy_version="approval-policy-v1",
+        decision=decision,
+        actor_id="approver-a" if decision is not None else None,
+        expires_at=expires_at,
+    )
+
+
+def test_postgres_approval_transitions_are_atomic_monotonic_and_audited() -> None:
+    async def scenario() -> None:
+        assert DATABASE_URL is not None
+        connection = await asyncpg.connect(DATABASE_URL)
+        await connection.execute(MIGRATION)
+        suffix = uuid4().hex
+        tenant_id = f"tenant-approval-cas-{suffix}"
+        approval_id = f"approval-cas-{suffix}"
+        expiry = datetime.now(UTC) + timedelta(minutes=5)
+        first = PostgresPolicyStateStore(DATABASE_URL)
+        second = PostgresPolicyStateStore(DATABASE_URL)
+        try:
+            requested = await first.command_approval(
+                _approval_command(
+                    tenant_id=tenant_id,
+                    approval_id=approval_id,
+                    operation="request",
+                    request_id=f"request-{suffix}",
+                    expires_at=expiry,
+                )
+            )
+            assert requested.status == "waiting"
+            replayed = await second.command_approval(
+                _approval_command(
+                    tenant_id=tenant_id,
+                    approval_id=approval_id,
+                    operation="request",
+                    request_id=f"request-replay-{suffix}",
+                    expires_at=expiry,
+                )
+            )
+            assert replayed.status == "waiting"
+            conflicting_request = await second.command_approval(
+                _approval_command(
+                    tenant_id=tenant_id,
+                    approval_id=approval_id,
+                    operation="request",
+                    request_id=f"request-conflict-{suffix}",
+                    expires_at=expiry,
+                    action_digest="different-action",
+                )
+            )
+            assert conflicting_request.status == "conflict"
+
+            approve, reject = await asyncio.gather(
+                first.command_approval(
+                    _approval_command(
+                        tenant_id=tenant_id,
+                        approval_id=approval_id,
+                        operation="record_human_response",
+                        request_id=f"approve-{suffix}",
+                        expires_at=expiry,
+                        decision="approve",
+                    )
+                ),
+                second.command_approval(
+                    _approval_command(
+                        tenant_id=tenant_id,
+                        approval_id=approval_id,
+                        operation="record_human_response",
+                        request_id=f"reject-{suffix}",
+                        expires_at=expiry,
+                        decision="reject",
+                    )
+                ),
+            )
+            assert sorted((approve.status, reject.status)) in (
+                ["approved", "conflict"],
+                ["conflict", "rejected"],
+            )
+            winner_decision = "approve" if approve.status == "approved" else "reject"
+            final_status = "approved" if winner_decision == "approve" else "rejected"
+            retry = await second.command_approval(
+                _approval_command(
+                    tenant_id=tenant_id,
+                    approval_id=approval_id,
+                    operation="record_human_response",
+                    request_id=f"winner-retry-{suffix}",
+                    expires_at=expiry,
+                    decision=winner_decision,
+                )
+            )
+            assert retry.status == final_status
+            for operation in ("cancel", "expire"):
+                blocked = await second.command_approval(
+                    _approval_command(
+                        tenant_id=tenant_id,
+                        approval_id=approval_id,
+                        operation=operation,
+                        request_id=f"{operation}-{suffix}",
+                        expires_at=expiry,
+                    )
+                )
+                assert blocked.status == "conflict"
+            row = await connection.fetchrow(
+                """SELECT status,decision,decided_by,request_digest
+                FROM policy.approval WHERE tenant_id=$1 AND approval_id=$2""",
+                tenant_id,
+                approval_id,
+            )
+            assert row is not None
+            assert row["status"] == final_status
+            assert row["decision"] == winner_decision
+            assert row["decided_by"] == "approver-a"
+            assert row["request_digest"]
+            validated = await first.command_approval(
+                _approval_command(
+                    tenant_id=tenant_id,
+                    approval_id=approval_id,
+                    operation="validate",
+                    request_id=f"validate-{suffix}",
+                    expires_at=expiry,
+                )
+            )
+            assert validated.valid is (final_status == "approved")
+            mismatched_validation = await first.command_approval(
+                _approval_command(
+                    tenant_id=tenant_id,
+                    approval_id=approval_id,
+                    operation="validate",
+                    request_id=f"validate-mismatch-{suffix}",
+                    expires_at=expiry,
+                    action_digest="different-action",
+                )
+            )
+            assert not mismatched_validation.valid
+            assert mismatched_validation.status == "conflict"
+            audits = await connection.fetch(
+                """SELECT outcome,actor_id,correlation_id,causation_id
+                FROM policy.approval_transition_audit
+                WHERE tenant_id=$1 AND approval_id=$2""",
+                tenant_id,
+                approval_id,
+            )
+            assert {item["outcome"] for item in audits} >= {
+                "winner",
+                "idempotent",
+                "conflict",
+            }
+            assert any(item["actor_id"] == "approver-a" for item in audits)
+            assert all(item["correlation_id"] == "approval-run" for item in audits)
+            assert all(item["causation_id"] == approval_id for item in audits)
+
+            cancel_race_id = f"approval-cancel-race-{suffix}"
+            await first.command_approval(
+                _approval_command(
+                    tenant_id=tenant_id,
+                    approval_id=cancel_race_id,
+                    operation="request",
+                    request_id=f"cancel-race-request-{suffix}",
+                    expires_at=expiry,
+                )
+            )
+            approval_result, cancel_result = await asyncio.gather(
+                first.command_approval(
+                    _approval_command(
+                        tenant_id=tenant_id,
+                        approval_id=cancel_race_id,
+                        operation="record_human_response",
+                        request_id=f"cancel-race-approve-{suffix}",
+                        expires_at=expiry,
+                        decision="approve",
+                    )
+                ),
+                second.command_approval(
+                    _approval_command(
+                        tenant_id=tenant_id,
+                        approval_id=cancel_race_id,
+                        operation="cancel",
+                        request_id=f"cancel-race-cancel-{suffix}",
+                        expires_at=expiry,
+                    )
+                ),
+            )
+            assert sorted((approval_result.status, cancel_result.status)) in (
+                ["approved", "conflict"],
+                ["cancelled", "conflict"],
+            )
+
+            expire_race_id = f"approval-expire-race-{suffix}"
+            await first.command_approval(
+                _approval_command(
+                    tenant_id=tenant_id,
+                    approval_id=expire_race_id,
+                    operation="request",
+                    request_id=f"expire-race-request-{suffix}",
+                    expires_at=expiry,
+                )
+            )
+            await connection.execute(
+                """UPDATE policy.approval SET expires_at=now()-interval '1 second'
+                WHERE tenant_id=$1 AND approval_id=$2""",
+                tenant_id,
+                expire_race_id,
+            )
+            late_approval, expiration = await asyncio.gather(
+                first.command_approval(
+                    _approval_command(
+                        tenant_id=tenant_id,
+                        approval_id=expire_race_id,
+                        operation="record_human_response",
+                        request_id=f"expire-race-approve-{suffix}",
+                        expires_at=expiry,
+                        decision="approve",
+                    )
+                ),
+                second.command_approval(
+                    _approval_command(
+                        tenant_id=tenant_id,
+                        approval_id=expire_race_id,
+                        operation="expire",
+                        request_id=f"expire-race-expire-{suffix}",
+                        expires_at=expiry,
+                    )
+                ),
+            )
+            assert {late_approval.status, expiration.status} <= {
+                "expired",
+                "conflict",
+            }
+            assert await connection.fetchval(
+                """SELECT status FROM policy.approval
+                WHERE tenant_id=$1 AND approval_id=$2""",
+                tenant_id,
+                expire_race_id,
+            ) == "expired"
+        finally:
+            await first.close()
+            await second.close()
+            await connection.execute(
+                "DELETE FROM policy.approval_transition_audit WHERE tenant_id=$1",
+                tenant_id,
+            )
+            await connection.execute(
+                "DELETE FROM policy.approval WHERE tenant_id=$1", tenant_id
+            )
+            await connection.close()
+
+    asyncio.run(scenario())
 
 
 def test_s3_owner_state_survives_process_local_clients() -> None:

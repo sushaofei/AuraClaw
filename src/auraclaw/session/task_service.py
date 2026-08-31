@@ -230,19 +230,24 @@ class TaskService:
                 record = projected
         if record is None:
             raise NotFoundError(f"Approval not found: {approval_id}")
-        decided = ApprovalAggregate.respond(
-            record,
-            actor_id=context.actor.id,
-            decision=decision,
-            feedback=feedback,
-        )
         session = await self._load(context.tenant_id, session_id)
-        session.record_human_response(
-            approval_id=approval_id,
-            actor_id=context.actor.id,
-            decision=decided.status.value,
-            feedback=feedback,
-        )
+        if record.status.value == decision:
+            decided = record
+            append_required = False
+        else:
+            decided = ApprovalAggregate.respond(
+                record,
+                actor_id=context.actor.id,
+                decision=decision,
+                feedback=feedback,
+            )
+            session.record_human_response(
+                approval_id=approval_id,
+                actor_id=context.actor.id,
+                decision=decided.status.value,
+                feedback=feedback,
+            )
+            append_required = True
         response = {
             "session_id": session_id,
             "run_id": session.run_id,
@@ -251,22 +256,25 @@ class TaskService:
             "approval_id": approval_id,
             "decision": decided.status.value,
         }
-        result = await self._event_store.append(
-            root_session_id=session.root_session_id,
-            session_id=session.session_id,
-            run_id=session.run_id,
-            context=context,
-            events=session.release_pending_events(),
-            command_result=response,
-        )
+        if append_required:
+            result = await self._event_store.append(
+                root_session_id=session.root_session_id,
+                session_id=session.session_id,
+                run_id=session.run_id,
+                context=context,
+                events=session.release_pending_events(),
+                command_result=response,
+            )
+            response = result.command_result
+            await self._after_append(session, result)
         if self._approval_notifier is not None:
             await self._approval_notifier.record_human_response(
                 record,
                 decision=decided.status.value,
                 feedback=feedback,
+                actor_id=context.actor.id,
             )
-        await self._after_append(session, result)
-        return result.command_result
+        return response
 
     async def get_task(self, *, tenant_id: str, session_id: str) -> dict[str, Any]:
         task = await self._reader.get_task(tenant_id, session_id)

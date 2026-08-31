@@ -50,11 +50,28 @@ allowed_decisions
 assigned_approvers
 policy_version
 expires_at
+request_digest / generation
 status
-decision / feedback
+decision / feedback / decided_by / decided_at
 ```
 
 批准绑定 `approval_id + session_id + action_digest + policy_version`。参数、目标或权限变化必须重新审批。
+同一 `approval_id` 只表示一个不可变 generation；需要重新审批时必须创建新的 Approval ID，不能覆盖旧决定。
+
+## 原子状态机与重放
+
+- PostgreSQL Policy Store 对目标行加锁，并以 `status='waiting'` 条件更新；approve、reject、cancel 和
+  expire 的并发调用只有一个能成为 winner。
+- `approved`、`rejected`、`cancelled`、`expired` 是单调终态。相同决定重放返回当前终态；相反决定或
+  其他终态转换返回 `conflict`，不会先短暂批准再回退。
+- Human response 只接受未过期的 `waiting`。expire 仅在数据库时间已达到 `expires_at` 时转换；cancel
+  只作用于尚未过期的 `waiting`。
+- request 保存覆盖 tenant、Approval、Session、Run、action digest、policy version 和 expiry 的稳定
+  `request_digest`。相同 ID 的不同 payload 返回 `conflict`；相同 payload 重放返回现状。
+- validate 在同一权威行上核对完整绑定、不可变终态和数据库时间。Tool Gateway 只有在 validate 返回
+  当前 generation 的有效 `approved` 后才能开始副作用。
+- 每个 winner、幂等重放、loser/conflict 和 validate 都写入事务内审计，保留 actor/service identity、
+  decision、request digest、correlation、causation 和结果。
 
 ## Human-in-the-Loop 流程
 
@@ -63,7 +80,8 @@ Tool Gateway -> Policy: evaluate
 Policy -> Session: approval.requested + waiting_for_human
 Session/Runtime Bus -> Streaming Gateway -> Web: 通知
 Human -> Task Gateway: response
-Task Gateway -> Session: human.response
+Task Gateway -> Session: human.response (durable first)
+Task Gateway -> Policy: idempotent CAS notification
 Projection -> Approval View
 Orchestrator: 恢复 runnable Session
 Tool Gateway -> Policy: validateApproval
@@ -86,6 +104,9 @@ Streaming Gateway 只通知，不接收审批结果。
 - Policy 服务不可用时，高风险写操作默认 fail closed。
 - 低风险只读行为可按明确策略降级，不能默认放行。
 - Approval 过期产生 Canonical Event，不自动视为拒绝或失败。
+- Canonical response 已提交但 Policy 通知失败时，Task API 对相同决定的重试不追加第二个事件，并重新通知
+  Policy。运维也可从 Canonical `approval.approved|rejected|cancelled|expired` 事件按原绑定重放；相反结果
+  必须进入人工一致性调查，不能强制覆盖 Policy 终态。
 - 拒绝后 Agent 可以修改计划，不必终止整个任务。
 
 ## 观测指标

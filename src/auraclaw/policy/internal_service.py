@@ -16,6 +16,7 @@ from auraclaw.contracts.internal import (
     ServiceIdentity,
 )
 from auraclaw.contracts.tools import RiskLevel, ToolCapability, ToolPermission
+from auraclaw.domain.approval import approval_request_digest
 
 
 class PolicyStateStore(Protocol):
@@ -125,33 +126,94 @@ class PolicyInternalService:
         if request.operation == "request":
             if request.expires_at is None or request.expires_at <= now:
                 return ApprovalValidationResponse(valid=False, status="expired")
+            request_digest = approval_request_digest(
+                tenant_id=request.context.tenant_id,
+                approval_id=request.approval_id,
+                session_id=request.session_id,
+                run_id=request.run_id,
+                action_digest=request.action_digest,
+                policy_version=request.policy_version,
+                expires_at=request.expires_at,
+            )
+            if existing is not None:
+                if existing["request_digest"] != request_digest:
+                    return ApprovalValidationResponse(valid=False, status="conflict")
+                status = str(existing["status"])
+                original = ApprovalCommandRequest.model_validate(existing["request"])
+                return ApprovalValidationResponse(
+                    valid=(
+                        status == "approved"
+                        and original.expires_at is not None
+                        and original.expires_at > now
+                    ),
+                    status=status,
+                )
             self._approvals[key] = {
                 "request": request,
+                "request_digest": request_digest,
                 "status": "waiting",
                 "decision": None,
             }
             return ApprovalValidationResponse(valid=False, status="waiting")
         if existing is None:
             return ApprovalValidationResponse(valid=False, status="not_found")
-        if request.operation == "record_human_response":
-            status = "approved" if request.decision == "approve" else "rejected"
-            existing["status"] = status
-            existing["decision"] = request.decision
-            return ApprovalValidationResponse(valid=status == "approved", status=status)
-        if request.operation in {"cancel", "expire"}:
-            status = "cancelled" if request.operation == "cancel" else "expired"
-            existing["status"] = status
-            return ApprovalValidationResponse(valid=False, status=status)
         existing_request = ApprovalCommandRequest.model_validate(existing["request"])
-        valid = (
+        same_scope = (
             existing_request.session_id == request.session_id
             and existing_request.run_id == request.run_id
             and existing_request.action_digest == request.action_digest
             and existing_request.policy_version == request.policy_version
-            and existing_request.expires_at is not None
-            and existing_request.expires_at > now
+        )
+        if not same_scope:
+            return ApprovalValidationResponse(valid=False, status="conflict")
+        existing_expiry = existing_request.expires_at
+        if existing_expiry is None:
+            return ApprovalValidationResponse(valid=False, status="conflict")
+        if request.operation == "record_human_response":
+            if request.decision not in {"approve", "reject"}:
+                return ApprovalValidationResponse(valid=False, status="conflict")
+            status = "approved" if request.decision == "approve" else "rejected"
+            current_status = str(existing["status"])
+            if current_status == "waiting" and existing_expiry <= now:
+                existing["status"] = "expired"
+                return ApprovalValidationResponse(valid=False, status="expired")
+            if current_status == status:
+                return ApprovalValidationResponse(
+                    valid=status == "approved", status=status
+                )
+            if current_status != "waiting":
+                return ApprovalValidationResponse(valid=False, status="conflict")
+            existing["status"] = status
+            existing["decision"] = request.decision
+            return ApprovalValidationResponse(valid=status == "approved", status=status)
+        if request.operation == "cancel":
+            current_status = str(existing["status"])
+            if current_status == "waiting" and existing_expiry <= now:
+                existing["status"] = "expired"
+                return ApprovalValidationResponse(valid=False, status="expired")
+            if current_status == "cancelled":
+                return ApprovalValidationResponse(valid=False, status="cancelled")
+            if current_status != "waiting":
+                return ApprovalValidationResponse(valid=False, status="conflict")
+            existing["status"] = "cancelled"
+            return ApprovalValidationResponse(valid=False, status="cancelled")
+        if request.operation == "expire":
+            current_status = str(existing["status"])
+            if current_status == "expired":
+                return ApprovalValidationResponse(valid=False, status="expired")
+            if current_status != "waiting":
+                return ApprovalValidationResponse(valid=False, status="conflict")
+            if existing_expiry > now:
+                return ApprovalValidationResponse(valid=False, status="waiting")
+            existing["status"] = "expired"
+            return ApprovalValidationResponse(valid=False, status="expired")
+        if existing["status"] == "waiting" and existing_expiry <= now:
+            existing["status"] = "expired"
+        valid = (
+            existing_expiry > now
             and existing["decision"] == "approve"
+            and existing["status"] == "approved"
         )
         return ApprovalValidationResponse(
-            valid=valid, status="approved" if valid else "invalid"
+            valid=valid, status=str(existing["status"])
         )
