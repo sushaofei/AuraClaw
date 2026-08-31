@@ -99,6 +99,11 @@ tenant、session、run、lease 与 fencing 只能从 workload identity 与 signe
 deadline 和 `side_effect_status`。连接断开不等于取消。MCP Task/Progress 不替代该 Store、
 Canonical Event 或 Delivery Job。
 
+Invocation Store 同时持久保存 execution owner、claim token、heartbeat/expiry、取消请求和等待审批的
+标准化结果。只有未过期 claim owner 可以 dispatch 和提交结果；`accepted` claim 过期可在副作用前重领，
+`executing` claim 过期必须进入 `unknown_side_effect` 人工恢复。Cancel 以 tenant-scoped 共享状态跨副本
+传播，状态查询读取 Store。进程内 task、cache 与 keyed lock 不是生产正确性依据。
+
 下游 MCP 默认使用 `2026-07-28` 无状态 profile；`2025-11-25 initialize` 仅作为显式 legacy Connector
 配置保留。Java API Connector 只允许已注册 operation 的 method/path template，禁止模型覆盖
 scheme、host、port、method 或 headers。

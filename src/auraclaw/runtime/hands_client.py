@@ -12,6 +12,7 @@ from auraclaw.contracts.errors import AuraClawError
 from auraclaw.contracts.hands import (
     HANDS_CONTRACT_VERSION,
     HANDS_INVOCATIONS_CANCEL,
+    HANDS_INVOCATIONS_STATUS,
     HANDS_MAX_REQUEST_BYTES,
     HANDS_MAX_RESPONSE_BYTES,
     HANDS_PROMPTS_GET,
@@ -24,6 +25,7 @@ from auraclaw.contracts.hands import (
     HandsCancelRequest,
     HandsCancelResponse,
     HandsGetPromptRequest,
+    HandsInvocationStatusResponse,
     HandsListRequest,
     HandsPage,
     HandsPromptDescriptor,
@@ -188,6 +190,20 @@ class HttpHandsClient:
             ),
         )
         return HandsCancelResponse.model_validate(payload).cancelled
+
+    async def get_invocation_status(
+        self,
+        assignment: RuntimeAssignment,
+        tool_invocation_id: str,
+    ) -> HandsInvocationStatusResponse:
+        payload = await self._post(
+            HANDS_INVOCATIONS_STATUS,
+            assignment,
+            HandsCancelRequest(tool_invocation_id=tool_invocation_id).model_dump(
+                mode="json"
+            ),
+        )
+        return HandsInvocationStatusResponse.model_validate(payload)
 
     async def _post(
         self,

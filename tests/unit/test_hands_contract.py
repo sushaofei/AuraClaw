@@ -271,6 +271,11 @@ def test_hands_list_call_resource_prompt_and_idempotency(kind: str) -> None:
                 ),
             )
             assert first.status == "success"
+            status = await client.get_invocation_status(
+                assignment, "tool-stable-1"
+            )
+            assert status.found
+            assert status.status == "success"
             assert recorder.invocations[0].tenant_id == "tenant-a"
             assert recorder.invocations[0].user_id == "user-101"
             repeated = await client.call_tool(

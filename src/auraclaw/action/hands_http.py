@@ -12,6 +12,7 @@ from auraclaw.contracts.errors import AuraClawError
 from auraclaw.contracts.hands import (
     HANDS_CONTRACT_VERSION,
     HANDS_INVOCATIONS_CANCEL,
+    HANDS_INVOCATIONS_STATUS,
     HANDS_MAX_REQUEST_BYTES,
     HANDS_PROMPTS_GET,
     HANDS_PROMPTS_LIST,
@@ -23,6 +24,7 @@ from auraclaw.contracts.hands import (
     HandsCancelRequest,
     HandsCancelResponse,
     HandsGetPromptRequest,
+    HandsInvocationStatusResponse,
     HandsListRequest,
     HandsPromptResult,
     HandsReadResourceRequest,
@@ -271,9 +273,24 @@ def create_hands_http_app(
         ),
     ) -> Any:
         request = HandsCancelRequest.model_validate(payload)
-        await _trusted(authorization, lease_assertion)
-        result = await gateway.cancel_invocation(request.tool_invocation_id)
+        trusted = await _trusted(authorization, lease_assertion)
+        result = await gateway.cancel_invocation(trusted, request.tool_invocation_id)
         return HandsCancelResponse(cancelled=result.cancelled).model_dump(mode="json")
+
+    @app.post(HANDS_INVOCATIONS_STATUS)
+    async def get_invocation_status(
+        payload: dict[str, Any],
+        authorization: str | None = Header(default=None),
+        lease_assertion: str | None = Header(
+            default=None, alias="X-AuraClaw-Lease-Assertion"
+        ),
+    ) -> Any:
+        request = HandsCancelRequest.model_validate(payload)
+        trusted = await _trusted(authorization, lease_assertion)
+        result = await gateway.get_invocation_status(
+            trusted, request.tool_invocation_id
+        )
+        return HandsInvocationStatusResponse.model_validate(result).model_dump(mode="json")
 
     @app.exception_handler(AuraClawError)
     async def handle_auraclaw_error(_request: Request, exc: AuraClawError) -> JSONResponse:

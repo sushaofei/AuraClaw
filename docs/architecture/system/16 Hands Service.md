@@ -41,6 +41,18 @@ Runtime Context 包含：Sandbox Spec、网络策略、Tool Permission、Artifac
 - Orchestrator 重建环境；Agent 根据副作用状态决定是否重试动作。
 - 临时缓存允许丢失，Secret 不能进入环境变量或可读文件。
 
+## 多副本执行与取消
+
+- 每个 Invocation 在适配器调用前取得 PostgreSQL execution claim，并由 Hands instance heartbeat 续租。
+- `accepted`、`executing`、`waiting_approval`、终态、normalized result、side-effect status 与取消请求均为
+  持久状态；`_inflight` 之类进程内结构不是状态查询或恢复依据。
+- Cancel 请求无论落到哪个副本都先写共享状态；owner 协作停止执行。重复 Cancel 幂等，tenant 来自
+  已认证 Lease Assertion，不能从请求 body 推断。
+- owner 在 `executing` 后失联时不允许另一副本自动接管该副作用，状态进入
+  `invocation_recovery_required`；操作员核对外部系统后再决定补偿。
+- waiting approval 释放 execution claim 但保留原 approval payload；批准后以同一幂等键重新 claim，
+  避免副本切换或重启创建重复审批。
+
 ## 外部系统调用
 
 ```text

@@ -7,6 +7,7 @@ from typing import Any, Literal, Protocol
 
 from auraclaw.contracts.events import CanonicalEvent, NewEvent
 from auraclaw.contracts.hands import (
+    HandsInvocationStatusResponse,
     HandsPage,
     HandsPromptDescriptor,
     HandsPromptResult,
@@ -193,6 +194,12 @@ class HandsClient(Protocol):
         assignment: RuntimeAssignment,
         tool_invocation_id: str,
     ) -> bool: ...
+
+    async def get_invocation_status(
+        self,
+        assignment: RuntimeAssignment,
+        tool_invocation_id: str,
+    ) -> HandsInvocationStatusResponse: ...
 
 
 class CapabilityClient(ToolClient, Protocol):

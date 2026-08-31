@@ -564,6 +564,41 @@ def test_gateway_cancels_long_running_hands_call() -> None:
     asyncio.run(scenario())
 
 
+def test_gateway_does_not_serialize_unrelated_invocations() -> None:
+    async def scenario() -> None:
+        both_started = asyncio.Event()
+        release = asyncio.Event()
+        started = 0
+
+        async def concurrent_handler(arguments: dict[str, Any]) -> dict[str, Any]:
+            nonlocal started
+            started += 1
+            if started == 2:
+                both_started.set()
+            await release.wait()
+            return {"target": arguments["target"]}
+
+        gateway = ToolGateway(
+            registry=ToolRegistry((_capability(ToolPermission.READ_ONLY),)),
+            policy=PolicyEngine(),
+            approvals=InMemoryApprovalProjection(),
+            hands=LocalHandsService(
+                workspace_root=Path.cwd(), handlers={"managed": concurrent_handler}
+            ),
+            artifacts=ArtifactStore(
+                InMemoryObjectStorage(), signing_key=b"concurrent-artifact-key"
+            ),
+        )
+        first = asyncio.create_task(gateway.execute(_invocation(key="concurrent-a")))
+        second = asyncio.create_task(gateway.execute(_invocation(key="concurrent-b")))
+        await asyncio.wait_for(both_started.wait(), timeout=1)
+        release.set()
+        results = await asyncio.gather(first, second)
+        assert all(result.status.value == "success" for result in results)
+
+    asyncio.run(scenario())
+
+
 def test_runtime_waits_for_approval_then_resumes_same_tool_call() -> None:
     class WriteProvider:
         async def generate(self, request: ModelRequest) -> ModelResponse:
