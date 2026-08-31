@@ -14,6 +14,7 @@ from auraclaw.contracts.delivery import (
 )
 from auraclaw.contracts.errors import LeaseConflictError
 from auraclaw.contracts.events import CanonicalEvent, utc_now
+from auraclaw.delivery.ports import SinkCircuitPermit, SinkCircuitSnapshot
 from auraclaw.infrastructure.delivery.common import build_delivery_job
 from auraclaw.infrastructure.persistence.postgres_common import (
     LazyPool as _LazyPool,
@@ -265,6 +266,155 @@ class PostgresDeliveryJobStore(_LazyPool):
             claim_ttl,
         )
         return self._job(row) if row is not None else None
+
+    async def acquire_sink_circuit(
+        self,
+        tenant_id: str,
+        sink_id: str,
+        *,
+        worker_id: str,
+        failure_threshold: int,
+        reset_after: timedelta,
+        probe_ttl: timedelta,
+    ) -> SinkCircuitPermit:
+        del failure_threshold, reset_after
+        pool = await self.pool()
+        async with pool.acquire() as connection, connection.transaction():
+            await connection.execute(
+                """INSERT INTO delivery.sink_circuit_state (tenant_id,sink_id)
+                VALUES ($1,$2) ON CONFLICT (tenant_id,sink_id) DO NOTHING""",
+                tenant_id,
+                sink_id,
+            )
+            row = await connection.fetchrow(
+                """SELECT *,open_until > now() AS open_active,
+                          probe_expires_at > now() AS probe_active
+                FROM delivery.sink_circuit_state
+                WHERE tenant_id=$1 AND sink_id=$2 FOR UPDATE""",
+                tenant_id,
+                sink_id,
+            )
+            assert row is not None
+            state = str(row["state"])
+            generation = int(row["generation"])
+            if state == "closed":
+                return SinkCircuitPermit(True, state, generation)
+            if state == "open" and bool(row["open_active"]):
+                return SinkCircuitPermit(False, state, generation)
+            if state == "half_open" and bool(row["probe_active"]):
+                return SinkCircuitPermit(False, state, generation)
+            probe_token = uuid4().hex
+            updated = await connection.fetchrow(
+                """UPDATE delivery.sink_circuit_state
+                SET state='half_open',generation=generation+1,probe_owner=$3,
+                    probe_token=$4,probe_expires_at=now()+$5::interval,
+                    updated_at=now()
+                WHERE tenant_id=$1 AND sink_id=$2 RETURNING *""",
+                tenant_id,
+                sink_id,
+                worker_id,
+                probe_token,
+                probe_ttl,
+            )
+            assert updated is not None
+            return SinkCircuitPermit(
+                True,
+                "half_open",
+                int(updated["generation"]),
+                probe_token=probe_token,
+            )
+
+    async def record_sink_circuit_result(
+        self,
+        tenant_id: str,
+        sink_id: str,
+        response: SinkResponse,
+        *,
+        failure_threshold: int,
+        reset_after: timedelta,
+        probe_token: str | None,
+    ) -> SinkCircuitSnapshot:
+        pool = await self.pool()
+        async with pool.acquire() as connection, connection.transaction():
+            row = await connection.fetchrow(
+                """SELECT * FROM delivery.sink_circuit_state
+                WHERE tenant_id=$1 AND sink_id=$2 FOR UPDATE""",
+                tenant_id,
+                sink_id,
+            )
+            if row is None:
+                row = await connection.fetchrow(
+                    """INSERT INTO delivery.sink_circuit_state (tenant_id,sink_id)
+                    VALUES ($1,$2) RETURNING *""",
+                    tenant_id,
+                    sink_id,
+                )
+            assert row is not None
+            state = str(row["state"])
+            failures = int(row["failure_count"])
+            if state == "half_open" and row["probe_token"] != probe_token:
+                return self._circuit(row)
+            if response.succeeded:
+                changed = state != "closed" or failures != 0
+                row = await connection.fetchrow(
+                    """UPDATE delivery.sink_circuit_state
+                    SET state='closed',failure_count=0,open_until=NULL,
+                        generation=generation+$3,probe_owner=NULL,probe_token=NULL,
+                        probe_expires_at=NULL,updated_at=now()
+                    WHERE tenant_id=$1 AND sink_id=$2 RETURNING *""",
+                    tenant_id,
+                    sink_id,
+                    int(changed),
+                )
+            elif response.retryable:
+                failures += 1
+                should_open = state == "half_open" or failures >= failure_threshold
+                if should_open:
+                    row = await connection.fetchrow(
+                        """UPDATE delivery.sink_circuit_state
+                        SET state='open',failure_count=$3,
+                            open_until=now()+$4::interval,generation=generation+1,
+                            probe_owner=NULL,probe_token=NULL,probe_expires_at=NULL,
+                            updated_at=now()
+                        WHERE tenant_id=$1 AND sink_id=$2 RETURNING *""",
+                        tenant_id,
+                        sink_id,
+                        max(failures, failure_threshold),
+                        reset_after,
+                    )
+                else:
+                    row = await connection.fetchrow(
+                        """UPDATE delivery.sink_circuit_state
+                        SET failure_count=$3,updated_at=now()
+                        WHERE tenant_id=$1 AND sink_id=$2 RETURNING *""",
+                        tenant_id,
+                        sink_id,
+                        failures,
+                    )
+            assert row is not None
+            return self._circuit(row)
+
+    async def get_sink_circuit(
+        self, tenant_id: str, sink_id: str
+    ) -> SinkCircuitSnapshot | None:
+        pool = await self.pool()
+        row = await pool.fetchrow(
+            """SELECT * FROM delivery.sink_circuit_state
+            WHERE tenant_id=$1 AND sink_id=$2""",
+            tenant_id,
+            sink_id,
+        )
+        return None if row is None else self._circuit(row)
+
+    @staticmethod
+    def _circuit(row: asyncpg.Record) -> SinkCircuitSnapshot:
+        return SinkCircuitSnapshot(
+            state=str(row["state"]),
+            failure_count=int(row["failure_count"]),
+            generation=int(row["generation"]),
+            open_until=row["open_until"],
+            probe_owner=row["probe_owner"],
+        )
 
     @staticmethod
     def _sink(row: asyncpg.Record) -> ResultSinkConfig:

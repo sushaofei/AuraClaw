@@ -36,7 +36,8 @@ registration lease 内仍活跃时，新进程注册会 fail closed。因此显�
 - Projection Outbox 每个 destination/tenant/session 只释放最早未完成记录。claim、retry delay 或
   poison 会阻断后续版本，避免多个 Worker 产生 version gap。
 - Delivery 在 Outbox ingestion 后按 tenant/session/sink 串行领取 Job；attempting、retry_wait 和过期
-  claim 均可恢复，DLQ 与人工 redelivery 使用稳定 delivery ID。
+  claim 均可恢复，DLQ 与人工 redelivery 使用稳定 delivery ID。Sink 熔断状态按 tenant/sink 共享，
+  半开探针通过持久 claim 保证全局至多一个，不随 Worker 重启丢失。
 - Streaming 的 sequence、Replay Event 与 Connection Registry 位于 PostgreSQL；实例切换不依赖
   进程内 cursor。Hands、Model、Policy、Credential 与 Artifact 同样使用共享状态和原子 claim。
 - Hands 以 Invocation execution claim 约束每个副作用 owner，并持续 heartbeat。Cancel 落到非 owner
@@ -45,7 +46,7 @@ registration lease 内仍活跃时，新进程注册会 fail closed。因此显�
 
 ## 生产配置门禁
 
-1. 依次应用 PostgreSQL/KingBase `0010`～`0046` expand migration。`0040`
+1. 依次应用 PostgreSQL/KingBase `0010`～`0047` expand migration。`0040`
    `0022` 增加 registration 与 execution claim 字段和索引；先迁移 Control 数据库，再滚动升级
    Orchestrator，最后升级 Agent Runtime。可选执行 `deploy/postgres/roles.sql` 做硬化，
    当前部署不按服务注入分角色 DSN。
@@ -61,6 +62,8 @@ registration lease 内仍活跃时，新进程注册会 fail closed。因此显�
    计数只增不退、阈值隔离和成功清零。
    `0046` 扩展 MCP Lifecycle Operation command digest、claim/heartbeat/expiry 和恢复状态；先迁移再
    滚动 Hands 管理面，升级窗口暂停 MCP enable/disable/retire/reconcile 命令。
+   `0047` 增加 Delivery tenant/sink 全局熔断、generation 和半开探针 owner；先迁移再滚动 Delivery，
+   升级窗口不得混跑仍以进程内计数决定外呼的旧 Worker。
 2. 各服务共享统一 `AURACLAW_DATABASE_URL`（Compose `database_url` secret）；migration 使用
    独立的 `AURACLAW_MIGRATION_DATABASE_URL`。
 3. 所有 Control、Session 与 Hands 副本必须使用相同的 `AURACLAW_LEASE_SIGNING_KEY`，并通过平台
@@ -102,3 +105,6 @@ hostname）或注入唯一实例 UID。停止全部旧 Runtime，等待 30 秒�
 
 回滚 `0046` 前暂停 MCP Lifecycle 管理命令，等待 `running` claim 完成，并核对所有 `reconciling` 与
 `unknown_side_effect` Operation。未完成人工核对时禁止把扩展状态折叠为 failed 或删除 claim 证据。
+
+回滚 `0047` 前停止 Delivery 新 Job 领取并排空 attempting attempt。记录仍处于 open/half-open 的 Sink，
+确认外部依赖恢复后才能删除共享状态；回滚到旧版本时 Delivery 只能单副本运行，否则熔断阈值不再全局一致。

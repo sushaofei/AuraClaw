@@ -342,6 +342,9 @@ class Settings(BaseSettings):
     credential_vault_mount: str = "secret"
     artifact_base_url: str = "http://127.0.0.1:8009"
     delivery_base_url: str = "http://127.0.0.1:8011"
+    delivery_circuit_failure_threshold: int = Field(default=3, ge=1, le=1000)
+    delivery_circuit_reset_seconds: float = Field(default=30.0, ge=0.1, le=3600.0)
+    delivery_circuit_probe_ttl_seconds: float = Field(default=10.0, ge=0.1, le=300.0)
     log_level: str = "INFO"
     storage_backend: Literal["auto", "memory", "postgres", "kingbase"] = "auto"
     db_dialect: Literal["postgres"] = "postgres"

@@ -27,6 +27,7 @@ MIGRATIONS = tuple(
         "migrations/0005_m4_collaboration_review.sql",
         "migrations/0006_m5_streaming_delivery.sql",
         "migrations/0010_s4_claim_recovery.sql",
+        "migrations/0047_delivery_sink_circuit.sql",
     )
 )
 pytestmark = pytest.mark.skipif(DATABASE_URL is None, reason="PostgreSQL test URL not configured")
@@ -43,7 +44,7 @@ async def _apply_migrations() -> None:
             "projection.approval_view",
             "projection.collaboration_view",
         )
-        for migration, relation in zip(MIGRATIONS[:-2], checks, strict=True):
+        for migration, relation in zip(MIGRATIONS[:5], checks, strict=True):
             if await connection.fetchval("SELECT to_regclass($1)", relation) is None:
                 await connection.execute(migration)
         m5_ready = await connection.fetchval(
@@ -59,13 +60,17 @@ async def _apply_migrations() -> None:
             )"""
         )
         if not m5_ready:
-            await connection.execute(MIGRATIONS[-2])
+            await connection.execute(MIGRATIONS[5])
         if await connection.fetchval(
             """SELECT 1 FROM information_schema.columns
             WHERE table_schema='delivery' AND table_name='delivery_job'
               AND column_name='claim_token'"""
         ) is None:
-            await connection.execute(MIGRATIONS[-1])
+            await connection.execute(MIGRATIONS[6])
+        if await connection.fetchval(
+            "SELECT to_regclass('delivery.sink_circuit_state')"
+        ) is None:
+            await connection.execute(MIGRATIONS[7])
     finally:
         await connection.close()
 
@@ -175,6 +180,119 @@ def test_postgres_delivery_job_survives_restart_and_duplicate_outbox() -> None:
                 await cleanup.execute(
                     "DELETE FROM delivery.delivery_job WHERE tenant_id=$1", tenant_id
                 )
+                await cleanup.execute(
+                    "DELETE FROM delivery.sink_config WHERE tenant_id=$1", tenant_id
+                )
+            finally:
+                await cleanup.close()
+
+    asyncio.run(asyncio.wait_for(scenario(), timeout=60))
+
+
+def test_postgres_sink_circuit_is_global_restart_safe_and_single_probe() -> None:
+    async def scenario() -> None:
+        assert DATABASE_URL is not None
+        await _apply_migrations()
+        suffix = uuid4().hex
+        tenant_id = f"tenant-pg-circuit-{suffix}"
+        sink_id = f"sink-pg-circuit-{suffix}"
+        session_id = f"session-pg-circuit-{suffix}"
+        first = PostgresDeliveryJobStore(DATABASE_URL)
+        second = PostgresDeliveryJobStore(DATABASE_URL)
+        restarted: PostgresDeliveryJobStore | None = None
+        sink = ResultSinkConfig(
+            sink_id=sink_id,
+            tenant_id=tenant_id,
+            session_id=session_id,
+            sink_type="restartable",
+            target_ref="managed://restartable",
+        )
+        try:
+            await first.register_sink(sink)
+            failed = SinkResponse(False, True, "HTTP 503")
+            for store, worker_id in ((first, "worker-a"), (second, "worker-b")):
+                permit = await store.acquire_sink_circuit(
+                    tenant_id,
+                    sink_id,
+                    worker_id=worker_id,
+                    failure_threshold=2,
+                    reset_after=timedelta(minutes=1),
+                    probe_ttl=timedelta(seconds=30),
+                )
+                assert permit.allowed
+                snapshot = await store.record_sink_circuit_result(
+                    tenant_id,
+                    sink_id,
+                    failed,
+                    failure_threshold=2,
+                    reset_after=timedelta(minutes=1),
+                    probe_token=permit.probe_token,
+                )
+            assert snapshot.state == "open" and snapshot.failure_count == 2
+            denied = await asyncio.gather(
+                *(
+                    store.acquire_sink_circuit(
+                        tenant_id,
+                        sink_id,
+                        worker_id=worker_id,
+                        failure_threshold=2,
+                        reset_after=timedelta(minutes=1),
+                        probe_ttl=timedelta(seconds=30),
+                    )
+                    for store, worker_id in ((first, "worker-a"), (second, "worker-b"))
+                )
+            )
+            assert not any(item.allowed for item in denied)
+
+            await first.close()
+            restarted = PostgresDeliveryJobStore(DATABASE_URL)
+            recovered = await restarted.get_sink_circuit(tenant_id, sink_id)
+            assert recovered is not None and recovered.state == "open"
+            connection = await asyncpg.connect(DATABASE_URL, timeout=10)
+            try:
+                await connection.execute(
+                    """UPDATE delivery.sink_circuit_state
+                    SET open_until=now()-interval '1 second'
+                    WHERE tenant_id=$1 AND sink_id=$2""",
+                    tenant_id,
+                    sink_id,
+                )
+            finally:
+                await connection.close()
+
+            permits = await asyncio.gather(
+                *(
+                    store.acquire_sink_circuit(
+                        tenant_id,
+                        sink_id,
+                        worker_id=worker_id,
+                        failure_threshold=2,
+                        reset_after=timedelta(minutes=1),
+                        probe_ttl=timedelta(seconds=30),
+                    )
+                    for store, worker_id in (
+                        (restarted, "worker-restarted"),
+                        (second, "worker-b"),
+                    )
+                )
+            )
+            probes = [item for item in permits if item.allowed]
+            assert len(probes) == 1 and probes[0].state == "half_open"
+            closed = await restarted.record_sink_circuit_result(
+                tenant_id,
+                sink_id,
+                SinkResponse(True, summary="HTTP 204"),
+                failure_threshold=2,
+                reset_after=timedelta(minutes=1),
+                probe_token=probes[0].probe_token,
+            )
+            assert closed.state == "closed" and closed.failure_count == 0
+        finally:
+            await second.close()
+            if restarted is not None:
+                await restarted.close()
+            cleanup = await asyncpg.connect(DATABASE_URL, timeout=10)
+            try:
                 await cleanup.execute(
                     "DELETE FROM delivery.sink_config WHERE tenant_id=$1", tenant_id
                 )

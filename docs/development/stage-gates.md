@@ -2460,3 +2460,23 @@ ready Skill Artifact 建立带 fencing 的物理回收流程；不把成功命�
 - [x] Ruff、Mypy、import-linter、定向与完整 Pytest 通过。
 - [x] Git 暂存范围已审查，不包含 `.env`、Secret、缓存、`docs/tmp/` 或个人 VS Code 配置。
 - [x] 本子阶段作为 intentional commit 提交并 push；Issue #62 保持 open。
+
+## 阶段 Delivery 全局 Sink 熔断（Issue #62 / Delivery 子阶段）
+
+状态：Delivery 跨副本熔断子阶段实现和门禁完成；Issue #62 的全部子阶段完成。
+
+### 持久状态与恢复
+
+- [x] `0047` 正反迁移按 `(tenant_id, sink_id)` 保存 failure count、open deadline、generation 与半开探针 owner/token/expiry。
+- [x] 所有生产 Worker 在外呼前通过 Delivery Store 原子申请许可；打开期间其他副本停止外呼。
+- [x] 到期后全局仅一个副本取得 half-open 探针；探针 owner 失联后可按 TTL 接管。
+- [x] 成功、可重试失败和重启恢复原子更新共享状态；熔断不替换 Job、attempt、重试、幂等或 DLQ 状态机。
+- [x] 阈值、reset 和 probe TTL 可配置；Owner Admin status 可查询 tenant/sink 当前熔断状态。
+
+### 验证与交付
+
+- [x] 内存并发测试覆盖共享阈值、双 Worker 竞争与唯一半开探针。
+- [x] PostgreSQL 测试覆盖双连接全局阈值、打开期间拒绝、重建恢复、并发唯一探针和成功关闭。
+- [x] Ruff、Mypy、import-linter、定向与完整 Pytest 通过。
+- [x] Git 暂存范围已审查，不包含 `.env`、Secret、缓存、`docs/tmp/` 或个人 VS Code 配置。
+- [x] 本子阶段作为 intentional commit 提交并 push；Issue #62 可关闭。

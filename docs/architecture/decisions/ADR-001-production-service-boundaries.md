@@ -158,7 +158,8 @@ Runtime producer 不分配依赖进程内存的公开 Session sequence。共享 
 重启和 Kafka rebalance 后 cursor 继续前进。Connection Registry 保存 owner 与 TTL，Gateway 实例不全量消费 Kafka。
 
 Delivery 只消费持久 Delivery Outbox/Job。相同 `delivery_id` 重试，Attempt History 不覆盖；Sink 凭证经 Credential Proxy，
-Artifact 链接经 Artifact Service，策略经 Policy。Runtime Event Bus 丢失不影响交付。
+Artifact 链接经 Artifact Service，策略经 Policy。Sink 熔断按 tenant/sink 持久化为全局状态，半开探针由原子
+claim 保证跨副本唯一，不能用 Worker 内存计数决定生产外呼。Runtime Event Bus 丢失不影响交付。
 
 ## 数据库与身份矩阵
 
