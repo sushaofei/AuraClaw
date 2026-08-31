@@ -176,6 +176,7 @@ class ManagedResourceGateway:
             input_digest=hashlib.sha256(uri.encode()).hexdigest(),
             correlation_id=trusted.run_id,
             attributes={
+                "permission": "read-only",
                 "classification": classification,
                 "mime_type": media_type or "application/octet-stream",
                 "session_id": trusted.session_id,

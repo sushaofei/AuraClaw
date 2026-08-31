@@ -34,6 +34,8 @@ from auraclaw.infrastructure.connectors.mcp.wire import (
     MCP_AURACLAW_TENANT_ID_META_KEY,
     MCP_AURACLAW_USER_ID_META_KEY,
     MCP_LEGACY_PROTOCOL_VERSION,
+    McpJsonRpcRequest,
+    McpJsonRpcResponse,
 )
 
 
@@ -205,6 +207,38 @@ class _UnexpectedHands:
         raise AssertionError(f"unexpected local Tool: {invocation}, {capability}")
 
 
+class _RecordingTransport:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, bool]] = []
+
+    async def send(
+        self,
+        request: McpJsonRpcRequest,
+        *,
+        trusted_context: object,
+        read_only: bool = False,
+    ) -> McpJsonRpcResponse:
+        del trusted_context
+        method = request.method
+        self.calls.append((method, read_only))
+        result: dict[str, object]
+        if method == "resources/read":
+            result = {
+                "contents": [
+                    {"uri": "github://issue/21", "text": "issue context"}
+                ]
+            }
+        elif method == "prompts/get":
+            result = {
+                "messages": [
+                    {"role": "user", "content": {"text": "review issue"}}
+                ]
+            }
+        else:
+            result = {"structuredContent": {"number": 21}}
+        return McpJsonRpcResponse(id=request.id, result=result)
+
+
 def _hands_trusted() -> HandsTrustedContext:
     return HandsTrustedContext(
         tenant_id="tenant-a",
@@ -360,6 +394,40 @@ def test_catalog_reconciliation_filters_routes_invalidates_and_recovers() -> Non
         recovered = await reconciler.reconcile_server(current)
         assert recovered.status == CapabilityStatus.ACTIVE
         assert tools.get("github.issue.get", "2.2.0")
+
+    asyncio.run(scenario())
+
+
+def test_mcp_connector_marks_tool_resource_and_prompt_reads_as_read_only() -> None:
+    async def scenario() -> None:
+        connector = ManagedMcpConnector(
+            _server(),
+            credentials=_RemoteCredentials(),
+            policy=_AllowPolicy(),
+        )
+        transport = _RecordingTransport()
+        connector._transport = transport  # type: ignore[assignment]
+        connector._tool_descriptor(
+            {
+                "name": "github.issue.get",
+                "annotations": {"readOnlyHint": True},
+            }
+        )
+
+        await connector.call_tool(
+            _hands_trusted(),
+            name="github.issue.get",
+            arguments={"number": 21},
+            invocation_id="read-tool",
+        )
+        await connector.read_resource(_hands_trusted(), "github://issue/21")
+        await connector.get_prompt(_hands_trusted(), "github.review")
+
+        assert transport.calls == [
+            ("tools/call", True),
+            ("resources/read", True),
+            ("prompts/get", True),
+        ]
 
     asyncio.run(scenario())
 

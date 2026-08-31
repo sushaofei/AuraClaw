@@ -279,7 +279,10 @@ class ToolGateway:
                 if self._invocation_store is not None:
                     await self._invocation_store.complete(invocation, result)
                 return result
-            if decision is PolicyDecision.REQUIRE_APPROVAL:
+            if decision is PolicyDecision.REQUIRE_APPROVAL and not (
+                capability.runtime_location == "remote-mcp"
+                and capability.permission is ToolPermission.READ_ONLY
+            ):
                 approval = await self._resolve_approval(
                     invocation, capability, digest, policy_version
                 )

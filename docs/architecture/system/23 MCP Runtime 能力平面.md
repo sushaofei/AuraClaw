@@ -128,6 +128,11 @@ Runtime 不信任 Server 返回的注解、描述、Schema、资源内容或 Too
 read-only Tool 的结果可以返回 Resource Link 或 Artifact Ref，供 Runtime 在独立授权后加载。这样既保留
 模型主动查询能力，也避免把任意查询伪装成可订阅的稳定资源。
 
+MCP `Resource` 读取、`Prompt` 获取以及经受信目录确认的 `read-only Tool` 调用不进入人工审批流程；
+它们仍必须通过 tenant、ACL、Policy、DLP、Prompt Injection 扫描和 Credential Proxy 等控制。Policy
+的显式拒绝继续 fail closed。未声明只读或其只读注解不受信的 Tool 仍按 `write-with-approval` 处理，
+`destructive/admin` 权限不因本规则放宽。
+
 ## 3. 能力模型
 
 ### 3.1 统一描述符

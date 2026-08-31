@@ -164,6 +164,25 @@ class _AllowPolicy:
         )
 
 
+class _PermissionPolicy:
+    def __init__(self) -> None:
+        self.attributes: list[dict[str, object]] = []
+
+    async def evaluate_action(self, **arguments: object) -> PolicyEvaluation:
+        attributes = arguments["attributes"]
+        assert isinstance(attributes, dict)
+        self.attributes.append(attributes)
+        return PolicyEvaluation(
+            decision=(
+                PolicyDecision.ALLOW
+                if attributes.get("permission") == "read-only"
+                else PolicyDecision.REQUIRE_APPROVAL
+            ),
+            decision_id="policy-read-only",
+            policy_version="m9-v2",
+        )
+
+
 class _Credentials:
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
@@ -522,6 +541,36 @@ def test_hands_remote_transport_rejects_mismatched_response_id() -> None:
         with pytest.raises(ValueError, match="response id"):
             await transport.send(
                 McpJsonRpcRequest(id="expected", method="tools/list"),
+                trusted_context=_trusted(),
+            )
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("method", ["resources/read", "prompts/get", "tools/call"])
+def test_hands_remote_transport_skips_approval_for_read_only_mcp_calls(
+    method: str,
+) -> None:
+    async def scenario() -> None:
+        credentials = _Credentials()
+        policy = _PermissionPolicy()
+        transport = ManagedRemoteMcpTransport(
+            _server(),
+            credentials=credentials,
+            policy=policy,
+        )
+        response = await transport.send(
+            McpJsonRpcRequest(id=7, method=method),
+            trusted_context=_trusted(),
+            read_only=True,
+        )
+        assert response.result == {"tools": []}
+        assert credentials.calls[0]["policy_decision_id"] == "policy-read-only"
+        assert policy.attributes[0]["permission"] == "read-only"
+
+        with pytest.raises(PolicyDeniedError, match="policy denied"):
+            await transport.send(
+                McpJsonRpcRequest(id=8, method="tools/call"),
                 trusted_context=_trusted(),
             )
 

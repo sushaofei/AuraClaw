@@ -89,6 +89,14 @@ class _DenyPolicy(PolicyEngine):
         return PolicyDecision.DENY
 
 
+class _RequireApprovalPolicy(PolicyEngine):
+    def evaluate(self, capability: ToolCapability, invocation: object = None) -> Any:
+        del capability, invocation
+        from auraclaw.contracts.tools import PolicyDecision
+
+        return PolicyDecision.REQUIRE_APPROVAL
+
+
 def _assignment(
     *,
     tenant_id: str = "tenant-a",
@@ -129,6 +137,7 @@ def _gateway(
     hands: Any | None = None,
     policy: PolicyEngine | None = None,
     permission: ToolPermission = ToolPermission.READ_ONLY,
+    runtime_location: str = "hands",
 ) -> tuple[HandsGateway, _RecordingHands]:
     capability = ToolCapability(
         name="lookup",
@@ -138,6 +147,7 @@ def _gateway(
         output_schema={"type": "object"},
         permission=permission,
         risk_level=RiskLevel.LOW,
+        runtime_location=runtime_location,
     )
     registry = ToolRegistry((capability,))
     recorder = hands or _RecordingHands()
@@ -328,6 +338,31 @@ def test_hands_policy_deny_and_approval_required(kind: str) -> None:
             )
             assert pending.status == "denied"
             assert pending.error_code == "approval_required"
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("kind", ["in-process", "http"])
+def test_read_only_remote_mcp_tool_does_not_require_approval(kind: str) -> None:
+    async def scenario() -> None:
+        gateway, recorder = _gateway(
+            policy=_RequireApprovalPolicy(),
+            permission=ToolPermission.READ_ONLY,
+            runtime_location="remote-mcp",
+        )
+        assignment = _assignment()
+        async for client in _call_with_client(kind, gateway, assignment):
+            result = await client.call_tool(
+                assignment,
+                HandsToolCall(
+                    tool_invocation_id="read-mcp-1",
+                    name="lookup",
+                    arguments={},
+                    expected_side_effect="read",
+                ),
+            )
+            assert result.status == "success"
+            assert len(recorder.invocations) == 1
 
     asyncio.run(scenario())
 
