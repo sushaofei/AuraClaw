@@ -2526,3 +2526,22 @@ ready Skill Artifact 建立带 fencing 的物理回收流程；不把成功命�
 - [x] Ruff、Mypy、import-linter、定向与完整 Pytest 通过。
 - [x] Git 暂存范围已审查，不包含 `.env`、Secret、缓存、`docs/tmp/` 或个人 VS Code 配置。
 - [x] 本阶段作为 intentional commit 提交并 push；Issue #63 可关闭。
+
+## 阶段 Model Gateway Durable Terminal Delivery（Issue #64 / Terminal 子阶段）
+
+状态：terminal completion 顺序修复完成；Issue #64 的 owner/cancel/reconciliation 子阶段继续跟踪。
+
+### 持久提交与交付
+
+- [x] Provider completed response 先提交 Model Call response、usage 与 reservation 结算，再 yield terminal `completed`。
+- [x] completion Store 写入失败直接结束 stream，客户端不会观察到虚假成功；日志不再是唯一恢复机制。
+- [x] 客户端在 terminal event 后立即关闭 generator 时，持久状态已是 completed。
+- [x] delta 仍可实时交付，但不作为最终结果或持久 completion 的替代。
+
+### 验证与交付
+
+- [x] 单元测试用阻塞 completion 证明 terminal event 等待 durable commit。
+- [x] 故障注入 completion 写失败，验证仅已发送 delta 可见且没有 completed。
+- [x] Ruff、Mypy、import-linter、定向与完整 Pytest 通过。
+- [x] Git 暂存范围已审查，不包含 `.env`、Secret、缓存、`docs/tmp/` 或个人 VS Code 配置。
+- [x] 本子阶段作为 intentional commit 提交并 push；Issue #64 保持 open。
