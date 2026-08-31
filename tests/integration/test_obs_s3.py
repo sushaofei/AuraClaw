@@ -118,7 +118,9 @@ class _ProxyRepository:
     ) -> PendingUpload | None:
         return self.uploads.get((tenant_id, artifact_id, upload_id))
 
-    async def claim_finalize(self, pending: PendingUpload) -> PendingUpload:
+    async def claim_finalize(
+        self, pending: PendingUpload, **_kwargs: object
+    ) -> PendingUpload:
         return replace(pending, finalize_claim_token="proxy-finalize")
 
     async def get_ready(
@@ -126,12 +128,14 @@ class _ProxyRepository:
     ) -> PendingUpload | None:
         return self.ready.get((tenant_id, artifact_id, version))
 
-    async def mark_multipart_completed(self, pending: PendingUpload) -> None:
+    async def mark_multipart_completed(self, pending: PendingUpload) -> bool:
         key = (pending.tenant_id, pending.artifact_id, pending.upload_id)
         self.uploads[key] = replace(pending, multipart_completed=True)
+        return True
 
-    async def mark_quarantined(self, pending: PendingUpload, reason: str) -> None:
+    async def mark_quarantined(self, pending: PendingUpload, reason: str) -> bool:
         del pending, reason
+        return True
 
     async def mark_ready(self, pending: PendingUpload, version: int) -> bool:
         self.ready[(pending.tenant_id, pending.artifact_id, version)] = pending

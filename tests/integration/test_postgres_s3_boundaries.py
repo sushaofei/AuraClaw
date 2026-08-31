@@ -226,7 +226,12 @@ def test_s3_owner_state_survives_process_local_clients() -> None:
             )
             await artifact_store.save_pending(pending)
             await artifact_store.mark_ready(pending, 1)
-            assert await artifact_store.get_ready(tenant_id, artifact_id, 1) == pending
+            ready = await artifact_store.get_ready(tenant_id, artifact_id, 1)
+            assert ready is not None
+            assert ready.artifact_id == pending.artifact_id
+            assert ready.object_key == pending.object_key
+            assert ready.lifecycle_status == "ready"
+            assert ready.scan_status == "clean"
 
             await connection.execute(
                 """INSERT INTO hands.tool_capability

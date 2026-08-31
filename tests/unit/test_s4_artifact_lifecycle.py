@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -6,7 +7,7 @@ import httpx
 import pytest
 
 from auraclaw.artifact.internal_service import ArtifactInternalService, PendingUpload
-from auraclaw.contracts.errors import ArtifactAccessError
+from auraclaw.contracts.errors import ArtifactAccessError, NotFoundError
 from auraclaw.contracts.internal import (
     ArtifactCreateUploadRequest,
     ArtifactDeleteRequest,
@@ -39,6 +40,10 @@ class _RecoveryRepository:
         self.deleted = False
         self.delete_claimed = False
         self.skill_bound = False
+        self.mark_ready_success = True
+        self.finalize_renewals = 0
+        self.gc_renewals = 0
+        self.get_ready_error = False
 
     async def get_upload(self, tenant_id: str, artifact_id: str, upload_id: str):
         del tenant_id, artifact_id, upload_id
@@ -46,30 +51,48 @@ class _RecoveryRepository:
 
     async def get_ready(self, tenant_id: str, artifact_id: str, version: int):
         del tenant_id, artifact_id, version
-        return self.pending if self.ready else None
+        if self.get_ready_error:
+            raise RuntimeError("metadata unavailable")
+        return self.pending if self.ready and not self.deleted else None
 
-    async def claim_finalize(self, pending: PendingUpload):
+    async def claim_finalize(self, pending: PendingUpload, **_kwargs: object):
         return replace(pending, finalize_claim_token="claim")
 
-    async def mark_multipart_completed(self, pending: PendingUpload) -> None:
+    async def validate_finalize(self, pending: PendingUpload) -> bool:
+        return pending.finalize_claim_token == "claim"
+
+    async def renew_finalize(self, pending: PendingUpload, **_kwargs: object) -> bool:
+        self.finalize_renewals += 1
+        return await self.validate_finalize(pending)
+
+    async def validate_gc(self, pending: PendingUpload) -> bool:
+        return pending.gc_claim_token is not None
+
+    async def renew_gc(self, pending: PendingUpload, **_kwargs: object) -> bool:
+        self.gc_renewals += 1
+        return await self.validate_gc(pending)
+
+    async def mark_multipart_completed(self, pending: PendingUpload) -> bool:
         del pending
         self.multipart_completed = True
+        return True
 
     async def mark_ready(self, pending: PendingUpload, version: int) -> bool:
         del pending, version
-        self.ready = True
-        return True
+        self.ready = self.mark_ready_success
+        return self.mark_ready_success
 
-    async def expired_uploads(self, *, limit: int = 100):
+    async def expired_uploads(self, *, limit: int = 100, **_kwargs: object):
         del limit
         return [replace(self.pending, gc_claim_token="gc")]
 
-    async def release_gc(self, pending: PendingUpload, error: str) -> None:
+    async def release_gc(self, pending: PendingUpload, error: str) -> bool:
         del pending, error
         self.gc_released = True
+        return True
 
     async def claim_ready_delete(
-        self, tenant_id: str, artifact_id: str, version: int
+        self, tenant_id: str, artifact_id: str, version: int, **_kwargs: object
     ):
         del tenant_id, artifact_id, version
         if (
@@ -95,9 +118,10 @@ class _RecoveryRepository:
 
     async def release_ready_delete(
         self, pending: PendingUpload, error: str
-    ) -> None:
+    ) -> bool:
         del pending, error
         self.delete_claimed = False
+        return True
 
     async def claim_skill_publication(
         self, tenant_id: str, artifact_id: str, version: int, command_id: str
@@ -126,7 +150,9 @@ class _RecoveryRepository:
         )
         return True
 
-    async def claim_skill_orphans(self, *, owner: str, limit: int = 100):
+    async def claim_skill_orphans(
+        self, *, owner: str, limit: int = 100, **_kwargs: object
+    ):
         del owner, limit
         if self.skill_bound or self.pending.skill_publish_claim_token is not None:
             return []
@@ -168,6 +194,13 @@ class _RecoveryVerifier:
     async def delete(self, pending: PendingUpload) -> bool:
         del pending
         return False
+
+
+class _SlowRecoveryVerifier(_RecoveryVerifier):
+    async def inspect(self, pending: PendingUpload) -> str:
+        del pending
+        await asyncio.sleep(0.05)
+        return "clean"
 
 
 class _DeleteVerifier(_RecoveryVerifier):
@@ -387,6 +420,164 @@ async def test_artifact_recovers_lost_complete_response_and_releases_failed_gc()
     assert repository.multipart_completed
     assert await service.cleanup_expired() == 0
     assert repository.gc_released
+
+
+@pytest.mark.asyncio
+async def test_finalize_failure_never_publishes_ready_cache() -> None:
+    pending = PendingUpload(
+        tenant_id="tenant-s4",
+        artifact_id="artifact-s4",
+        upload_id="upload-s4",
+        object_key="tenant/artifact/object",
+        root_session_id="root-s4",
+        session_id="session-s4",
+        name="result.txt",
+        media_type="text/plain",
+        expected_size=6,
+        expected_checksum="checksum",
+        classification="internal",
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+    )
+    repository = _RecoveryRepository(pending)
+    repository.mark_ready_success = False
+    service = ArtifactInternalService(
+        SeaweedFSS3Presigner(
+            "http://seaweed.test:8333",
+            access_key="access",
+            secret_key="secret",
+            bucket="artifacts",
+            region="us-east-1",
+        ),
+        repository=repository,  # type: ignore[arg-type]
+        object_verifier=_RecoveryVerifier(),  # type: ignore[arg-type]
+        policy=_AllowPolicy(),
+    )
+    context = InternalRequestContext(
+        tenant_id="tenant-s4",
+        service_identity=ServiceIdentity.ACTION_HANDS,
+        request_id="request-s4",
+        correlation_id="run-s4",
+        causation_id="run-s4",
+    )
+    with pytest.raises(ArtifactAccessError, match="lease was lost"):
+        await service.finalize(
+            ArtifactFinalizeRequest(
+                context=context,
+                artifact_id=pending.artifact_id,
+                version=1,
+                upload_id=pending.upload_id,
+                size=pending.expected_size,
+                checksum=pending.expected_checksum,
+            )
+        )
+    with pytest.raises(NotFoundError):
+        await service.download(
+            ArtifactDownloadRequest(
+                context=context,
+                artifact_id=pending.artifact_id,
+                version=1,
+                actor_id="runtime-s4",
+                policy_decision_id="decision-s4",
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_slow_finalize_renews_claim_until_ready_commit() -> None:
+    pending = PendingUpload(
+        tenant_id="tenant-s4",
+        artifact_id="artifact-slow",
+        upload_id="upload-slow",
+        object_key="tenant/artifact/slow",
+        root_session_id="root-s4",
+        session_id="session-s4",
+        name="slow.bin",
+        media_type="application/octet-stream",
+        expected_size=6,
+        expected_checksum="checksum",
+        classification="internal",
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+    )
+    repository = _RecoveryRepository(pending)
+    service = ArtifactInternalService(
+        SeaweedFSS3Presigner(
+            "http://seaweed.test:8333",
+            access_key="access",
+            secret_key="secret",
+            bucket="artifacts",
+            region="us-east-1",
+        ),
+        repository=repository,  # type: ignore[arg-type]
+        object_verifier=_SlowRecoveryVerifier(),  # type: ignore[arg-type]
+        claim_ttl=timedelta(milliseconds=30),
+    )
+    response = await service.finalize(
+        ArtifactFinalizeRequest(
+            context=InternalRequestContext(
+                tenant_id="tenant-s4",
+                service_identity=ServiceIdentity.ACTION_HANDS,
+                request_id="slow-s4",
+                correlation_id="slow-s4",
+                causation_id="slow-s4",
+            ),
+            artifact_id=pending.artifact_id,
+            version=1,
+            upload_id=pending.upload_id,
+            size=pending.expected_size,
+            checksum=pending.expected_checksum,
+        )
+    )
+    assert response.status == "ready"
+    assert repository.finalize_renewals >= 2
+
+
+@pytest.mark.asyncio
+async def test_download_does_not_fallback_to_ready_cache_when_postgres_fails() -> None:
+    pending = PendingUpload(
+        tenant_id="tenant-s4",
+        artifact_id="artifact-ready",
+        upload_id="upload-ready",
+        object_key="tenant/artifact/ready",
+        root_session_id="root-s4",
+        session_id="session-s4",
+        name="ready.txt",
+        media_type="text/plain",
+        expected_size=1,
+        expected_checksum="checksum",
+        classification="internal",
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+    )
+    repository = _RecoveryRepository(pending)
+    repository.ready = True
+    repository.get_ready_error = True
+    service = ArtifactInternalService(
+        SeaweedFSS3Presigner(
+            "http://seaweed.test:8333",
+            access_key="access",
+            secret_key="secret",
+            bucket="artifacts",
+            region="us-east-1",
+        ),
+        repository=repository,  # type: ignore[arg-type]
+        policy=_AllowPolicy(),
+    )
+    service._ready[(pending.tenant_id, pending.artifact_id, 1)] = pending
+    with pytest.raises(RuntimeError, match="metadata unavailable"):
+        await service.download(
+            ArtifactDownloadRequest(
+                context=InternalRequestContext(
+                    tenant_id=pending.tenant_id,
+                    service_identity=ServiceIdentity.ACTION_HANDS,
+                    request_id="download-s4",
+                    correlation_id="download-s4",
+                    causation_id="download-s4",
+                ),
+                artifact_id=pending.artifact_id,
+                version=1,
+                actor_id="runtime-s4",
+                policy_decision_id="decision-s4",
+            )
+        )
 
 
 @pytest.mark.asyncio

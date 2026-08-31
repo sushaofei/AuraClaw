@@ -2021,6 +2021,8 @@ def _artifact_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         multipart=storage.multipart,
         multipart_threshold=settings.artifact_multipart_threshold,
         multipart_part_size=settings.artifact_multipart_part_size,
+        claim_ttl=timedelta(seconds=settings.artifact_claim_ttl_seconds),
+        orphan_claim_limit=settings.artifact_orphan_claim_limit,
     )
 
     async def artifact_status(parameters: dict[str, Any]) -> dict[str, Any]:
