@@ -205,6 +205,10 @@ from auraclaw.infrastructure.persistence.postgres_control_store import (
 from auraclaw.infrastructure.persistence.postgres_credential_registry import (
     PostgresCredentialRegistry,
 )
+from auraclaw.infrastructure.persistence.postgres_fencing_ledger import (
+    FencingLedgerOwner,
+    PostgresFencingTokenLedger,
+)
 from auraclaw.infrastructure.persistence.postgres_invocation_store import (
     PostgresInvocationStore,
 )
@@ -692,6 +696,22 @@ def _lease_key_configured(settings: Settings) -> bool:
         settings.lease_signing_key is not None
         and len(settings.lease_signing_key.get_secret_value()) >= 32
     )
+
+
+def _fencing_token_ledger(
+    settings: Settings,
+    owner: FencingLedgerOwner,
+) -> InMemoryFencingTokenLedger | PostgresFencingTokenLedger:
+    if settings.sql_storage_enabled:
+        return PostgresFencingTokenLedger(
+            settings.resolved_database_url,
+            owner=owner,
+        )
+    if settings.deployment_profile == "production":
+        raise ValueError(
+            f"{owner} production composition requires a persistent fencing token ledger"
+        )
+    return InMemoryFencingTokenLedger()
 
 
 def _seed_managed_connector_credentials(
@@ -1215,11 +1235,14 @@ def _session_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
             }
         )
         closeables = (wake,)
+    fencing_ledger = _fencing_token_ledger(settings, "session")
+    if isinstance(fencing_ledger, PostgresFencingTokenLedger):
+        closeables += (fencing_ledger,)
     app = _base_service_app(spec, settings, closeables=closeables)
     key = _lease_signing_key(settings)
     verifier = LeaseAssertionVerifier(
         {"development": key},
-        ledger=InMemoryFencingTokenLedger(),
+        ledger=fencing_ledger,
         audience=("session", "runtime"),
     )
     event_store = providers.get_event_store()
@@ -1267,6 +1290,9 @@ def _orchestrator_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
     )
     key = _lease_signing_key(settings)
     closeables: tuple[Any, ...] = (store,) if settings.sql_storage_enabled else ()
+    fencing_ledger = _fencing_token_ledger(settings, "control")
+    if isinstance(fencing_ledger, PostgresFencingTokenLedger):
+        closeables += (fencing_ledger,)
     token = settings.workload_token_value(ServiceIdentity.ORCHESTRATOR.value)
     bearer_token = token or secrets.token_urlsafe(32)
     feed_session = RemoteSessionEventStore(
@@ -1328,7 +1354,7 @@ def _orchestrator_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         store,
         lease_verifier=LeaseAssertionVerifier(
             {"development": key},
-            ledger=InMemoryFencingTokenLedger(),
+            ledger=fencing_ledger,
             audience=("control", "runtime"),
         ),
         lease_signer=LeaseAssertionSigner(key_id="development", signing_key=key),
@@ -1357,6 +1383,7 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         requires_policy=True,
     )
     closeables: tuple[Any, ...] = ()
+    fencing_ledger = _fencing_token_ledger(settings, "hands")
     policy: RemotePolicyClient
     credential_proxy: RemoteCredentialProxy | None = None
     artifacts: RemoteArtifactWriter
@@ -1429,6 +1456,7 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
             if isinstance(mcp_registry_store, PostgresMcpServerRegistryStore)
             else ()
         ),
+        *((fencing_ledger,) if isinstance(fencing_ledger, PostgresFencingTokenLedger) else ()),
     )
     app = _base_service_app(
         spec,
@@ -1579,7 +1607,7 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         {token: "*"} if token else {},
         verifier=LeaseAssertionVerifier(
             {"development": key},
-            ledger=InMemoryFencingTokenLedger(),
+            ledger=fencing_ledger,
             audience="runtime",
         ),
     )

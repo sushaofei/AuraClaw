@@ -2356,3 +2356,23 @@ ready Skill Artifact 建立带 fencing 的物理回收流程；不把成功命�
 - [x] Ruff、Mypy、定向及完整 Pytest 通过。
 - [x] Git 暂存范围已审查，不包含 `.env`、Secret、缓存、`docs/tmp/` 或个人 VS Code 配置。
 - [x] 本阶段作为一个 intentional commit 提交并 push 当前分支，并关闭 Issue #65。
+
+## 阶段持久化 Fencing Token 高水位（Issue #62 / P0 子阶段）
+
+状态：P0 fencing 子阶段实现和门禁完成；Issue #62 的 Hands/Admin/MCP/Delivery 后续项继续跟踪。
+
+### 持久化与安全
+
+- [x] `0042` 正反迁移在 `session_core`、`control`、`hands` owner schema 建立独立高水位表。
+- [x] PostgreSQL ledger 按 `(tenant_id, resource_id)` 原子 upsert；相同 token 幂等、更高 token 推进、低 token fail closed。
+- [x] Session、Orchestrator Control 和 Action Hands 的 SQL composition 使用持久 ledger，并纳入生命周期关闭。
+- [x] 三个服务在 production + 非 SQL 配置时拒绝启动，不再回退到 `InMemoryFencingTokenLedger`。
+- [x] Control Assignment/Lease Store 仍是执行归属权威来源；ledger 不替代 current lease、claim 与 heartbeat 校验。
+
+### 验证与交付
+
+- [x] PostgreSQL 参数化集成测试覆盖三个 owner、跨 ledger 实例、重建、并发 token 1/2、tenant/resource 隔离和同 token 重试。
+- [x] 单元测试覆盖三个生产服务拒绝进程本地 ledger；既有过期 assertion、签名和 scope 负向测试保持通过。
+- [x] Ruff、Mypy、定向与完整 Pytest 通过。
+- [x] Git 暂存范围已审查，不包含 `.env`、Secret、缓存、`docs/tmp/` 或个人 VS Code 配置。
+- [x] 本子阶段作为 intentional commit 提交并 push；Issue #62 在其余持久正确性子阶段完成前保持 open。

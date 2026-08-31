@@ -23,6 +23,8 @@ registration lease 内仍活跃时，新进程注册会 fail closed。因此显�
 - Orchestrator 使用可过期 claim、Session lease 与单调 fencing token；任一副本可回收过期
   Assignment。Runtime 从共享 checkpoint 恢复，旧实例的 Session、Tool、heartbeat 和 checkpoint
   写入均被拒绝。
+- Session、Control 和 Hands 分别在 owner schema 持久化 `(tenant_id, resource_id)` fencing 高水位；
+  副本切换和进程重启不会清零。相同 token 可安全重试，低于高水位的 assertion 在业务 handler 前拒绝。
 - Runtime 为每个 Assignment 原子创建 `execution_claim_token`，不再按 `running.started_at + 5s`
   猜测孤儿。活跃 claim、Runtime registration 与 Session lease 必须同时匹配；执行心跳每 10 秒续租
   claim、Session lease 和签名 Lease Assertion。超过 claim 安全窗口后 Runtime 取消 Harness，停止新副作用。
@@ -40,12 +42,14 @@ registration lease 内仍活跃时，新进程注册会 fail closed。因此显�
 
 ## 生产配置门禁
 
-1. 依次应用 PostgreSQL/KingBase `0010`～`0041` expand migration。`0040`
+1. 依次应用 PostgreSQL/KingBase `0010`～`0042` expand migration。`0040`
    `0022` 增加 registration 与 execution claim 字段和索引；先迁移 Control 数据库，再滚动升级
    Orchestrator，最后升级 Agent Runtime。可选执行 `deploy/postgres/roles.sql` 做硬化，
    当前部署不按服务注入分角色 DSN。
    `0041` 将 MCP observed health 扩为实例级主键，并加入 Catalog generation；必须在滚动 Action Hands
    前应用。升级后观察每个 Server 至少一个 active instance、active generation 单调增长和 stale 告警。
+   `0042` 增加 Session、Control、Hands fencing 高水位表；必须先迁移数据库，再滚动三个服务，
+   不允许新版本在生产环境回退到内存 ledger。
 2. 各服务共享统一 `AURACLAW_DATABASE_URL`（Compose `database_url` secret）；migration 使用
    独立的 `AURACLAW_MIGRATION_DATABASE_URL`。
 3. 所有 Control、Session 与 Hands 副本必须使用相同的 `AURACLAW_LEASE_SIGNING_KEY`，并通过平台
@@ -72,3 +76,6 @@ hostname）或注入唯一实例 UID。停止全部旧 Runtime，等待 30 秒�
 回滚 Action Hands 前先停止 Catalog reconcile，确认没有 generation 切换事务，并将每个 Server 排空到
 单个 Hands 实例；随后才可执行 `0041_capability_catalog_consistency.down.sql`。down migration 会折叠
 实例健康行并移除 generation 字段，不删除当前 active Capability 行。
+
+回滚 `0042` 前必须停止所有 Runtime 和 Session/Orchestrator/Hands 新请求并完成排空；删除高水位表会失去
+对仍未过期旧 assertion 的重放防护，因此只允许在所有旧 Lease Assertion 都已过期后执行 down migration。

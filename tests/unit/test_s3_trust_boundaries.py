@@ -470,12 +470,12 @@ def test_production_runtime_composition_is_remote_only_and_has_no_provider_secre
     assert all("Store" not in type(item).__name__ for item in app.state.closeables)
 
 
-def test_production_hands_requires_signed_runtime_lease_capability() -> None:
+def test_hands_requires_signed_runtime_lease_capability() -> None:
     key = b"test-hands-capability-signing-key-0001"
     app = create_service_app(
         "hands",
         _settings(
-            deployment_profile="production",
+            deployment_profile="development",
             storage_backend="memory",
             runtime_id="runtime-a",
             runtime_workload_token="runtime-token",
