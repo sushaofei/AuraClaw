@@ -760,11 +760,11 @@ def test_compose_injects_secrets_only_into_their_owner_services() -> None:
     def count_key(key: str) -> int:
         return len(re.findall(rf"^\s+{key}:", compose, re.MULTILINE))
 
-    # compose.test.yml uses _FILE secret mounts like prod
-    assert count_key("SEAWEEDFS_SECRET_KEY_FILE") == 1
+    # All deployment profiles use OBS-only _FILE secret mounts.
+    assert count_key("SEAWEEDFS_SECRET_KEY_FILE") == 0
     assert count_key("OBS_AK_FILE") == 1
     assert count_key("OBS_SK_FILE") == 1
-    assert count_key("SEAWEEDFS_ACCESS_KEY_FILE") == 1
+    assert count_key("SEAWEEDFS_ACCESS_KEY_FILE") == 0
     assert count_key("AURACLAW_MODEL_API_KEY_FILE") == 1
     assert count_key("AURACLAW_LEASE_SIGNING_KEY_FILE") == 3
     runtime = compose.split("  agent-runtime:", 1)[1].split("  model-gateway:", 1)[0]

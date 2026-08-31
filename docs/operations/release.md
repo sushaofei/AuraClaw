@@ -105,7 +105,7 @@ docker image inspect "${AURACLAW_IMAGE:-auraclaw:s5}" >/dev/null
 
 1. 若尚无 `.env.prod`：`cp .env.prod.example .env.prod`，填入不可变镜像与真实密钥（0600，不进 Git）
 2. KingBase DB 角色已按 `deploy/postgres/roles.sql` 的权限意图授权
-3. Kafka / SeaweedFS / Vault / 模型出口可从 `auraclaw-platform` 访问
+3. Kafka / OBS / Vault / 模型出口可从 `auraclaw-platform` 访问
 4. Secret **不**写进 Compose、镜像、命令行
 
 ### B2. 物化 Secret + 预检

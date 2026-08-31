@@ -213,7 +213,7 @@ docker compose --env-file .env.test -f compose.test.yml up -d --wait
 docker compose --env-file .env.prod -f compose.prod.yml up -d --wait
 ```
 
-Compose 不启动 SeaweedFS，而是使用 `.env.test` / `.env.prod` 中已部署的外部 S3 endpoint。若 SeaweedFS、
+Compose 不启动对象存储，而是使用 `.env.dev` / `.env.test` / `.env.prod` 中的外部华为 OBS endpoint。若
 PostgreSQL 或 Kafka 运行在 Docker Host，请把相应 host 配置为 `host.docker.internal`；生产环境
 使用服务 DNS、Secret/Workload 注入，不在 Compose 文件中写入密钥。Ingress 将
 `/v1/streams/*` 路由到 `streaming-gateway:8010`，其余路径路由到 `task-api:8000`。
@@ -238,7 +238,7 @@ docker compose --env-file .env.prod -f compose.prod.yml up -d --wait
 S3 生产装配已切换为 owner HTTP/MCP Client：Session、Control、Model、Policy、Credential、
 Artifact 和 Admin 写路径不再共享跨域 Store。Action Hands 以 MCP Server 暴露工具，并通过持久
 Invocation Store、Policy、Credential Proxy 和 Artifact Service 执行；Runtime 只持有 MCP Client。
-SeaweedFS 管理密钥只注入 Artifact Service，Vault Token 只注入 Credential Proxy，Runtime 位于
+OBS AK/SK 只注入 Artifact Service，Vault Token 只注入 Credential Proxy，Runtime 位于
 无 platform egress 的内部 Docker network。本地 `auraclaw serve` 与生产 Compose 使用同一组
 12 个入口；环境差异只来自 `.env.dev` / `.env.test` / `.env.prod` 提供的存储、事件总线、模型端点和 CORS
 等资源。CLI 与 VS Code debug 都读取 `.env.dev`（可用 `AURACLAW_ENV_FILE` 覆盖）。服务器测试 / 生产通过

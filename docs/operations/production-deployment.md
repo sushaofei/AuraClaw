@@ -20,7 +20,7 @@ Docker Compose 不提供 Kubernetes HPA、PDB 或 NetworkPolicy。本方案以�
 - `.host.env` 保存 `KINGBASE_HOST/PORT/USER/PWD`，运行
   `scripts/sync_kingbase_env.py` 后再物化 Compose Secret；
 - Compose `migrate` 使用 `/app/migrations`，当前目标 `0041`；
-- Kafka/Replay Router、SeaweedFS、Vault 和模型出口可从 `auraclaw-platform` 网络访问；
+- Kafka/Replay Router、华为 OBS、Vault 和模型出口可从 `auraclaw-platform` 网络访问；
 - 部署机存在被 `.gitignore` 排除的 `.env.prod`，从 `.env.prod.example` 复制后填真实密钥；
 - Secret 不写入 Compose、镜像、命令参数或日志。
 - 蓝绿窗口按两套完整集群预留 CPU、内存、数据库连接和外部配额；容量不足时不得开始切流。
@@ -34,7 +34,7 @@ docker network inspect auraclaw-platform >/dev/null 2>&1 ||
 
 最低必填配置包括不可变 `AURACLAW_IMAGE`、统一应用 DSN、migration admin DSN、工作负载
 令牌、lease key、chaintower workload token、Agent Context 验签密钥、模型凭据、Vault 配置
-及 SeaweedFS 配置。Agent Runtime 没有数据库、模型、Vault 或 SeaweedFS Secret；chaintower
+及 OBS 配置。Agent Runtime 没有数据库、模型、Vault 或 OBS Secret；chaintower
 身份密钥只挂到 Task API。只有对应 owner service 获得这些凭据。
 
 ## 3. 预检与迁移
@@ -100,7 +100,7 @@ Ingress 使用 Docker DNS 动态重解析 Task API 与 Streaming Gateway；副�
 ## 5. 蓝绿发布与回滚
 
 运行中的颜色假设为 blue。green 使用不同的 project、内部、edge、platform 网络和临时
-ingress 端口。先创建 green platform 网络，并将 PostgreSQL、Kafka、SeaweedFS、Vault、模型
+ingress 端口。先创建 green platform 网络，并将 PostgreSQL、Kafka、OBS、Vault、模型
 出口或其受控代理接入：
 
 ```bash
@@ -144,7 +144,7 @@ docker compose --env-file .env.prod -f compose.prod.yml \
 Session、Projection、Orchestrator、Runtime、Model、Hands、Policy、Credential、Artifact、
 Streaming 和 Delivery 都支持多副本。缩容前观察 claim/lease、outbox、delivery job 和
 multipart finalize/gc 是否排空；Hands 本地 workspace 是每个容器的临时文件系统，持久结果
-必须进入 Artifact Service/SeaweedFS。
+必须进入 Artifact Service/OBS。
 
 ## 7. 故障演练矩阵
 
@@ -158,7 +158,7 @@ multipart finalize/gc 是否排空；Hands 本地 workspace 是每个容器的�
 | Skill Source | 中断一个 MCP Source、让两个 Source 同时提供同版本 | 连续完整快照阈值生效；切换最高优先级可用来源；Installation 抑制不被覆盖 |
 | Skill uninstall | draining 时 kill 一个 Hands 副本、并发两个 drainer | 新发现保持关闭；活动 binding 继续；Run 终态后只推进一次 uninstalled revision |
 | Policy/Credential | stop、Vault 断连或 deny | fail closed；不执行 tool；不泄露 credential |
-| Artifact/SeaweedFS | S3 断连、multipart 中断 | metadata 保持 pending/failed；恢复后 finalize/gc 可重入 |
+| Artifact/OBS | S3 断连、multipart 中断 | metadata 保持 pending/failed；恢复后 finalize/gc 可重入 |
 | Kafka/Streaming | broker 断连、消费者暂停 | 生产端背压；SSE 可 replay；Canonical Result 不依赖 SSE |
 | Delivery | kill claim owner、sink 5xx | claim expiry 后重试；超限进入 DLQ；redrive 可审计 |
 | PostgreSQL | 短暂断连 | readiness 失败、停止接流；恢复后 outbox/claim 继续 |
@@ -182,4 +182,4 @@ actor、command id、correlation/causation 和审批依据。
 出现以下任一情况立即停止发布或扩缩容：迁移 checksum drift、N/N-1 契约不兼容、readiness
 持续失败、Policy/Credential fail-open、生产身份 fail-open 或重新开放裸 tenant/user Header、
 跨角色数据库写入成功、Canonical Result 丢失、
-Delivery 重复副作用、SeaweedFS 对象与 metadata 无法收敛，或 Secret 出现在日志/config。
+Delivery 重复副作用、OBS 对象与 metadata 无法收敛，或 Secret 出现在日志/config。
