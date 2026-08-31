@@ -80,6 +80,8 @@ Hands / Agent / Delivery Producer
 ## 安全与观测
 
 - 上传下载全程 tenant scope、加密和审计。
+- 下载、显式删除和 orphan 物理删除都必须复核权威 Policy decision；Policy 客户端缺失、超时、异常或返回无效决定时，在签发 URL、claim 删除或访问对象存储前 fail closed。
+- 生产 Artifact Service 缺少调用方 workload identity、服务自身 Policy workload identity 或 Policy 地址时拒绝启动；空身份映射始终是 deny-all。
 - 对可执行文件、压缩包和外部内容进行扫描。
 - 敏感 Artifact 不生成可转发的永久链接。
 - 指标：storage bytes、upload/download latency、scan failure、orphan artifact、GC reclaimed、signed URL use。

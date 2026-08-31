@@ -53,6 +53,13 @@ Hands / Tool Adapter
 
 对于数据库、GitHub、SaaS 和通知系统，应显式区分读、写、删除和管理员能力。
 
+## 内部服务认证
+
+- Runtime 工具入口与 MCP Registry、Skill Publication 等管理契约都必须显式配置 workload identity。
+- 空身份映射表示 deny-all，不能解释为关闭认证；开发环境确需无认证的测试契约时，必须显式启用仅供开发的开关。
+- 生产组合缺少任一调用方身份、Hands 自身下游身份或 Policy 地址时必须拒绝启动，不能依赖 readiness 降级后继续提供管理接口。
+- Bearer token 与请求上下文中的 `service_identity` 必须同时匹配，任一缺失或冲突均返回 401。
+
 ## Artifact
 
 - 输入 Artifact 以只读或 Copy-on-write 方式挂载。

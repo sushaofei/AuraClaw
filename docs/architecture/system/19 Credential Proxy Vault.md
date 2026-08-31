@@ -84,6 +84,8 @@ Provision 阶段使用凭证准备受控资源，例如 Clone Repo；Sandbox 获
 
 ## 失败处理
 
+- Policy validator 未配置、不可达、超时、返回异常或决定无效：在解析 Vault Secret、写 usage audit 或调用外部适配器前 fail closed。
+- 生产 Credential Proxy 缺少任一调用方 workload identity、服务自身 Policy workload identity 或 Policy 地址时拒绝启动。
 - Secret 过期：Proxy 协调刷新并记录，不把刷新 Token 返回调用方。
 - 权限不足：返回标准 denied，不泄漏账户信息。
 - 外部副作用未知：记录 request id 和 side-effect status，禁止盲目重试。

@@ -68,12 +68,18 @@ class CredentialProxyInternalService:
             ServiceIdentity.DELIVERY_WORKER,
         }:
             raise CredentialAccessError("workload may not invoke credentials")
-        if self._policy is not None and not await self._policy.validate_decision(
-            tenant_id=request.context.tenant_id,
-            decision_id=request.policy_decision_id,
-            action=_POLICY_ACTION_BY_OPERATION.get(request.operation, request.operation),
-            resource=request.target,
-        ):
+        if self._policy is None:
+            raise CredentialAccessError("policy validation is unavailable")
+        try:
+            valid = await self._policy.validate_decision(
+                tenant_id=request.context.tenant_id,
+                decision_id=request.policy_decision_id,
+                action=_POLICY_ACTION_BY_OPERATION.get(request.operation, request.operation),
+                resource=request.target,
+            )
+        except Exception as exc:
+            raise CredentialAccessError("policy validation is unavailable") from exc
+        if not valid:
             raise CredentialAccessError("policy decision is invalid or expired")
         adapter = self._adapters.get(request.target)
         if adapter is None:

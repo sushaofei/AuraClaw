@@ -13,7 +13,7 @@ from auraclaw.artifact.internal_service import ArtifactInternalService
 from auraclaw.composition.services import create_service_app
 from auraclaw.config import Settings
 from auraclaw.contracts.commands import CommandContext
-from auraclaw.contracts.errors import AuraClawError
+from auraclaw.contracts.errors import AuraClawError, CredentialAccessError
 from auraclaw.contracts.events import Actor, NewEvent
 from auraclaw.contracts.hands import HANDS_TOOLS_LIST
 from auraclaw.contracts.internal import (
@@ -21,6 +21,7 @@ from auraclaw.contracts.internal import (
     AssignmentClaimResponse,
     AssignmentDispositionRequest,
     AssignmentDispositionResponse,
+    CredentialInvokeRequest,
     InternalRequestContext,
     LeaseAssertion,
     RuntimeHeartbeatResponse,
@@ -478,6 +479,9 @@ def test_production_hands_requires_signed_runtime_lease_capability() -> None:
             storage_backend="memory",
             runtime_id="runtime-a",
             runtime_workload_token="runtime-token",
+            task_api_workload_token="task-token",
+            credential_proxy_workload_token="credential-token",
+            action_hands_workload_token="hands-token",
             lease_signing_key=key.decode(),
         ),
     )
@@ -618,6 +622,49 @@ async def test_hands_uses_authenticated_remote_policy_and_credential_boundaries(
     await credential.aclose()
     await policy_validator.aclose()
     await policy.aclose()
+
+
+class _UnavailablePolicy:
+    async def validate_decision(self, **_parameters: object) -> bool:
+        raise TimeoutError("policy timed out")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("policy", [None, _UnavailablePolicy()])
+async def test_credential_invoke_fails_closed_before_adapter_side_effect(
+    policy: _UnavailablePolicy | None,
+) -> None:
+    invoked = False
+
+    async def adapter(_request: dict[str, object], _secret: str) -> dict[str, bool]:
+        nonlocal invoked
+        invoked = True
+        return {"ok": True}
+
+    service = CredentialProxyInternalService(
+        CredentialProxy(InMemoryVault({})),
+        adapters={"managed": adapter},
+        policy=policy,
+    )
+    with pytest.raises(CredentialAccessError, match="policy validation is unavailable"):
+        await service.invoke(
+            CredentialInvokeRequest(
+                context=InternalRequestContext(
+                    tenant_id="tenant-a",
+                    service_identity=ServiceIdentity.ACTION_HANDS,
+                    request_id="request-a",
+                    correlation_id="run-a",
+                    causation_id="decision-a",
+                ),
+                session_id="session-a",
+                credential_ref="credential-a",
+                operation="send",
+                target="managed",
+                method="POST",
+                policy_decision_id="decision-a",
+            )
+        )
+    assert invoked is False
 
 
 @pytest.mark.asyncio

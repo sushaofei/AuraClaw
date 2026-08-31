@@ -138,6 +138,7 @@ def create_contract_app(
     *,
     stream_routes: Mapping[str, StreamContractRoute] | None = None,
     workload_identities: Mapping[str, ServiceIdentity] | None = None,
+    allow_unauthenticated: bool = False,
 ) -> FastAPI:
     app = FastAPI(title=f"AuraClaw {service_name} Internal API", version=INTERNAL_API_VERSION)
 
@@ -167,11 +168,11 @@ def create_contract_app(
         return JSONResponse(status_code=exc.status_code, content=error.model_dump(mode="json"))
 
     def _authenticate(request_model: ContractModel, raw_request: Request) -> None:
-        if workload_identities is None:
+        if allow_unauthenticated:
             return
         authorization = raw_request.headers.get("Authorization", "")
         token = authorization.removeprefix("Bearer ")
-        authenticated = workload_identities.get(token)
+        authenticated = (workload_identities or {}).get(token)
         context = getattr(request_model, "context", None)
         supplied = getattr(context, "service_identity", None)
         if authenticated is None or supplied != authenticated:

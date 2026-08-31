@@ -2335,3 +2335,24 @@ ready Skill Artifact 建立带 fencing 的物理回收流程；不把成功命�
 - [x] Ruff、Mypy、定向与完整 Pytest 通过。
 - [x] Git 改动范围审查通过；不包含 `.env`、Secret、缓存或无关个人配置。
 - [x] 本阶段作为一个 intentional commit 提交并 push 当前分支。
+
+## 阶段内部身份与 Policy 强制 fail-closed（Issue #65）
+
+状态：实现、架构说明与自动化门禁完成。
+
+### 安全边界
+
+- [x] 内部 Contract 默认要求 workload authentication；未传身份映射与空映射均为 deny-all。
+- [x] 仅测试/开发契约可以通过显式 `allow_unauthenticated` 开关关闭认证，生产组合不使用该开关。
+- [x] Hands MCP Registry 与 Skill Publication 管理路由不再把空身份映射转换成免认证。
+- [x] Credential invoke 在 Policy validator 缺失、异常、超时或决定无效时，于 Vault/adapter 副作用前 fail closed。
+- [x] Artifact download、delete 与 orphan delete 在 Policy validator 缺失、异常、超时或决定无效时，于 URL 签发和对象删除前 fail closed。
+- [x] 生产 Hands、Credential Proxy、Artifact Service 缺少所需 workload identity 或 Policy 地址时拒绝启动。
+- [x] 本阶段不改变 Canonical Session 事实、数据库 Schema 或迁移；数据库变更不适用。
+
+### 验证与交付
+
+- [x] 参数化测试覆盖未传/空身份映射、Policy 未配置/超时、生产缺身份/Policy 地址和副作用未执行。
+- [x] Ruff、Mypy、定向及完整 Pytest 通过。
+- [x] Git 暂存范围已审查，不包含 `.env`、Secret、缓存、`docs/tmp/` 或个人 VS Code 配置。
+- [x] 本阶段作为一个 intentional commit 提交并 push 当前分支，并关闭 Issue #65。

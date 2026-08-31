@@ -689,12 +689,61 @@ def test_policy_credential_artifact_model_and_admin_http_contracts() -> None:
                 return expected
 
             route = contract_route(type(request), type(expected), handler)
-            app = create_contract_app("contract-test", {path: route})
+            app = create_contract_app(
+                "contract-test", {path: route}, allow_unauthenticated=True
+            )
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app), base_url="http://internal"
             ) as raw:
                 response = await HttpContractClient(raw).call(path, request, type(expected))
             assert response == expected
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("workload_identities", [None, {}])
+def test_internal_contract_authentication_defaults_to_deny(
+    workload_identities: dict[str, ServiceIdentity] | None,
+) -> None:
+    async def scenario() -> None:
+        request = AdminOperationRequest(
+            context=_context(ServiceIdentity.TASK_API),
+            operation_id="operation-denied",
+            owner_service=ServiceIdentity.PROJECTION_WORKER,
+            operation="projection.status",
+        )
+        expected = AdminOperationResponse(
+            operation_id=request.operation_id,
+            status="accepted",
+        )
+        invoked = False
+
+        async def handler(_request: AdminOperationRequest) -> AdminOperationResponse:
+            nonlocal invoked
+            invoked = True
+            return expected
+
+        app = create_contract_app(
+            "contract-auth-default",
+            {
+                "/internal/v1/admin/operations": contract_route(
+                    AdminOperationRequest,
+                    AdminOperationResponse,
+                    handler,
+                )
+            },
+            workload_identities=workload_identities,
+        )
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://internal"
+        ) as client:
+            response = await client.post(
+                "/internal/v1/admin/operations",
+                json=request.model_dump(mode="json"),
+                headers={"X-AuraClaw-Contract-Version": INTERNAL_API_VERSION},
+            )
+        assert response.status_code == 401
+        assert invoked is False
 
     asyncio.run(scenario())
 
