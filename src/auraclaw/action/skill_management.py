@@ -82,6 +82,19 @@ class SkillManagementService:
             raise NotFoundError("Skill package not found")
         return record
 
+    async def get_admin_snapshot(
+        self, tenant_id: str
+    ) -> tuple[
+        tuple[SkillPackageRecord, ...],
+        tuple[SkillPublicationRecord, ...],
+        tuple[SkillInstallationRecord, ...],
+    ]:
+        return (
+            await self._lifecycle.list_packages(tenant_id),
+            await self._lifecycle.list_publications(tenant_id),
+            await self._lifecycle.list_installations(tenant_id),
+        )
+
     async def list_packages(self, tenant_id: str) -> tuple[SkillPackageRecord, ...]:
         return await self._lifecycle.list_packages(tenant_id)
 

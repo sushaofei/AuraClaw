@@ -2480,3 +2480,23 @@ ready Skill Artifact 建立带 fencing 的物理回收流程；不把成功命�
 - [x] Ruff、Mypy、import-linter、定向与完整 Pytest 通过。
 - [x] Git 暂存范围已审查，不包含 `.env`、Secret、缓存、`docs/tmp/` 或个人 VS Code 配置。
 - [x] 本子阶段作为 intentional commit 提交并 push；Issue #62 可关闭。
+
+## 阶段 Skill 管理读取跨进程权威化（Issue #61）
+
+状态：Skill 管理读路径、正文读取与跨进程恢复验收完成。
+
+### 权威状态与边界
+
+- [x] `/v1/admin/skills` 从 Hands 持久 package/publication/installation 快照组装，不遍历 Task API Registry。
+- [x] 普通详情和版本详情从 Hands 查询权威状态；`SKILL.md` 由 Hands 经 Artifact Reader 下载并校验 package digest。
+- [x] SQL composition 不再注入 compatibility cache；Task API Registry 为空、重启或过期不影响管理正确性。
+- [x] 兼容字段 `skills` 与权威 `items` 内容一致；筛选、分页、publication、installation 与 availability 使用同一快照。
+- [x] Hands Runtime Registry/Catalog 仍是可丢弃投影，enable/disable/revoke 继续由持久 lifecycle 驱动重建。
+
+### 验证与交付
+
+- [x] 独立 Hands/Task API app、完全独立空 Registry 的回归测试覆盖列表、详情、版本、publication 和正文。
+- [x] PostgreSQL 测试覆盖跨 Store 写后读、新 Store 重建、Artifact 正文、tenant 隔离和 Task API 空 Registry。
+- [x] Ruff、Mypy、import-linter、定向与完整 Pytest 通过。
+- [x] Git 暂存范围已审查，不包含 `.env`、Secret、缓存、`docs/tmp/` 或个人 VS Code 配置。
+- [x] 本阶段作为 intentional commit 提交并 push；Issue #61 可关闭。

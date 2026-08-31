@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
 import asyncpg
+import httpx
 import pytest
+from fastapi import FastAPI
 
+from auraclaw.action.skill_internal_service import SkillPublicationInternalService
 from auraclaw.action.skill_lifecycle import (
     SkillAdmissionAuditRecord,
     SkillPublishCommit,
@@ -16,8 +20,19 @@ from auraclaw.action.skill_lifecycle import (
     SkillSourcePackageIdentity,
     SkillSourceSnapshotCommit,
 )
+from auraclaw.action.skill_management import SkillManagementService
+from auraclaw.action.skill_packages import (
+    HmacSkillSignatureVerifier,
+    SkillPackage,
+    SkillPackageRegistry,
+    skill_package_archive,
+    skill_package_digest,
+)
+from auraclaw.action.skill_publication import SkillPublicationService
+from auraclaw.api.routes.admin_skills import create_skill_admin_router
 from auraclaw.config import get_settings
 from auraclaw.contracts.errors import VersionConflictError
+from auraclaw.contracts.internal import ServiceIdentity
 from auraclaw.contracts.skills import (
     SkillInstallationRecord,
     SkillInstallationStatus,
@@ -32,10 +47,14 @@ from auraclaw.contracts.skills import (
     SkillSourceSyncState,
 )
 from auraclaw.contracts.tools import ArtifactRef
+from auraclaw.infrastructure.clients.skill_publication import RemoteSkillPublicationClient
+from auraclaw.infrastructure.identity.verifier import DevelopmentHeaderIdentityVerifier
 from auraclaw.infrastructure.persistence.postgres_common import asyncpg_url
 from auraclaw.infrastructure.persistence.postgres_skill_lifecycle import (
     PostgresSkillLifecycleStore,
 )
+from auraclaw.internal.http import create_contract_app
+from auraclaw.internal.routes import skill_publication_routes
 
 SETTINGS = get_settings()
 DATABASE_URL = asyncpg_url(SETTINGS.resolved_database_url) if SETTINGS.postgres_enabled else None
@@ -61,6 +80,40 @@ MIGRATION = "\n".join(
 pytestmark = pytest.mark.skipif(DATABASE_URL is None, reason="PostgreSQL test URL not configured")
 
 
+class _SharedSkillArtifacts:
+    def __init__(self) -> None:
+        self.contents: dict[str, bytes] = {}
+
+    async def put(self, **kwargs: object) -> ArtifactRef:
+        content = kwargs["content"]
+        assert isinstance(content, bytes)
+        artifact_id = f"art-{uuid4().hex}"
+        self.contents[artifact_id] = content
+        return ArtifactRef(
+            artifact_id=artifact_id,
+            version=1,
+            content_hash=hashlib.sha256(content).hexdigest(),
+            media_type="application/vnd.auraclaw.skill-package+json",
+            size=len(content),
+        )
+
+    async def read(
+        self,
+        *,
+        tenant_id: str,
+        artifact_ref: ArtifactRef,
+        actor_id: str,
+        correlation_id: str,
+    ) -> bytes:
+        del tenant_id, actor_id, correlation_id
+        return self.contents[artifact_ref.artifact_id]
+
+
+class _NoOpSkillProjector:
+    async def rebuild_tenant(self, tenant_id: str) -> None:
+        del tenant_id
+
+
 async def _ensure_skill_lifecycle_schema(connection: asyncpg.Connection) -> None:
     current = await connection.fetchval(
         """SELECT EXISTS(
@@ -82,7 +135,25 @@ def test_postgres_skill_lifecycle_is_persistent_and_tenant_scoped() -> None:
         await _ensure_skill_lifecycle_schema(connection)
         suffix = uuid4().hex
         tenant_id = f"tenant-skill-{suffix}"
-        digest = f"sha256:{suffix.ljust(64, '0')}"
+        manifest = SkillManifest(
+            name="release.prepare",
+            version="1.0.0",
+            description="Prepare release",
+            publisher="platform",
+            signature="hmac-sha256:abc",
+        )
+        archive_package = SkillPackage(
+            manifest=manifest,
+            files={
+                "manifest.json": manifest.model_dump_json().encode(),
+                "SKILL.md": b"# PostgreSQL Skill\n",
+            },
+        )
+        archive = skill_package_archive(archive_package)
+        digest = skill_package_digest(archive_package)
+        artifacts = _SharedSkillArtifacts()
+        artifact_id = f"art-{suffix}"
+        artifacts.contents[artifact_id] = archive
         store_a = PostgresSkillLifecycleStore(DATABASE_URL)
         store_b = PostgresSkillLifecycleStore(DATABASE_URL)
         now = datetime.now(UTC)
@@ -147,20 +218,14 @@ def test_postgres_skill_lifecycle_is_persistent_and_tenant_scoped() -> None:
             assert await store_b.list_admissions(f"other-{tenant_id}") == ()
             package = SkillPackageRecord(
                 tenant_id=tenant_id,
-                manifest=SkillManifest(
-                    name="release.prepare",
-                    version="1.0.0",
-                    description="Prepare release",
-                    publisher="platform",
-                    signature="hmac-sha256:abc",
-                ),
+                manifest=manifest,
                 package_digest=digest,
                 artifact_ref=ArtifactRef(
-                    artifact_id=f"art-{suffix}",
+                    artifact_id=artifact_id,
                     version=1,
-                    content_hash=suffix,
+                    content_hash=hashlib.sha256(archive).hexdigest(),
                     media_type="application/vnd.auraclaw.skill-package+json",
-                    size=100,
+                    size=len(archive),
                 ),
                 retention_until=now + timedelta(days=90),
                 retention_updated_by="integration-test",
@@ -269,6 +334,82 @@ def test_postgres_skill_lifecycle_is_persistent_and_tenant_scoped() -> None:
             assert await store_b.list_publications(f"other-{tenant_id}") == ()
             assert await store_b.get_source(tenant_id, source.source_id) == source
             assert await store_b.get_sync_state(tenant_id, source.source_id) == sync_state
+
+            restarted_store = PostgresSkillLifecycleStore(DATABASE_URL)
+            hands_registry = SkillPackageRegistry(
+                artifacts=artifacts,
+                signature_verifier=HmacSkillSignatureVerifier(
+                    {"platform": b"postgres-skill-test-key"}
+                ),
+            )
+            hands_publication = SkillPublicationService(
+                registry=hands_registry,
+                lifecycle=restarted_store,
+                artifacts=artifacts,
+            )
+            hands_management = SkillManagementService(
+                lifecycle=restarted_store,
+                projector=_NoOpSkillProjector(),
+            )
+            hands_contract = create_contract_app(
+                "postgres-skill-admin-test",
+                skill_publication_routes(
+                    SkillPublicationInternalService(
+                        hands_publication,
+                        management=hands_management,
+                        admissions=restarted_store,
+                        artifacts=artifacts,
+                    )
+                ),
+                workload_identities={"task-token": ServiceIdentity.TASK_API},
+            )
+            hands_app = FastAPI()
+            hands_app.mount("/internal/v1/skill-publications", hands_contract)
+            remote = RemoteSkillPublicationClient(
+                "http://hands",
+                bearer_token="task-token",
+                transport=httpx.ASGITransport(app=hands_app),
+            )
+            task_registry = SkillPackageRegistry(
+                artifacts=artifacts,
+                signature_verifier=HmacSkillSignatureVerifier(
+                    {"platform": b"postgres-skill-test-key"}
+                ),
+            )
+            task_app = FastAPI()
+            task_app.state.identity_verifier = DevelopmentHeaderIdentityVerifier()
+            task_app.include_router(
+                create_skill_admin_router(
+                    task_registry,
+                    management_service=remote,
+                    content_reader=remote,
+                )
+            )
+            try:
+                async with httpx.AsyncClient(
+                    base_url="http://task-api",
+                    transport=httpx.ASGITransport(app=task_app),
+                    headers={"X-Tenant-ID": tenant_id, "X-Actor-ID": "admin"},
+                ) as task_client:
+                    listed = await task_client.get("/v1/admin/skills")
+                    assert listed.status_code == 200
+                    assert listed.json()["skills"] == listed.json()["items"]
+                    assert listed.json()["items"][0]["version"] == "1.0.0"
+                    detail = await task_client.get(
+                        "/v1/admin/skills/platform/release.prepare"
+                    )
+                    assert detail.status_code == 200
+                    assert detail.json()["skill_markdown"] == "# PostgreSQL Skill\n"
+                    version = await task_client.get(
+                        "/v1/admin/skills/platform/release.prepare/versions/1.0.0"
+                    )
+                    assert version.status_code == 200
+                    assert version.json()["package_digest"] == digest
+                assert task_registry.list_publications(tenant_id) == ()
+                assert await remote.list_packages(f"other-{tenant_id}") == ()
+            finally:
+                await remote.aclose()
+                await restarted_store.close()
 
             transactional_package = package.model_copy(
                 update={

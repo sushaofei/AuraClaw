@@ -282,8 +282,28 @@ class RemoteSkillPublicationClient:
         name: str,
         version: str,
     ) -> SkillPackageRecord:
+        response = await self._package_state(tenant_id, publisher, name, version)
+        return SkillPackageRecord.model_validate(response.package)
+
+    async def get_skill_markdown(
+        self,
+        tenant_id: str,
+        publisher: str,
+        name: str,
+        version: str,
+    ) -> str | None:
+        response = await self._package_state(tenant_id, publisher, name, version)
+        return response.skill_markdown
+
+    async def _package_state(
+        self,
+        tenant_id: str,
+        publisher: str,
+        name: str,
+        version: str,
+    ) -> SkillPackageStateInternalResponse:
         request_id = f"skill-package-state-{uuid4().hex}"
-        response = await self._contract.call(
+        return await self._contract.call(
             "/internal/v1/skill-publications/package",
             SkillPackageStateInternalRequest(
                 context=InternalRequestContext(
@@ -299,11 +319,30 @@ class RemoteSkillPublicationClient:
             ),
             SkillPackageStateInternalResponse,
         )
-        return SkillPackageRecord.model_validate(response.package)
 
     async def list_packages(self, tenant_id: str) -> tuple[SkillPackageRecord, ...]:
         response = await self._admin_snapshot(tenant_id)
         return tuple(SkillPackageRecord.model_validate(item) for item in response.packages)
+
+    async def get_admin_snapshot(
+        self, tenant_id: str
+    ) -> tuple[
+        tuple[SkillPackageRecord, ...],
+        tuple[SkillPublicationRecord, ...],
+        tuple[SkillInstallationRecord, ...],
+    ]:
+        response = await self._admin_snapshot(tenant_id)
+        return (
+            tuple(SkillPackageRecord.model_validate(item) for item in response.packages),
+            tuple(
+                SkillPublicationRecord.model_validate(item)
+                for item in response.publications
+            ),
+            tuple(
+                SkillInstallationRecord.model_validate(item)
+                for item in response.installations
+            ),
+        )
 
     async def purge_package(self, command: PurgeSkillPackageCommand) -> SkillPackageRecord:
         response = await self._contract.call(

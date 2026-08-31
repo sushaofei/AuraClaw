@@ -43,6 +43,8 @@ registration lease 内仍活跃时，新进程注册会 fail closed。因此显�
 - Hands 以 Invocation execution claim 约束每个副作用 owner，并持续 heartbeat。Cancel 落到非 owner
   副本时写共享请求，由 owner 在轮询窗口内停止；`executing` claim 过期不得自动重放，而是进入
   `invocation_recovery_required`。waiting approval 的 payload 持久化并在重启后复用。
+- Skill 管理读取始终经 Hands 查询 PostgreSQL lifecycle，`SKILL.md` 经 Artifact 边界读取；Task API
+  的进程内 Skill Registry 不是管理事实源，清空缓存或重启 Task API 不需要预热才能提供管理查询。
 
 ## 生产配置门禁
 

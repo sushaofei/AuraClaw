@@ -5,14 +5,23 @@ import binascii
 from dataclasses import asdict, is_dataclass
 from typing import Any, cast
 
+from auraclaw.action.ports import ArtifactContentReader
 from auraclaw.action.skill_lifecycle import SkillLifecycleStore
 from auraclaw.action.skill_management import SkillManagementService
-from auraclaw.action.skill_packages import SkillPackage
+from auraclaw.action.skill_packages import (
+    SkillPackage,
+    skill_package_digest,
+    skill_package_from_archive,
+)
 from auraclaw.action.skill_publication import SkillPublicationService
 from auraclaw.action.skill_publishers import SkillPublisherService
 from auraclaw.action.skill_rebuild import SkillStateRebuilder
 from auraclaw.action.skill_sources import SkillSourceService
-from auraclaw.contracts.errors import AuthorizationError, SchemaValidationError
+from auraclaw.contracts.errors import (
+    AuthorizationError,
+    SchemaValidationError,
+    VersionConflictError,
+)
 from auraclaw.contracts.internal import (
     ServiceIdentity,
     SkillAdminSnapshotInternalRequest,
@@ -81,6 +90,7 @@ class SkillPublicationInternalService:
         publishers: SkillPublisherService | None = None,
         admissions: SkillLifecycleStore | None = None,
         sources: SkillSourceService | None = None,
+        artifacts: ArtifactContentReader | None = None,
     ) -> None:
         self._publication = publication
         self._management = management
@@ -88,6 +98,7 @@ class SkillPublicationInternalService:
         self._publishers = publishers
         self._admissions = admissions
         self._sources = sources
+        self._artifacts = artifacts
 
     async def configure_source(
         self, request: SkillSourceConfigureInternalRequest
@@ -420,8 +431,22 @@ class SkillPublicationInternalService:
             request.name,
             request.version,
         )
+        skill_markdown: str | None = None
+        if self._artifacts is not None:
+            content = await self._artifacts.read(
+                tenant_id=request.context.tenant_id,
+                artifact_ref=package.artifact_ref,
+                actor_id="task-api-skill-admin",
+                correlation_id=request.context.correlation_id,
+            )
+            archive = skill_package_from_archive(content)
+            if skill_package_digest(archive) != package.package_digest:
+                raise VersionConflictError("Persisted Skill package digest does not match")
+            markdown = archive.files.get("SKILL.md")
+            skill_markdown = None if markdown is None else markdown.decode()
         return SkillPackageStateInternalResponse(
-            package=package.model_dump(mode="json")
+            package=package.model_dump(mode="json"),
+            skill_markdown=skill_markdown,
         )
 
     async def purge(
