@@ -942,6 +942,9 @@ data: {"event_id":"rte_...","session_id":"ses_abc","run_id":"run_...","sequence"
 - 游标 `session_id:sequence`，同一 Session 多轮 Run 单调递增。
 - 无 `Last-Event-ID` 会回放保留窗口。
 - 游标过期时收到 `event: stream.reset`，`data.reason=cursor_expired`，应回退 Task / Result API。
+- 连续 `model.output.delta` 默认至少间隔 20ms 发送，避免 SQL 回放或轮询批次瞬间倾泻；可通过
+  `AURACLAW_STREAM_DELTA_MIN_INTERVAL_SECONDS` 在 0–0.1 秒范围内调整，设为 0 关闭整形。
+- PostgreSQL 连接队列满时保留未发送 cursor，客户端恢复消费后继续补发，不静默跳过 delta。
 - Kafka offset 不对外。SSE 不是结果交付保证。
 
 ### `GET /v1/operations/sessions/{session_id}/timeline`

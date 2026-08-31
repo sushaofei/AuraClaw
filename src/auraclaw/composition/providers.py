@@ -199,7 +199,12 @@ def get_streaming_ingestor() -> KafkaStreamingIngestor | None:
 
 @lru_cache
 def get_streaming_gateway() -> StreamingGateway:
-    return StreamingGateway(reader=get_task_projection(), bus=get_runtime_replay_bus())
+    settings = get_settings()
+    return StreamingGateway(
+        reader=get_task_projection(),
+        bus=get_runtime_replay_bus(),
+        delta_min_interval=settings.stream_delta_min_interval_seconds,
+    )
 
 
 @lru_cache

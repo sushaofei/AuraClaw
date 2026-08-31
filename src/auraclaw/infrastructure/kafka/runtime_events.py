@@ -225,12 +225,14 @@ class RuntimeSubscription:
         close: Callable[[], Awaitable[None]],
         *,
         replay_missed: bool,
+        on_dequeue: Callable[[], None] | None = None,
     ) -> None:
         self.initial = initial
         self.replay_missed = replay_missed
         self._queue = queue
         self._close = close
         self._closed = False
+        self._on_dequeue = on_dequeue
 
     async def events(self) -> AsyncIterator[RuntimeEvent]:
         try:
@@ -238,6 +240,8 @@ class RuntimeSubscription:
                 yield initial_event
             while True:
                 queued_event = await self._queue.get()
+                if self._on_dequeue is not None:
+                    self._on_dequeue()
                 if queued_event is None:
                     return
                 yield queued_event
@@ -349,6 +353,8 @@ class PostgresRuntimeEventStore(LazyPool):
         self._connection_ttl = connection_ttl
         self._poll_interval = poll_interval
         self._subscriptions: dict[str, asyncio.Task[None]] = {}
+        self._subscription_keys: dict[str, tuple[str, str]] = {}
+        self._subscription_wakeups: dict[str, asyncio.Event] = {}
         self._closed = False
 
     async def next_sequence(self, tenant_id: str, session_id: str) -> int:
@@ -416,6 +422,7 @@ class PostgresRuntimeEventStore(LazyPool):
             raise RuntimeEventRejectedError(
                 "runtime event sequence is already occupied"
             ) from exc
+        self._wake_local_subscriptions(event.tenant_id, event.session_id)
 
     async def ingest(self, event: RuntimeEvent) -> RuntimeEvent:
         """Assign the public cursor at the shared Kafka ingestion boundary."""
@@ -471,13 +478,18 @@ class PostgresRuntimeEventStore(LazyPool):
                 cursor,
                 self._connection_ttl,
             )
+        wakeup = asyncio.Event()
+        self._subscription_keys[connection_id] = (tenant_id, session_id)
+        self._subscription_wakeups[connection_id] = wakeup
         task = asyncio.create_task(
-            self._poll(connection_id, tenant_id, session_id, cursor, queue)
+            self._poll(connection_id, tenant_id, session_id, cursor, queue, wakeup)
         )
         self._subscriptions[connection_id] = task
 
         async def close() -> None:
             polling = self._subscriptions.pop(connection_id, None)
+            self._subscription_keys.pop(connection_id, None)
+            self._subscription_wakeups.pop(connection_id, None)
             if polling is not None and polling is not asyncio.current_task():
                 polling.cancel()
                 with suppress(asyncio.CancelledError):
@@ -488,7 +500,21 @@ class PostgresRuntimeEventStore(LazyPool):
                 connection_id,
             )
 
-        return RuntimeSubscription(initial, queue, close, replay_missed=replay_missed)
+        return RuntimeSubscription(
+            initial,
+            queue,
+            close,
+            replay_missed=replay_missed,
+            on_dequeue=wakeup.set,
+        )
+
+    def _wake_local_subscriptions(self, tenant_id: str, session_id: str) -> None:
+        key = (tenant_id, session_id)
+        for connection_id, subscription_key in tuple(self._subscription_keys.items()):
+            if subscription_key == key:
+                wakeup = self._subscription_wakeups.get(connection_id)
+                if wakeup is not None:
+                    wakeup.set()
 
     async def _poll(
         self,
@@ -497,10 +523,12 @@ class PostgresRuntimeEventStore(LazyPool):
         session_id: str,
         cursor: int,
         queue: asyncio.Queue[RuntimeEvent | None],
+        wakeup: asyncio.Event,
     ) -> None:
         pool = await self.pool()
         try:
             while True:
+                wakeup.clear()
                 rows = await pool.fetch(
                     """SELECT * FROM streaming.runtime_event
                        WHERE tenant_id = $1 AND session_id = $2 AND sequence > $3
@@ -512,14 +540,10 @@ class PostgresRuntimeEventStore(LazyPool):
                 )
                 for row in rows:
                     event = self._event(row)
-                    cursor = event.sequence
                     if queue.full():
-                        if event.type in _NON_CRITICAL_TYPES:
-                            continue
-                        with suppress(asyncio.QueueEmpty):
-                            queue.get_nowait()
-                    with suppress(asyncio.QueueFull):
-                        queue.put_nowait(event)
+                        break
+                    queue.put_nowait(event)
+                    cursor = event.sequence
                 await pool.execute(
                     """UPDATE streaming.connection_registry
                        SET cursor_sequence = $2, heartbeat_at = now(),
@@ -530,7 +554,12 @@ class PostgresRuntimeEventStore(LazyPool):
                     self._connection_ttl,
                     self._owner_id,
                 )
-                await asyncio.sleep(self._poll_interval)
+                if rows and not queue.full() and cursor < self._event(rows[-1]).sequence:
+                    continue
+                try:
+                    await asyncio.wait_for(wakeup.wait(), timeout=self._poll_interval)
+                except TimeoutError:
+                    pass
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -551,6 +580,8 @@ class PostgresRuntimeEventStore(LazyPool):
         self._closed = True
         tasks = tuple(self._subscriptions.values())
         self._subscriptions.clear()
+        self._subscription_keys.clear()
+        self._subscription_wakeups.clear()
         for task in tasks:
             task.cancel()
         for task in tasks:

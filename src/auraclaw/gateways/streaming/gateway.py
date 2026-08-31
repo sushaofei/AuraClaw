@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator
 from typing import Protocol
@@ -45,9 +46,16 @@ def _event_data(event: RuntimeEvent) -> dict[str, object]:
 class StreamingGateway:
     """Tenant-authorized SSE bridge over a shared, bounded replay buffer."""
 
-    def __init__(self, *, reader: TaskReader, bus: RuntimeReplayBus) -> None:
+    def __init__(
+        self,
+        *,
+        reader: TaskReader,
+        bus: RuntimeReplayBus,
+        delta_min_interval: float = 0.0,
+    ) -> None:
         self._reader = reader
         self._bus = bus
+        self._delta_min_interval = max(delta_min_interval, 0.0)
 
     async def subscribe(
         self,
@@ -88,9 +96,18 @@ class StreamingGateway:
                 separators=(",", ":"),
             )
             yield f"event: stream.reset\ndata: {data}\n\n"
+        last_delta_sent_at: float | None = None
+        loop = asyncio.get_running_loop()
         async for event in subscription.events():
             if event.visibility != "user":
                 continue
+            if event.type == "model.output.delta" and self._delta_min_interval > 0:
+                now = loop.time()
+                if last_delta_sent_at is not None:
+                    delay = self._delta_min_interval - (now - last_delta_sent_at)
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+                last_delta_sent_at = loop.time()
             data = json.dumps(_event_data(event), separators=(",", ":"))
             yield f"id: {_public_cursor(event)}\nevent: {event.type}\ndata: {data}\n\n"
 

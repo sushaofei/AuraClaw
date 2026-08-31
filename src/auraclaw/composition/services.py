@@ -860,6 +860,7 @@ def _streaming_app(settings: Settings) -> FastAPI:
     gateway = StreamingGateway(
         reader=projection,
         bus=providers.get_runtime_replay_bus(),
+        delta_min_interval=settings.stream_delta_min_interval_seconds,
     )
     app.dependency_overrides[get_streaming_gateway] = lambda: gateway
     app.state.closeables = (projection,)

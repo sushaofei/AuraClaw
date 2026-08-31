@@ -108,3 +108,37 @@ def test_postgres_streaming_sequence_replay_and_gateway_handoff() -> None:
             await store_b.close()
 
     asyncio.run(scenario())
+
+
+def test_postgres_streaming_wakes_immediately_and_preserves_slow_deltas() -> None:
+    async def scenario() -> None:
+        assert DATABASE_URL is not None
+        await _apply_migration()
+        suffix = uuid4().hex
+        tenant_id = f"tenant-stream-wakeup-{suffix}"
+        session_id = f"session-stream-wakeup-{suffix}"
+        store = PostgresRuntimeEventStore(
+            DATABASE_URL,
+            owner_id="gateway-wakeup",
+            retention_events=10,
+            connection_queue_size=1,
+            poll_interval=1.0,
+        )
+        try:
+            subscription = await store.subscribe(tenant_id, session_id, after_sequence=0)
+            stream = subscription.events()
+
+            await store.publish(_event(tenant_id, session_id, 1))
+            first = await asyncio.wait_for(anext(stream), timeout=0.25)
+            assert first.sequence == 1
+
+            await store.publish(_event(tenant_id, session_id, 2))
+            await store.publish(_event(tenant_id, session_id, 3))
+            second = await asyncio.wait_for(anext(stream), timeout=0.25)
+            third = await asyncio.wait_for(anext(stream), timeout=0.25)
+            assert [second.sequence, third.sequence] == [2, 3]
+            await stream.aclose()
+        finally:
+            await store.close()
+
+    asyncio.run(scenario())

@@ -402,6 +402,7 @@ class Settings(BaseSettings):
     kafka_streaming_group: str = "streaming-ingestor"
     runtime_event_retention_events: int = 1_000
     stream_connection_queue_size: int = 128
+    stream_delta_min_interval_seconds: float = Field(default=0.02, ge=0.0, le=0.1)
     cors_allow_origins: str = ""
     runtime_poll_interval: float = 0.05
     # Shared production-topology worker ticks (Outbox → Feed / Projection).
