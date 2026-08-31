@@ -5,7 +5,7 @@
 S4 的进程均为无本地业务状态实例；Canonical Event、Control、Projection、Delivery、Hands、
 Model、Policy、Credential、Artifact 和 Streaming 状态由各自 owner schema 持久化。生产环境建议
 Session、Orchestrator、Agent Runtime、Projection、Streaming、Delivery 与 Action Hands 至少 2 个
-副本，入口类服务至少 2 个副本；PostgreSQL、Kafka、SeaweedFS 与 Vault 使用平台提供的高可用
+副本，入口类服务至少 2 个副本；PostgreSQL、Kafka、OBS 与 Vault 使用平台提供的高可用
 部署。S5 已以 Docker Compose 固化副本、资源限额、内部网络、Secret mount 和蓝绿升级；
 Compose 不提供 HPA/PDB/NetworkPolicy，跨故障域高可用由两套独立 Compose 集群承担。
 
@@ -50,7 +50,7 @@ registration lease 内仍活跃时，新进程注册会 fail closed。因此显�
    独立的 `AURACLAW_MIGRATION_DATABASE_URL`。
 3. 所有 Control、Session 与 Hands 副本必须使用相同的 `AURACLAW_LEASE_SIGNING_KEY`，并通过平台
    Secret mount 注入。
-4. SeaweedFS bucket 权限只授予 Artifact Service；Vault token 只授予 Credential Proxy。Vault KV
+4. OBS bucket 权限只授予 Artifact Service；Vault token 只授予 Credential Proxy。Vault KV
    多字段引用必须使用 `path#field`。集成测试通过 `TEST_VAULT_CREDENTIAL_FIELD` 指定一次性测试值
    的字段名。
 5. `AURACLAW_ORCHESTRATOR_LEASE_TTL_SECONDS` 必须大于正常单次模型/工具网络超时；默认 300 秒。

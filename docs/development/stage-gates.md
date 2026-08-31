@@ -2296,3 +2296,22 @@ ready Skill Artifact 建立带 fencing 的物理回收流程；不把成功命�
 - [x] 全量 Pytest 与集成集通过；未配置的 PostgreSQL 生产角色和 SeaweedFS S3 共 3 项按声明跳过。
 - [ ] 在干净 PostgreSQL 与 KingBase 测试库完成 migration up/down、角色矩阵和核心 Store smoke。
 - [x] 本阶段随 `a6d238d` intentional commit 提交并 push；无关个人配置未入库。
+
+## 阶段三环境对象存储收敛到 OBS
+
+状态：开发、测试和生产配置已统一到华为 OBS；测试环境发布与实际对象操作验证完成。
+
+### 配置与安全
+
+- [x] `.env.dev.example`、`.env.test.example` 和 `.env.prod.example` 默认使用 `artifact_backend=obs`。
+- [x] 三份受保护的实际环境文件复用已验证 OBS 配置，不输出或提交 AK/SK。
+- [x] 测试/生产 Compose 仅向 Artifact Service 挂载 OBS AK/SK，不再挂载 SeaweedFS Secret。
+- [x] Compose 预检未指定后端时以 OBS 为安全默认；Secret 物化不再生成 SeaweedFS 占位文件。
+
+### 验证与交付
+
+- [x] 三套实际 `.env` 通过 Compose preflight，且无活跃 SeaweedFS 变量。
+- [x] 远程测试环境完成 Secret 物化、Artifact Service 重建与 readiness 验证。
+- [x] 完成 OBS single/multipart 及 AuraClaw 代理上传回归，测试对象已清理。
+- [x] Ruff、Mypy、定向测试与全量 Pytest 通过。
+- [x] 本阶段作为 intentional commit 提交并 push，不包含 `.env`、Secret、缓存或无关改动。

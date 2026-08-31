@@ -126,13 +126,9 @@ def test_production_compose_mounts_least_privilege_secrets() -> None:
         "vault_token" not in secret_sources(service)
         for service in APPLICATION_SERVICES - {"credential-proxy"}
     )
-    assert {"seaweedfs_access_key", "seaweedfs_secret_key", "obs_ak", "obs_sk"} <= secret_sources(
-        "artifact-service"
-    )
+    assert {"obs_ak", "obs_sk"} <= secret_sources("artifact-service")
     assert all(
-        "seaweedfs_access_key" not in secret_sources(service)
-        and "seaweedfs_secret_key" not in secret_sources(service)
-        and "obs_ak" not in secret_sources(service)
+        "obs_ak" not in secret_sources(service)
         and "obs_sk" not in secret_sources(service)
         for service in APPLICATION_SERVICES - {"artifact-service"}
     )
@@ -237,7 +233,7 @@ def test_env_templates_are_ready_to_copy() -> None:
     assert debug_settings.sql_storage_enabled is True
     assert debug_settings.runtime_event_backend == "kafka"
     assert debug_settings.kafka_host == "localhost"
-    assert debug_settings.artifact_backend == "seaweedfs"
+    assert debug_settings.artifact_backend == "obs"
     assert debug_settings.insecure_identity_headers_enabled
     assert debug_settings.deployment_profile == "development"
     assert debug_settings.lease_signing_key is not None
@@ -267,7 +263,7 @@ def test_env_templates_are_ready_to_copy() -> None:
         "AURACLAW_MODEL_API_KEY",
         "AURACLAW_MODEL_BASE_URL",
         "AURACLAW_MODEL_NAME",
-        # Development may use SeaweedFS while test/production use OBS.
+        # Deployment profiles may still override this explicitly.
         "AURACLAW_ARTIFACT_BACKEND",
         "AURACLAW_CREDENTIAL_VAULT_ADDR",
         "AURACLAW_CORS_ALLOW_ORIGINS",
@@ -337,9 +333,12 @@ def test_production_preflight_accepts_shared_database_url_and_unique_tokens(
         "AURACLAW_MODEL_NAME=test-model",
         "AURACLAW_CREDENTIAL_VAULT_ADDR=https://vault.example",
         "AURACLAW_CREDENTIAL_VAULT_TOKEN=test-vault-secret",
-        "SEAWEEDFS_HOST=seaweed.example",
-        "SEAWEEDFS_ACCESS_KEY=test-access",
-        "SEAWEEDFS_SECRET_KEY=test-secret",
+        "AURACLAW_ARTIFACT_BACKEND=obs",
+        "OBS_ENDPOINT=obsv3.example.com",
+        "OBS_BUCKET=auraclaw-artifacts",
+        "OBS_AK=test-obs-access",
+        "OBS_SK=test-obs-secret",
+        "OBS_REGION=example-region",
         "AURACLAW_CHAINTOWER_WORKLOAD_TOKEN=ct-" + "t" * 40,
         'AURACLAW_AGENT_CONTEXT_SIGNING_KEYS_JSON={"k1":"chaintower-agent-context-signing-key-01"}',
     ]

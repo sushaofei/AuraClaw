@@ -70,7 +70,7 @@ def _resolved_artifact_backend(values: dict[str, str]) -> str:
         return "obs"
     if values.get("SEAWEEDFS_HOST"):
         return "seaweedfs"
-    return "seaweedfs"
+    return "obs"
 
 
 def required_variables(values: dict[str, str]) -> tuple[str, ...]:

@@ -403,15 +403,7 @@ services:
       <<: *common-environment
       AURACLAW_HEALTH_PORT: "8009"
       AURACLAW_DATABASE_URL_FILE: /run/secrets/database_url
-      AURACLAW_ARTIFACT_BACKEND: ${AURACLAW_ARTIFACT_BACKEND:-seaweedfs}
-      SEAWEEDFS_ACCESS_KEY_FILE: /run/secrets/seaweedfs_access_key
-      SEAWEEDFS_SECRET_KEY_FILE: /run/secrets/seaweedfs_secret_key
-      SEAWEEDFS_HOST: ${SEAWEEDFS_HOST:-host.docker.internal}
-      SEAWEEDFS_S3_PORT: ${SEAWEEDFS_S3_PORT:-8333}
-      SEAWEEDFS_BUCKET: ${SEAWEEDFS_BUCKET:-auraclaw-artifacts}
-      SEAWEEDFS_REGION: ${SEAWEEDFS_REGION:-us-east-1}
-      SEAWEEDFS_USE_SSL: ${SEAWEEDFS_USE_SSL:-false}
-      SEAWEEDFS_PATH_STYLE: ${SEAWEEDFS_PATH_STYLE:-true}
+      AURACLAW_ARTIFACT_BACKEND: ${AURACLAW_ARTIFACT_BACKEND:-obs}
       OBS_AK_FILE: /run/secrets/obs_ak
       OBS_SK_FILE: /run/secrets/obs_sk
       OBS_ENDPOINT: ${OBS_ENDPOINT:-}
@@ -427,8 +419,6 @@ services:
       AURACLAW_ARTIFACT_SERVICE_WORKLOAD_TOKEN_FILE: /run/secrets/artifact_service_workload_token
     secrets:
       - database_url
-      - seaweedfs_access_key
-      - seaweedfs_secret_key
       - obs_ak
       - obs_sk
       - action_hands_workload_token
@@ -563,8 +553,6 @@ secrets:
   lease_signing_key: {file: "${AURACLAW_SECRET_DIR:-.runtime/compose-secrets}/lease_signing_key"}
   model_api_key: {file: "${AURACLAW_SECRET_DIR:-.runtime/compose-secrets}/model_api_key"}
   vault_token: {file: "${AURACLAW_SECRET_DIR:-.runtime/compose-secrets}/vault_token"}
-  seaweedfs_access_key: {file: "${AURACLAW_SECRET_DIR:-.runtime/compose-secrets}/seaweedfs_access_key"}
-  seaweedfs_secret_key: {file: "${AURACLAW_SECRET_DIR:-.runtime/compose-secrets}/seaweedfs_secret_key"}
   obs_ak: {file: "${AURACLAW_SECRET_DIR:-.runtime/compose-secrets}/obs_ak"}
   obs_sk: {file: "${AURACLAW_SECRET_DIR:-.runtime/compose-secrets}/obs_sk"}
   chaintower_workload_token: {file: "${AURACLAW_SECRET_DIR:-.runtime/compose-secrets}/chaintower_workload_token"}
