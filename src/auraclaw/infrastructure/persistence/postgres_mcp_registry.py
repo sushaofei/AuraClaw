@@ -1,9 +1,13 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from auraclaw.action.mcp_registry import McpServerRegistryStore, _aggregate_runtime
+from auraclaw.action.mcp_registry import (
+    McpOperationClaim,
+    McpServerRegistryStore,
+    _aggregate_runtime,
+)
 from auraclaw.contracts.errors import NotFoundError, VersionConflictError
 from auraclaw.contracts.mcp_registry import (
     McpActiveSnapshotEntry,
@@ -151,9 +155,20 @@ class PostgresMcpServerRegistryStore(LazyPool, McpServerRegistryStore):
         desired_state: McpDesiredState,
         active_revision: int | None,
         operation: McpServerOperationRecord,
+        claim_token: str | None = None,
     ) -> McpServerRecord:
         pool = await self.pool()
         async with pool.acquire() as connection, connection.transaction():
+                if claim_token is not None:
+                    owns_claim = await connection.fetchval(
+                        """SELECT true FROM hands.mcp_server_operation
+                        WHERE operation_id=$1 AND claim_token=$2 AND status='running'
+                          AND claim_expires_at > now() FOR UPDATE""",
+                        operation.operation_id,
+                        claim_token,
+                    )
+                    if owns_claim is None:
+                        raise VersionConflictError("MCP operation claim was lost")
                 row = await connection.fetchrow(
                     """UPDATE hands.mcp_server
                     SET desired_state=$1, active_revision=$2, updated_at=$3
@@ -173,16 +188,134 @@ class PostgresMcpServerRegistryStore(LazyPool, McpServerRegistryStore):
                     if existing is None:
                         raise NotFoundError("MCP server was not found")
                     raise VersionConflictError("MCP server revision conflict")
-                await _upsert_operation(connection, operation)
+                if claim_token is None:
+                    await _upsert_operation(connection, operation)
         hydrated = await self._hydrate(dict(row))
         return hydrated
 
+    async def claim_operation(
+        self,
+        operation: McpServerOperationRecord,
+        *,
+        request_digest: str,
+        claimed_by: str,
+        claim_token: str,
+        claim_ttl: timedelta,
+    ) -> McpOperationClaim:
+        pool = await self.pool()
+        tenant_id = operation.tenant_id or "platform"
+        async with pool.acquire() as connection, connection.transaction():
+            inserted = await connection.fetchval(
+                """INSERT INTO hands.mcp_server_operation
+                (operation_id,server_id,tenant_id,target_revision,command_id,actor_id,
+                 correlation_id,causation_id,operation,status,result_json,created_at,
+                 request_digest,claimed_by,claim_token,claim_expires_at,
+                 heartbeat_at,started_at)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'running','{}'::jsonb,$10,
+                        $11,$12,$13,now()+$14::interval,now(),now())
+                ON CONFLICT (tenant_id,command_id) DO NOTHING
+                RETURNING operation_id""",
+                operation.operation_id,
+                operation.server_id,
+                tenant_id,
+                operation.target_revision,
+                operation.command_id,
+                operation.actor_id,
+                operation.correlation_id,
+                operation.causation_id,
+                operation.operation.value,
+                operation.created_at,
+                request_digest,
+                claimed_by,
+                claim_token,
+                claim_ttl,
+            )
+            if inserted is not None:
+                running = operation.model_copy(
+                    update={"status": McpRegistryOperationStatus.RUNNING}
+                )
+                return McpOperationClaim(True, running, claim_token)
+            row = await connection.fetchrow(
+                """SELECT *,claim_expires_at > now() AS claim_active
+                FROM hands.mcp_server_operation
+                WHERE tenant_id=$1 AND command_id=$2 FOR UPDATE""",
+                tenant_id,
+                operation.command_id,
+            )
+            assert row is not None
+            if str(row["request_digest"]) != request_digest:
+                raise VersionConflictError(
+                    "MCP command id was already used for a different request"
+                )
+            if (
+                str(row["status"]) == "running"
+                and row["claim_expires_at"] is not None
+                and not bool(row["claim_active"])
+            ):
+                row = await connection.fetchrow(
+                    """UPDATE hands.mcp_server_operation
+                    SET status='unknown_side_effect',
+                        safe_error_code='mcp_operation_recovery_required',
+                        completed_at=now(),claimed_by=NULL,claim_token=NULL,
+                        claim_expires_at=NULL
+                    WHERE operation_id=$1 RETURNING *""",
+                    str(row["operation_id"]),
+                )
+                assert row is not None
+            return McpOperationClaim(False, _operation(dict(row)))
+
+    async def renew_operation(
+        self,
+        operation_id: str,
+        *,
+        claimed_by: str,
+        claim_token: str,
+        claim_ttl: timedelta,
+    ) -> bool:
+        pool = await self.pool()
+        status = await pool.execute(
+            """UPDATE hands.mcp_server_operation
+            SET claim_expires_at=now()+$4::interval,heartbeat_at=now()
+            WHERE operation_id=$1 AND claimed_by=$2 AND claim_token=$3
+              AND status='running' AND claim_expires_at > now()""",
+            operation_id,
+            claimed_by,
+            claim_token,
+            claim_ttl,
+        )
+        return str(status) == "UPDATE 1"
+
     async def complete_operation(
-        self, operation: McpServerOperationRecord
+        self,
+        operation: McpServerOperationRecord,
+        *,
+        claim_token: str | None = None,
     ) -> McpServerOperationRecord:
         pool = await self.pool()
         async with pool.acquire() as connection:
-            await _upsert_operation(connection, operation)
+            if claim_token is None:
+                await _upsert_operation(connection, operation)
+            else:
+                row = await connection.fetchrow(
+                    """UPDATE hands.mcp_server_operation SET status=$3,
+                       safe_error_code=$4,result_json=$5::jsonb,completed_at=$6,
+                       claimed_by=NULL,claim_token=NULL,claim_expires_at=NULL
+                    WHERE operation_id=$1 AND claim_token=$2
+                      AND status='running' AND claim_expires_at > now()
+                    RETURNING *""",
+                    operation.operation_id,
+                    claim_token,
+                    operation.status.value,
+                    operation.safe_error_code,
+                    json_dumps(operation.result),
+                    operation.completed_at,
+                )
+                if row is None:
+                    current = await connection.fetchrow(
+                        "SELECT * FROM hands.mcp_server_operation WHERE operation_id=$1",
+                        operation.operation_id,
+                    )
+                    return operation if current is None else _operation(dict(current))
         return operation
 
     async def update_runtime(self, runtime: McpServerRuntimeRecord) -> None:

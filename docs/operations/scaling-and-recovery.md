@@ -45,7 +45,7 @@ registration lease 内仍活跃时，新进程注册会 fail closed。因此显�
 
 ## 生产配置门禁
 
-1. 依次应用 PostgreSQL/KingBase `0010`～`0045` expand migration。`0040`
+1. 依次应用 PostgreSQL/KingBase `0010`～`0046` expand migration。`0040`
    `0022` 增加 registration 与 execution claim 字段和索引；先迁移 Control 数据库，再滚动升级
    Orchestrator，最后升级 Agent Runtime。可选执行 `deploy/postgres/roles.sql` 做硬化，
    当前部署不按服务注入分角色 DSN。
@@ -59,6 +59,8 @@ registration lease 内仍活跃时，新进程注册会 fail closed。因此显�
    Action Hands。升级期间不得同时运行会绕过 claim 的旧 Hands 副本。
    `0045` 增加 MCP Catalog 持久同步失败与 quarantine 字段；先迁移再滚动 Action Hands，观察失败
    计数只增不退、阈值隔离和成功清零。
+   `0046` 扩展 MCP Lifecycle Operation command digest、claim/heartbeat/expiry 和恢复状态；先迁移再
+   滚动 Hands 管理面，升级窗口暂停 MCP enable/disable/retire/reconcile 命令。
 2. 各服务共享统一 `AURACLAW_DATABASE_URL`（Compose `database_url` secret）；migration 使用
    独立的 `AURACLAW_MIGRATION_DATABASE_URL`。
 3. 所有 Control、Session 与 Hands 副本必须使用相同的 `AURACLAW_LEASE_SIGNING_KEY`，并通过平台
@@ -97,3 +99,6 @@ hostname）或注入唯一实例 UID。停止全部旧 Runtime，等待 30 秒�
 
 回滚 `0045` 前停止 Catalog reconcile，并确认没有处于 `quarantined` 的 Server。回滚会删除持久失败
 历史；若仍需隔离，必须先通过 desired state 显式 disable，不能依赖旧副本的内存计数。
+
+回滚 `0046` 前暂停 MCP Lifecycle 管理命令，等待 `running` claim 完成，并核对所有 `reconciling` 与
+`unknown_side_effect` Operation。未完成人工核对时禁止把扩展状态折叠为 failed 或删除 claim 证据。

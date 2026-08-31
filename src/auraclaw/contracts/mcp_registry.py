@@ -51,6 +51,8 @@ class McpRegistryOperationStatus(StrEnum):
     RUNNING = "running"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
+    RECONCILING = "reconciling"
+    UNKNOWN_SIDE_EFFECT = "unknown_side_effect"
 
 
 class McpServerConfig(ContractModel):

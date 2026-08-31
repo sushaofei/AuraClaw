@@ -273,7 +273,7 @@ def test_registry_delete_is_idempotent() -> None:
     asyncio.run(scenario())
 
 
-def test_failed_enable_keeps_previous_active_revision() -> None:
+def test_failed_enable_persists_intent_for_reconciliation() -> None:
     async def scenario() -> None:
         store = InMemoryMcpServerRegistryStore()
         service = McpServerRegistryService(store)
@@ -302,14 +302,14 @@ def test_failed_enable_keeps_previous_active_revision() -> None:
 
         service.bind_runtime(Boom())
         failed = await service.enable("local-order-mcp", _life())
-        assert failed.status.value == "failed"
+        assert failed.status.value == "reconciling"
         record = await service.get_server(
             tenant_id="tenant-a",
             server_id="local-order-mcp",
             actor_id="admin-1",
         )
-        assert record.active_revision is None
-        assert record.desired_state is McpDesiredState.DISABLED
+        assert record.active_revision == 1
+        assert record.desired_state is McpDesiredState.ENABLED
 
         service.bind_runtime(Ok())
         enabled = await service.enable(
@@ -324,13 +324,13 @@ def test_failed_enable_keeps_previous_active_revision() -> None:
             "local-order-mcp",
             _life(command_id="cmd-enable-4", expected_revision=2, target_revision=2),
         )
-        assert failed_promote.status.value == "failed"
+        assert failed_promote.status.value == "reconciling"
         record = await service.get_server(
             tenant_id="tenant-a",
             server_id="local-order-mcp",
             actor_id="admin-1",
         )
-        assert record.active_revision == 1
+        assert record.active_revision == 2
 
     asyncio.run(scenario())
 

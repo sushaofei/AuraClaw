@@ -108,6 +108,10 @@ Invocation Store 同时持久保存 execution owner、claim token、heartbeat/ex
 配置保留。Java API Connector 只允许已注册 operation 的 method/path template，禁止模型覆盖
 scheme、host、port、method 或 headers。
 
+MCP Lifecycle 管理命令在 Runtime apply/revoke 前按 tenant/command digest 原子 claim。Enable、Disable、
+Retire 与 Reconcile 先持久提交 desired-state intent，再由各 Hands 副本 reconcile 实际 Connector、Catalog
+和 Egress；即时副作用失败进入 `reconciling`，claim owner 失联进入 `unknown_side_effect`，均不盲目重放。
+
 ### 7. Policy 与 Approval
 
 Policy 是 Task Admission、Model/Data Residency、Runtime Placement、Tool/Side Effect、Delivery Egress、Artifact Download/Share
