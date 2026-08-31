@@ -40,34 +40,51 @@ class PostgresArtifactRepository(LazyPool):
             pending.retention_until,
         )
 
-    async def mark_multipart_completed(self, pending: PendingUpload) -> None:
+    async def mark_multipart_completed(self, pending: PendingUpload) -> bool:
         pool = await self.pool()
-        await pool.execute(
-            """UPDATE artifact.metadata SET multipart_completed_at=now()
+        result = await pool.execute(
+            """UPDATE artifact.metadata SET multipart_completed_at=now(),
+            object_side_effect_started_at=NULL
             WHERE tenant_id=$1 AND artifact_id=$2 AND upload_id=$3
-              AND status IN ('pending','scanning') AND finalize_claim_token=$4""",
+              AND status IN ('pending','scanning') AND finalize_claim_token=$4
+              AND finalize_claim_expires_at > now()""",
             pending.tenant_id,
             pending.artifact_id,
             pending.upload_id,
             pending.finalize_claim_token,
         )
+        return str(result) == "UPDATE 1"
 
-    async def claim_finalize(self, pending: PendingUpload) -> PendingUpload | None:
+    async def claim_finalize(
+        self, pending: PendingUpload, *, claim_ttl: timedelta = timedelta(seconds=30)
+    ) -> PendingUpload | None:
         pool = await self.pool()
+        await pool.execute(
+            """UPDATE artifact.metadata SET status='reconciling',
+            object_state='unknown',reconciliation_reason='finalize_owner_lost_after_side_effect',
+            reconciliation_updated_at=now()
+            WHERE tenant_id=$1 AND artifact_id=$2 AND upload_id=$3
+              AND status='scanning' AND finalize_claim_expires_at<=now()
+              AND object_side_effect_started_at IS NOT NULL""",
+            pending.tenant_id,
+            pending.artifact_id,
+            pending.upload_id,
+        )
         token = f"finalize_{uuid4().hex}"
         row = await pool.fetchrow(
             """UPDATE artifact.metadata SET status='scanning',scan_status='scanning',
-            scan_started_at=now(),finalize_claim_token=$4,
+            scan_started_at=now(),finalize_heartbeat_at=now(),finalize_claim_token=$4,
             finalize_claim_expires_at=now()+$5::interval
             WHERE tenant_id=$1 AND artifact_id=$2 AND upload_id=$3
               AND status IN ('pending','scanning')
+              AND object_side_effect_started_at IS NULL
               AND (finalize_claim_expires_at IS NULL OR finalize_claim_expires_at<=now())
             RETURNING *""",
             pending.tenant_id,
             pending.artifact_id,
             pending.upload_id,
             token,
-            timedelta(seconds=30),
+            claim_ttl,
         )
         return self._pending(row) if row is not None else None
 
@@ -88,10 +105,13 @@ class PostgresArtifactRepository(LazyPool):
         pool = await self.pool()
         result = await pool.execute(
             """UPDATE artifact.metadata SET status='ready',scan_status='clean',version=$4,
-            finalize_claim_token=NULL,finalize_claim_expires_at=NULL
+            finalize_claim_token=NULL,finalize_claim_expires_at=NULL,
+            finalize_heartbeat_at=NULL,object_state='known',reconciliation_reason=NULL,
+            object_side_effect_started_at=NULL
             WHERE tenant_id=$1 AND artifact_id=$2 AND upload_id=$3
               AND ((status='pending' AND $5::text IS NULL)
-                   OR (status='scanning' AND finalize_claim_token=$5))""",
+                   OR (status='scanning' AND finalize_claim_token=$5
+                       AND finalize_claim_expires_at > now()))""",
             pending.tenant_id,
             pending.artifact_id,
             pending.upload_id,
@@ -100,19 +120,56 @@ class PostgresArtifactRepository(LazyPool):
         )
         return str(result) == "UPDATE 1"
 
-    async def mark_quarantined(self, pending: PendingUpload, reason: str) -> None:
+    async def mark_quarantined(self, pending: PendingUpload, reason: str) -> bool:
         pool = await self.pool()
-        await pool.execute(
+        result = await pool.execute(
             """UPDATE artifact.metadata SET status='quarantined',
             scan_status='quarantined',scan_error=$4,
-            finalize_claim_token=NULL,finalize_claim_expires_at=NULL
+            finalize_claim_token=NULL,finalize_claim_expires_at=NULL,
+            finalize_heartbeat_at=NULL,object_state='known',
+            object_side_effect_started_at=NULL
             WHERE tenant_id=$1 AND artifact_id=$2 AND upload_id=$3
-              AND status IN ('pending','scanning') AND finalize_claim_token=$5""",
+              AND status IN ('pending','scanning') AND finalize_claim_token=$5
+              AND finalize_claim_expires_at > now()""",
             pending.tenant_id,
             pending.artifact_id,
             pending.upload_id,
             reason,
             pending.finalize_claim_token,
+        )
+        return str(result) == "UPDATE 1"
+
+    async def renew_finalize(
+        self, pending: PendingUpload, *, claim_ttl: timedelta
+    ) -> bool:
+        pool = await self.pool()
+        result = await pool.execute(
+            """UPDATE artifact.metadata SET finalize_heartbeat_at=now(),
+            finalize_claim_expires_at=now()+$5::interval
+            WHERE tenant_id=$1 AND artifact_id=$2 AND upload_id=$3
+              AND status='scanning' AND finalize_claim_token=$4
+              AND finalize_claim_expires_at > now()""",
+            pending.tenant_id,
+            pending.artifact_id,
+            pending.upload_id,
+            pending.finalize_claim_token,
+            claim_ttl,
+        )
+        return str(result) == "UPDATE 1"
+
+    async def validate_finalize(self, pending: PendingUpload) -> bool:
+        pool = await self.pool()
+        return bool(
+            await pool.fetchval(
+                """SELECT EXISTS(SELECT 1 FROM artifact.metadata
+                WHERE tenant_id=$1 AND artifact_id=$2 AND upload_id=$3
+                  AND status='scanning' AND finalize_claim_token=$4
+                  AND finalize_claim_expires_at > now())""",
+                pending.tenant_id,
+                pending.artifact_id,
+                pending.upload_id,
+                pending.finalize_claim_token,
+            )
         )
 
     async def get_ready(
@@ -121,7 +178,8 @@ class PostgresArtifactRepository(LazyPool):
         pool = await self.pool()
         row = await pool.fetchrow(
             """SELECT * FROM artifact.metadata WHERE tenant_id=$1 AND artifact_id=$2
-            AND version=$3 AND status='ready' AND deleted_at IS NULL""",
+            AND version=$3 AND status='ready' AND object_state='known'
+            AND deleted_at IS NULL""",
             tenant_id,
             artifact_id,
             version,
@@ -129,17 +187,35 @@ class PostgresArtifactRepository(LazyPool):
         return self._pending(row) if row is not None else None
 
     async def claim_ready_delete(
-        self, tenant_id: str, artifact_id: str, version: int
+        self,
+        tenant_id: str,
+        artifact_id: str,
+        version: int,
+        *,
+        claim_ttl: timedelta = timedelta(seconds=30),
     ) -> PendingUpload | None:
         pool = await self.pool()
+        await pool.execute(
+            """UPDATE artifact.metadata SET status='reconciling',object_state='unknown',
+            reconciliation_reason='delete_owner_lost_after_side_effect',
+            reconciliation_updated_at=now()
+            WHERE tenant_id=$1 AND artifact_id=$2 AND version=$3
+              AND status='deleting' AND gc_claim_expires_at<=now()
+              AND object_side_effect_started_at IS NOT NULL""",
+            tenant_id,
+            artifact_id,
+            version,
+        )
         token = f"delete_{uuid4().hex}"
         row = await pool.fetchrow(
             """UPDATE artifact.metadata SET status='deleting',gc_claim_token=$4,
+            gc_heartbeat_at=now(),
             gc_claim_expires_at=now()+$5::interval,gc_attempt_count=gc_attempt_count+1
             WHERE tenant_id=$1 AND artifact_id=$2 AND version=$3
               AND (status='ready' OR (
                     status='deleting' AND gc_claim_expires_at <= now()))
-              AND deleted_at IS NULL AND NOT legal_hold
+              AND deleted_at IS NULL AND object_state='known' AND NOT legal_hold
+              AND object_side_effect_started_at IS NULL
               AND retention_until IS NOT NULL AND retention_until <= now()
               AND (gc_claim_expires_at IS NULL OR gc_claim_expires_at <= now())
             RETURNING *""",
@@ -147,7 +223,7 @@ class PostgresArtifactRepository(LazyPool):
             artifact_id,
             version,
             token,
-            timedelta(seconds=30),
+            claim_ttl,
         )
         return self._pending(row) if row is not None else None
 
@@ -155,13 +231,98 @@ class PostgresArtifactRepository(LazyPool):
         pool = await self.pool()
         result = await pool.execute(
             """UPDATE artifact.metadata SET status='deleted',deleted_at=now(),
-            gc_last_error=NULL,gc_claim_token=NULL,gc_claim_expires_at=NULL
+            gc_last_error=NULL,gc_claim_token=NULL,gc_claim_expires_at=NULL,
+            gc_heartbeat_at=NULL,object_state='known',reconciliation_reason=NULL,
+            object_side_effect_started_at=NULL
             WHERE tenant_id=$1 AND artifact_id=$2 AND status='deleting'
-              AND gc_claim_token=$3""",
+              AND gc_claim_token=$3 AND gc_claim_expires_at > now()""",
             pending.tenant_id,
             pending.artifact_id,
             pending.gc_claim_token,
         )
+        return str(result) == "UPDATE 1"
+
+    async def renew_gc(self, pending: PendingUpload, *, claim_ttl: timedelta) -> bool:
+        pool = await self.pool()
+        result = await pool.execute(
+            """UPDATE artifact.metadata SET gc_heartbeat_at=now(),
+            gc_claim_expires_at=now()+$4::interval
+            WHERE tenant_id=$1 AND artifact_id=$2 AND gc_claim_token=$3
+              AND gc_claim_expires_at > now() AND deleted_at IS NULL""",
+            pending.tenant_id,
+            pending.artifact_id,
+            pending.gc_claim_token,
+            claim_ttl,
+        )
+        return str(result) == "UPDATE 1"
+
+    async def validate_gc(self, pending: PendingUpload) -> bool:
+        pool = await self.pool()
+        return bool(
+            await pool.fetchval(
+                """SELECT EXISTS(SELECT 1 FROM artifact.metadata
+                WHERE tenant_id=$1 AND artifact_id=$2 AND gc_claim_token=$3
+                  AND gc_claim_expires_at > now() AND deleted_at IS NULL)""",
+                pending.tenant_id,
+                pending.artifact_id,
+                pending.gc_claim_token,
+            )
+        )
+
+    async def mark_reconciling(
+        self, pending: PendingUpload, *, operation: str, reason: str
+    ) -> bool:
+        pool = await self.pool()
+        token = (
+            pending.finalize_claim_token
+            if operation == "finalize"
+            else pending.gc_claim_token
+        )
+        token_column = (
+            "finalize_claim_token" if operation == "finalize" else "gc_claim_token"
+        )
+        result = await pool.execute(
+            f"""UPDATE artifact.metadata SET status='reconciling',object_state='unknown',
+            reconciliation_reason=$4,reconciliation_updated_at=now(),
+            object_operation_ref=$5
+            WHERE tenant_id=$1 AND artifact_id=$2 AND {token_column}=$3
+              AND deleted_at IS NULL""",
+            pending.tenant_id,
+            pending.artifact_id,
+            token,
+            reason,
+            f"{operation}:{pending.artifact_id}:{pending.version}",
+        )
+        return str(result) == "UPDATE 1"
+
+    async def begin_object_side_effect(
+        self, pending: PendingUpload, *, operation: str
+    ) -> bool:
+        pool = await self.pool()
+        if operation == "finalize":
+            result = await pool.execute(
+                """UPDATE artifact.metadata SET object_side_effect_started_at=now(),
+                object_operation_ref=$5
+                WHERE tenant_id=$1 AND artifact_id=$2 AND upload_id=$3
+                  AND status='scanning' AND finalize_claim_token=$4
+                  AND finalize_claim_expires_at > now()""",
+                pending.tenant_id,
+                pending.artifact_id,
+                pending.upload_id,
+                pending.finalize_claim_token,
+                f"finalize:{pending.artifact_id}:{pending.version}",
+            )
+        else:
+            result = await pool.execute(
+                """UPDATE artifact.metadata SET object_side_effect_started_at=now(),
+                object_operation_ref=$4
+                WHERE tenant_id=$1 AND artifact_id=$2 AND gc_claim_token=$3
+                  AND gc_claim_expires_at > now() AND deleted_at IS NULL""",
+                pending.tenant_id,
+                pending.artifact_id,
+                pending.gc_claim_token,
+                f"gc:{pending.artifact_id}:{pending.version}",
+            )
         return str(result) == "UPDATE 1"
 
     async def is_deleted(
@@ -181,18 +342,20 @@ class PostgresArtifactRepository(LazyPool):
 
     async def release_ready_delete(
         self, pending: PendingUpload, error: str
-    ) -> None:
+    ) -> bool:
         pool = await self.pool()
-        await pool.execute(
+        result = await pool.execute(
             """UPDATE artifact.metadata SET status='ready',gc_claim_token=NULL,
-            gc_claim_expires_at=NULL,gc_last_error=$3
+            gc_claim_expires_at=NULL,gc_heartbeat_at=NULL,gc_last_error=$3,
+            object_side_effect_started_at=NULL
             WHERE tenant_id=$1 AND artifact_id=$2 AND status='deleting'
-              AND gc_claim_token=$4""",
+              AND gc_claim_token=$4 AND gc_claim_expires_at > now()""",
             pending.tenant_id,
             pending.artifact_id,
             error,
             pending.gc_claim_token,
         )
+        return str(result) == "UPDATE 1"
 
     async def get_ready_delete_claim(
         self,
@@ -226,7 +389,7 @@ class PostgresArtifactRepository(LazyPool):
             """UPDATE artifact.metadata SET skill_publish_claim_token=$4,
             skill_publish_claim_expires_at=now()+interval '15 minutes'
             WHERE tenant_id=$1 AND artifact_id=$2 AND version=$3
-              AND status='ready' AND deleted_at IS NULL
+              AND status='ready' AND object_state='known' AND deleted_at IS NULL
               AND media_type='application/vnd.auraclaw.skill-package+json'
               AND (root_session_id='skill-registry'
                    OR root_session_id LIKE 'skill-upload:%')
@@ -260,7 +423,8 @@ class PostgresArtifactRepository(LazyPool):
               AND deleted_at IS NULL AND (
                 (status='ready' AND (
                   skill_publish_claim_token=$6 OR skill_bound_digest=$5))
-                OR (status='deleting' AND gc_claim_token=$7))""",
+                OR (status='deleting' AND gc_claim_token=$7
+                    AND gc_claim_expires_at > now()))""",
             pending.tenant_id,
             pending.artifact_id,
             pending.version,
@@ -272,17 +436,31 @@ class PostgresArtifactRepository(LazyPool):
         return str(result) == "UPDATE 1"
 
     async def claim_skill_orphans(
-        self, *, owner: str, limit: int = 100
+        self,
+        *,
+        owner: str,
+        limit: int = 100,
+        claim_ttl: timedelta = timedelta(seconds=30),
     ) -> list[PendingUpload]:
         pool = await self.pool()
+        await pool.execute(
+            """UPDATE artifact.metadata SET status='reconciling',object_state='unknown',
+            reconciliation_reason='orphan_owner_lost_after_side_effect',
+            reconciliation_updated_at=now()
+            WHERE status='deleting' AND gc_claim_expires_at<=now()
+              AND object_side_effect_started_at IS NOT NULL
+              AND media_type='application/vnd.auraclaw.skill-package+json'"""
+        )
         token = f"skill-orphan:{owner}:{uuid4().hex}"
         rows = await pool.fetch(
             """UPDATE artifact.metadata target SET status='deleting',
-                   gc_claim_token=$2,gc_claim_expires_at=now()+interval '30 seconds',
+                   gc_claim_token=$2,gc_heartbeat_at=now(),
+                   gc_claim_expires_at=now()+$3::interval,
                    gc_attempt_count=gc_attempt_count+1
                WHERE (tenant_id,artifact_id) IN (
                    SELECT tenant_id,artifact_id FROM artifact.metadata
-                   WHERE status='ready' AND deleted_at IS NULL AND NOT legal_hold
+                   WHERE status='ready' AND object_state='known'
+                     AND deleted_at IS NULL AND NOT legal_hold
                      AND media_type='application/vnd.auraclaw.skill-package+json'
                      AND (root_session_id='skill-registry'
                           OR root_session_id LIKE 'skill-upload:%')
@@ -291,11 +469,13 @@ class PostgresArtifactRepository(LazyPool):
                      AND (skill_publish_claim_expires_at IS NULL
                           OR skill_publish_claim_expires_at <= now())
                      AND (gc_claim_expires_at IS NULL OR gc_claim_expires_at <= now())
+                     AND object_side_effect_started_at IS NULL
                    ORDER BY retention_until,artifact_id
                    FOR UPDATE SKIP LOCKED LIMIT $1
                ) RETURNING target.*""",
             limit,
             token,
+            claim_ttl,
         )
         return [self._pending(row) for row in rows]
 
@@ -307,56 +487,125 @@ class PostgresArtifactRepository(LazyPool):
         )
         return int(result.rsplit(" ", 1)[-1])
 
-    async def expired_uploads(self, *, limit: int = 100) -> list[PendingUpload]:
+    async def claim_reconciling(
+        self,
+        *,
+        owner: str,
+        limit: int = 1,
+        claim_ttl: timedelta = timedelta(seconds=30),
+    ) -> list[PendingUpload]:
         pool = await self.pool()
+        token = f"reconcile:{owner}:{uuid4().hex}"
+        rows = await pool.fetch(
+            """UPDATE artifact.metadata target SET gc_claim_token=$2,
+            gc_heartbeat_at=now(),gc_claim_expires_at=now()+$3::interval
+            WHERE (tenant_id,artifact_id) IN (
+                SELECT tenant_id,artifact_id FROM artifact.metadata
+                WHERE status='reconciling' AND object_state='unknown'
+                  AND deleted_at IS NULL
+                  AND (gc_claim_expires_at IS NULL OR gc_claim_expires_at<=now())
+                ORDER BY reconciliation_updated_at,artifact_id
+                FOR UPDATE SKIP LOCKED LIMIT $1
+            ) RETURNING target.*""",
+            limit,
+            token,
+            claim_ttl,
+        )
+        return [self._pending(row) for row in rows]
+
+    async def resolve_reconciling(
+        self, pending: PendingUpload, *, status: str, reason: str
+    ) -> bool:
+        if status not in {"ready", "pending", "deleted", "quarantined"}:
+            return False
+        pool = await self.pool()
+        result = await pool.execute(
+            """UPDATE artifact.metadata SET status=$4,object_state='known',
+            deleted_at=CASE WHEN $4='deleted' THEN now() ELSE deleted_at END,
+            scan_status=CASE WHEN $4='ready' THEN 'clean'
+                             WHEN $4='quarantined' THEN 'quarantined'
+                             ELSE scan_status END,
+            reconciliation_reason=$5,reconciliation_updated_at=now(),
+            object_side_effect_started_at=NULL,finalize_claim_token=NULL,
+            finalize_claim_expires_at=NULL,finalize_heartbeat_at=NULL,
+            gc_claim_token=NULL,gc_claim_expires_at=NULL,gc_heartbeat_at=NULL
+            WHERE tenant_id=$1 AND artifact_id=$2 AND gc_claim_token=$3
+              AND status='reconciling' AND object_state='unknown'
+              AND gc_claim_expires_at > now()""",
+            pending.tenant_id,
+            pending.artifact_id,
+            pending.gc_claim_token,
+            status,
+            reason,
+        )
+        return str(result) == "UPDATE 1"
+
+    async def expired_uploads(
+        self, *, limit: int = 100, claim_ttl: timedelta = timedelta(seconds=30)
+    ) -> list[PendingUpload]:
+        pool = await self.pool()
+        await pool.execute(
+            """UPDATE artifact.metadata SET status='reconciling',object_state='unknown',
+            reconciliation_reason='gc_owner_lost_after_side_effect',
+            reconciliation_updated_at=now()
+            WHERE status IN ('pending','scanning') AND gc_claim_expires_at<=now()
+              AND object_side_effect_started_at IS NOT NULL AND deleted_at IS NULL"""
+        )
         token = f"gc_{uuid4().hex}"
         rows = await pool.fetch(
             """UPDATE artifact.metadata target SET gc_claim_token=$2,
-                   gc_claim_expires_at=now()+$3::interval,
+                   gc_heartbeat_at=now(),gc_claim_expires_at=now()+$3::interval,
                    gc_attempt_count=gc_attempt_count+1
                WHERE (tenant_id,artifact_id) IN (
                    SELECT tenant_id,artifact_id FROM artifact.metadata
                    WHERE status IN ('pending','scanning')
+                     AND object_state='known'
                      AND upload_expires_at <= now() AND NOT legal_hold
                      AND deleted_at IS NULL
                      AND (gc_claim_expires_at IS NULL OR gc_claim_expires_at <= now())
+                     AND object_side_effect_started_at IS NULL
                    ORDER BY upload_expires_at,artifact_id
                    FOR UPDATE SKIP LOCKED LIMIT $1
                )
                RETURNING target.*""",
             limit,
             token,
-            timedelta(seconds=30),
+            claim_ttl,
         )
         return [self._pending(row) for row in rows]
 
-    async def mark_deleted(self, pending: PendingUpload) -> None:
+    async def mark_deleted(self, pending: PendingUpload) -> bool:
         pool = await self.pool()
-        await pool.execute(
+        result = await pool.execute(
             """UPDATE artifact.metadata SET status='deleted',deleted_at=now(),
-            gc_last_error=NULL,gc_claim_token=NULL,gc_claim_expires_at=NULL
+            gc_last_error=NULL,gc_claim_token=NULL,gc_claim_expires_at=NULL,
+            gc_heartbeat_at=NULL,object_state='known',reconciliation_reason=NULL,
+            object_side_effect_started_at=NULL
             WHERE tenant_id=$1 AND artifact_id=$2 AND upload_id=$3
               AND status IN ('pending','scanning') AND NOT legal_hold
-              AND gc_claim_token=$4""",
+              AND gc_claim_token=$4 AND gc_claim_expires_at > now()""",
             pending.tenant_id,
             pending.artifact_id,
             pending.upload_id,
             pending.gc_claim_token,
         )
+        return str(result) == "UPDATE 1"
 
-    async def release_gc(self, pending: PendingUpload, error: str) -> None:
+    async def release_gc(self, pending: PendingUpload, error: str) -> bool:
         pool = await self.pool()
-        await pool.execute(
+        result = await pool.execute(
             """UPDATE artifact.metadata SET gc_claim_token=NULL,
-            gc_claim_expires_at=NULL,gc_last_error=$4
+            gc_claim_expires_at=NULL,gc_last_error=$4,
+            gc_heartbeat_at=NULL,object_side_effect_started_at=NULL
             WHERE tenant_id=$1 AND artifact_id=$2 AND upload_id=$3
-              AND gc_claim_token=$5""",
+              AND gc_claim_token=$5 AND gc_claim_expires_at > now()""",
             pending.tenant_id,
             pending.artifact_id,
             pending.upload_id,
             error,
             pending.gc_claim_token,
         )
+        return str(result) == "UPDATE 1"
 
     @staticmethod
     def _pending(row: asyncpg.Record) -> PendingUpload:
@@ -408,4 +657,11 @@ class PostgresArtifactRepository(LazyPool):
             ),
             retention_until=row["retention_until"],
             legal_hold=bool(row["legal_hold"]),
+            lifecycle_status=str(row["status"]),
+            scan_status=str(row["scan_status"]),
+            object_operation_ref=(
+                str(row["object_operation_ref"])
+                if row["object_operation_ref"] is not None
+                else None
+            ),
         )

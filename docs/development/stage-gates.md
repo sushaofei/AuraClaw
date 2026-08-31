@@ -2572,3 +2572,29 @@ ready Skill Artifact 建立带 fencing 的物理回收流程；不把成功命�
 - [x] PostgreSQL 集成覆盖原子 claim、heartbeat、终态单调、tenant/run 校验及过期 owner 保留额度。
 - [x] Ruff、Mypy、import-linter、迁移 roundtrip、定向与完整 Pytest 通过。
 - [x] Git 暂存范围审查、intentional commit 与 push 完成；Issue #64 可关闭。
+
+## 阶段 Artifact PostgreSQL 权威状态与 Lease-safe 对象操作（Issue #66）
+
+状态：代码、迁移、测试和文档完成。
+
+### 权威状态与缓存
+
+- [x] Finalize 仅在 PostgreSQL `mark_ready` 成功后发布本地 ready；失败会清除派生状态。
+- [x] Production download 始终查询 PostgreSQL ready/deleted/scan 状态，数据库故障 fail closed，不回退 cache。
+- [x] 跨副本 delete、quarantine、重启和 cache clear 后的访问结果由同一 metadata 事实决定。
+
+### Claim、对象副作用与恢复
+
+- [x] `0049` 正反迁移增加 finalize/GC heartbeat、object side-effect marker 与 reconciliation 字段/索引。
+- [x] Multipart、scan、delete、expired upload GC 和 Skill orphan resolution 使用可配置 TTL 并持续 renew。
+- [x] 每个对象存储副作用前后验证 owner/token；mark/release 影响零行作为 lease lost。
+- [x] 副作用开始后 owner 丢失不会直接 takeover/replay，而进入 `reconciling/object_state=unknown`。
+- [x] Reconciler 使用对象 HEAD/checksum 收敛 ready/pending/quarantined/deleted；GC/orphan 逐条 JIT claim。
+- [x] Worker cancellation 停止 renewal，未开始副作用可在过期后领取，已开始副作用转 reconciliation。
+
+### 验证与交付
+
+- [x] 单元测试覆盖 ready commit 失败、PostgreSQL 故障 fail closed 与慢 scan 持续续租。
+- [x] PostgreSQL/Object Storage 集成覆盖跨副本删除、续租、防旧 owner 提交、unknown fencing 和 `0049` roundtrip。
+- [x] Ruff、Mypy、import-linter、定向与完整 Pytest 通过。
+- [x] Git 暂存范围审查、intentional commit 与 push 完成；Issue #66 关闭。

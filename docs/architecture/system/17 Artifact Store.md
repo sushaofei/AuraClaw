@@ -56,6 +56,11 @@ Hands / Agent / Delivery Producer
 
 大型输出不能先写入 Session 再异步搬运，否则会污染 Event Log 并产生双事实源。
 
+PostgreSQL metadata 是 ready、deleted、quarantined、retention、legal hold 与访问可见性的唯一权威。
+对象上传/扫描完成后必须先提交 metadata，之后才能发布任何本地 ready cache；生产 download/delete
+每次签发 URL 或执行对象操作前都重新读取 PostgreSQL，cache hit、cache miss、重启和数据库故障不能改变
+授权结果。数据库不可用时敏感读 fail closed，不回退到旧 `_ready`。
+
 ## 读取流程
 
 - Task Query：校验 Root/Child 权限后返回短期下载链接。
@@ -76,6 +81,12 @@ Hands / Agent / Delivery Producer
 - 最终结果与审计证据按 Session 策略保留。
 - 被 Session、Delivery 或 Review 引用的 Artifact 不得提前回收。
 - 删除使用引用计数/标记清理和合规保留检查。
+- Finalize、multipart complete、scan、delete、expired upload GC 与 Skill orphan resolution 使用可配置
+  claim TTL，并以 owner token heartbeat 续租；每个对象存储副作用前后都验证 ownership。
+- 对象副作用开始前先持久化 operation marker。owner 在副作用开始后失联时，过期 claim 不会被另一
+  副本直接重放，而进入 `reconciling/object_state=unknown`；reconciler 通过 checksum/HEAD 对比对象与
+  metadata，安全收敛为 ready、pending、quarantined 或 deleted。
+- GC 与 orphan 使用逐条 just-in-time claim；批量上限只决定循环容量，不让排在批尾的记录提前过期。
 
 ## 安全与观测
 
@@ -85,6 +96,7 @@ Hands / Agent / Delivery Producer
 - 对可执行文件、压缩包和外部内容进行扫描。
 - 敏感 Artifact 不生成可转发的永久链接。
 - 指标：storage bytes、upload/download latency、scan failure、orphan artifact、GC reclaimed、signed URL use。
+- 续租失败、lease lost、unknown object state、reconciliation backlog/latency 与 stale cache rejection 必须可观测。
 
 ## 验收条件
 

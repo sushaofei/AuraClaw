@@ -398,6 +398,8 @@ class Settings(BaseSettings):
     artifact_multipart_part_size: int = Field(
         default=8 * 1024 * 1024, ge=5 * 1024 * 1024
     )
+    artifact_claim_ttl_seconds: float = Field(default=30.0, ge=3.0, le=3600.0)
+    artifact_orphan_claim_limit: int = Field(default=1, ge=1, le=100)
     runtime_event_backend: Literal["auto", "memory", "kafka"] = "auto"
     kafka_host: str | None = Field(default=None, validation_alias="KAFKA_HOST")
     kafka_port: int = Field(default=9092, validation_alias="KAFKA_PORT")
