@@ -291,6 +291,7 @@ class ObservabilityProjector:
         "delivery.succeeded",
         "delivery.failed",
         "delivery.dead_lettered",
+        "delivery.reconciling",
     }
 
     def __init__(self, service: ObservabilityService) -> None:

@@ -37,7 +37,10 @@ registration lease 内仍活跃时，新进程注册会 fail closed。因此显�
   poison 会阻断后续版本，避免多个 Worker 产生 version gap。
 - Delivery 在 Outbox ingestion 后按 tenant/session/sink 串行领取 Job；attempting、retry_wait 和过期
   claim 均可恢复，DLQ 与人工 redelivery 使用稳定 delivery ID。Sink 熔断状态按 tenant/sink 共享，
-  半开探针通过持久 claim 保证全局至多一个，不随 Worker 重启丢失。
+  半开探针通过持久 claim 保证全局至多一个，不随 Worker 重启丢失。每轮只领取副本空闲容量，
+  全局/per-tenant 并发上限分别由 `AURACLAW_DELIVERY_MAX_CONCURRENT` 与
+  `AURACLAW_DELIVERY_MAX_CONCURRENT_PER_TENANT` 控制；长投递按
+  `AURACLAW_DELIVERY_CLAIM_TTL_SECONDS` 续租。副作用开始后丢 owner 进入 reconciliation，不自动重投。
 - Streaming 的 sequence、Replay Event 与 Connection Registry 位于 PostgreSQL；实例切换不依赖
   进程内 cursor。Hands、Model、Policy、Credential 与 Artifact 同样使用共享状态和原子 claim。
 - Hands 以 Invocation execution claim 约束每个副作用 owner，并持续 heartbeat。Cancel 落到非 owner
@@ -54,6 +57,9 @@ registration lease 内仍活跃时，新进程注册会 fail closed。因此显�
   Session。Delta buffer 按 run 隔离，Kafka timeout 或 caller cancellation 后 keyed state 会回收。
 - Skill 管理读取始终经 Hands 查询 PostgreSQL lifecycle，`SKILL.md` 经 Artifact 边界读取；Task API
   的进程内 Skill Registry 不是管理事实源，清空缓存或重启 Task API 不需要预热才能提供管理查询。
+  Publication Reliability 每轮只领取 `AURACLAW_SKILL_RELIABILITY_MAX_CONCURRENT` 条 Outbox，按 tenant
+  合并 rebuild、跨 tenant 并行，并以 `AURACLAW_SKILL_RELIABILITY_CLAIM_TTL_SECONDS` 续租；complete/fail
+  影响零行视为 owner 丢失，不把旧 worker 的结果冒充成功。
 - Model Gateway 为每个 Model Call 持久化 execution owner、claim token 与 heartbeat。任意副本可写
   cancel request，owner 协作取消 Provider；断线或 owner 失联进入 `reconciling` 并保留 token
   reservation，禁止在结果未知时自动重放或释放额度。
@@ -63,7 +69,7 @@ registration lease 内仍活跃时，新进程注册会 fail closed。因此显�
 
 ## 生产配置门禁
 
-1. 依次应用 PostgreSQL/KingBase `0010`～`0049` expand migration。`0040`
+1. 依次应用 PostgreSQL/KingBase `0010`～`0050` expand migration。`0040`
    `0022` 增加 registration 与 execution claim 字段和索引；先迁移 Control 数据库，再滚动升级
    Orchestrator，最后升级 Agent Runtime。可选执行 `deploy/postgres/roles.sql` 做硬化，
    当前部署不按服务注入分角色 DSN。
@@ -85,6 +91,8 @@ registration lease 内仍活跃时，新进程注册会 fail closed。因此显�
    先迁移再滚动 Model Gateway，升级窗口不得混跑会绕过 claim 或将 cancel request 直接视为成功的旧副本。
    `0049` 增加 Artifact finalize/GC heartbeat、对象副作用 marker 和 reconciliation 状态；先迁移再滚动
    Artifact Service。升级窗口不得混跑会用旧 `_ready` 授权或在过期 claim 后直接重放对象操作的副本。
+   `0050` 增加 Delivery/Skill Outbox claim heartbeat、Delivery side-effect marker 与 reconciliation 原因；
+   先迁移，再滚动 Delivery Worker 与 Action Hands。升级窗口不得混跑不会续租的旧批处理 Worker。
 2. 各服务共享统一 `AURACLAW_DATABASE_URL`（Compose `database_url` secret）；migration 使用
    独立的 `AURACLAW_MIGRATION_DATABASE_URL`。
 3. 所有 Control、Session 与 Hands 副本必须使用相同的 `AURACLAW_LEASE_SIGNING_KEY`，并通过平台
@@ -103,6 +111,9 @@ registration lease 内仍活跃时，新进程注册会 fail closed。因此显�
    Producer 默认 64 个 publish 槽、1024 个 waiter、5 秒队列超时和 10 秒底层 publish 超时。分别观察
    `resource.gateway.*` 与 `runtime.event.*` queue/in-flight/latency/backpressure 指标。单 Session Kafka
    超时应只增加该 key 的 timeout，不应伴随其他 Session queue latency 同步上升。
+8. Delivery 默认每副本 8 个槽、每 tenant 2 个槽、claim TTL 30 秒；Skill Reliability 默认每副本
+   8 条 Outbox、claim TTL 30 秒。观察 `delivery.worker.*` 与 `skill.reliability.*`；renew failure 或
+   duplicate prevention 持续增长时先查数据库延迟和 owner 切换，不能直接缩短 TTL 或重放 reconciliation。
 
 升级前检查并修复旧数据：同一部署中若多个容器显式共享 `AURACLAW_RUNTIME_ID`，先改为未配置（使用
 hostname）或注入唯一实例 UID。停止全部旧 Runtime，等待 30 秒，然后将无对应健康实例且状态为

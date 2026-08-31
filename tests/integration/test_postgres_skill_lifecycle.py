@@ -75,6 +75,7 @@ MIGRATION = "\n".join(
         (ROOT / "migrations/0036_skill_binding_revocation_policy.sql").read_text(),
         (ROOT / "migrations/0037_skill_publication_sources.sql").read_text(),
         (ROOT / "migrations/0038_skill_installation_draining.sql").read_text(),
+        (ROOT / "migrations/0050_batch_worker_lease_safety.sql").read_text(),
     )
 )
 pytestmark = pytest.mark.skipif(DATABASE_URL is None, reason="PostgreSQL test URL not configured")

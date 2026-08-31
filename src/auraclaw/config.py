@@ -405,6 +405,13 @@ class Settings(BaseSettings):
     hands_max_queued: int = Field(default=256, ge=1, le=100_000)
     hands_max_queued_per_tenant: int = Field(default=32, ge=1, le=100_000)
     hands_queue_timeout_seconds: float = Field(default=5.0, gt=0.0, le=3600.0)
+    delivery_max_concurrent: int = Field(default=8, ge=1, le=10_000)
+    delivery_max_concurrent_per_tenant: int = Field(default=2, ge=1, le=10_000)
+    delivery_claim_ttl_seconds: float = Field(default=30.0, gt=0.0, le=3600.0)
+    skill_reliability_max_concurrent: int = Field(default=8, ge=1, le=10_000)
+    skill_reliability_claim_ttl_seconds: float = Field(
+        default=30.0, gt=0.0, le=3600.0
+    )
     resource_gateway_max_concurrent: int = Field(default=32, ge=1, le=10_000)
     resource_gateway_max_queued: int = Field(default=128, ge=1, le=100_000)
     resource_gateway_queue_timeout_seconds: float = Field(default=5.0, gt=0.0, le=3600.0)
@@ -480,6 +487,10 @@ class Settings(BaseSettings):
             )
         if self.hands_max_queued_per_tenant > self.hands_max_queued:
             raise ValueError("hands per-tenant queue cannot exceed global queue")
+        if self.delivery_max_concurrent_per_tenant > self.delivery_max_concurrent:
+            raise ValueError(
+                "delivery per-tenant concurrency cannot exceed global concurrency"
+            )
         return self
 
     @model_validator(mode="after")

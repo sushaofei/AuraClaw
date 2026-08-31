@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from auraclaw.action.ports import SkillArtifactOrphan
 from auraclaw.action.skill_lifecycle import InMemorySkillLifecycleStore
@@ -26,15 +26,19 @@ _KEY = b"skill-reliability-test-key"
 
 
 class _Artifacts:
-    def __init__(self, published: ArtifactRef, orphan: ArtifactRef) -> None:
+    def __init__(
+        self, published: ArtifactRef, orphan: ArtifactRef, *, delay: float = 0.0
+    ) -> None:
         self.published = published
         self.orphan = orphan
         self.claims: list[str] = []
         self.binds: list[str] = []
         self.resolutions: list[tuple[str, bool]] = []
         self._returned_orphans = False
+        self.delay = delay
 
     async def claim_publication(self, **kwargs: object) -> None:
+        await asyncio.sleep(self.delay)
         self.claims.append(str(kwargs["command_id"]))
 
     async def bind_publication(self, **kwargs: object) -> None:
@@ -69,11 +73,11 @@ class _Rebuilder:
         return 1, ()
 
 
-def _package() -> SkillPackage:
+def _package(version: str = "1.0.0") -> SkillPackage:
     verifier = HmacSkillSignatureVerifier({"acme": _KEY})
     unsigned = SkillManifest(
         name="release.prepare",
-        version="1.0.0",
+        version=version,
         description="Prepare release",
         publisher="acme",
         signature=f"hmac-sha256:{'0' * 64}",
@@ -151,6 +155,68 @@ def test_reliability_worker_delivers_outbox_and_repairs_or_deletes_orphans() -> 
             (published.artifact_ref.artifact_id, True),
             ("art-unpublished", False),
         ]
+        assert await lifecycle.claim_outbox(owner="hands-b") == ()
+
+    asyncio.run(scenario())
+
+
+def test_reliability_worker_renews_and_coalesces_same_tenant_rebuild() -> None:
+    async def scenario() -> None:
+        lifecycle = InMemorySkillLifecycleStore()
+        registry = SkillPackageRegistry(
+            artifacts=ArtifactStore(InMemoryObjectStorage(), signing_key=_KEY),
+            signature_verifier=HmacSkillSignatureVerifier({"acme": _KEY}),
+        )
+        now = datetime.now(UTC)
+        service = SkillPublicationService(
+            registry=registry,
+            lifecycle=lifecycle,
+            bootstrap_sources=(
+                SkillSourceRecord(
+                    source_id="sks_source-a",
+                    tenant_id="tenant-a",
+                    kind=SkillSourceKind.ADMIN_UPLOAD,
+                    desired_state=SkillSourceDesiredState.ENABLED,
+                    publisher_allowlist=("acme",),
+                    created_by="system",
+                    updated_by="system",
+                    created_at=now,
+                    updated_at=now,
+                ),
+            ),
+        )
+        publications = []
+        for index, version in enumerate(("1.0.0", "1.0.1"), start=1):
+            publications.append(
+                await service.publish(
+                    PublishSkillCommand(
+                        tenant_id="tenant-a",
+                        actor_id="admin-a",
+                        source_id="sks_source-a",
+                        command_id=f"publish-{index}",
+                        correlation_id=f"corr-{index}",
+                        causation_id=f"publish-{index}",
+                    ),
+                    _package(version),
+                )
+            )
+        artifacts = _Artifacts(
+            publications[0].artifact_ref,
+            ArtifactRef("orphan", 1, "f" * 64, "application/octet-stream", 1),
+            delay=0.04,
+        )
+        rebuilder = _Rebuilder()
+        worker = SkillPublicationReliabilityWorker(
+            lifecycle=lifecycle,
+            artifacts=artifacts,
+            rebuilder=rebuilder,  # type: ignore[arg-type]
+            owner="hands-a",
+            claim_ttl=timedelta(seconds=0.03),
+        )
+        result = await worker.run_once()
+        assert result.outbox_completed == 2
+        assert result.outbox_failed == 0
+        assert rebuilder.tenants == ["tenant-a"]
         assert await lifecycle.claim_outbox(owner="hands-b") == ()
 
     asyncio.run(scenario())

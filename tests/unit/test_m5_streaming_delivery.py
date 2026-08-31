@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from time import perf_counter
 
@@ -11,7 +12,7 @@ import pytest
 from auraclaw.contracts.commands import CommandContext
 from auraclaw.contracts.delivery import DeliveryJob, ResultSinkConfig, SinkResponse
 from auraclaw.contracts.errors import NotFoundError
-from auraclaw.contracts.events import Actor, NewEvent
+from auraclaw.contracts.events import Actor, CanonicalEvent, NewEvent
 from auraclaw.contracts.state import Visibility
 from auraclaw.delivery.worker import CircuitBreaker, ResultDeliveryWorker
 from auraclaw.gateways.streaming.gateway import StreamingGateway
@@ -44,6 +45,155 @@ class RecordingSink:
     async def deliver(self, job: DeliveryJob, config: ResultSinkConfig) -> SinkResponse:
         self.calls.append(job.delivery_id)
         return self.responses.pop(0)
+
+
+class _SlowRecordingSink(RecordingSink):
+    def __init__(self, delay: float) -> None:
+        super().__init__([SinkResponse(True, summary="slow success")])
+        self.delay = delay
+        self.started = asyncio.Event()
+
+    async def deliver(self, job: DeliveryJob, config: ResultSinkConfig) -> SinkResponse:
+        self.started.set()
+        await asyncio.sleep(self.delay)
+        return await super().deliver(job, config)
+
+
+class _LeaseLosingStore(InMemoryDeliveryJobStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.renewals = 0
+
+    async def renew_claim(
+        self, job: DeliveryJob, *, claim_ttl: timedelta
+    ) -> bool:
+        self.renewals += 1
+        if self.renewals > 1:
+            return False
+        return await super().renew_claim(job, claim_ttl=claim_ttl)
+
+
+def _delivery_event(suffix: str) -> CanonicalEvent:
+    return CanonicalEvent(
+        event_id=f"event-{suffix}",
+        tenant_id="tenant-lease",
+        root_session_id=f"session-{suffix}",
+        session_id=f"session-{suffix}",
+        run_id=f"run-{suffix}",
+        aggregate_version=1,
+        type="run.completed",
+        occurred_at=datetime.now(UTC),
+        actor=Actor(type="runtime", id="runtime"),
+        correlation_id=suffix,
+        causation_id=suffix,
+        visibility=Visibility.USER,
+        schema_version=1,
+        payload={"result_summary": "done"},
+    )
+
+
+def test_delivery_worker_renews_slow_claim_and_blocks_takeover() -> None:
+    async def scenario() -> None:
+        event_store = InMemoryEventStore()
+        projection = InMemoryTaskProjection()
+        relay = OutboxRelay(event_store, projection)
+        store = InMemoryDeliveryJobStore()
+        sink = ResultSinkConfig(
+            sink_id="slow-sink",
+            tenant_id="tenant-lease",
+            session_id="session-slow",
+            sink_type="recording",
+            target_ref="managed://slow",
+        )
+        await store.register_sink(sink)
+        await store.create_job(_delivery_event("slow"), sink)
+        adapter = _SlowRecordingSink(0.09)
+        worker = ResultDeliveryWorker(
+            outbox=event_store,
+            event_store=event_store,
+            relay=relay,
+            store=store,
+            adapters=[adapter],
+            worker_id="worker-a",
+            claim_ttl=timedelta(seconds=0.03),
+        )
+        running = asyncio.create_task(worker.run_once())
+        await adapter.started.wait()
+        await asyncio.sleep(0.05)
+        assert await store.claim_due(
+            worker_id="worker-b",
+            claim_ttl=timedelta(seconds=0.03),
+            limit=1,
+        ) == []
+        assert await running == 1
+        job = (await store.list_jobs("tenant-lease", "session-slow"))[0]
+        assert job.status.value == "succeeded"
+
+    asyncio.run(scenario())
+
+
+def test_delivery_worker_reconciles_when_lease_is_lost_after_side_effect() -> None:
+    async def scenario() -> None:
+        event_store = InMemoryEventStore()
+        relay = OutboxRelay(event_store, InMemoryTaskProjection())
+        store = _LeaseLosingStore()
+        sink = ResultSinkConfig(
+            sink_id="uncertain-sink",
+            tenant_id="tenant-lease",
+            session_id="session-uncertain",
+            sink_type="recording",
+            target_ref="managed://uncertain",
+        )
+        await store.register_sink(sink)
+        await store.create_job(_delivery_event("uncertain"), sink)
+        worker = ResultDeliveryWorker(
+            outbox=event_store,
+            event_store=event_store,
+            relay=relay,
+            store=store,
+            adapters=[_SlowRecordingSink(0.1)],
+            claim_ttl=timedelta(seconds=0.03),
+        )
+        assert await worker.run_once() == 1
+        job = (await store.list_jobs("tenant-lease", "session-uncertain"))[0]
+        assert job.status.value == "reconciling"
+        assert job.reconciliation_reason == "lease_lost"
+        assert await store.claim_due(
+            worker_id="worker-b",
+            claim_ttl=timedelta(seconds=0.03),
+            limit=1,
+        ) == []
+
+    asyncio.run(scenario())
+
+
+def test_delivery_claim_reserves_capacity_across_tenants() -> None:
+    async def scenario() -> None:
+        store = InMemoryDeliveryJobStore()
+        for suffix, tenant in (
+            ("a-1", "tenant-a"),
+            ("a-2", "tenant-a"),
+            ("b", "tenant-b"),
+        ):
+            event = replace(_delivery_event(suffix), tenant_id=tenant)
+            sink = ResultSinkConfig(
+                sink_id=f"sink-{suffix}",
+                tenant_id=tenant,
+                session_id=event.session_id,
+                sink_type="recording",
+                target_ref=f"managed://{suffix}",
+            )
+            await store.register_sink(sink)
+            await store.create_job(event, sink)
+        claimed = await store.claim_due(
+            worker_id="fair-worker",
+            claim_ttl=timedelta(seconds=30),
+            limit=2,
+            max_per_tenant=1,
+        )
+        assert {job.tenant_id for job in claimed} == {"tenant-a", "tenant-b"}
+
+    asyncio.run(scenario())
 
 
 def test_runtime_producer_sequences_coalesces_redacts_and_limits_events() -> None:

@@ -1498,6 +1498,11 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         artifacts=skill_artifacts,
         rebuilder=skill_rebuilder,
         owner=f"action-hands-{secrets.token_hex(8)}",
+        max_concurrent=settings.skill_reliability_max_concurrent,
+        claim_ttl=timedelta(
+            seconds=settings.skill_reliability_claim_ttl_seconds
+        ),
+        metric_writer=hands_metric_store,
     )
     skill_admission_maintenance = SkillAdmissionMaintenanceWorker(
         skill_lifecycle,
@@ -2098,6 +2103,11 @@ def _delivery_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         if settings.sql_storage_enabled
         else None
     )
+    delivery_metric_store = (
+        PostgresObservabilityStore(settings.resolved_database_url)
+        if settings.sql_storage_enabled
+        else None
+    )
     policy = RemotePolicyClient(
         settings.policy_base_url,
         bearer_token=bearer_token,
@@ -2120,10 +2130,14 @@ def _delivery_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         circuit_failure_threshold=settings.delivery_circuit_failure_threshold,
         circuit_reset_after=timedelta(seconds=settings.delivery_circuit_reset_seconds),
         circuit_probe_ttl=timedelta(seconds=settings.delivery_circuit_probe_ttl_seconds),
+        claim_ttl=timedelta(seconds=settings.delivery_claim_ttl_seconds),
+        max_concurrent=settings.delivery_max_concurrent,
+        max_concurrent_per_tenant=settings.delivery_max_concurrent_per_tenant,
+        metric_writer=delivery_metric_store,
     )
     closeables: tuple[Any, ...] = (session, policy, credentials)
     if settings.sql_storage_enabled:
-        closeables += (store, admin_store)
+        closeables += (store, admin_store, delivery_metric_store)
     app = _base_service_app(
         spec,
         settings,

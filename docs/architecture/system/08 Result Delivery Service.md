@@ -107,6 +107,20 @@ half-open 探针；探针 owner 失联后可按 TTL 接管。服务重启不得�
 `AURACLAW_DELIVERY_CIRCUIT_FAILURE_THRESHOLD`、`AURACLAW_DELIVERY_CIRCUIT_RESET_SECONDS`、
 `AURACLAW_DELIVERY_CIRCUIT_PROBE_TTL_SECONDS` 配置。Admin `status` 传 tenant/sink 可查询当前状态。
 
+## 批处理并发与租约安全
+
+Worker 每轮最多领取当前副本可用的 `AURACLAW_DELIVERY_MAX_CONCURRENT` 个 Job，并以
+`AURACLAW_DELIVERY_MAX_CONCURRENT_PER_TENANT` 隔离单 tenant；Store 仍按
+tenant/session/sink 只释放流头，因此同一流严格有序、不同流可以并行。长投递以
+`AURACLAW_DELIVERY_CLAIM_TTL_SECONDS` 为租约并持续 heartbeat，访问 Sink 前再次原子记录
+side-effect marker。若外部副作用开始后丢失 owner、进程取消或完成写入失败，Job 进入
+`reconciling`，禁止仅因租约过期盲目重投；运维需根据 Sink 的 delivery ID/ACK 查询结果后收敛。
+
+优雅关闭先停止领取新 Job，再等待在途任务至少一个 claim TTL；强制取消会停止续租。指标
+`delivery.worker.queue.claimed`、`delivery.worker.in_flight`、
+`delivery.worker.claim.age.seconds`、`delivery.worker.renew_failure` 和
+`delivery.worker.duplicate_prevented` 用于观察容量、陈旧租约和重复副作用阻断。
+
 ## 与 Outbox 的边界
 
 Session Outbox 保证“需要投递”不会丢；Delivery Job Store 保证“投递过程”可恢复。Result Delivery 自身不能扫描 Session 状态推测哪些任务应该投递。
@@ -116,7 +130,8 @@ Session Outbox 保证“需要投递”不会丢；Delivery Job Store 保证“�
 - Webhook 签名、时间戳和防重放。
 - Artifact 使用短期、最小权限下载链接。
 - 通过 Credential Proxy 调用外部 Sink。
-- 指标：delivery latency、success rate、retry count、DLQ size、ACK latency、sink circuit state。
+- 指标：delivery latency、success rate、retry count、DLQ size、ACK latency、sink circuit state、
+  claim age、renew failure 和 duplicate prevention。
 
 ## 验收条件
 
