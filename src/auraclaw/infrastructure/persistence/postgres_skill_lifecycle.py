@@ -45,6 +45,7 @@ from auraclaw.infrastructure.persistence.postgres_common import (
     LazyPool,
     json_dumps,
     json_loads,
+    retry_serializable_transaction,
 )
 
 
@@ -181,6 +182,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
         )
         return int(deleted or 0)
 
+    @retry_serializable_transaction("skill.publish")
     async def commit_publish(self, commit: SkillPublishCommit) -> SkillPublishCommitResult:
         pool = await self.pool()
         package = commit.package
@@ -304,6 +306,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
             )
             return result
 
+    @retry_serializable_transaction("skill.restore")
     async def commit_restore(self, commit: SkillRestoreCommit) -> SkillPublicationRecord:
         record = commit.publication
         pool = await self.pool()
@@ -752,6 +755,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
             raise VersionConflictError("Skill installation revision conflict")
         return _installation(dict(row))
 
+    @retry_serializable_transaction("skill.installation.change")
     async def commit_installation_change(
         self, commit: SkillInstallationCommit
     ) -> SkillInstallationRecord:
@@ -922,6 +926,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
             raise VersionConflictError("Skill Source revision conflict")
         return _source(dict(row))
 
+    @retry_serializable_transaction("skill.source.config")
     async def commit_source_config(
         self, commit: SkillSourceConfigCommit
     ) -> SkillSourceRecord:
@@ -1010,24 +1015,22 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
                     commit.occurred_at,
                 )
             affected = await connection.fetch(
-                """SELECT DISTINCT publisher,name,version
-                FROM hands.skill_publication_source
-                WHERE tenant_id=$1 AND source_id=$2""",
+                """SELECT p.* FROM hands.skill_publication p
+                JOIN (
+                    SELECT DISTINCT tenant_id,publisher,name,version
+                    FROM hands.skill_publication_source
+                    WHERE tenant_id=$1 AND source_id=$2
+                ) reference
+                  ON reference.tenant_id=p.tenant_id
+                 AND reference.publisher=p.publisher
+                 AND reference.name=p.name AND reference.version=p.version
+                WHERE p.status NOT IN ('retired','revoked')
+                ORDER BY p.tenant_id,p.publisher,p.name,p.version
+                FOR UPDATE OF p""",
                 record.tenant_id,
                 record.source_id,
             )
-            for reference in affected:
-                publication_row = await connection.fetchrow(
-                    """SELECT * FROM hands.skill_publication
-                    WHERE tenant_id=$1 AND publisher=$2 AND name=$3 AND version=$4
-                      AND status NOT IN ('retired','revoked') FOR UPDATE""",
-                    record.tenant_id,
-                    str(reference["publisher"]),
-                    str(reference["name"]),
-                    str(reference["version"]),
-                )
-                if publication_row is None:
-                    continue
+            for publication_row in affected:
                 selected = await connection.fetchval(
                     """SELECT ps.source_id
                     FROM hands.skill_publication_source ps
@@ -1038,9 +1041,9 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
                       AND s.desired_state='enabled'
                     ORDER BY s.priority DESC,ps.source_id LIMIT 1""",
                     record.tenant_id,
-                    str(reference["publisher"]),
-                    str(reference["name"]),
-                    str(reference["version"]),
+                    str(publication_row["publisher"]),
+                    str(publication_row["name"]),
+                    str(publication_row["version"]),
                 )
                 if selected is not None and str(selected) == str(
                     publication_row["source_id"]
@@ -1242,6 +1245,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
             if row is None:
                 raise VersionConflictError("Skill Source generation cannot move backwards")
 
+    @retry_serializable_transaction("skill.source.snapshot")
     async def commit_source_snapshot(
         self, commit: SkillSourceSnapshotCommit
     ) -> SkillSourceSnapshotResult:
@@ -1274,7 +1278,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
                  AND ps.name=p.name AND ps.version=p.version
                 WHERE p.tenant_id=$1 AND ps.source_id=$2
                   AND p.status NOT IN ('retired','revoked')
-                ORDER BY p.publisher,p.name,p.version FOR UPDATE OF p""",
+                ORDER BY p.tenant_id,p.publisher,p.name,p.version FOR UPDATE OF p""",
                 state.tenant_id,
                 state.source_id,
             )

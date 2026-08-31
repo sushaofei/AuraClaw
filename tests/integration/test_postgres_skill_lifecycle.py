@@ -17,6 +17,7 @@ from auraclaw.action.skill_lifecycle import (
     SkillAdmissionAuditRecord,
     SkillPublishCommit,
     SkillRestoreCommit,
+    SkillSourceConfigCommit,
     SkillSourcePackageIdentity,
     SkillSourceSnapshotCommit,
 )
@@ -79,6 +80,138 @@ MIGRATION = "\n".join(
     )
 )
 pytestmark = pytest.mark.skipif(DATABASE_URL is None, reason="PostgreSQL test URL not configured")
+
+
+def test_source_config_uses_canonical_publication_lock_order() -> None:
+    async def scenario() -> None:
+        assert DATABASE_URL is not None
+        connection = await asyncpg.connect(DATABASE_URL)
+        await _ensure_skill_lifecycle_schema(connection)
+        suffix = uuid4().hex
+        tenant_id = f"tenant-lock-order-{suffix}"
+        store_a = PostgresSkillLifecycleStore(DATABASE_URL)
+        store_b = PostgresSkillLifecycleStore(DATABASE_URL)
+        now = datetime.now(UTC)
+        sources = tuple(
+            SkillSourceRecord(
+                source_id=f"sks_{label}_{suffix}",
+                tenant_id=tenant_id,
+                kind=SkillSourceKind.MCP,
+                desired_state=SkillSourceDesiredState.ENABLED,
+                publisher_allowlist=("platform",),
+                revision=1,
+                created_by="test",
+                updated_by="test",
+                created_at=now,
+                updated_at=now,
+                priority=priority,
+            )
+            for label, priority in (("a", 20), ("b", 10))
+        )
+        try:
+            for source in sources:
+                await store_a.put_source(source, expected_revision=0)
+            for index, name in enumerate(("alpha", "omega"), start=1):
+                package = SkillPackageRecord(
+                    tenant_id=tenant_id,
+                    manifest=SkillManifest(
+                        name=name,
+                        version="1.0.0",
+                        description=name,
+                        publisher="platform",
+                        signature="hmac-sha256:test",
+                    ),
+                    package_digest=f"sha256:{str(index) * 64}",
+                    artifact_ref=ArtifactRef(
+                        artifact_id=f"art-{name}-{suffix}",
+                        version=1,
+                        content_hash=str(index) * 64,
+                        media_type="application/octet-stream",
+                        size=1,
+                    ),
+                    retention_until=now + timedelta(days=90),
+                    retention_updated_by="test",
+                    retention_updated_at=now,
+                    created_at=now,
+                )
+                await store_a.put_package(package)
+                await store_a.put_publication(
+                    SkillPublicationRecord(
+                        publication_id=f"skp_{name}_{suffix}",
+                        tenant_id=tenant_id,
+                        publisher="platform",
+                        name=name,
+                        version="1.0.0",
+                        package_digest=package.package_digest,
+                        status=SkillPublicationStatus.ACTIVE,
+                        source_id=sources[0].source_id,
+                        revision=1,
+                        created_by="test",
+                        updated_by="test",
+                        created_at=now,
+                        updated_at=now,
+                    ),
+                    expected_revision=0,
+                )
+                source_order = sources if name == "alpha" else tuple(reversed(sources))
+                for source in source_order:
+                    await connection.execute(
+                        """INSERT INTO hands.skill_publication_source
+                        (tenant_id,publisher,name,version,source_id,available,
+                         first_seen_at,last_seen_at)
+                        VALUES ($1,'platform',$2,'1.0.0',$3,true,$4,$4)""",
+                        tenant_id,
+                        name,
+                        source.source_id,
+                        now,
+                    )
+
+            def retirement(source: SkillSourceRecord, label: str) -> SkillSourceConfigCommit:
+                return SkillSourceConfigCommit(
+                    command_id=f"retire-{label}-{suffix}",
+                    request_digest=f"sha256:{label * 64}",
+                    operation="retire",
+                    actor_id="test",
+                    correlation_id=f"corr-{label}-{suffix}",
+                    causation_id=f"retire-{label}-{suffix}",
+                    reason_code="lock_order_test",
+                    expected_revision=1,
+                    source=source.model_copy(
+                        update={
+                            "desired_state": SkillSourceDesiredState.RETIRED,
+                            "revision": 2,
+                            "updated_at": datetime.now(UTC),
+                        }
+                    ),
+                    occurred_at=datetime.now(UTC),
+                )
+
+            results = await asyncio.wait_for(
+                asyncio.gather(
+                    store_a.commit_source_config(retirement(sources[0], "a")),
+                    store_b.commit_source_config(retirement(sources[1], "b")),
+                ),
+                timeout=10,
+            )
+            assert {result.desired_state for result in results} == {
+                SkillSourceDesiredState.RETIRED
+            }
+        finally:
+            await store_a.close()
+            await store_b.close()
+            for table in (
+                "skill_source_command",
+                "skill_publication_source",
+                "skill_publication",
+                "skill_package",
+                "skill_source",
+            ):
+                await connection.execute(
+                    f"DELETE FROM hands.{table} WHERE tenant_id=$1", tenant_id
+                )
+            await connection.close()
+
+    asyncio.run(scenario())
 
 
 class _SharedSkillArtifacts:

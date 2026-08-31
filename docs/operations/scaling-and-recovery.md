@@ -60,6 +60,10 @@ registration lease 内仍活跃时，新进程注册会 fail closed。因此显�
   Publication Reliability 每轮只领取 `AURACLAW_SKILL_RELIABILITY_MAX_CONCURRENT` 条 Outbox，按 tenant
   合并 rebuild、跨 tenant 并行，并以 `AURACLAW_SKILL_RELIABILITY_CLAIM_TTL_SECONDS` 续租；complete/fail
   影响零行视为 owner 丢失，不把旧 worker 的结果冒充成功。
+  Skill Source/Publication/Publisher 写事务使用固定数据库锁层级；多 publication 始终按
+  tenant/publisher/name/version 排序加锁。`40P01`/`40001` 从事务入口按原 command 语义有限重试，
+  不在失败语句中间继续。观察 `postgres.transaction.retry{operation=skill.*}` 与
+  `postgres.transaction.retry_exhausted`；持续增长时检查长事务、缺失索引和数据库 lock wait。
 - Model Gateway 为每个 Model Call 持久化 execution owner、claim token 与 heartbeat。任意副本可写
   cancel request，owner 协作取消 Provider；断线或 owner 失联进入 `reconciling` 并保留 token
   reservation，禁止在结果未知时自动重放或释放额度。
@@ -114,6 +118,9 @@ registration lease 内仍活跃时，新进程注册会 fail closed。因此显�
 8. Delivery 默认每副本 8 个槽、每 tenant 2 个槽、claim TTL 30 秒；Skill Reliability 默认每副本
    8 条 Outbox、claim TTL 30 秒。观察 `delivery.worker.*` 与 `skill.reliability.*`；renew failure 或
    duplicate prevention 持续增长时先查数据库延迟和 owner 切换，不能直接缩短 TTL 或重放 reconciliation。
+9. Skill 事务默认最多重试 3 次，基础抖动延迟 10ms。调大重试预算前先检查 PostgreSQL
+   `deadlocks`、`pg_stat_activity.wait_event`、statement/lock timeout 和最慢事务；预算耗尽返回可重试
+   conflict，调用方应保留同一 command id/request digest，不能生成新命令绕过幂等检查。
 
 升级前检查并修复旧数据：同一部署中若多个容器显式共享 `AURACLAW_RUNTIME_ID`，先改为未配置（使用
 hostname）或注入唯一实例 UID。停止全部旧 Runtime，等待 30 秒，然后将无对应健康实例且状态为

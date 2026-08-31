@@ -21,10 +21,14 @@ from auraclaw.contracts.skills import (
     SkillPublisherStatusOperation,
     SkillRevocationAction,
 )
-from auraclaw.infrastructure.persistence.postgres_common import LazyPool
+from auraclaw.infrastructure.persistence.postgres_common import (
+    LazyPool,
+    retry_serializable_transaction,
+)
 
 
 class PostgresSkillPublisherStore(LazyPool, SkillPublisherStore):
+    @retry_serializable_transaction("skill.publisher.register")
     async def register_publisher(
         self, command: RegisterSkillPublisherCommand
     ) -> SkillPublisherRecord:
@@ -63,6 +67,7 @@ class PostgresSkillPublisherStore(LazyPool, SkillPublisherStore):
             await _record_command(connection, command, "register", digest, None)
             return _publisher_record(row)
 
+    @retry_serializable_transaction("skill.publisher.rotate_key")
     async def rotate_key(
         self, command: RotateSkillPublisherKeyCommand
     ) -> tuple[SkillPublisherRecord, SkillPublisherKeyRecord]:
@@ -133,6 +138,7 @@ class PostgresSkillPublisherStore(LazyPool, SkillPublisherStore):
             await _record_command(connection, command, "rotate", digest, command.key_id)
             return _publisher_record(publisher_row), _key_record(key_row)
 
+    @retry_serializable_transaction("skill.publisher.revoke_key")
     async def revoke_key(
         self, command: RevokeSkillPublisherKeyCommand
     ) -> SkillPublisherKeyRecord:
@@ -193,6 +199,7 @@ class PostgresSkillPublisherStore(LazyPool, SkillPublisherStore):
             await _record_command(connection, command, "revoke", digest, command.key_id)
             return _key_record(row)
 
+    @retry_serializable_transaction("skill.publisher.change_status")
     async def change_status(
         self, command: ChangeSkillPublisherStatusCommand
     ) -> SkillPublisherRecord:
