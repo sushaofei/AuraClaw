@@ -2,7 +2,8 @@ import asyncio
 import hashlib
 import hmac
 import json
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
+from time import perf_counter
 
 import httpx
 import pytest
@@ -29,6 +30,7 @@ from auraclaw.infrastructure.kafka.runtime_events import (
 from auraclaw.infrastructure.persistence.memory_event_store import InMemoryEventStore
 from auraclaw.projection.relay import OutboxRelay
 from auraclaw.projection.task.projector import InMemoryTaskProjection
+from auraclaw.runtime.ports import RuntimeEvent
 from auraclaw.session.task_service import TaskService
 
 
@@ -192,6 +194,70 @@ def test_streaming_gateway_authorizes_replays_and_signals_expired_cursor() -> No
         await slow_events.aclose()
         with pytest.raises(NotFoundError, match="Session not found"):
             await gateway.authorize(tenant_id="foreign", session_id=session_id)
+
+    asyncio.run(scenario())
+
+
+def test_streaming_gateway_paces_consecutive_model_deltas() -> None:
+    class Reader:
+        async def get_task(self, tenant_id: str, session_id: str) -> dict[str, str]:
+            return {"tenant_id": tenant_id, "session_id": session_id}
+
+    class Subscription:
+        initial: list[RuntimeEvent] = []
+        replay_missed = False
+
+        async def events(self):  # type: ignore[no-untyped-def]
+            for sequence in range(1, 4):
+                yield RuntimeEvent(
+                    event_id=f"event-{sequence}",
+                    tenant_id="tenant-m5",
+                    root_session_id="session-m5",
+                    session_id="session-m5",
+                    run_id="run-m5",
+                    sequence=sequence,
+                    type="model.output.delta",
+                    timestamp=datetime.now(UTC),
+                    payload={"delta": str(sequence)},
+                    visibility="user",
+                )
+
+    class Bus:
+        async def subscribe(
+            self,
+            tenant_id: str,
+            session_id: str,
+            *,
+            after_sequence: int | None = None,
+        ) -> Subscription:
+            del tenant_id, session_id, after_sequence
+            return Subscription()
+
+    async def scenario() -> None:
+        interval = 0.02
+        gateway = StreamingGateway(
+            reader=Reader(),  # type: ignore[arg-type]
+            bus=Bus(),  # type: ignore[arg-type]
+            delta_min_interval=interval,
+        )
+        stream = gateway.sse(
+            tenant_id="tenant-m5",
+            session_id="session-m5",
+            last_event_id=None,
+        )
+        emitted_at: list[float] = []
+        try:
+            for _ in range(3):
+                await anext(stream)
+                emitted_at.append(perf_counter())
+        finally:
+            await stream.aclose()
+
+        gaps = [
+            later - earlier
+            for earlier, later in zip(emitted_at, emitted_at[1:], strict=False)
+        ]
+        assert all(gap >= interval * 0.8 for gap in gaps)
 
     asyncio.run(scenario())
 
