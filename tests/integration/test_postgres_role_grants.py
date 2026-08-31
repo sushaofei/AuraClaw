@@ -64,10 +64,19 @@ def _configured_url(name: str) -> str | None:
     value = os.getenv(name) or DOTENV.get(name)
     if not value:
         return None
-    lowered = value.lower()
-    if lowered.startswith("mysql:") or "mysql+" in lowered:
-        return None
     return asyncpg_url(value)
+
+
+async def _catalog_has_roles(database_url: str, roles: tuple[str, ...]) -> bool:
+    connection = await asyncpg.connect(database_url)
+    try:
+        installed = await connection.fetch(
+            "SELECT rolname FROM pg_roles WHERE rolname=ANY($1::text[])",
+            list(roles),
+        )
+        return {str(row["rolname"]) for row in installed} == set(roles)
+    finally:
+        await connection.close()
 
 
 async def _assert_hardened_login(
@@ -149,7 +158,7 @@ async def _assert_write_denied(
 
 
 def test_production_roles_enforce_owner_and_query_boundaries() -> None:
-    if SETTINGS.mysql_enabled or not SETTINGS.postgres_enabled:
+    if not SETTINGS.postgres_enabled:
         pytest.skip("PostgreSQL role grant matrix requires postgres primary storage")
     required_names = (*ROLE_TARGETS, QUERY_ROLE[0])
     urls = {name: _configured_url(name) for name in required_names}
@@ -159,6 +168,12 @@ def test_production_roles_enforce_owner_and_query_boundaries() -> None:
     )
     if missing and fallback_url is None:
         pytest.skip("production role DSNs and catalog connection are not configured")
+    if missing and fallback_url is not None:
+        required_roles = tuple(
+            [target[0] for target in ROLE_TARGETS.values()] + [QUERY_ROLE[1]]
+        )
+        if not asyncio.run(_catalog_has_roles(fallback_url, required_roles)):
+            pytest.skip("optional PostgreSQL production roles are not installed")
 
     async def scenario() -> None:
         tables = tuple(target[1] for target in ROLE_TARGETS.values())

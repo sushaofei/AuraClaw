@@ -8,7 +8,6 @@ import asyncpg  # type: ignore[import-untyped]
 
 from auraclaw.contracts.events import Actor, CanonicalEvent
 from auraclaw.contracts.state import Visibility
-from auraclaw.infrastructure.persistence.mysql_pool import MysqlLazyPool, MysqlPool
 from auraclaw.infrastructure.persistence.sql_dialect import Dialect, detect_dialect
 
 
@@ -54,26 +53,20 @@ def event_from_record(row: Any) -> CanonicalEvent:
 
 
 class LazyPool:
-    """Dialect-aware lazy pool. PostgreSQL uses asyncpg; MySQL uses aiomysql."""
+    """Lazy asyncpg pool for PostgreSQL and Kingbase compatibility mode."""
 
     def __init__(self, database_url: str, dialect: Dialect | None = None) -> None:
         self._dialect: Dialect = dialect or detect_dialect(database_url)
         self._database_url = database_url
         self._postgres_url = asyncpg_url(database_url)
-        self._pool: asyncpg.Pool | MysqlPool | None = None
-        self._mysql: MysqlLazyPool | None = (
-            MysqlLazyPool(database_url) if self._dialect == "mysql" else None
-        )
+        self._pool: asyncpg.Pool | None = None
         self._pool_lock = asyncio.Lock()
 
     @property
     def dialect(self) -> Dialect:
         return self._dialect
 
-    async def pool(self) -> asyncpg.Pool | MysqlPool:
-        if self._dialect == "mysql":
-            assert self._mysql is not None
-            return await self._mysql.pool()
+    async def pool(self) -> asyncpg.Pool:
         if self._pool is None:
             async with self._pool_lock:
                 if self._pool is None:
@@ -86,10 +79,6 @@ class LazyPool:
         return self._pool
 
     async def close(self) -> None:
-        if self._mysql is not None:
-            await self._mysql.close()
-        if self._pool is not None and self._dialect == "postgres":
-            postgres_pool = self._pool
-            assert isinstance(postgres_pool, asyncpg.Pool)
-            await postgres_pool.close()
+        if self._pool is not None:
+            await self._pool.close()
             self._pool = None

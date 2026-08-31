@@ -785,12 +785,6 @@ def test_s3_database_roles_and_ops_clients_preserve_owner_boundaries() -> None:
     assert "credential TO auraclaw_credential" in roles
     assert "streaming TO auraclaw_streaming" in roles
     assert "model_gateway TO auraclaw_model" in roles
-    mysql_roles = (ROOT / "deploy/mysql/roles.sql").read_text()
-    assert "auraclaw_session" in mysql_roles
-    assert "auraclaw_task_query_ro" in mysql_roles
-    assert "`auraclaw`.`session_core_%`" in mysql_roles
-    assert "`auraclaw`.`control_%`" in mysql_roles
-    assert "`auraclaw`.`model_gateway_%`" in mysql_roles
     cli = (ROOT / "src/auraclaw/composition/cli.py").read_text()
     assert "RemoteAdminClient" in cli
     assert "PostgresOperationsStore" not in cli

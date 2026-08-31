@@ -14,7 +14,6 @@
 | `.env.test` / `.env.prod` | 部署环境变量（0600，勿提交） |
 | `.runtime/compose-secrets/` | Compose secrets 文件（0700/0600） |
 | `deploy/nginx.conf` | Ingress 配置 |
-| `deploy/mysql/roles.sql` | MySQL 角色授权 |
 | `Dockerfile` / `src/` / `migrations/` | 本地构建镜像用 |
 | `scripts/` | secrets 物化与 preflight |
 

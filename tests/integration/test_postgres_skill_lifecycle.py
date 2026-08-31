@@ -48,7 +48,6 @@ MIGRATION = "\n".join(
         (ROOT / "migrations/0026_skill_publication_reliability.sql").read_text(),
         (ROOT / "migrations/0028_skill_source_reconcile_lease.sql").read_text(),
         (ROOT / "migrations/0029_skill_source_inventory_retirement.sql").read_text(),
-        (ROOT / "migrations/0030_skill_publisher_suspension.sql").read_text(),
         (ROOT / "migrations/0031_skill_publication_restore.sql").read_text(),
         (ROOT / "migrations/0032_skill_admission_audit.sql").read_text(),
         (ROOT / "migrations/0033_skill_content_quarantine.sql").read_text(),
@@ -62,11 +61,25 @@ MIGRATION = "\n".join(
 pytestmark = pytest.mark.skipif(DATABASE_URL is None, reason="PostgreSQL test URL not configured")
 
 
+async def _ensure_skill_lifecycle_schema(connection: asyncpg.Connection) -> None:
+    current = await connection.fetchval(
+        """SELECT EXISTS(
+            SELECT 1 FROM pg_constraint constraint_record
+            JOIN pg_class relation ON relation.oid=constraint_record.conrelid
+            JOIN pg_namespace namespace ON namespace.oid=relation.relnamespace
+            WHERE constraint_record.conname='skill_installation_uninstall_action_check'
+              AND namespace.nspname='hands' AND relation.relname='skill_installation'
+        )"""
+    )
+    if not current:
+        await connection.execute(MIGRATION)
+
+
 def test_postgres_skill_lifecycle_is_persistent_and_tenant_scoped() -> None:
     async def scenario() -> None:
         assert DATABASE_URL is not None
         connection = await asyncpg.connect(DATABASE_URL)
-        await connection.execute(MIGRATION)
+        await _ensure_skill_lifecycle_schema(connection)
         suffix = uuid4().hex
         tenant_id = f"tenant-skill-{suffix}"
         digest = f"sha256:{suffix.ljust(64, '0')}"

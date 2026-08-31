@@ -43,6 +43,39 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+async def _ensure_skill_publisher_schema(connection: asyncpg.Connection) -> None:
+    status_constraint = await connection.fetchval(
+        """SELECT pg_get_constraintdef(constraint_record.oid)
+            FROM pg_constraint constraint_record
+            JOIN pg_class relation ON relation.oid=constraint_record.conrelid
+            JOIN pg_namespace namespace ON namespace.oid=relation.relnamespace
+            WHERE constraint_record.conname='skill_publisher_status_evidence_check'
+              AND namespace.nspname='hands' AND relation.relname='skill_publisher'"""
+    )
+    key_constraint = await connection.fetchval(
+        """SELECT EXISTS(
+            SELECT 1 FROM pg_constraint constraint_record
+            JOIN pg_class relation ON relation.oid=constraint_record.conrelid
+            JOIN pg_namespace namespace ON namespace.oid=relation.relnamespace
+            WHERE constraint_record.conname='skill_publisher_key_revocation_policy_check'
+              AND namespace.nspname='hands' AND relation.relname='skill_publisher_key'
+        )"""
+    )
+    current = (
+        key_constraint
+        and status_constraint is not None
+        and "revoked" in str(status_constraint)
+        and "security_action" in str(status_constraint)
+    )
+    if current:
+        return
+    await connection.execute(
+        """ALTER TABLE IF EXISTS hands.skill_publisher_key
+        DROP CONSTRAINT IF EXISTS skill_publisher_key_revocation_policy_check"""
+    )
+    await connection.execute(MIGRATION)
+
+
 def _public_key() -> str:
     raw = Ed25519PrivateKey.generate().public_key().public_bytes(
         serialization.Encoding.Raw,
@@ -55,7 +88,7 @@ def test_postgres_publisher_rotation_is_atomic_and_idempotent() -> None:
     async def scenario() -> None:
         assert DATABASE_URL is not None
         connection = await asyncpg.connect(DATABASE_URL)
-        await connection.execute(MIGRATION)
+        await _ensure_skill_publisher_schema(connection)
         suffix = uuid4().hex
         tenant_id = f"tenant-publisher-{suffix}"
         publisher = f"publisher-{suffix}"

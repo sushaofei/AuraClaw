@@ -16,6 +16,7 @@ from auraclaw.contracts.skills import (
     SkillSourceDesiredState,
     SkillSourceKind,
     SkillSourceRecord,
+    SkillSourceSyncState,
 )
 
 
@@ -49,6 +50,12 @@ class SkillSourceService:
         if source is None:
             raise NotFoundError("Skill Source not found")
         return source
+
+    async def get_source_sync_state(
+        self, tenant_id: str, source_id: str
+    ) -> SkillSourceSyncState | None:
+        await self.get_source(tenant_id, source_id)
+        return await self._lifecycle.get_sync_state(tenant_id, source_id)
 
     async def configure(
         self, command: ConfigureSkillSourceCommand

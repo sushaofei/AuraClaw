@@ -29,7 +29,6 @@ def test_kingbase_backend_resolves_postgres_dialect(monkeypatch: pytest.MonkeyPa
     settings = Settings(_env_file=None)
     assert settings.kingbase_enabled is True
     assert settings.postgres_enabled is True
-    assert settings.mysql_enabled is False
     assert settings.resolved_db_dialect == "postgres"
     assert settings.storage_label == "kingbase"
     assert settings.resolved_database_url.startswith("postgresql+asyncpg://")
@@ -57,10 +56,10 @@ def test_kingbase_env_aliases_overwrite_db_when_backend_kingbase(
     monkeypatch.delenv("AURACLAW_KINGBASE_ENV_FILE", raising=False)
     for key in _KINGBASE_KEYS:
         monkeypatch.delenv(key, raising=False)
-    monkeypatch.setenv("DB_HOST", "mysql-host")
-    monkeypatch.setenv("DB_PORT", "3306")
-    monkeypatch.setenv("DB_USER", "mysql_user")
-    monkeypatch.setenv("DB_PWD", "mysql_pwd")
+    monkeypatch.setenv("DB_HOST", "stale-host")
+    monkeypatch.setenv("DB_PORT", "5544")
+    monkeypatch.setenv("DB_USER", "stale_user")
+    monkeypatch.setenv("DB_PWD", "stale_pwd")
     monkeypatch.setenv("DB_NAME", "auraclaw_dev")
 
     apply_kingbase_env_aliases(settings_env_file=env_file)
@@ -125,30 +124,6 @@ def test_kingbase_inline_db_credentials_in_settings_env(
     settings = Settings(_env_file=env_file)
     assert settings.db_host == "10.244.72.1"
     assert settings.kingbase_enabled is True
-
-
-def test_kingbase_aliases_do_not_override_mysql_backend(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    env_file = tmp_path / ".env.dev"
-    env_file.write_text(
-        "AURACLAW_STORAGE_BACKEND=mysql\n"
-        "KINGBASE_HOST=10.244.72.1\nKINGBASE_PORT=54321\n"
-        "KINGBASE_DB_USER=kb\nKINGBASE_DB_PWD=p\nKINGBASE_AURACLAW_DB=kbdb\n",
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("AURACLAW_STORAGE_BACKEND", "mysql")
-    monkeypatch.setenv("DB_HOST", "mysql-host")
-    monkeypatch.setenv("DB_PORT", "3306")
-    monkeypatch.setenv("DB_USER", "mysql_user")
-    monkeypatch.setenv("DB_PWD", "mysql_pwd")
-    monkeypatch.setenv("DB_NAME", "auraclaw_dev")
-
-    apply_kingbase_env_aliases(settings_env_file=env_file)
-    settings = Settings(_env_file=None)
-    assert settings.mysql_enabled is True
-    assert settings.db_host == "mysql-host"
-    assert settings.resolved_database_url.startswith("mysql+aiomysql://")
 
 
 def test_detect_and_normalize_kingbase_urls() -> None:

@@ -307,6 +307,17 @@ class PostgresSkillPublisherStore(LazyPool, SkillPublisherStore):
         async with pool.acquire() as connection:
             return await _publisher(connection, tenant_id, publisher)
 
+    async def list_publishers(
+        self, tenant_id: str
+    ) -> tuple[SkillPublisherRecord, ...]:
+        pool = await self.pool()
+        rows = await pool.fetch(
+            """SELECT * FROM hands.skill_publisher
+            WHERE tenant_id=$1 ORDER BY publisher""",
+            tenant_id,
+        )
+        return tuple(_publisher_record(row) for row in rows)
+
     async def get_key(
         self, tenant_id: str, publisher: str, key_id: str
     ) -> SkillPublisherKeyRecord | None:

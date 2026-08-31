@@ -2,9 +2,9 @@
 
 > **状态**：最小闭环已实现；生产稳定化待实施
 > **日期**：2026-07-24
-> **依据**：MySQL `ct_model_*` 现有表结构与样本、[[23 MCP Runtime 能力平面]]
+> **依据**：PostgreSQL-compatible `ct_model_*` 现有表结构与样本、[[23 MCP Runtime 能力平面]]
 > **范围**：把租户模型定义编译成 AuraClaw Skill Package，并通过内部 MCP Capability Gateway
-> 提供给 Agent；不让 Agent 或 Runtime 直连 MySQL，不把自然语言公式当成可信执行代码。
+> 提供给 Agent；不让 Agent 或 Runtime 直连数据库，不把自然语言公式当成可信执行代码。
 
 ## 1. 结论
 
@@ -33,7 +33,7 @@ Skill 只描述何时使用模型、如何收集输入、如何处理依赖、�
 为尽快验证链路，首期实现刻意采用以下简化：
 
 ```text
-MySQL ct_model_* 固定只读 SELECT
+PostgreSQL ct_model_* 固定只读 SELECT
  -> ModelSkillSnapshot
  -> ModelSkillCompiler
  -> 签名 SkillPackage
@@ -51,7 +51,7 @@ MySQL ct_model_* 固定只读 SELECT
   `procurement-price-insight-atomic-v1` 可绑定固定的只读原子 Tool，或在 v2 配置中依赖固定
   的平台子 Skill。未注册模板仍禁止执行；
 - 开发环境可使用固定本地签名键，生产启用源读取时必须提供独立签名键；
-- MySQL 到 AuraClaw tenant 通过显式配置映射，默认仅服务 development 演示。
+- PostgreSQL Source 到 AuraClaw tenant 通过显式配置映射，默认仅服务 development 演示。
 
 本阶段直接读库是为了缩短验证路径，并不代表最终生产边界已经确定。以下事项记录为后续决策：
 
@@ -128,7 +128,7 @@ Binding。Runtime 分批加载依赖，并按“子 Skill 在前、场景 Skill 
 
 ```mermaid
 flowchart LR
-    MYSQL["Model Config MySQL<br/>ct_model_*"]
+    PG["Model Config PostgreSQL<br/>ct_model_*"]
     SRC["ModelDefinitionSource<br/>read-only adapter"]
     LOAD["Snapshot Loader"]
     VAL["Validator + Normalizer"]
@@ -141,7 +141,7 @@ flowchart LR
     RT["Agent Runtime"]
     EXEC["Managed Model Tools"]
 
-    MYSQL --> SRC --> LOAD --> VAL --> COMP --> SIGN --> REG
+    PG --> SRC --> LOAD --> VAL --> COMP --> SIGN --> REG
     REG --> ART
     REG --> CAT --> MCP --> RT
     RT -->|"model.evaluate / explain"| MCP --> EXEC
@@ -159,7 +159,7 @@ flowchart LR
 ### 3.2 不负责
 
 - 不执行模型、不写 `ct_model_execution*` 或业务表；
-- 不把 MySQL 作为 AuraClaw Canonical Session Event；
+- 不把外部 PostgreSQL 读模型作为 AuraClaw Canonical Session Event；
 - 不允许 Runtime、Agent 或模型参数提交 SQL、表名、Server 地址或凭证；
 - 不把 Draft 或实时变化的关系行静默覆盖到已发布 Skill 版本；
 - 不根据自然语言描述自动发明公式；
@@ -175,7 +175,7 @@ flowchart LR
 | Skill 激活和终态 | Session Canonical Event |
 | 转换游标、源摘要、失败与重试 | Action Hands Model Skill Sync Store |
 
-转换服务对 MySQL 只使用只读账号。凭证以 `credential_ref` 配置，由受管连接器持有，不进入
+转换服务对 PostgreSQL Source 只使用只读账号。凭证以 `credential_ref` 配置，由受管连接器持有，不进入
 Runtime、MCP Resource、Skill 包、日志或 Artifact。
 
 ## 4. 源快照契约
@@ -265,7 +265,7 @@ tests/fixtures.json                 可选
 | `input_schema` | 由 input feature + mapping 生成；API 的调用输入只包含业务目标和显式覆盖字段 |
 | `output_schema` | 由 output schema + threshold/tag 输出生成 |
 | `required_tools` | 通用受管 Tool：`ct.model.inputs.read`、`ct.model.evaluate`、可选 `ct.model.writeback` |
-| `required_resources` | 版本化 `model://` 配置/解释 Resource；不引用任意 MySQL/HTTP 地址 |
+| `required_resources` | 版本化 `model://` 配置/解释 Resource；不引用任意数据库/HTTP 地址 |
 | `allowed_roles` | 默认 `coordinator, worker`，管理发布不对 Agent 暴露 |
 | `data_classification` | tenant 策略配置，默认 `internal` |
 | `risk_level` | 只读评分 `medium`；带业务回写或事件发送至少 `high` |
@@ -399,7 +399,7 @@ model_skill_sync_state(
 
 - `action-hands` 启动前执行一次同步，随后按
   `AURACLAW_MODEL_SKILL_RECONCILE_INTERVAL_SECONDS`（默认 60 秒）扫描；
-- 每次扫描使用 MySQL `READ ONLY + WITH CONSISTENT SNAPSHOT` 装载完整聚合配置；
+- 每次扫描使用 PostgreSQL `REPEATABLE READ READ ONLY` 事务装载完整聚合配置；
 - 相同 Skill 版本和 package digest 为幂等 no-op，不重复生成 Artifact；
 - 新出现的合格版本被发布；上一轮存在、本轮不再返回的版本被撤销 MCP 可见性；
 - 暂时失败保留上一份可用发布并在下一轮重试，单个无效快照不会阻断其他模型；
@@ -436,12 +436,12 @@ contracts/model_skills.py                 跨边界快照、报告、命令 DTO
 action/model_skill_compiler.py            纯校验与确定性编译
 action/model_skill_publisher.py           对账、幂等、发布编排
 action/ports.py                           Source/SyncStore/Signer/Publisher ports
-infrastructure/model_sources/mysql.py     ct_model_* 只读适配器
+infrastructure/model_sources/postgres.py  ct_model_* 只读适配器
 infrastructure/persistence/...            sync state 持久化
 composition/services.py                   action-hands 对象图与生命周期
 ```
 
-`domain` 和 `contracts` 不导入 MySQL、FastAPI 或基础设施。入口只调用 `composition`。MySQL 适配器不
+`domain` 和 `contracts` 不导入数据库驱动、FastAPI 或基础设施。入口只调用 `composition`。Source 适配器不
 直接写 Artifact、Catalog 或 Session；发布必须经过 `action` 端口和现有治理链路。
 
 现有 `SkillPackageRegistry` 主要是进程内 Registry。生产实现前需要把 Publication 元数据和包加载
@@ -513,9 +513,9 @@ model_skill_reconcile_lag
 
 - Draft、不完整、跨 tenant、依赖成环或同版本漂移的模型不能成为 Active Skill；
 - 同一源快照在任意实例上生成字节一致的包和 digest；
-- Runtime 只通过内部 MCP 发现 Skill，不接触 MySQL、SQL、地址或凭证；
+- Runtime 只通过内部 MCP 发现 Skill，不接触数据库、SQL、地址或凭证；
 - Agent 不自行解释公式或选择上游版本，计算只由固定 digest 的 Tool 完成；
 - 写回与事件发送经过 Policy、Approval、Invocation Store、幂等和 Fencing；
 - action-hands 多副本/重启后 Publication 与 Skill Resource 不丢失；
 - 发布、激活、执行、结果和撤销能追溯到 tenant、模型版本、source/package digest 和策略证据；
-- Outbox 丢失、重复、乱序或 MySQL 短暂不可用不会造成静默覆盖或错误发布。
+- Outbox 丢失、重复、乱序或 PostgreSQL Source 短暂不可用不会造成静默覆盖或错误发布。

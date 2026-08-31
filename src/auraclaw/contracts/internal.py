@@ -918,6 +918,20 @@ class SkillPublisherInternalResponse(ContractModel):
     keys: tuple[dict[str, Any], ...] = ()
 
 
+class SkillAdminSnapshotInternalRequest(ContractModel):
+    context: InternalRequestContext
+
+
+class SkillAdminSnapshotInternalResponse(ContractModel):
+    api_version: str = INTERNAL_API_VERSION
+    packages: tuple[dict[str, Any], ...] = ()
+    publications: tuple[dict[str, Any], ...] = ()
+    installations: tuple[dict[str, Any], ...] = ()
+    publishers: tuple[dict[str, Any], ...] = ()
+    sources: tuple[dict[str, Any], ...] = ()
+    source_sync_states: tuple[dict[str, Any], ...] = ()
+
+
 class AdminOperationRequest(ContractModel):
     context: InternalRequestContext
     operation_id: str

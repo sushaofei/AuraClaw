@@ -15,6 +15,8 @@ from auraclaw.action.skill_sources import SkillSourceService
 from auraclaw.contracts.errors import AuthorizationError, SchemaValidationError
 from auraclaw.contracts.internal import (
     ServiceIdentity,
+    SkillAdminSnapshotInternalRequest,
+    SkillAdminSnapshotInternalResponse,
     SkillAdmissionListInternalRequest,
     SkillAdmissionListInternalResponse,
     SkillAdmissionMetricsInternalRequest,
@@ -176,6 +178,47 @@ class SkillPublicationInternalService:
         if self._sources is None:
             raise SchemaValidationError("Skill Source service is not configured")
         return self._sources
+
+    async def admin_snapshot(
+        self, request: SkillAdminSnapshotInternalRequest
+    ) -> SkillAdminSnapshotInternalResponse:
+        if request.context.service_identity is not ServiceIdentity.TASK_API:
+            raise AuthorizationError("workload may not query Skill management state")
+        if self._management is None or self._admissions is None:
+            raise SchemaValidationError("Skill management query is not configured")
+        tenant_id = request.context.tenant_id
+        sources = await self._admissions.list_sources(tenant_id)
+        sync_states: list[dict[str, Any]] = []
+        for source in sources:
+            state = await self._admissions.get_sync_state(tenant_id, source.source_id)
+            if state is not None:
+                sync_states.append(state.model_dump(mode="json"))
+        publisher_rows: tuple[dict[str, Any], ...] = ()
+        if self._publishers is not None:
+            publisher_rows = tuple(
+                {
+                    "publisher": record.model_dump(mode="json"),
+                    "keys": tuple(key.model_dump(mode="json") for key in keys),
+                }
+                for record, keys in await self._publishers.list_publishers(tenant_id)
+            )
+        return SkillAdminSnapshotInternalResponse(
+            packages=tuple(
+                item.model_dump(mode="json")
+                for item in await self._management.list_packages(tenant_id)
+            ),
+            publications=tuple(
+                item.model_dump(mode="json")
+                for item in await self._management.list_publications(tenant_id)
+            ),
+            installations=tuple(
+                item.model_dump(mode="json")
+                for item in await self._management.list_installations(tenant_id)
+            ),
+            publishers=publisher_rows,
+            sources=tuple(item.model_dump(mode="json") for item in sources),
+            source_sync_states=tuple(sync_states),
+        )
 
     async def list_admissions(
         self, request: SkillAdmissionListInternalRequest

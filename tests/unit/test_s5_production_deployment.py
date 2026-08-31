@@ -137,6 +137,7 @@ def test_production_compose_mounts_least_privilege_secrets() -> None:
         for service in APPLICATION_SERVICES - {"artifact-service"}
     )
     assert "runtime_workload_token" in secret_sources("agent-runtime")
+    assert "credential_proxy_workload_token" in secret_sources("action-hands")
     assert "streaming_gateway_workload_token" in secret_sources("session")
     assert "streaming_gateway_workload_token" in secret_sources("streaming-gateway")
     assert not any(

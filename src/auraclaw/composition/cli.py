@@ -553,7 +553,7 @@ def build_parser() -> argparse.ArgumentParser:
     migrate.add_argument(
         "--directory",
         default=None,
-        help="Migration directory (default: migrations/ or migrations/mysql/ by dialect)",
+        help="Migration directory (default: migrations/)",
     )
     migrate.add_argument("--confirm-existing-schema", action="store_true")
     skills = subcommands.add_parser("skills")
@@ -631,7 +631,7 @@ def _run_ingress_process(
 def _serve_topology(settings: Settings, *, host: str) -> None:
     if not settings.sql_storage_enabled:
         raise ValueError(
-            "auraclaw serve requires SQL storage (postgres, mysql, or kingbase) so "
+            "auraclaw serve requires SQL storage (PostgreSQL or Kingbase) so "
             "MCP registry, session facts and projections survive restarts. Configure "
             "AURACLAW_STORAGE_BACKEND and DB_* credentials in .env.dev."
         )

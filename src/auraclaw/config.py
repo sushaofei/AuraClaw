@@ -99,7 +99,7 @@ def apply_local_dev_proxy_env(env_file: str | Path | None = None) -> None:
     """Apply NO_PROXY / clear HTTP(S)_PROXY for local `.env.dev` only.
 
     Corporate HTTP proxies on developer machines break access to private Kafka /
-    MySQL / SeaweedFS / Vault hosts. Server test and production Compose do not
+    PostgreSQL / SeaweedFS / Vault hosts. Server test and production Compose do not
     need this — they run without local proxy interference.
     """
     path = Path(env_file) if env_file is not None else None
@@ -343,12 +343,12 @@ class Settings(BaseSettings):
     artifact_base_url: str = "http://127.0.0.1:8009"
     delivery_base_url: str = "http://127.0.0.1:8011"
     log_level: str = "INFO"
-    storage_backend: Literal["auto", "memory", "postgres", "mysql", "kingbase"] = "auto"
-    db_dialect: Literal["mysql", "postgres"] = "mysql"
-    database_url: str = "mysql+aiomysql://auraclaw:auraclaw@localhost:3306/auraclaw"
+    storage_backend: Literal["auto", "memory", "postgres", "kingbase"] = "auto"
+    db_dialect: Literal["postgres"] = "postgres"
+    database_url: str = "postgresql+asyncpg://auraclaw:auraclaw@localhost:5432/auraclaw"
     migration_database_url: SecretStr | None = None
     db_host: str | None = Field(default=None, validation_alias="DB_HOST")
-    db_port: int = Field(default=3306, validation_alias="DB_PORT")
+    db_port: int = Field(default=5432, validation_alias="DB_PORT")
     db_user: str | None = Field(default=None, validation_alias="DB_USER")
     db_password: str | None = Field(default=None, validation_alias="DB_PWD")
     db_name: str | None = Field(default=None, validation_alias="DB_NAME")
@@ -451,6 +451,27 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
+    def validate_database_urls(self) -> Settings:
+        urls = [self.database_url]
+        if self.migration_database_url is not None:
+            urls.append(self.migration_database_url.get_secret_value())
+        for url in urls:
+            lowered = url.lower()
+            if not lowered.startswith(
+                (
+                    "postgresql://",
+                    "postgresql+asyncpg://",
+                    "postgres://",
+                    "kingbase://",
+                    "kingbase+",
+                )
+            ):
+                raise ValueError(
+                    "database URLs must use PostgreSQL or Kingbase compatibility mode"
+                )
+        return self
+
+    @model_validator(mode="after")
     def validate_artifact_backend(self) -> Settings:
         if self.artifact_backend == "seaweedfs":
             missing = []
@@ -489,28 +510,8 @@ class Settings(BaseSettings):
         return self
 
     @property
-    def resolved_db_dialect(self) -> Literal["mysql", "postgres"]:
-        if self.storage_backend in {"postgres", "kingbase"}:
-            return "postgres"
-        if self.storage_backend == "mysql":
-            return "mysql"
-        url = (self.database_url or "").lower()
-        if (
-            url.startswith("postgresql:")
-            or url.startswith("postgres:")
-            or url.startswith("kingbase:")
-            or url.startswith("kingbase+")
-            or "+asyncpg" in url
-        ):
-            return "postgres"
-        if (
-            url.startswith("mysql:")
-            or "+aiomysql" in url
-            or "+asyncmy" in url
-            or "+pymysql" in url
-        ):
-            return "mysql"
-        return self.db_dialect
+    def resolved_db_dialect(self) -> Literal["postgres"]:
+        return "postgres"
 
     @property
     def resolved_database_url(self) -> str:
@@ -523,9 +524,6 @@ class Settings(BaseSettings):
             user = quote(self.db_user, safe="")
             password = quote(self.db_password, safe="")
             database = quote(self.db_name, safe="")
-            dialect = self.resolved_db_dialect
-            if dialect == "mysql":
-                return f"mysql+aiomysql://{user}:{password}@{self.db_host}:{self.db_port}/{database}"
             return f"postgresql+asyncpg://{user}:{password}@{self.db_host}:{self.db_port}/{database}"
         url = self.database_url
         lowered = url.lower()
@@ -545,7 +543,7 @@ class Settings(BaseSettings):
     def sql_storage_enabled(self) -> bool:
         if self.storage_backend == "memory":
             return False
-        if self.storage_backend in {"postgres", "mysql", "kingbase"}:
+        if self.storage_backend in {"postgres", "kingbase"}:
             return True
         return bool(self.db_host and self.db_user and self.db_name)
 
@@ -553,10 +551,6 @@ class Settings(BaseSettings):
     def postgres_enabled(self) -> bool:
         """True when primary SQL storage is PostgreSQL-compatible (incl. KingBase)."""
         return self.sql_storage_enabled and self.resolved_db_dialect == "postgres"
-
-    @property
-    def mysql_enabled(self) -> bool:
-        return self.sql_storage_enabled and self.resolved_db_dialect == "mysql"
 
     @property
     def kingbase_enabled(self) -> bool:
@@ -750,7 +744,7 @@ def _validate_local_dev_storage(settings: Settings, env_file: str | Path | None)
     raise ValueError(
         "Local development (.env.dev) requires SQL storage so registrations and "
         "projections survive process restarts. Set AURACLAW_STORAGE_BACKEND to "
-        "postgres, mysql, or kingbase and configure DB_* credentials."
+        "postgres or kingbase and configure DB_* credentials."
     )
 
 

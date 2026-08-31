@@ -62,4 +62,4 @@ Control Plane Lease 决定。若未来开放，需要先定义 owner 与 Lease �
 - M4 串行、并行、树形、混合 DAG 与 Reviewer lineage 回归。
 - M13 shared pool、串行依赖解锁、Root suspend/wake、内部命令幂等、签名角色防伪、runtime budget
   持久化和角色 Harness fail-closed。
-- memory 路径执行；PostgreSQL/MySQL suspend/wake 与 Root Feed SQL 通过既有方言测试覆盖。
+- memory 路径执行；PostgreSQL/KingBase suspend/wake 与 Root Feed SQL 通过兼容性测试覆盖。

@@ -309,29 +309,29 @@ Gateway 的短期 Replay Buffer，不为每个浏览器创建 Kafka Consumer。
 Event 回写，并通过 Task/Result Query 的 `delivery_status`、`delivery_id`、attempt count 与响应
 摘要查询。Sink 只保存 `credential_ref`，Job 不保存 Secret。
 
-## 主存储（MySQL / PostgreSQL / KingBase）
+## 主存储（PostgreSQL / KingBase）
 
 存储配置支持两种形式：
 
-- `AURACLAW_DATABASE_URL=mysql+aiomysql://...` 或 `postgresql+asyncpg://...`
+- `AURACLAW_DATABASE_URL=postgresql+asyncpg://...`
   （KingBase 也可用 `kingbase://` / `kingbase+asyncpg://`，运行时规范为 `postgresql+asyncpg://`）
 - `DB_HOST`、`DB_PORT`、`DB_USER`、`DB_PWD`、`DB_NAME`
 
 方言选择：
 
-- `AURACLAW_DB_DIALECT=mysql|postgres`（默认 **mysql**）
-- `AURACLAW_STORAGE_BACKEND=auto|memory|mysql|postgres|kingbase`
+- `AURACLAW_DB_DIALECT=postgres`
+- `AURACLAW_STORAGE_BACKEND=auto|memory|postgres|kingbase`
 
-当存在完整 `DB_*` 且 `storage_backend=auto` 时启用 SQL 存储，方言默认 MySQL。
-继续使用 PostgreSQL 时请显式设置 `AURACLAW_STORAGE_BACKEND=postgres`（或
-`AURACLAW_DB_DIALECT=postgres` 且 URL scheme 为 postgresql）。密码中的 `#`、`,` 由
+当存在完整 `DB_*` 且 `storage_backend=auto` 时启用 PostgreSQL 兼容存储。
+本地 PostgreSQL 设置 `AURACLAW_STORAGE_BACKEND=postgres`；KingBase 兼容模式设置为
+`kingbase`。密码中的 `#`、`,` 由
 `Settings.resolved_database_url` 自动 URL 编码。
 
 **KingBase（PostgreSQL 兼容模式）**：测试与生产环境固定设置
 `AURACLAW_STORAGE_BACKEND=kingbase`。数据库主机凭证只维护在 gitignored `.host.env`
 的 `KINGBASE_HOST/PORT/USER/PWD`；运行 `scripts/sync_kingbase_env.py` 会原子更新
-`.env.test` / `.env.prod` 的 `DB_*` 与 URL 编码后的统一 asyncpg DSN，并清除遗留 MySQL
-环境变量。方言与连接池复用 PostgreSQL / `asyncpg`，Domain ports 与 Store 代码无需改动。
+`.env.test` / `.env.prod` 的 `DB_*` 与 URL 编码后的统一 asyncpg DSN。方言与连接池复用
+PostgreSQL / `asyncpg`，Domain ports 与 Store 代码无需改动。
 
 **本地 PostgreSQL**：开发默认可用 `AURACLAW_STORAGE_BACKEND=postgres`。启动时从
 `.postgresql.local.env`（或 `.postgresql.env` / `AURACLAW_POSTGRESQL_ENV_FILE`）读取
@@ -342,9 +342,6 @@ Event 回写，并通过 Task/Result Query 的 `delivery_status`、`delivery_id`
 迁移：
 
 ```bash
-# MySQL（默认目录 migrations/mysql）
-uv run auraclaw migrate up
-
 # PostgreSQL / KingBase（同一迁移树）
 AURACLAW_STORAGE_BACKEND=postgres uv run auraclaw migrate up --directory migrations
 AURACLAW_STORAGE_BACKEND=kingbase uv run auraclaw migrate up --directory migrations
@@ -352,17 +349,11 @@ AURACLAW_STORAGE_BACKEND=kingbase uv run auraclaw migrate up --directory migrati
 
 首次启动前按版本顺序应用 migrations。开发和生产使用各自配置文件中的 `DB_NAME`。
 
-PostgreSQL / KingBase 脚本在 `migrations/`；MySQL 对照脚本在 `migrations/mysql/`（表名使用
-`schema_table` 前缀，例如 `session_core_canonical_event`）。可选角色授权脚本（当前部署不注入
-分角色 DSN）：
-
-- MySQL：`deploy/mysql/roles.sql`（意图文档）；托管实例若拒绝通配 GRANT，使用
-  `uv run python scripts/apply_mysql_roles.py` 按前缀展开到具体表
-- PostgreSQL / KingBase：`deploy/postgres/roles.sql`（需在目标实例验证语法兼容）
+PostgreSQL / KingBase 共用 `migrations/`。可选角色授权脚本（当前部署不注入分角色 DSN）为
+`deploy/postgres/roles.sql`，应用到 KingBase 前需在目标实例验证兼容语法。
 
 ```text
 migrations/0001_initial.sql
-migrations/mysql/0001_initial.sql
 migrations/0002_m1_fact_query.sql
 migrations/0003_m2_managed_runtime.sql
 migrations/0004_m3_tool_artifact_approval.sql

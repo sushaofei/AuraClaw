@@ -266,6 +266,33 @@ def test_skill_admin_manages_installation_and_revocation_separately() -> None:
         assert len(skills) == 1
         assert skills[0]["name"] == "release.prepare"
         assert skills[0]["status"] == "active"
+        assert listed.json()["items"][0]["availability"] == "available"
+        assert listed.json()["items"][0]["installation"]["revision"] == 1
+
+        installations = client.get(
+            "/v1/admin/skill-installations?status=active", headers=headers
+        )
+        assert installations.status_code == 200, installations.text
+        assert installations.json()["installations"][0]["source_id"] == "sks_admin_upload"
+
+        publications = client.get(
+            "/v1/admin/skill-publications?publisher=platform", headers=headers
+        )
+        assert publications.status_code == 200, publications.text
+        assert publications.json()["publications"][0]["version"] == "1.4.0"
+
+        packages = client.get(
+            "/v1/admin/skill-packages?retention_status=retained", headers=headers
+        )
+        assert packages.status_code == 200, packages.text
+        assert packages.json()["packages"][0]["retention_revision"] == 1
+
+        management_view = client.get(
+            "/v1/admin/skills/platform/release.prepare/management", headers=headers
+        )
+        assert management_view.status_code == 200, management_view.text
+        assert management_view.json()["installation"]["status"] == "active"
+        assert management_view.json()["versions"][0]["package"]["retention_status"] == "retained"
 
         detail = client.get("/v1/admin/skills/platform/release.prepare", headers=headers)
         assert detail.status_code == 200
@@ -297,6 +324,8 @@ def test_skill_admin_manages_installation_and_revocation_separately() -> None:
         )
         assert disabled.status_code == 202, disabled.text
         assert disabled.json()["installation"]["status"] == "disabled"
+        disabled_catalog = client.get("/v1/admin/skills", headers=headers).json()
+        assert disabled_catalog["items"][0]["availability"] == "installation_disabled"
         assert (
             registry.get_publication(
                 "tenant-1", "platform", "release.prepare", "1.4.0"

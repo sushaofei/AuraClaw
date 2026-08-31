@@ -10,11 +10,10 @@ from auraclaw.composition import providers
 from auraclaw.config import get_settings
 
 # Unit tests construct Settings(_env_file=None, ...) with explicit kwargs.
-# A shell that sourced .env exports AURACLAW_*/MYSQL_DB_*/DB_* into the process;
+# A shell that sourced .env exports AURACLAW_*/DB_* into the process;
 # pydantic-settings still reads those env vars and breaks production/hands unit tests.
 _AMBIENT_PREFIXES = (
     "AURACLAW_",
-    "MYSQL_DB_",
     "DB_",
     "SEAWEEDFS_",
     "REDIS_",

@@ -270,6 +270,8 @@ class SkillLifecycleStore(Protocol):
         self, tenant_id: str, publisher: str, name: str, version: str
     ) -> SkillPackageRecord | None: ...
 
+    async def list_packages(self, tenant_id: str) -> tuple[SkillPackageRecord, ...]: ...
+
     async def update_package_retention(
         self, record: SkillPackageRecord, *, expected_revision: int
     ) -> SkillPackageRecord: ...
@@ -694,6 +696,22 @@ class InMemorySkillLifecycleStore:
         self, tenant_id: str, publisher: str, name: str, version: str
     ) -> SkillPackageRecord | None:
         return self._packages.get((tenant_id, publisher, name, version))
+
+    async def list_packages(self, tenant_id: str) -> tuple[SkillPackageRecord, ...]:
+        return tuple(
+            sorted(
+                (
+                    record
+                    for record in self._packages.values()
+                    if record.tenant_id == tenant_id
+                ),
+                key=lambda item: (
+                    item.manifest.publisher,
+                    item.manifest.name,
+                    item.manifest.version,
+                ),
+            )
+        )
 
     async def update_package_retention(
         self, record: SkillPackageRecord, *, expected_revision: int

@@ -82,6 +82,9 @@ class SkillManagementService:
             raise NotFoundError("Skill package not found")
         return record
 
+    async def list_packages(self, tenant_id: str) -> tuple[SkillPackageRecord, ...]:
+        return await self._lifecycle.list_packages(tenant_id)
+
     async def get_installation(
         self,
         tenant_id: str,
@@ -92,6 +95,11 @@ class SkillManagementService:
         if record is None:
             raise NotFoundError("Skill installation not found")
         return record
+
+    async def list_installations(
+        self, tenant_id: str
+    ) -> tuple[SkillInstallationRecord, ...]:
+        return await self._lifecycle.list_installations(tenant_id)
 
     async def get_publication(
         self,
@@ -104,6 +112,11 @@ class SkillManagementService:
         if record is None:
             raise NotFoundError("Skill publication not found")
         return record
+
+    async def list_publications(
+        self, tenant_id: str
+    ) -> tuple[SkillPublicationRecord, ...]:
+        return await self._lifecycle.list_publications(tenant_id)
 
     async def change_installation(
         self,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import json
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, Literal, Protocol
@@ -15,6 +16,7 @@ from auraclaw.action.skill_lifecycle import (
 )
 from auraclaw.action.skill_packages import SkillPackage, SkillPackageRegistry
 from auraclaw.api.dependencies import RequestIdentity, request_identity
+from auraclaw.contracts.errors import NotFoundError
 from auraclaw.contracts.internal import (
     ArtifactFinalizeResponse,
     ArtifactUploadResponse,
@@ -153,9 +155,15 @@ class SkillManager(Protocol):
         version: str,
     ) -> SkillPackageRecord: ...
 
+    async def list_packages(self, tenant_id: str) -> tuple[SkillPackageRecord, ...]: ...
+
     async def get_installation(
         self, tenant_id: str, publisher: str, name: str
     ) -> SkillInstallationRecord: ...
+
+    async def list_installations(
+        self, tenant_id: str
+    ) -> tuple[SkillInstallationRecord, ...]: ...
 
     async def get_publication(
         self,
@@ -164,6 +172,10 @@ class SkillManager(Protocol):
         name: str,
         version: str,
     ) -> SkillPublicationRecord: ...
+
+    async def list_publications(
+        self, tenant_id: str
+    ) -> tuple[SkillPublicationRecord, ...]: ...
 
     async def change_installation(
         self, command: ChangeSkillInstallationCommand
@@ -201,6 +213,12 @@ class SkillPublisherManager(Protocol):
         self, tenant_id: str, publisher: str
     ) -> tuple[SkillPublisherRecord, tuple[SkillPublisherKeyRecord, ...]]: ...
 
+    async def list_publishers(
+        self, tenant_id: str
+    ) -> tuple[
+        tuple[SkillPublisherRecord, tuple[SkillPublisherKeyRecord, ...]], ...
+    ]: ...
+
 
 class SkillAdmissionReader(Protocol):
     async def page_admissions(
@@ -236,6 +254,10 @@ class SkillSourceManager(Protocol):
     async def sync_source(
         self, tenant_id: str, source_id: str
     ) -> dict[str, object]: ...
+
+    async def get_source_sync_state(
+        self, tenant_id: str, source_id: str
+    ) -> object | None: ...
 
 
 def _summary(publication: PublishedSkill, *, skill_markdown: str | None = None) -> dict[str, Any]:
@@ -298,6 +320,23 @@ def create_skill_admin_router(
                     identity.tenant_id, source_id
                 )
             )
+        }
+
+    @router.get("/skill-sources/{source_id}/sync-state")
+    async def get_skill_source_sync_state(
+        source_id: str, identity: Identity
+    ) -> dict[str, Any]:
+        service = _require_source_service(source_service)
+        state = await service.get_source_sync_state(identity.tenant_id, source_id)
+        return {
+            "source_id": source_id,
+            "sync_state": (
+                None
+                if state is None
+                else state.model_dump(mode="json")
+                if hasattr(state, "model_dump")
+                else state
+            ),
         }
 
     async def _configure_source(
@@ -381,14 +420,86 @@ def create_skill_admin_router(
         return {"source": _source_summary(result)}
 
     @router.get("/skills")
-    async def list_skills(identity: Identity) -> dict[str, Any]:
+    async def list_skills(
+        identity: Identity,
+        q: Annotated[str | None, Query(max_length=256)] = None,
+        publisher: Annotated[str | None, Query(max_length=128)] = None,
+        risk_level: Annotated[str | None, Query(max_length=64)] = None,
+        publication_status: Annotated[str | None, Query(max_length=64)] = None,
+        installation_status: Annotated[str | None, Query(max_length=64)] = None,
+        source_id: Annotated[str | None, Query(max_length=128)] = None,
+        cursor: Annotated[str | None, Query(max_length=2048)] = None,
+        limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    ) -> dict[str, Any]:
         latest: dict[tuple[str, str], PublishedSkill] = {}
         for publication in registry.list_publications(identity.tenant_id):
             key = (publication.manifest.publisher, publication.manifest.name)
             current = latest.get(key)
-            if current is None or publication.manifest.version > current.manifest.version:
+            if current is None or _semver_key(publication.manifest.version) > _semver_key(
+                current.manifest.version
+            ):
                 latest[key] = publication
-        return {"skills": [_summary(item) for item in latest.values()]}
+        installations: dict[tuple[str, str], SkillInstallationRecord] = {}
+        publication_records: dict[tuple[str, str, str], SkillPublicationRecord] = {}
+        if management_service is not None:
+            installations = {
+                (item.publisher, item.name): item
+                for item in await management_service.list_installations(identity.tenant_id)
+            }
+            publication_records = {
+                (item.publisher, item.name, item.version): item
+                for item in await management_service.list_publications(identity.tenant_id)
+            }
+        legacy = [_summary(item) for item in latest.values()]
+        items: list[dict[str, Any]] = []
+        normalized_query = (q or "").casefold()
+        for publication in latest.values():
+            manifest = publication.manifest
+            installation = installations.get((manifest.publisher, manifest.name))
+            state = publication_records.get(
+                (manifest.publisher, manifest.name, manifest.version)
+            )
+            if publisher and manifest.publisher != publisher:
+                continue
+            if risk_level and manifest.risk_level != risk_level:
+                continue
+            if publication_status and publication.status.value != publication_status:
+                continue
+            if installation_status and (
+                installation is None or installation.status.value != installation_status
+            ):
+                continue
+            effective_source_id = (
+                installation.source_id
+                if installation is not None
+                else state.source_id if state is not None else None
+            )
+            if source_id and effective_source_id != source_id:
+                continue
+            haystack = " ".join(
+                (manifest.publisher, manifest.name, manifest.description)
+            ).casefold()
+            if normalized_query and normalized_query not in haystack:
+                continue
+            publication_payload = {
+                "status": publication.status.value,
+                "revision": None if state is None else state.revision,
+                "source_id": None if state is None else state.source_id,
+            }
+            installation_payload = (
+                None if installation is None else _installation_summary(installation)
+            )
+            items.append(
+                {
+                    **_summary(publication),
+                    "latest_version": manifest.version,
+                    "publication": publication_payload,
+                    "installation": installation_payload,
+                    "availability": _skill_availability(publication, installation),
+                }
+            )
+        page, next_cursor = _page(items, cursor=cursor, limit=limit, key=_skill_item_key)
+        return {"skills": legacy, "items": page, "next_cursor": next_cursor}
 
     @router.get("/skill-admissions")
     async def list_skill_admissions(
@@ -491,6 +602,36 @@ def create_skill_admin_router(
                 }
             ],
         }
+
+    @router.get("/skill-publishers")
+    async def list_skill_publishers(
+        identity: Identity,
+        status_filter: Annotated[
+            str | None, Query(alias="status", max_length=64)
+        ] = None,
+        q: Annotated[str | None, Query(max_length=256)] = None,
+        cursor: Annotated[str | None, Query(max_length=2048)] = None,
+        limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    ) -> dict[str, Any]:
+        service = _require_publisher_service(publisher_service)
+        normalized_query = (q or "").casefold()
+        records = [
+            _publisher_summary(record, keys)
+            for record, keys in await service.list_publishers(identity.tenant_id)
+            if (not status_filter or record.status.value == status_filter)
+            and (
+                not normalized_query
+                or normalized_query
+                in f"{record.publisher} {record.display_name}".casefold()
+            )
+        ]
+        page, next_cursor = _page(
+            records,
+            cursor=cursor,
+            limit=limit,
+            key=lambda item: (str(item["publisher"]["publisher"]),),
+        )
+        return {"publishers": page, "next_cursor": next_cursor}
 
     @router.get("/skill-publishers/{publisher}")
     async def get_skill_publisher(publisher: str, identity: Identity) -> dict[str, Any]:
@@ -698,6 +839,97 @@ def create_skill_admin_router(
             policy_decision_id,
         )
 
+    @router.get("/skill-installations")
+    async def list_skill_installations(
+        identity: Identity,
+        status_filter: Annotated[
+            str | None, Query(alias="status", max_length=64)
+        ] = None,
+        publisher: Annotated[str | None, Query(max_length=128)] = None,
+        source_id: Annotated[str | None, Query(max_length=128)] = None,
+        cursor: Annotated[str | None, Query(max_length=2048)] = None,
+        limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    ) -> dict[str, Any]:
+        service = _require_management_service(management_service)
+        records = [
+            _installation_summary(item)
+            for item in await service.list_installations(identity.tenant_id)
+            if (not status_filter or item.status.value == status_filter)
+            and (not publisher or item.publisher == publisher)
+            and (not source_id or item.source_id == source_id)
+        ]
+        page, next_cursor = _page(
+            records,
+            cursor=cursor,
+            limit=limit,
+            key=lambda item: (str(item["publisher"]), str(item["name"])),
+        )
+        return {"installations": page, "next_cursor": next_cursor}
+
+    @router.get("/skill-publications")
+    async def list_skill_publications(
+        identity: Identity,
+        status_filter: Annotated[
+            str | None, Query(alias="status", max_length=64)
+        ] = None,
+        publisher: Annotated[str | None, Query(max_length=128)] = None,
+        name: Annotated[str | None, Query(max_length=256)] = None,
+        source_id: Annotated[str | None, Query(max_length=128)] = None,
+        cursor: Annotated[str | None, Query(max_length=2048)] = None,
+        limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    ) -> dict[str, Any]:
+        service = _require_management_service(management_service)
+        records = [
+            _publication_state_summary(item)
+            for item in await service.list_publications(identity.tenant_id)
+            if (not status_filter or item.status.value == status_filter)
+            and (not publisher or item.publisher == publisher)
+            and (not name or item.name == name)
+            and (not source_id or item.source_id == source_id)
+        ]
+        page, next_cursor = _page(
+            records,
+            cursor=cursor,
+            limit=limit,
+            key=lambda item: (
+                str(item["publisher"]),
+                str(item["name"]),
+                str(item["version"]),
+            ),
+        )
+        return {"publications": page, "next_cursor": next_cursor}
+
+    @router.get("/skill-packages")
+    async def list_skill_packages(
+        identity: Identity,
+        retention_status: Annotated[str | None, Query(max_length=64)] = None,
+        publisher: Annotated[str | None, Query(max_length=128)] = None,
+        name: Annotated[str | None, Query(max_length=256)] = None,
+        legal_hold: bool | None = None,
+        cursor: Annotated[str | None, Query(max_length=2048)] = None,
+        limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    ) -> dict[str, Any]:
+        service = _require_management_service(management_service)
+        records = [
+            _package_state_summary(item)
+            for item in await service.list_packages(identity.tenant_id)
+            if (not retention_status or item.retention_status.value == retention_status)
+            and (not publisher or item.manifest.publisher == publisher)
+            and (not name or item.manifest.name == name)
+            and (legal_hold is None or item.legal_hold is legal_hold)
+        ]
+        page, next_cursor = _page(
+            records,
+            cursor=cursor,
+            limit=limit,
+            key=lambda item: (
+                str(item["publisher"]),
+                str(item["name"]),
+                str(item["version"]),
+            ),
+        )
+        return {"packages": page, "next_cursor": next_cursor}
+
     @router.get("/skills/{publisher}/{name}")
     async def get_skill(publisher: str, name: str, identity: Identity) -> dict[str, Any]:
         publication = registry.get_publication(identity.tenant_id, publisher, name)
@@ -707,14 +939,59 @@ def create_skill_admin_router(
             name,
             publication.manifest.version,
         )
-        versions = [
+        versions = sorted(
+            [
             item.manifest.version
             for item in registry.list_publications(identity.tenant_id)
             if item.manifest.publisher == publisher and item.manifest.name == name
-        ]
+            ],
+            key=_semver_key,
+            reverse=True,
+        )
         payload = _summary(publication, skill_markdown=markdown)
         payload["versions"] = versions
         return payload
+
+    @router.get("/skills/{publisher}/{name}/management")
+    async def get_skill_management_view(
+        publisher: str, name: str, identity: Identity
+    ) -> dict[str, Any]:
+        service = _require_management_service(management_service)
+        publications = tuple(
+            item
+            for item in await service.list_publications(identity.tenant_id)
+            if item.publisher == publisher and item.name == name
+        )
+        packages = {
+            item.manifest.version: item
+            for item in await service.list_packages(identity.tenant_id)
+            if item.manifest.publisher == publisher and item.manifest.name == name
+        }
+        try:
+            installation = await service.get_installation(
+                identity.tenant_id, publisher, name
+            )
+        except NotFoundError:
+            installation = None
+        versions = [
+            {
+                "publication": _publication_state_summary(item),
+                "package": (
+                    None
+                    if item.version not in packages
+                    else _package_state_summary(packages[item.version])
+                ),
+            }
+            for item in publications
+        ]
+        return {
+            "publisher": publisher,
+            "name": name,
+            "installation": (
+                None if installation is None else _installation_summary(installation)
+            ),
+            "versions": versions,
+        }
 
     @router.get("/skills/{publisher}/{name}/versions/{version}")
     async def get_skill_version(
@@ -1095,6 +1372,15 @@ def _require_publisher_service(
     return service
 
 
+def _require_management_service(service: SkillManager | None) -> SkillManager:
+    if service is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Skill management service is not configured",
+        )
+    return service
+
+
 def _require_admission_reader(
     reader: SkillAdmissionReader | None,
 ) -> SkillAdmissionReader:
@@ -1175,6 +1461,8 @@ def _installation_summary(
         "version_constraint": installation.version_constraint,
         "pinned_package_digest": installation.pinned_package_digest,
         "status": installation.status.value,
+        "source_id": installation.source_id,
+        "auto_upgrade": installation.auto_upgrade,
         "revision": installation.revision,
         "reason_code": installation.reason_code,
         "uninstall_action": (
@@ -1198,6 +1486,7 @@ def _publication_state_summary(
         "version": publication.version,
         "package_digest": publication.package_digest,
         "status": publication.status.value,
+        "source_id": publication.source_id,
         "revision": publication.revision,
         "reason_code": publication.reason_code,
         "revocation_action": (
@@ -1226,3 +1515,66 @@ def _package_state_summary(package: SkillPackageRecord) -> dict[str, Any]:
         "retention_updated_at": package.retention_updated_at.isoformat(),
         "purged_at": (None if package.purged_at is None else package.purged_at.isoformat()),
     }
+
+
+def _skill_availability(
+    publication: PublishedSkill,
+    installation: SkillInstallationRecord | None,
+) -> str:
+    if publication.status.value != "active":
+        return "publication_unavailable"
+    if installation is None:
+        return "not_installed"
+    if installation.status.value != "active":
+        return f"installation_{installation.status.value}"
+    return "available"
+
+
+def _skill_item_key(item: dict[str, Any]) -> tuple[str, ...]:
+    return (str(item["publisher"]), str(item["name"]))
+
+
+def _semver_key(version: str) -> tuple[int, int, int]:
+    core = version.split("-", 1)[0]
+    major, minor, patch = core.split(".")
+    return int(major), int(minor), int(patch)
+
+
+def _page(
+    records: list[dict[str, Any]],
+    *,
+    cursor: str | None,
+    limit: int,
+    key: Any,
+) -> tuple[list[dict[str, Any]], str | None]:
+    ordered = sorted(records, key=key)
+    after: tuple[str, ...] | None = None
+    if cursor:
+        try:
+            padding = "=" * (-len(cursor) % 4)
+            decoded = base64.urlsafe_b64decode(f"{cursor}{padding}").decode()
+            payload = json.loads(decoded)
+            values = payload["after"]
+            if not isinstance(values, list) or not all(
+                isinstance(value, str) for value in values
+            ):
+                raise ValueError
+            after = tuple(values)
+        except (
+            ValueError,
+            KeyError,
+            binascii.Error,
+            json.JSONDecodeError,
+            UnicodeDecodeError,
+        ) as exc:
+            raise HTTPException(status_code=422, detail="Invalid Skill page cursor") from exc
+    if after is not None:
+        ordered = [item for item in ordered if tuple(key(item)) > after]
+    page = ordered[:limit]
+    next_cursor = None
+    if len(ordered) > limit and page:
+        encoded = json.dumps(
+            {"after": list(key(page[-1]))}, separators=(",", ":")
+        ).encode()
+        next_cursor = base64.urlsafe_b64encode(encoded).decode().rstrip("=")
+    return page, next_cursor

@@ -22,7 +22,6 @@ from auraclaw.infrastructure.persistence.postgres_common import LazyPool
 from auraclaw.infrastructure.persistence.postgres_mcp_registry import (
     PostgresMcpServerRegistryStore,
 )
-from auraclaw.infrastructure.persistence.sql_dialect import detect_dialect
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -31,28 +30,18 @@ def _sql_url() -> str | None:
     settings = get_settings()
     if settings.sql_storage_enabled:
         return settings.resolved_database_url
-    host = (
-        os.environ.get("AURACLAW_MYSQL_SMOKE_HOST")
-        or os.environ.get("DB_HOST")
-        or os.environ.get("MYSQL_DB_HOST")
-    )
+    host = os.environ.get("DB_HOST")
     if not host:
         return None
-    user = os.environ.get("DB_USER") or os.environ.get("MYSQL_DB_USER")
+    user = os.environ.get("DB_USER")
     password = os.environ.get("DB_PWD")
-    if password is None:
-        password = os.environ.get("MYSQL_DB_PWD")
-    port = os.environ.get("DB_PORT") or os.environ.get("MYSQL_DB_PORT") or "3306"
-    database = (
-        os.environ.get("AURACLAW_MYSQL_SMOKE_DB")
-        or os.environ.get("DB_NAME")
-        or "auraclaw_dev"
-    )
+    port = os.environ.get("DB_PORT") or "5432"
+    database = os.environ.get("DB_NAME") or "auraclaw_dev"
     if not user or password is None:
         return None
     return (
-        f"mysql+aiomysql://{quote(user, safe='')}:{quote(password, safe='')}"
-        f"@{host}:{port}/{database}"
+        f"postgresql+asyncpg://{quote(user, safe='')}:{quote(password, safe='')}"
+        f"@{host}:{port}/{quote(database, safe='')}"
     )
 
 
@@ -63,29 +52,17 @@ pytestmark = pytest.mark.skipif(
 
 
 async def _apply_registry_migration(database_url: str) -> None:
-    dialect = detect_dialect(database_url)
     pool_holder = LazyPool(database_url)
     pool = await pool_holder.pool()
     try:
         async with pool.acquire() as connection:
-            if dialect == "mysql":
-                existing = await connection.fetchval(
-                    """SELECT COUNT(*) FROM information_schema.tables
-                    WHERE table_schema=DATABASE() AND table_name='hands_mcp_server'"""
-                )
-                if int(existing or 0) > 0:
-                    return
-                sql = (
-                    ROOT / "migrations/mysql/0020_mcp_server_registry.sql"
-                ).read_text()
-            else:
-                existing = await connection.fetchval(
-                    """SELECT COUNT(*) FROM information_schema.tables
-                    WHERE table_schema='hands' AND table_name='mcp_server'"""
-                )
-                if int(existing or 0) > 0:
-                    return
-                sql = (ROOT / "migrations/0020_mcp_server_registry.sql").read_text()
+            existing = await connection.fetchval(
+                """SELECT COUNT(*) FROM information_schema.tables
+                WHERE table_schema='hands' AND table_name='mcp_server'"""
+            )
+            if int(existing or 0) > 0:
+                return
+            sql = (ROOT / "migrations/0020_mcp_server_registry.sql").read_text()
             for statement in _split_sql(sql):
                 await connection.execute(statement)
     finally:

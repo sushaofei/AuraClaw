@@ -75,7 +75,7 @@ uv run auraclaw migrate up
 | `0038` | Skill Installation draining/force 策略证据、drainer 索引与安装命令幂等账本 |
 | `0039` | Publisher 永久撤销、Publisher/key 批量 Runtime Policy 证据与约束 |
 
-PostgreSQL / Kingbase 序列未使用 `0017`；MySQL 方言的 `0017` 用于扩大 Task View 文本字段。
+PostgreSQL / Kingbase 序列保留 `0017` 版本号空位，后续迁移继续按既有编号递增。
 不要为了填补编号而重命名已经发布的迁移。
 
 每个正向迁移原则上有同版本 `.down.sql`。新增迁移时同时更新本表，并在
@@ -96,6 +96,5 @@ PostgreSQL / Kingbase 序列未使用 `0017`；MySQL 方言的 `0017` 用于扩�
 
 - 迁移执行：`src/auraclaw/infrastructure/persistence/migration_runner.py`
 - PostgreSQL / Kingbase 迁移：`migrations/`
-- MySQL 方言迁移：`migrations/mysql/`
 - 生产角色：`deploy/postgres/roles.sql`
 - Store 与投影适配器：`src/auraclaw/infrastructure/persistence/`、`src/auraclaw/infrastructure/projection/`
