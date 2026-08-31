@@ -2316,3 +2316,22 @@ ready Skill Artifact 建立带 fencing 的物理回收流程；不把成功命�
 - [x] 完成 OBS single/multipart 及 AuraClaw 代理上传回归，测试对象已清理。
 - [x] Ruff、Mypy、定向测试与全量 Pytest 通过。
 - [x] 本阶段作为 intentional commit 提交并 push，不包含 `.env`、Secret、缓存或无关改动。
+
+## 阶段 MCP 只读能力免审批
+
+状态：实现、文档与完整仓库门禁均已完成。
+
+### 权限与安全
+
+- [x] 受信目录标记为 `read-only` 的远端 MCP Tool 不再创建或等待人工审批。
+- [x] MCP Resource read 与 Prompt get 以 `read-only` 权限进入权威 Policy 判定，不走人工审批。
+- [x] Policy 显式 `deny`、未受信或未声明只读的 Tool、写操作与 destructive/admin 操作保持 fail closed。
+- [x] tenant、ACL、Credential Proxy、DLP、Prompt Injection 扫描、幂等与审计边界保持不变。
+
+### 验证与交付
+
+- [x] Hands in-process/HTTP contract 覆盖只读远端 MCP Tool 免审批。
+- [x] Resource Gateway、MCP Connector 与远端 Transport 覆盖 Tool/Resource/Prompt 的只读策略属性。
+- [x] Ruff、Mypy、定向与完整 Pytest 通过。
+- [x] Git 改动范围审查通过；不包含 `.env`、Secret、缓存或无关个人配置。
+- [x] 本阶段作为一个 intentional commit 提交并 push 当前分支。

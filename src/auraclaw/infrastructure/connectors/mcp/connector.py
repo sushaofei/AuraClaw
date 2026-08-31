@@ -61,6 +61,7 @@ class ManagedMcpConnector:
         # explicit in the server definition and translate only at this boundary.
         self._remote_tool_names: dict[str, str] = {}
         self._tool_argument_wrappers: set[str] = set()
+        self._read_only_tools: set[str] = set()
 
     @property
     def connector_id(self) -> str:
@@ -255,6 +256,7 @@ class ManagedMcpConnector:
         response = await self._transport.send(
             McpJsonRpcRequest(id=invocation_id, method="tools/call", params=params),
             trusted_context=_mcp_trusted(trusted),
+            read_only=name in self._read_only_tools,
         )
         if response.error is not None:
             return HandsToolResult(
@@ -316,7 +318,12 @@ class ManagedMcpConnector:
             and schema.get("required") == ["input"]
         ):
             self._tool_argument_wrappers.add(canonical_name)
-        return _tool_descriptor(item, name=canonical_name)
+        descriptor = _tool_descriptor(item, name=canonical_name)
+        if descriptor.read_only:
+            self._read_only_tools.add(canonical_name)
+        else:
+            self._read_only_tools.discard(canonical_name)
+        return descriptor
 
     async def aclose(self) -> None:
         return None
@@ -370,6 +377,7 @@ class ManagedMcpConnector:
                 params=request_params,
             ),
             trusted_context=trusted,
+            read_only=method in {"resources/read", "prompts/get"},
         )
         if response.error is not None:
             raise ValueError(

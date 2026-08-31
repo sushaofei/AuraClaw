@@ -31,6 +31,21 @@ class _DenyPolicy:
         )
 
 
+class _PermissionPolicy:
+    async def evaluate_action(self, **arguments: object) -> PolicyEvaluation:
+        attributes = arguments["attributes"]
+        assert isinstance(attributes, dict)
+        return PolicyEvaluation(
+            decision=(
+                PolicyDecision.ALLOW
+                if attributes.get("permission") == "read-only"
+                else PolicyDecision.REQUIRE_APPROVAL
+            ),
+            decision_id="decision-read-only",
+            policy_version="m9-v2",
+        )
+
+
 def _trusted(*, tenant_id: str = "tenant-a") -> HandsTrustedContext:
     return HandsTrustedContext(
         tenant_id=tenant_id,
@@ -115,6 +130,31 @@ def test_resource_gateway_enriches_scans_caches_and_invalidates() -> None:
 
         with pytest.raises(KeyError):
             await gateway.read(_trusted(tenant_id="tenant-b"), uri)
+
+    asyncio.run(scenario())
+
+
+def test_resource_read_does_not_require_approval() -> None:
+    async def scenario() -> None:
+        uri = "memory://docs/read-only"
+        registry = HandsResourceRegistry(
+            resources=(
+                RegisteredResource(
+                    descriptor=HandsResourceDescriptor(uri=uri, name="read-only"),
+                    contents=(HandsResourceContent(uri=uri, text="safe context"),),
+                ),
+            )
+        )
+        gateway = ManagedResourceGateway(
+            registry,
+            artifacts=_artifacts(),
+            policy=_PermissionPolicy(),
+        )
+
+        contents = await gateway.read(_trusted(), uri)
+
+        assert contents[0].text == "safe context"
+        assert contents[0].policy_decision_id == "decision-read-only"
 
     asyncio.run(scenario())
 

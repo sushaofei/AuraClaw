@@ -65,6 +65,7 @@ class ManagedRemoteMcpTransport:
         request: McpJsonRpcRequest,
         *,
         trusted_context: McpTrustedContext,
+        read_only: bool = False,
     ) -> McpJsonRpcResponse:
         if (
             self._server.tenant_id is not None
@@ -124,6 +125,7 @@ class ManagedRemoteMcpTransport:
             correlation_id=trusted_context.run_id,
             attributes={
                 "method": request.method,
+                **({"permission": "read-only"} if read_only else {}),
                 "server_id": self._server.server_id,
                 "trust_level": self._server.trust_level.value,
             },
