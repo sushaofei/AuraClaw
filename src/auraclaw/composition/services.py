@@ -1516,6 +1516,10 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         resources,
         artifacts=artifacts,
         policy=policy if isinstance(policy, RemotePolicyClient) else None,
+        max_concurrent=settings.resource_gateway_max_concurrent,
+        max_queued=settings.resource_gateway_max_queued,
+        queue_timeout_seconds=settings.resource_gateway_queue_timeout_seconds,
+        metric_writer=hands_metric_store,
     )
     skill_resolver = SkillResolver(
         skill_registry,

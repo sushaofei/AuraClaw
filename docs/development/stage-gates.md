@@ -2623,3 +2623,30 @@ ready Skill Artifact 建立带 fencing 的物理回收流程；不把成功命�
 - [x] PostgreSQL 集成继续覆盖双副本同 key claim、取消、waiting approval 与 owner-loss recovery。
 - [x] Ruff、Mypy、import-linter、性能并发测试及完整 Pytest 通过。
 - [x] Git 暂存范围审查、intentional commit 与 push 完成；Issue #67 关闭。
+
+## 阶段 Resource 与 Runtime Event 分区并发（Issue #68）
+
+状态：代码、测试和文档完成。
+
+### Resource Gateway
+
+- [x] 全局 state lock 仅保护 cache/load/generation map，不包围 Policy、扫描或 Artifact I/O。
+- [x] single-flight key 包含 tenant、root/session、URI 与 source revision，完成/失败/取消后回收。
+- [x] Invalidate 推进 generation，进行中的旧 revision load 完成后不能重新发布 cache。
+- [x] 独立 semaphore、有限 unique-key queue、等待超时与 queue/in-flight/latency/backpressure 指标已接线。
+
+### Runtime Event Producer
+
+- [x] Ordering scope 收窄为 tenant/session；不同 Session 可并发，同 Session sequence/send 严格有序。
+- [x] Delta buffer 按 tenant/session/run 隔离，publish/flush 并发不跨 Run 合并。
+- [x] 有限 publish queue、semaphore、queue timeout 与底层 publisher timeout 不持有 replica-wide I/O lock。
+- [x] Keyed lock 在成功、失败、timeout、cancellation 后回收，并输出 queue/in-flight/latency/timeout 指标。
+- [x] SQL topology 使用 PostgreSQL Runtime Event Store 作为共享 sequence allocator；进程锁不替代多副本权威。
+
+### 验证与交付
+
+- [x] Resource 测试覆盖跨 tenant 并行、同 key Artifact single-flight、invalidate race 与 waiter cancellation。
+- [x] Runtime Event 测试覆盖跨 Session 并行、同 Session send 顺序、Kafka timeout、queue timeout 与 Delta/flush race。
+- [x] PostgreSQL 集成覆盖多副本 sequence 唯一性、replay 与 handoff。
+- [x] Ruff、Mypy、import-linter、Compose、定向与完整 Pytest 通过。
+- [x] Git 暂存范围审查、intentional commit 与 push 完成；Issue #68 关闭。

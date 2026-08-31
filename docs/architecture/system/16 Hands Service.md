@@ -84,6 +84,16 @@ Hands / Tool Adapter
 - Tool Result 只返回 `artifact_ref` 和摘要。
 - 外部系统写入结果记录 resource id、version 和 side-effect status。
 
+## Resource Gateway 并发
+
+- Cache key 包含 tenant、root/session、URI 与 source revision；Policy decision 不跨这些边界复用。
+- Cache miss 以完整 key 建立 single-flight task，同 key 只执行一次 Policy、扫描和 Artifact 写入；调用方
+  cancellation 不能取消其他 waiter 共享的 load。
+- 全局 state lock 只保护 cache、in-flight map 与 invalidate generation，不包围 Policy/Artifact I/O。
+- Invalidate 单调推进 `(tenant, URI)` generation；旧 load 可以向原调用方返回，但完成后不能重新发布
+  已失效 revision 的 cache。
+- 独立 semaphore、有限队列和等待超时提供背压；失败、取消与超时后 keyed task 必须清理。
+
 ## 观测指标
 
 ```text
@@ -93,6 +103,10 @@ tool.gateway.queue.depth
 tool.gateway.queue.latency.seconds
 tool.gateway.in_flight
 tool.gateway.backpressure.count
+resource.gateway.queue.depth
+resource.gateway.queue.latency.seconds
+resource.gateway.in_flight
+resource.gateway.backpressure.count
 resource_exhausted
 network_denied
 runtime_crash

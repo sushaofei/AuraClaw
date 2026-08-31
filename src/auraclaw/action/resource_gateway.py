@@ -8,13 +8,19 @@ import json
 import re
 import time
 from dataclasses import dataclass
-from typing import Protocol
+from datetime import UTC, datetime
+from typing import Any, Protocol
 from urllib.parse import urlsplit
 
 from auraclaw.action.mcp_primitives import HandsResourceRegistry
 from auraclaw.action.ports import ArtifactWriter, ResourcePolicyEvaluator
-from auraclaw.contracts.errors import PolicyDeniedError, SchemaValidationError
+from auraclaw.contracts.errors import (
+    PolicyDeniedError,
+    ResourceBusyError,
+    SchemaValidationError,
+)
 from auraclaw.contracts.hands import HandsResourceContent, HandsTrustedContext
+from auraclaw.contracts.observability import MetricPoint
 from auraclaw.contracts.tools import PolicyDecision
 
 _SECRET_PATTERN = re.compile(
@@ -29,6 +35,10 @@ _PROMPT_INJECTION_PATTERNS = (
 
 class ResourceContentScanner(Protocol):
     def scan(self, content: bytes, *, media_type: str) -> tuple[str, ...]: ...
+
+
+class MetricWriter(Protocol):
+    async def write_metric(self, metric: MetricPoint) -> None: ...
 
 
 class DefaultResourceContentScanner:
@@ -76,11 +86,17 @@ class ManagedResourceGateway:
         max_inline_bytes: int = 64 * 1024,
         max_resource_bytes: int = 8 * 1024 * 1024,
         cache_ttl_seconds: float = 30.0,
+        max_concurrent: int = 32,
+        max_queued: int = 128,
+        queue_timeout_seconds: float = 5.0,
+        metric_writer: MetricWriter | None = None,
     ) -> None:
         if max_inline_bytes < 1 or max_resource_bytes < max_inline_bytes:
             raise ValueError("Resource size limits are invalid")
         if cache_ttl_seconds < 0:
             raise ValueError("Resource cache TTL cannot be negative")
+        if max_concurrent < 1 or max_queued < 1 or queue_timeout_seconds <= 0:
+            raise ValueError("Resource gateway capacity limits must be positive")
         self._registry = registry
         self._artifacts = artifacts
         self._policy = policy
@@ -90,10 +106,19 @@ class ManagedResourceGateway:
         self._max_inline_bytes = max_inline_bytes
         self._max_resource_bytes = max_resource_bytes
         self._cache_ttl_seconds = cache_ttl_seconds
-        self._cache: dict[
-            tuple[str, str, str, str], _CacheEntry
+        self._cache: dict[tuple[str, str, str, str, str | None], _CacheEntry] = {}
+        self._loads: dict[
+            tuple[str, str, str, str, str | None],
+            asyncio.Task[tuple[HandsResourceContent, ...]],
         ] = {}
-        self._lock = asyncio.Lock()
+        self._generations: dict[tuple[str, str], int] = {}
+        self._state_lock = asyncio.Lock()
+        self._capacity = asyncio.Semaphore(max_concurrent)
+        self._max_queued = max_queued
+        self._queue_timeout_seconds = queue_timeout_seconds
+        self._queued = 0
+        self._inflight = 0
+        self._metric_writer = metric_writer
 
     async def read(
         self,
@@ -103,52 +128,76 @@ class ManagedResourceGateway:
         parsed = urlsplit(uri)
         if not parsed.scheme or parsed.scheme not in self._allowed_schemes:
             raise PolicyDeniedError("Resource URI scheme is not allowed")
-        self._registry.get_resource(trusted_context.tenant_id, uri)
+        resource = self._registry.get_resource(trusted_context.tenant_id, uri)
+        source_revision = (
+            None
+            if resource.descriptor.source_revision is None
+            else str(resource.descriptor.source_revision)
+        )
         cache_key = (
             trusted_context.tenant_id,
             trusted_context.root_session_id,
             trusted_context.session_id,
             uri,
+            source_revision,
         )
-        now = time.monotonic()
-        cached = self._cache.get(cache_key)
-        if cached is not None and cached.expires_at > now:
-            return tuple(_with_cache_hit(content, True) for content in cached.contents)
-
-        async with self._lock:
-            resource = self._registry.get_resource(trusted_context.tenant_id, uri)
+        async with self._state_lock:
             cached = self._cache.get(cache_key)
             if cached is not None and cached.expires_at > time.monotonic():
                 return tuple(_with_cache_hit(content, True) for content in cached.contents)
-            classification = resource.descriptor.classification or "internal"
-            source_revision = resource.descriptor.source_revision
-            policy_decision_id = await self._authorize(
-                trusted_context,
-                uri,
-                classification=classification,
-                media_type=resource.descriptor.mime_type,
-            )
-            normalized: tuple[HandsResourceContent, ...] = tuple(
-                [
-                    await self._normalize(
-                        trusted_context,
-                        content,
-                        classification=classification,
-                        source_revision=source_revision,
-                        policy_decision_id=policy_decision_id,
+            load = self._loads.get(cache_key)
+            queue_full = False
+            if load is None:
+                if self._queued >= self._max_queued:
+                    queue_full = True
+                    queue_depth = None
+                else:
+                    self._queued += 1
+                    generation = self._generations.get(
+                        (trusted_context.tenant_id, uri), 0
                     )
-                    for content in resource.contents
-                ]
+                    load = asyncio.create_task(
+                        self._load(
+                            trusted_context,
+                            uri,
+                            resource,
+                            cache_key,
+                            generation,
+                        )
+                    )
+                    self._loads[cache_key] = load
+                    queue_depth = self._queued
+            else:
+                queue_depth = None
+        if queue_full:
+            await self._emit(
+                "resource.gateway.backpressure.count",
+                1.0,
+                trusted_context.tenant_id,
+                reason="queue_full",
             )
-            if self._cache_ttl_seconds > 0:
-                self._cache[cache_key] = _CacheEntry(
-                    expires_at=time.monotonic() + self._cache_ttl_seconds,
-                    contents=normalized,
-                )
-            return normalized
+            raise ResourceBusyError()
+        if queue_depth is not None:
+            await self._emit(
+                "resource.gateway.queue.depth",
+                float(queue_depth),
+                trusted_context.tenant_id,
+            )
+        assert load is not None
+        return await asyncio.shield(load)
 
     async def invalidate(self, uri: str, *, tenant_id: str | None = None) -> int:
-        async with self._lock:
+        async with self._state_lock:
+            affected_tenants = {
+                key[0]
+                for key in (*self._cache.keys(), *self._loads.keys())
+                if key[3] == uri and (tenant_id is None or key[0] == tenant_id)
+            }
+            for affected_tenant in affected_tenants:
+                generation_key = (affected_tenant, uri)
+                self._generations[generation_key] = (
+                    self._generations.get(generation_key, 0) + 1
+                )
             keys = [
                 key
                 for key in self._cache
@@ -157,6 +206,143 @@ class ManagedResourceGateway:
             for key in keys:
                 self._cache.pop(key, None)
             return len(keys)
+
+    async def _load(
+        self,
+        trusted: HandsTrustedContext,
+        uri: str,
+        resource: Any,
+        cache_key: tuple[str, str, str, str, str | None],
+        generation: int,
+    ) -> tuple[HandsResourceContent, ...]:
+        queued_at = time.monotonic()
+        acquired = False
+        started = False
+        try:
+            try:
+                await asyncio.wait_for(
+                    self._capacity.acquire(), timeout=self._queue_timeout_seconds
+                )
+            except TimeoutError as exc:
+                await self._emit(
+                    "resource.gateway.backpressure.count",
+                    1.0,
+                    trusted.tenant_id,
+                    reason="queue_timeout",
+                )
+                raise ResourceBusyError("resource gateway queue wait timed out") from exc
+            acquired = True
+            async with self._state_lock:
+                self._queued -= 1
+                self._inflight += 1
+                started = True
+                queue_depth = self._queued
+                inflight = self._inflight
+            await self._emit(
+                "resource.gateway.queue.latency.seconds",
+                time.monotonic() - queued_at,
+                trusted.tenant_id,
+            )
+            await self._emit(
+                "resource.gateway.queue.depth", float(queue_depth), trusted.tenant_id
+            )
+            await self._emit(
+                "resource.gateway.in_flight", float(inflight), trusted.tenant_id
+            )
+            classification = resource.descriptor.classification or "internal"
+            policy_decision_id = await self._authorize(
+                trusted,
+                uri,
+                classification=classification,
+                media_type=resource.descriptor.mime_type,
+            )
+            normalized = tuple(
+                [
+                    await self._normalize(
+                        trusted,
+                        content,
+                        classification=classification,
+                        source_revision=resource.descriptor.source_revision,
+                        policy_decision_id=policy_decision_id,
+                    )
+                    for content in resource.contents
+                ]
+            )
+            async with self._state_lock:
+                generation_matches = self._generations.get(
+                    (trusted.tenant_id, uri), 0
+                ) == generation
+                revision_matches = False
+                try:
+                    current = self._registry.get_resource(trusted.tenant_id, uri)
+                    current_revision = (
+                        None
+                        if current.descriptor.source_revision is None
+                        else str(current.descriptor.source_revision)
+                    )
+                    revision_matches = current_revision == cache_key[4]
+                except KeyError:
+                    pass
+                if (
+                    self._cache_ttl_seconds > 0
+                    and generation_matches
+                    and revision_matches
+                ):
+                    self._cache[cache_key] = _CacheEntry(
+                        expires_at=time.monotonic() + self._cache_ttl_seconds,
+                        contents=normalized,
+                    )
+            return normalized
+        finally:
+            if acquired:
+                self._capacity.release()
+            async with self._state_lock:
+                if not started:
+                    self._queued -= 1
+                else:
+                    self._inflight -= 1
+                current_task = asyncio.current_task()
+                if self._loads.get(cache_key) is current_task:
+                    self._loads.pop(cache_key, None)
+                generation_key = (trusted.tenant_id, uri)
+                if not any(
+                    key[0] == trusted.tenant_id and key[3] == uri
+                    for key in (*self._loads.keys(), *self._cache.keys())
+                ):
+                    self._generations.pop(generation_key, None)
+                queue_depth = self._queued
+                inflight = self._inflight
+            await self._emit(
+                "resource.gateway.queue.depth", float(queue_depth), trusted.tenant_id
+            )
+            await self._emit(
+                "resource.gateway.in_flight", float(inflight), trusted.tenant_id
+            )
+
+    async def _emit(
+        self,
+        name: str,
+        value: float,
+        tenant_id: str,
+        **labels: str,
+    ) -> None:
+        if self._metric_writer is None:
+            return
+        try:
+            await asyncio.wait_for(
+                self._metric_writer.write_metric(
+                    MetricPoint(
+                        name=name,
+                        value=value,
+                        observed_at=datetime.now(UTC),
+                        tenant_id=tenant_id,
+                        labels=labels,
+                    )
+                ),
+                timeout=0.1,
+            )
+        except Exception:
+            return
 
     async def _authorize(
         self,

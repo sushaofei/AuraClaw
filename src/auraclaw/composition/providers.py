@@ -173,13 +173,18 @@ def get_runtime_event_publisher() -> SDKRuntimeEventPublisher:
     replay = get_runtime_replay_bus()
     allocator = (
         replay
-        if not settings.kafka_enabled and isinstance(replay, PostgresRuntimeEventStore)
+        if isinstance(replay, PostgresRuntimeEventStore)
         else None
     )
     sdk = RuntimeEventProducerSDK(
         producer,
         sequence_allocator=allocator,
         delta_flush_bytes=1,
+        max_concurrent=settings.runtime_event_publish_max_concurrent,
+        max_queued=settings.runtime_event_publish_max_queued,
+        queue_timeout_seconds=settings.runtime_event_publish_queue_timeout_seconds,
+        publish_timeout_seconds=settings.runtime_event_publish_timeout_seconds,
+        metric_writer=get_observability_store(),
     )
     return SDKRuntimeEventPublisher(sdk)
 

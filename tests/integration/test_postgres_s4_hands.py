@@ -103,6 +103,17 @@ def test_hands_replicas_atomically_deduplicate_and_recover_invocation() -> None:
                 claim_ttl=timedelta(seconds=30),
             )
             assert cached.cached_result == completed
+            colliding = replace(
+                invocation, idempotency_key=f"different-idempotency-{suffix}"
+            )
+            collision = await store_b.begin(
+                colliding,
+                "digest-s4",
+                owner="hands-b",
+                claim_token="claim-primary-collision",
+                claim_ttl=timedelta(seconds=30),
+            )
+            assert collision.conflict
         finally:
             await store_a.close()
             await store_b.close()

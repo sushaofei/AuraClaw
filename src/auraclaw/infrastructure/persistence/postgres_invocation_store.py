@@ -60,7 +60,7 @@ class PostgresInvocationStore(LazyPool):
                  execution_claim_expires_at,execution_heartbeat_at)
                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,'accepted',$11,$12,
                         $13,$14,now()+$15::interval,now())
-                ON CONFLICT (tenant_id,idempotency_key) DO NOTHING
+                ON CONFLICT DO NOTHING
                 RETURNING tool_invocation_id""",
                 invocation.tenant_id,
                 invocation.tool_invocation_id,
@@ -89,16 +89,22 @@ class PostgresInvocationStore(LazyPool):
                 return InvocationBegin(acquired=True, claim_token=claim_token)
 
             row = await connection.fetchrow(
-                """SELECT argument_digest,normalized_result,status,side_effect_status,
+                """SELECT idempotency_key,argument_digest,normalized_result,status,
+                          side_effect_status,
                           execution_claim_expires_at > now() AS claim_active
                 FROM hands.invocation
-                WHERE tenant_id=$1 AND idempotency_key=$2
+                WHERE tenant_id=$1
+                  AND (idempotency_key=$2 OR tool_invocation_id=$3)
                 FOR UPDATE""",
                 invocation.tenant_id,
                 invocation.idempotency_key,
+                invocation.tool_invocation_id,
             )
             assert row is not None
-            if str(row["argument_digest"]) != argument_digest:
+            if (
+                str(row["idempotency_key"]) != invocation.idempotency_key
+                or str(row["argument_digest"]) != argument_digest
+            ):
                 return InvocationBegin(conflict=True)
 
             status = str(row["status"])

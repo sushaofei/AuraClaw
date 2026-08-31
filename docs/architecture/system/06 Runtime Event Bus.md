@@ -71,6 +71,11 @@ SDK 负责：
 - 批量、压缩和 Token Delta 合并。
 - 重试、指标和 Trace Context 传播。
 
+Producer 的有序范围是 `(tenant_id, session_id)`：同一 Session 的 sequence 分配、Delta buffer 变更与
+底层 send 串行，不同 Session 不共享 publish lock。Delta buffer 额外包含 `run_id`，因此并发 flush 不会
+跨 Run 合并。进程内 keyed lock 只维护单副本发送顺序；PostgreSQL sequence allocator/Streaming ingest
+仍负责多副本公开 sequence，Runtime Event 不因此成为最终结果交付通道。
+
 ## 消费和重放
 
 - Consumer 使用 Offset 恢复内部消费位置。
@@ -81,6 +86,8 @@ SDK 负责：
 ## 背压
 
 - Producer 侧合并过细 Token Delta。
+- Producer 使用独立全局 semaphore、有限等待队列和总 queue timeout；同 Session waiter 也受上限约束。
+- Kafka `send_and_wait` 使用明确 publish timeout。超时只释放当前 Session keyed state，不冻结其他 Session。
 - 限制单事件和单 Session 每秒事件量。
 - Streaming Gateway 每连接使用有界队列。
 - 非关键进度允许采样或覆盖；终态和审批通知不可静默丢弃。
@@ -89,7 +96,10 @@ SDK 负责：
 
 - Topic 和 Consumer Group 按服务账户授权。
 - 消息不得包含 Secret、完整凭证或未脱敏 Tool Result。
-- 指标：produce latency、consumer lag、partition skew、replay hit、dropped/coalesced events、schema reject。
+- 指标：`runtime.event.queue.depth`、`runtime.event.queue.latency.seconds`、
+  `runtime.event.in_flight`、`runtime.event.backpressure.count`、
+  `runtime.event.publish.timeout.count`、consumer lag、partition skew、replay hit、
+  dropped/coalesced events、schema reject。
 
 ## 验收条件
 

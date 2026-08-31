@@ -405,12 +405,23 @@ class Settings(BaseSettings):
     hands_max_queued: int = Field(default=256, ge=1, le=100_000)
     hands_max_queued_per_tenant: int = Field(default=32, ge=1, le=100_000)
     hands_queue_timeout_seconds: float = Field(default=5.0, gt=0.0, le=3600.0)
+    resource_gateway_max_concurrent: int = Field(default=32, ge=1, le=10_000)
+    resource_gateway_max_queued: int = Field(default=128, ge=1, le=100_000)
+    resource_gateway_queue_timeout_seconds: float = Field(default=5.0, gt=0.0, le=3600.0)
     runtime_event_backend: Literal["auto", "memory", "kafka"] = "auto"
     kafka_host: str | None = Field(default=None, validation_alias="KAFKA_HOST")
     kafka_port: int = Field(default=9092, validation_alias="KAFKA_PORT")
     kafka_runtime_topic: str = "managed-agent.runtime-events"
     kafka_streaming_group: str = "streaming-ingestor"
     runtime_event_retention_events: int = 1_000
+    runtime_event_publish_max_concurrent: int = Field(default=64, ge=1, le=10_000)
+    runtime_event_publish_max_queued: int = Field(default=1_024, ge=1, le=100_000)
+    runtime_event_publish_queue_timeout_seconds: float = Field(
+        default=5.0, gt=0.0, le=3600.0
+    )
+    runtime_event_publish_timeout_seconds: float = Field(
+        default=10.0, gt=0.0, le=3600.0
+    )
     stream_connection_queue_size: int = 128
     stream_delta_min_interval_seconds: float = Field(default=0.02, ge=0.0, le=0.1)
     cors_allow_origins: str = ""
