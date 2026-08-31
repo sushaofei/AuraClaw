@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import json
+import secrets
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Protocol
 from uuid import uuid4
 
@@ -29,6 +33,13 @@ from auraclaw.contracts.mcp_registry import (
 )
 
 PLATFORM_TENANT = "platform"
+
+
+@dataclass(frozen=True)
+class McpOperationClaim:
+    acquired: bool
+    operation: McpServerOperationRecord
+    claim_token: str | None = None
 
 
 class McpServerRegistryStore(Protocol):
@@ -65,10 +76,33 @@ class McpServerRegistryStore(Protocol):
         desired_state: McpDesiredState,
         active_revision: int | None,
         operation: McpServerOperationRecord,
+        claim_token: str | None = None,
     ) -> McpServerRecord: ...
 
+    async def claim_operation(
+        self,
+        operation: McpServerOperationRecord,
+        *,
+        request_digest: str,
+        claimed_by: str,
+        claim_token: str,
+        claim_ttl: timedelta,
+    ) -> McpOperationClaim: ...
+
+    async def renew_operation(
+        self,
+        operation_id: str,
+        *,
+        claimed_by: str,
+        claim_token: str,
+        claim_ttl: timedelta,
+    ) -> bool: ...
+
     async def complete_operation(
-        self, operation: McpServerOperationRecord
+        self,
+        operation: McpServerOperationRecord,
+        *,
+        claim_token: str | None = None,
     ) -> McpServerOperationRecord: ...
 
     async def update_runtime(self, runtime: McpServerRuntimeRecord) -> None: ...
@@ -95,6 +129,8 @@ class InMemoryMcpServerRegistryStore:
     _operations: dict[str, McpServerOperationRecord] = field(default_factory=dict)
     _operations_by_command: dict[tuple[str, str], str] = field(default_factory=dict)
     _runtime: dict[tuple[str, str], McpServerRuntimeRecord] = field(default_factory=dict)
+    _operation_claims: dict[str, tuple[str, str, datetime]] = field(default_factory=dict)
+    _operation_digests: dict[str, str] = field(default_factory=dict)
 
     async def get_server(self, server_id: str) -> McpServerRecord | None:
         record = self._servers.get(server_id)
@@ -156,7 +192,12 @@ class InMemoryMcpServerRegistryStore:
         desired_state: McpDesiredState,
         active_revision: int | None,
         operation: McpServerOperationRecord,
+        claim_token: str | None = None,
     ) -> McpServerRecord:
+        if claim_token is not None and not self._claim_is_active(
+            operation.operation_id, claim_token
+        ):
+            raise VersionConflictError("MCP operation claim was lost")
         existing = self._servers.get(server_id)
         if existing is None:
             raise NotFoundError("MCP server was not found")
@@ -174,10 +215,88 @@ class InMemoryMcpServerRegistryStore:
         self._save_operation(operation)
         return self._hydrate(updated)
 
+    async def claim_operation(
+        self,
+        operation: McpServerOperationRecord,
+        *,
+        request_digest: str,
+        claimed_by: str,
+        claim_token: str,
+        claim_ttl: timedelta,
+    ) -> McpOperationClaim:
+        existing = await self.get_operation_by_command(
+            operation.command_id, operation.tenant_id or PLATFORM_TENANT
+        )
+        if existing is not None:
+            if self._operation_digests.get(existing.operation_id) != request_digest:
+                raise VersionConflictError(
+                    "MCP command id was already used for a different request"
+                )
+            claim = self._operation_claims.get(existing.operation_id)
+            if (
+                existing.status is McpRegistryOperationStatus.RUNNING
+                and claim is not None
+                and claim[2] <= datetime.now(UTC)
+            ):
+                unknown = existing.model_copy(
+                    update={
+                        "status": McpRegistryOperationStatus.UNKNOWN_SIDE_EFFECT,
+                        "safe_error_code": "mcp_operation_recovery_required",
+                        "completed_at": datetime.now(UTC),
+                    }
+                )
+                self._save_operation(unknown)
+                return McpOperationClaim(False, unknown)
+            return McpOperationClaim(False, existing)
+        running = operation.model_copy(
+            update={"status": McpRegistryOperationStatus.RUNNING}
+        )
+        self._save_operation(running)
+        self._operation_digests[running.operation_id] = request_digest
+        self._operation_claims[running.operation_id] = (
+            claimed_by,
+            claim_token,
+            datetime.now(UTC) + claim_ttl,
+        )
+        return McpOperationClaim(True, running, claim_token)
+
+    async def renew_operation(
+        self,
+        operation_id: str,
+        *,
+        claimed_by: str,
+        claim_token: str,
+        claim_ttl: timedelta,
+    ) -> bool:
+        claim = self._operation_claims.get(operation_id)
+        if (
+            claim is None
+            or claim[0] != claimed_by
+            or claim[1] != claim_token
+            or claim[2] <= datetime.now(UTC)
+        ):
+            return False
+        self._operation_claims[operation_id] = (
+            claimed_by,
+            claim_token,
+            datetime.now(UTC) + claim_ttl,
+        )
+        return True
+
     async def complete_operation(
-        self, operation: McpServerOperationRecord
+        self,
+        operation: McpServerOperationRecord,
+        *,
+        claim_token: str | None = None,
     ) -> McpServerOperationRecord:
+        if claim_token is not None and not self._claim_is_active(
+            operation.operation_id, claim_token
+        ):
+            current = self._operations.get(operation.operation_id)
+            return current if current is not None else operation
         self._save_operation(operation)
+        if claim_token is not None:
+            self._operation_claims.pop(operation.operation_id, None)
         return operation
 
     async def update_runtime(self, runtime: McpServerRuntimeRecord) -> None:
@@ -230,6 +349,14 @@ class InMemoryMcpServerRegistryStore:
         self._operations_by_command[
             (operation.tenant_id or PLATFORM_TENANT, operation.command_id)
         ] = operation.operation_id
+
+    def _claim_is_active(self, operation_id: str, claim_token: str) -> bool:
+        claim = self._operation_claims.get(operation_id)
+        return (
+            claim is not None
+            and claim[1] == claim_token
+            and claim[2] > datetime.now(UTC)
+        )
 
     def _hydrate(self, record: McpServerRecord) -> McpServerRecord:
         latest = self._revisions.get((record.server_id, record.latest_revision))
@@ -284,10 +411,16 @@ class McpServerRegistryService:
         *,
         runtime: McpRuntimeController | None = None,
         allow_private_auth_none: bool = False,
+        instance_id: str | None = None,
+        operation_claim_ttl: timedelta = timedelta(seconds=30),
     ) -> None:
+        if operation_claim_ttl <= timedelta(0):
+            raise ValueError("operation_claim_ttl must be positive")
         self._store = store
         self._runtime = runtime
         self._allow_private_auth_none = allow_private_auth_none
+        self._instance_id = instance_id or f"mcp-registry-{secrets.token_hex(8)}"
+        self._operation_claim_ttl = operation_claim_ttl
 
     def bind_runtime(self, runtime: McpRuntimeController) -> None:
         self._runtime = runtime
@@ -535,18 +668,8 @@ class McpServerRegistryService:
         command: McpServerLifecycleCommand,
         kind: McpRegistryOperationKind,
     ) -> McpServerOperationRecord:
-        existing = await self._idempotent(command.command_id, command.tenant_id)
-        if existing is not None:
-            return existing
         current = await self._require_server(server_id, command.tenant_id)
-        if current.latest_revision != command.expected_revision:
-            raise VersionConflictError("MCP server revision conflict")
-        if current.desired_state is McpDesiredState.RETIRED:
-            raise InvalidTransitionError("retired MCP server cannot change state")
         target_revision = command.target_revision or current.latest_revision
-        revision = await self._store.get_revision(server_id, target_revision)
-        if revision is None:
-            raise NotFoundError("MCP server revision was not found")
         now = datetime.now(UTC)
         operation = _new_operation(
             command,
@@ -555,28 +678,78 @@ class McpServerRegistryService:
             target_revision=target_revision,
             now=now,
         )
-        await self._store.complete_operation(operation)
+        request_digest = _lifecycle_request_digest(server_id, command, kind)
+        claim_token = secrets.token_urlsafe(24)
+        claim = await self._store.claim_operation(
+            operation,
+            request_digest=request_digest,
+            claimed_by=self._instance_id,
+            claim_token=claim_token,
+            claim_ttl=self._operation_claim_ttl,
+        )
+        if not claim.acquired or claim.claim_token is None:
+            return claim.operation
+        operation = claim.operation
+        parent = asyncio.current_task()
+        heartbeat = asyncio.create_task(
+            self._heartbeat_operation(operation.operation_id, claim_token, parent)
+        )
+        desired, active = current.desired_state, current.active_revision
+        desired_committed = False
         try:
-            result = await self._apply_lifecycle(current, revision, kind)
-        except Exception as exc:
-            failed = operation.model_copy(
+            if current.latest_revision != command.expected_revision:
+                raise VersionConflictError("MCP server revision conflict")
+            if current.desired_state is McpDesiredState.RETIRED:
+                raise InvalidTransitionError("retired MCP server cannot change state")
+            revision = await self._store.get_revision(server_id, target_revision)
+            if revision is None:
+                raise NotFoundError("MCP server revision was not found")
+            desired, active = self._lifecycle_target(current, revision, kind)
+            if kind is not McpRegistryOperationKind.TEST:
+                current = await self._store.set_desired_state(
+                    server_id=server_id,
+                    expected_revision=command.expected_revision,
+                    desired_state=desired,
+                    active_revision=active,
+                    operation=operation,
+                    claim_token=claim_token,
+                )
+                desired_committed = True
+            await self._apply_lifecycle(current, revision, kind)
+        except asyncio.CancelledError:
+            unknown = operation.model_copy(
                 update={
-                    "status": McpRegistryOperationStatus.FAILED,
-                    "safe_error_code": _safe_error(exc),
-                    "result": _failure_result(exc),
+                    "status": McpRegistryOperationStatus.UNKNOWN_SIDE_EFFECT,
+                    "safe_error_code": "mcp_operation_claim_lost",
+                    "result": {"manual_recovery_required": True},
                     "completed_at": datetime.now(UTC),
                 }
             )
-            return await self._store.complete_operation(failed)
-        desired, active = result
-        updated = await self._store.set_desired_state(
-            server_id=server_id,
-            expected_revision=command.expected_revision,
-            desired_state=desired,
-            active_revision=active,
-            operation=operation,
-        )
-        del updated
+            return await self._store.complete_operation(
+                unknown, claim_token=claim_token
+            )
+        except Exception as exc:
+            failed = operation.model_copy(
+                update={
+                    "status": (
+                        McpRegistryOperationStatus.RECONCILING
+                        if desired_committed
+                        else McpRegistryOperationStatus.FAILED
+                    ),
+                    "safe_error_code": _safe_error(exc),
+                    "result": {
+                        **_failure_result(exc),
+                        "desired_state_committed": desired_committed,
+                    },
+                    "completed_at": datetime.now(UTC),
+                }
+            )
+            return await self._store.complete_operation(
+                failed, claim_token=claim_token
+            )
+        finally:
+            heartbeat.cancel()
+            await asyncio.gather(heartbeat, return_exceptions=True)
         return await self._store.complete_operation(
             operation.model_copy(
                 update={
@@ -587,15 +760,54 @@ class McpServerRegistryService:
                         "active_revision": active,
                     },
                 }
-            )
+            ),
+            claim_token=claim_token,
         )
+
+    @staticmethod
+    def _lifecycle_target(
+        current: McpServerRecord,
+        revision: McpServerRevisionRecord,
+        kind: McpRegistryOperationKind,
+    ) -> tuple[McpDesiredState, int | None]:
+        if kind is McpRegistryOperationKind.ENABLE:
+            return McpDesiredState.ENABLED, revision.revision
+        if kind is McpRegistryOperationKind.DISABLE:
+            return McpDesiredState.DISABLED, current.active_revision
+        if kind is McpRegistryOperationKind.RETIRE:
+            return McpDesiredState.RETIRED, current.active_revision
+        return current.desired_state, current.active_revision
+
+    async def _heartbeat_operation(
+        self,
+        operation_id: str,
+        claim_token: str,
+        parent: asyncio.Task[object] | None,
+    ) -> None:
+        interval = max(self._operation_claim_ttl.total_seconds() / 3, 0.01)
+        try:
+            while True:
+                await asyncio.sleep(interval)
+                renewed = await self._store.renew_operation(
+                    operation_id,
+                    claimed_by=self._instance_id,
+                    claim_token=claim_token,
+                    claim_ttl=self._operation_claim_ttl,
+                )
+                if not renewed:
+                    if parent is not None and not parent.done():
+                        parent.cancel()
+                    return
+        except Exception:
+            if parent is not None and not parent.done():
+                parent.cancel()
 
     async def _apply_lifecycle(
         self,
         current: McpServerRecord,
         revision: McpServerRevisionRecord,
         kind: McpRegistryOperationKind,
-    ) -> tuple[McpDesiredState, int | None]:
+    ) -> None:
         entry = McpActiveSnapshotEntry(
             server_id=current.server_id,
             tenant_id=current.tenant_id,
@@ -607,15 +819,15 @@ class McpServerRegistryService:
         if kind is McpRegistryOperationKind.TEST:
             if self._runtime is not None:
                 await self._runtime.test(entry)
-            return current.desired_state, current.active_revision
+            return
         if kind is McpRegistryOperationKind.ENABLE:
             if self._runtime is not None:
                 await self._runtime.apply(entry)
-            return McpDesiredState.ENABLED, revision.revision
+            return
         if kind is McpRegistryOperationKind.DISABLE:
             if self._runtime is not None:
                 await self._runtime.revoke(current.server_id)
-            return McpDesiredState.DISABLED, current.active_revision
+            return
         if kind is McpRegistryOperationKind.RECONCILE:
             if (
                 self._runtime is not None
@@ -634,10 +846,10 @@ class McpServerRegistryService:
                             }
                         )
                     )
-            return current.desired_state, current.active_revision
+            return
         if self._runtime is not None:
             await self._runtime.revoke(current.server_id)
-        return McpDesiredState.RETIRED, current.active_revision
+        return
 
     async def _require_server(
         self, server_id: str, tenant_id: str
@@ -693,6 +905,25 @@ def _new_operation(
         status=McpRegistryOperationStatus.ACCEPTED,
         created_at=now,
     )
+
+
+def _lifecycle_request_digest(
+    server_id: str,
+    command: McpServerLifecycleCommand,
+    kind: McpRegistryOperationKind,
+) -> str:
+    payload = json.dumps(
+        {
+            "tenant_id": command.tenant_id,
+            "server_id": server_id,
+            "operation": kind.value,
+            "expected_revision": command.expected_revision,
+            "target_revision": command.target_revision,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _failure_result(exc: BaseException) -> dict[str, str]:

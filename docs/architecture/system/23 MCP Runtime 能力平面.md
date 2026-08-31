@@ -545,6 +545,16 @@ Server 注册属于管理面写操作，只允许平台或 tenant 管理员通�
 revision 持久化，验证成功后由 Action Hands 与 Credential Proxy 热加载；进程重启从 Registry 恢复。
 Runtime 无权动态注册 URL、stdio command 或环境变量。
 
+Lifecycle command 在任何 Runtime/Connector/Egress 副作用前，以 `(tenant_id, command_id)` 和规范化
+request digest 原子 claim。并发 loser 返回同一持久 operation；相同 command id 的不同 Server、操作、
+expected revision 或 target revision 返回 conflict，不暴露数据库唯一约束。claim 保存 instance owner、
+不可猜测 token、heartbeat 和 expiry；运行中 owner 失联进入 `unknown_side_effect` 人工恢复，不自动重放。
+
+Enable/Disable/Retire/Reconcile 先提交权威 desired state/active revision intent，再调用本地 Runtime。
+Enable 在 intent 提交前不能暴露 Connector；Disable/Retire intent 提交后即从共享 active snapshot 排除，
+各副本的 `reconcile_loaded()` 负责撤销残余 Connector/Egress。intent 已提交但即时 apply/revoke 失败时，
+Operation 进入 `reconciling`，而不是回滚 desired state 或宣称副作用未发生。
+
 Catalog publication 与运行健康分离。每次通过完整校验的远端快照在 Server 行锁内获得单调
 `catalog_generation`，Capability 行与 active generation 在同一事务提交；失败轮次不删除、不替换
 last-known-good generation。Hands 副本启动时即使远端暂不可达，也从共享 active generation 恢复本地

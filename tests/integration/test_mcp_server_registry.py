@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import quote
 from uuid import uuid4
@@ -13,8 +14,11 @@ from auraclaw.config import get_settings
 from auraclaw.contracts.errors import VersionConflictError
 from auraclaw.contracts.mcp_registry import (
     McpDesiredState,
+    McpRegistryOperationKind,
+    McpRegistryOperationStatus,
     McpServerConfig,
     McpServerLifecycleCommand,
+    McpServerOperationRecord,
     McpServerWriteCommand,
 )
 from auraclaw.infrastructure.persistence.migration_runner import discover_migrations
@@ -60,10 +64,14 @@ async def _apply_registry_migration(database_url: str) -> None:
                 """SELECT COUNT(*) FROM information_schema.tables
                 WHERE table_schema='hands' AND table_name='mcp_server'"""
             )
-            if int(existing or 0) > 0:
-                return
-            sql = (ROOT / "migrations/0020_mcp_server_registry.sql").read_text()
-            for statement in _split_sql(sql):
+            if int(existing or 0) == 0:
+                sql = (ROOT / "migrations/0020_mcp_server_registry.sql").read_text()
+                for statement in _split_sql(sql):
+                    await connection.execute(statement)
+            claims = (
+                ROOT / "migrations/0046_mcp_lifecycle_operation_claims.sql"
+            ).read_text()
+            for statement in _split_sql(claims):
                 await connection.execute(statement)
     finally:
         await pool_holder.close()
@@ -215,3 +223,129 @@ def test_migration_discovery_includes_mcp_registry() -> None:
     versions = {item.version for item in migrations}
     assert "0020" in versions
     assert len(migrations) >= 19
+
+
+def test_lifecycle_command_is_claimed_before_runtime_side_effect() -> None:
+    async def scenario() -> None:
+        assert SQL_URL is not None
+        await _apply_registry_migration(SQL_URL)
+        suffix = uuid4().hex[:12]
+        server_id = f"claim-{suffix}"
+        tenant_id = f"tenant-{suffix}"
+        store_a = PostgresMcpServerRegistryStore(SQL_URL)
+        store_b = PostgresMcpServerRegistryStore(SQL_URL)
+        service_a = McpServerRegistryService(store_a, instance_id="registry-a")
+        service_b = McpServerRegistryService(store_b, instance_id="registry-b")
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        class SlowRuntime:
+            def __init__(self) -> None:
+                self.applies = 0
+
+            async def test(self, entry: object) -> None:
+                del entry
+
+            async def apply(self, entry: object) -> None:
+                del entry
+                self.applies += 1
+                persisted = await store_b.get_server(server_id)
+                assert persisted is not None
+                assert persisted.desired_state is McpDesiredState.ENABLED
+                assert persisted.active_revision == 1
+                started.set()
+                await release.wait()
+
+            async def revoke(self, server_id: str) -> None:
+                del server_id
+
+        runtime = SlowRuntime()
+        service_a.bind_runtime(runtime)
+        service_b.bind_runtime(runtime)
+        config = McpServerConfig(
+            server_id=server_id,
+            tenant_id=tenant_id,
+            title="Claimed MCP",
+            endpoint="https://claimed.example/mcp",
+            credential_ref=f"vault/{server_id}#client_secret",
+            allowed_tool_prefixes=("demo.",),
+        )
+        command_id = f"enable-{suffix}"
+        command = McpServerLifecycleCommand(
+            command_id=command_id,
+            tenant_id=tenant_id,
+            actor_id="admin",
+            correlation_id=f"corr-{suffix}",
+            causation_id=f"cause-{suffix}",
+            expected_revision=1,
+            target_revision=1,
+        )
+        try:
+            await service_a.create(
+                McpServerWriteCommand(
+                    command_id=f"create-{suffix}",
+                    tenant_id=tenant_id,
+                    actor_id="admin",
+                    correlation_id=f"corr-create-{suffix}",
+                    causation_id=f"cause-create-{suffix}",
+                    expected_revision=0,
+                    config=config,
+                )
+            )
+            winner = asyncio.create_task(service_a.enable(server_id, command))
+            await asyncio.wait_for(started.wait(), timeout=2)
+            loser = await service_b.enable(server_id, command)
+            assert loser.status.value == "running"
+            release.set()
+            completed = await asyncio.wait_for(winner, timeout=2)
+            assert completed.status.value == "succeeded"
+            assert runtime.applies == 1
+
+            with pytest.raises(VersionConflictError, match="different request"):
+                await service_b.disable(server_id, command)
+
+            abandoned = McpServerOperationRecord(
+                operation_id=f"operation-abandoned-{suffix}",
+                server_id=server_id,
+                tenant_id=tenant_id,
+                target_revision=1,
+                command_id=f"abandoned-{suffix}",
+                actor_id="admin",
+                correlation_id=f"corr-abandoned-{suffix}",
+                causation_id=f"cause-abandoned-{suffix}",
+                operation=McpRegistryOperationKind.RECONCILE,
+                status=McpRegistryOperationStatus.ACCEPTED,
+                created_at=datetime.now(UTC),
+            )
+            claimed = await store_a.claim_operation(
+                abandoned,
+                request_digest="abandoned-digest",
+                claimed_by="registry-a",
+                claim_token="abandoned-token",
+                claim_ttl=timedelta(seconds=30),
+            )
+            assert claimed.acquired
+            pool = await store_a.pool()
+            await pool.execute(
+                """UPDATE hands.mcp_server_operation
+                SET claim_expires_at=now()-interval '1 second'
+                WHERE operation_id=$1""",
+                abandoned.operation_id,
+            )
+            recovered = await store_b.claim_operation(
+                abandoned,
+                request_digest="abandoned-digest",
+                claimed_by="registry-b",
+                claim_token="takeover-token",
+                claim_ttl=timedelta(seconds=30),
+            )
+            assert not recovered.acquired
+            assert recovered.operation.status is McpRegistryOperationStatus.UNKNOWN_SIDE_EFFECT
+            assert recovered.operation.safe_error_code == "mcp_operation_recovery_required"
+        finally:
+            release.set()
+            await _cleanup(store_a, server_id)
+            await store_a.close()
+            await store_b.close()
+
+    asyncio.run(scenario())

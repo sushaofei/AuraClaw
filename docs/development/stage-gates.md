@@ -2438,3 +2438,25 @@ ready Skill Artifact 建立带 fencing 的物理回收流程；不把成功命�
 - [x] Ruff、Mypy、import-linter、定向与完整 Pytest 通过。
 - [x] Git 暂存范围已审查，不包含 `.env`、Secret、缓存、`docs/tmp/` 或个人 VS Code 配置。
 - [x] 本子阶段作为 intentional commit 提交并 push；Issue #62 保持 open。
+
+## 阶段 MCP Lifecycle 原子 Command Claim（Issue #62 / MCP Lifecycle 子阶段）
+
+状态：MCP Lifecycle 跨副本命令与副作用顺序子阶段完成；Issue #62 的 Delivery 子阶段继续跟踪。
+
+### 幂等与恢复
+
+- [x] `0046` 正反迁移增加 request digest、claim owner/token、heartbeat/expiry、started 和扩展恢复状态。
+- [x] Lifecycle 在 Runtime/Connector/Egress 副作用前按 tenant/command 原子 claim；并发 loser 返回同一 operation。
+- [x] 相同 command id 的不同 server/kind/revision/target digest 稳定 conflict，不暴露 unique violation。
+- [x] Enable/Disable/Retire/Reconcile 先持久提交 desired-state intent，再执行 runtime apply/revoke。
+- [x] intent 提交后的即时副作用失败进入 reconciling；过期 running claim 进入 unknown_side_effect/manual recovery。
+- [x] claim heartbeat 只允许 owner/token 续租；过期 owner 不能提交终态。
+
+### 验证与交付
+
+- [x] PostgreSQL 双副本测试覆盖并发同 command 仅一次 runtime apply、loser running 与 payload conflict。
+- [x] 测试覆盖 runtime apply 前 desired state 已持久，以及 abandoned claim 的 unknown-side-effect 转换。
+- [x] 单元测试覆盖 apply 失败保留 authoritative intent 并返回 reconciling。
+- [x] Ruff、Mypy、import-linter、定向与完整 Pytest 通过。
+- [x] Git 暂存范围已审查，不包含 `.env`、Secret、缓存、`docs/tmp/` 或个人 VS Code 配置。
+- [x] 本子阶段作为 intentional commit 提交并 push；Issue #62 保持 open。
