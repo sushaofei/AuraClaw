@@ -251,14 +251,18 @@ class SkillLifecycleStore(Protocol):
     ) -> SkillPublishCommitResult: ...
 
     async def claim_outbox(
-        self, *, owner: str, limit: int = 100
+        self, *, owner: str, limit: int = 100, claim_ttl: timedelta = timedelta(seconds=30)
     ) -> tuple[SkillOutboxRecord, ...]: ...
 
-    async def complete_outbox(self, *, outbox_id: str, owner: str) -> None: ...
+    async def renew_outbox(
+        self, *, outbox_id: str, owner: str, claim_ttl: timedelta
+    ) -> bool: ...
+
+    async def complete_outbox(self, *, outbox_id: str, owner: str) -> bool: ...
 
     async def fail_outbox(
         self, *, outbox_id: str, owner: str, safe_error_code: str
-    ) -> None: ...
+    ) -> bool: ...
 
     async def has_artifact_reference(
         self, tenant_id: str, artifact_id: str, version: int
@@ -622,8 +626,9 @@ class InMemorySkillLifecycleStore:
         return min(candidates, key=lambda item: (-item[0], item[1]))[1]
 
     async def claim_outbox(
-        self, *, owner: str, limit: int = 100
+        self, *, owner: str, limit: int = 100, claim_ttl: timedelta = timedelta(seconds=30)
     ) -> tuple[SkillOutboxRecord, ...]:
+        del claim_ttl
         claimed: list[SkillOutboxRecord] = []
         async with self._lock:
             for outbox_id, record in self._outbox.items():
@@ -635,19 +640,28 @@ class InMemorySkillLifecycleStore:
                     break
         return tuple(claimed)
 
-    async def complete_outbox(self, *, outbox_id: str, owner: str) -> None:
+    async def renew_outbox(
+        self, *, outbox_id: str, owner: str, claim_ttl: timedelta
+    ) -> bool:
+        del claim_ttl
+        async with self._lock:
+            return self._claimed_outbox.get(outbox_id) == owner
+
+    async def complete_outbox(self, *, outbox_id: str, owner: str) -> bool:
         async with self._lock:
             if self._claimed_outbox.get(outbox_id) == owner:
                 self._outbox.pop(outbox_id, None)
                 self._claimed_outbox.pop(outbox_id, None)
+                return True
+            return False
 
     async def fail_outbox(
         self, *, outbox_id: str, owner: str, safe_error_code: str
-    ) -> None:
+    ) -> bool:
         del safe_error_code
         async with self._lock:
             if self._claimed_outbox.get(outbox_id) != owner:
-                return
+                return False
             record = self._outbox.get(outbox_id)
             if record is not None:
                 self._outbox[outbox_id] = SkillOutboxRecord(
@@ -659,6 +673,7 @@ class InMemorySkillLifecycleStore:
                     attempt=record.attempt + 1,
                 )
             self._claimed_outbox.pop(outbox_id, None)
+            return True
 
     async def has_artifact_reference(
         self, tenant_id: str, artifact_id: str, version: int

@@ -2650,3 +2650,27 @@ ready Skill Artifact 建立带 fencing 的物理回收流程；不把成功命�
 - [x] PostgreSQL 集成覆盖多副本 sequence 唯一性、replay 与 handoff。
 - [x] Ruff、Mypy、import-linter、Compose、定向与完整 Pytest 通过。
 - [x] Git 暂存范围审查、intentional commit 与 push 完成；Issue #68 关闭。
+
+## 阶段批处理 Worker 有界并发与租约安全（Issue #69）
+
+状态：代码、迁移、测试和文档完成。
+
+### Delivery Worker
+
+- [x] 每轮按副本空闲容量领取，使用全局/per-tenant 并发上限；Store 保持同 stream 有序、不同 stream 并行。
+- [x] 长投递持续续租，访问 Sink 前原子写 side-effect marker；完成写入验证 owner/token。
+- [x] 副作用后租约丢失、取消或完成不确定进入 reconciliation，禁止过期 claim 直接重投。
+- [x] 输出 claimed/in-flight、claim age、renew failure 与 duplicate prevention 指标。
+
+### Skill Publication Reliability
+
+- [x] Outbox 与 orphan 只领取当前容量，长 Artifact/Rebuild 操作持续续租。
+- [x] 同 tenant Outbox 合并为一次 rebuild，不同 tenant 并行；complete/fail 影响零行视为 lease lost。
+- [x] orphan 保持逐条安全解析，失败或取消不会遗留本地锁或冒充成功。
+
+### 验证与交付
+
+- [x] `0050` 正反迁移覆盖 Delivery/Skill heartbeat、side-effect marker 与 reconciliation 字段。
+- [x] 单元与 PostgreSQL 集成覆盖慢操作续租、跨副本 takeover 阻断、同 tenant rebuild 合并和 owner 校验。
+- [x] Ruff、Mypy、import-linter、Compose、定向与完整 Pytest 通过。
+- [x] Git 暂存范围审查、intentional commit 与 push 完成；Issue #69 关闭。

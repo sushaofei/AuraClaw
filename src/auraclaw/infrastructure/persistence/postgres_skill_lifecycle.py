@@ -395,11 +395,18 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
             )
             return _publication(dict(updated))
 
-    async def claim_outbox(self, *, owner: str, limit: int = 100) -> tuple[SkillOutboxRecord, ...]:
+    async def claim_outbox(
+        self,
+        *,
+        owner: str,
+        limit: int = 100,
+        claim_ttl: timedelta = timedelta(seconds=30),
+    ) -> tuple[SkillOutboxRecord, ...]:
         pool = await self.pool()
         rows = await pool.fetch(
             """UPDATE hands.skill_outbox target SET claimed_by=$1,
-                   claim_expires_at=now()+interval '30 seconds',attempt=attempt+1
+                   claim_expires_at=now()+$3::interval,claim_heartbeat_at=now(),
+                   attempt=attempt+1
                WHERE outbox_id IN (
                    SELECT outbox_id FROM hands.skill_outbox
                    WHERE published_at IS NULL AND available_at <= now()
@@ -408,6 +415,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
                ) RETURNING *""",
             owner,
             limit,
+            claim_ttl,
         )
         return tuple(
             SkillOutboxRecord(
@@ -421,27 +429,46 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
             for row in rows
         )
 
-    async def complete_outbox(self, *, outbox_id: str, owner: str) -> None:
+    async def renew_outbox(
+        self, *, outbox_id: str, owner: str, claim_ttl: timedelta
+    ) -> bool:
         pool = await self.pool()
-        await pool.execute(
+        status = await pool.execute(
+            """UPDATE hands.skill_outbox
+               SET claim_expires_at=now()+$3::interval,claim_heartbeat_at=now()
+               WHERE outbox_id=$1 AND claimed_by=$2
+                 AND published_at IS NULL AND claim_expires_at > now()""",
+            int(outbox_id),
+            owner,
+            claim_ttl,
+        )
+        return bool(status.rsplit(" ", 1)[-1] == "1")
+
+    async def complete_outbox(self, *, outbox_id: str, owner: str) -> bool:
+        pool = await self.pool()
+        status = await pool.execute(
             """UPDATE hands.skill_outbox SET published_at=now(),claimed_by=NULL,
-            claim_expires_at=NULL,last_error=NULL WHERE outbox_id=$1
+            claim_expires_at=NULL,claim_heartbeat_at=NULL,last_error=NULL WHERE outbox_id=$1
               AND claimed_by=$2 AND claim_expires_at > now()""",
             int(outbox_id),
             owner,
         )
+        return bool(status.rsplit(" ", 1)[-1] == "1")
 
-    async def fail_outbox(self, *, outbox_id: str, owner: str, safe_error_code: str) -> None:
+    async def fail_outbox(
+        self, *, outbox_id: str, owner: str, safe_error_code: str
+    ) -> bool:
         pool = await self.pool()
-        await pool.execute(
+        status = await pool.execute(
             """UPDATE hands.skill_outbox SET claimed_by=NULL,claim_expires_at=NULL,
-            last_error=$3,available_at=now()+
+            claim_heartbeat_at=NULL,last_error=$3,available_at=now()+
               (LEAST(300, power(2, LEAST(attempt, 8)))::text || ' seconds')::interval
             WHERE outbox_id=$1 AND claimed_by=$2""",
             int(outbox_id),
             owner,
             safe_error_code[:128],
         )
+        return bool(status.rsplit(" ", 1)[-1] == "1")
 
     async def has_artifact_reference(self, tenant_id: str, artifact_id: str, version: int) -> bool:
         pool = await self.pool()

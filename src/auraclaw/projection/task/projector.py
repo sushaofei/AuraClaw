@@ -62,6 +62,7 @@ KNOWN_TASK_EVENTS = {
     "delivery.succeeded",
     "delivery.failed",
     "delivery.dead_lettered",
+    "delivery.reconciling",
 }
 
 

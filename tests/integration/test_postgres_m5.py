@@ -28,9 +28,51 @@ MIGRATIONS = tuple(
         "migrations/0006_m5_streaming_delivery.sql",
         "migrations/0010_s4_claim_recovery.sql",
         "migrations/0047_delivery_sink_circuit.sql",
+        "migrations/0050_batch_worker_lease_safety.sql",
     )
 )
+MIGRATION_0050_DOWN = (
+    ROOT / "migrations/0050_batch_worker_lease_safety.down.sql"
+).read_text()
 pytestmark = pytest.mark.skipif(DATABASE_URL is None, reason="PostgreSQL test URL not configured")
+
+
+def test_batch_worker_lease_safety_migration_roundtrip() -> None:
+    async def scenario() -> None:
+        assert DATABASE_URL is not None
+        await _apply_migrations()
+        connection = await asyncpg.connect(DATABASE_URL, timeout=10)
+        try:
+            await connection.execute(
+                "SELECT pg_advisory_lock(hashtextextended($1, 0))",
+                "migration-0050-roundtrip",
+            )
+            await connection.execute(MIGRATION_0050_DOWN)
+            assert not await connection.fetchval(
+                """SELECT EXISTS(SELECT 1 FROM information_schema.columns
+                WHERE table_schema='delivery' AND table_name='delivery_job'
+                  AND column_name='claim_heartbeat_at')"""
+            )
+            assert not await connection.fetchval(
+                """SELECT EXISTS(SELECT 1 FROM information_schema.columns
+                WHERE table_schema='hands' AND table_name='skill_outbox'
+                  AND column_name='claim_heartbeat_at')"""
+            )
+            await connection.execute(MIGRATIONS[8])
+            assert await connection.fetchval(
+                """SELECT EXISTS(SELECT 1 FROM information_schema.columns
+                WHERE table_schema='delivery' AND table_name='delivery_job'
+                  AND column_name='side_effect_started_at')"""
+            )
+        finally:
+            await connection.execute(MIGRATIONS[8])
+            await connection.execute(
+                "SELECT pg_advisory_unlock(hashtextextended($1, 0))",
+                "migration-0050-roundtrip",
+            )
+            await connection.close()
+
+    asyncio.run(scenario())
 
 
 async def _apply_migrations() -> None:
@@ -71,6 +113,12 @@ async def _apply_migrations() -> None:
             "SELECT to_regclass('delivery.sink_circuit_state')"
         ) is None:
             await connection.execute(MIGRATIONS[7])
+        if await connection.fetchval(
+            """SELECT 1 FROM information_schema.columns
+            WHERE table_schema='delivery' AND table_name='delivery_job'
+              AND column_name='claim_heartbeat_at'"""
+        ) is None:
+            await connection.execute(MIGRATIONS[8])
     finally:
         await connection.close()
 

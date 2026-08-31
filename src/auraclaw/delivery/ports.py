@@ -54,8 +54,21 @@ class DeliveryStore(Protocol):
     async def create_job(self, event: CanonicalEvent, sink: ResultSinkConfig) -> DeliveryJob: ...
 
     async def claim_due(
-        self, *, worker_id: str, claim_ttl: timedelta, limit: int
+        self,
+        *,
+        worker_id: str,
+        claim_ttl: timedelta,
+        limit: int,
+        max_per_tenant: int | None = None,
     ) -> list[DeliveryJob]: ...
+
+    async def renew_claim(
+        self, job: DeliveryJob, *, claim_ttl: timedelta
+    ) -> bool: ...
+
+    async def begin_side_effect(self, job: DeliveryJob) -> bool: ...
+
+    async def mark_reconciling(self, job: DeliveryJob, *, reason: str) -> bool: ...
 
     async def record_attempt(
         self,

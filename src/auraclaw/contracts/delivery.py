@@ -13,6 +13,7 @@ class DeliveryStatus(StrEnum):
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     DEAD_LETTERED = "dead_lettered"
+    RECONCILING = "reconciling"
 
 
 @dataclass(frozen=True)
@@ -48,6 +49,9 @@ class DeliveryJob:
     claimed_by: str | None = None
     claim_token: str | None = None
     claim_expires_at: datetime | None = None
+    claim_heartbeat_at: datetime | None = None
+    side_effect_started_at: datetime | None = None
+    reconciliation_reason: str | None = None
 
 
 @dataclass(frozen=True)
