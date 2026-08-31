@@ -41,6 +41,11 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+class _AllowPolicy:
+    async def validate_decision(self, **_parameters: object) -> bool:
+        return True
+
+
 def test_artifact_multipart_scan_restart_and_gc() -> None:
     async def scenario() -> None:
         assert DATABASE_URL is not None
@@ -69,6 +74,7 @@ def test_artifact_multipart_scan_restart_and_gc() -> None:
             presigner,
             repository=repository_a,
             object_verifier=verifier,
+            policy=_AllowPolicy(),
             multipart=multipart,
             multipart_threshold=5 * 1024 * 1024,
             multipart_part_size=5 * 1024 * 1024,
@@ -77,6 +83,7 @@ def test_artifact_multipart_scan_restart_and_gc() -> None:
             presigner,
             repository=repository_b,
             object_verifier=verifier,
+            policy=_AllowPolicy(),
             multipart=multipart,
             multipart_threshold=5 * 1024 * 1024,
             multipart_part_size=5 * 1024 * 1024,
@@ -335,7 +342,7 @@ def test_artifact_multipart_scan_restart_and_gc() -> None:
                    WHERE tenant_id=$1 AND artifact_id=$2""",
                 tenant_id,
                 expired.artifact_id,
-                datetime.now(UTC),
+                datetime.now(UTC) - timedelta(minutes=1),
             )
             reclaimed = await asyncio.gather(
                 service.cleanup_expired(), service_b.cleanup_expired()

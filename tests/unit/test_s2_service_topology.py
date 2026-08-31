@@ -175,7 +175,7 @@ def test_production_readiness_fails_when_hard_dependencies_are_missing() -> None
         storage_backend="memory",
         artifact_backend="local",
     )
-    for command in ("session", "artifact", "hands", "model-gateway"):
+    for command in ("session", "model-gateway"):
         app = create_service_app(command, production)
         with TestClient(app) as client:
             response = client.get("/health/ready")
@@ -184,6 +184,71 @@ def test_production_readiness_fails_when_hard_dependencies_are_missing() -> None
             serialized = json.dumps(response.json())
             assert "secret" not in serialized.lower()
             assert "api_key" not in serialized.lower()
+
+
+@pytest.mark.parametrize(
+    ("command", "configured_tokens", "missing"),
+    [
+        (
+            "hands",
+            {
+                "task_api_workload_token": "task-token",
+                "action_hands_workload_token": "hands-token",
+            },
+            "credential-proxy",
+        ),
+        (
+            "credential-proxy",
+            {
+                "task_api_workload_token": "task-token",
+                "action_hands_workload_token": "hands-token",
+                "delivery_workload_token": "delivery-token",
+            },
+            "credential-proxy",
+        ),
+        (
+            "artifact",
+            {
+                "task_api_workload_token": "task-token",
+                "action_hands_workload_token": "hands-token",
+                "delivery_workload_token": "delivery-token",
+            },
+            "artifact-service",
+        ),
+    ],
+)
+def test_security_enforcement_services_fail_production_startup_without_identity(
+    command: str,
+    configured_tokens: dict[str, str],
+    missing: str,
+) -> None:
+    settings = _settings(
+        deployment_profile="production",
+        storage_backend="memory",
+        artifact_backend="local",
+        **configured_tokens,
+    )
+    with pytest.raises(ValueError, match=missing):
+        create_service_app(command, settings)
+
+
+@pytest.mark.parametrize("command", ["hands", "credential-proxy", "artifact"])
+def test_policy_enforcement_services_fail_production_startup_without_policy_url(
+    command: str,
+) -> None:
+    settings = _settings(
+        deployment_profile="production",
+        storage_backend="memory",
+        artifact_backend="local",
+        policy_base_url=" ",
+        task_api_workload_token="task-token",
+        action_hands_workload_token="hands-token",
+        delivery_workload_token="delivery-token",
+        credential_proxy_workload_token="credential-token",
+        artifact_service_workload_token="artifact-token",
+    )
+    with pytest.raises(ValueError, match="policy-base-url"):
+        create_service_app(command, settings)
 
 
 def test_hands_exposes_authenticated_internal_contract() -> None:

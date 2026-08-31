@@ -664,6 +664,29 @@ def _has_workload_tokens(settings: Settings, identities: tuple[ServiceIdentity, 
     return all(settings.workload_token_value(identity.value) for identity in identities)
 
 
+def _require_production_security_configuration(
+    settings: Settings,
+    service_name: str,
+    identities: tuple[ServiceIdentity, ...],
+    *,
+    requires_policy: bool = False,
+) -> None:
+    if settings.deployment_profile != "production":
+        return
+    missing = [
+        identity.value
+        for identity in identities
+        if not settings.workload_token_value(identity.value)
+    ]
+    if requires_policy and not settings.policy_base_url.strip():
+        missing.append("policy-base-url")
+    if missing:
+        raise ValueError(
+            f"{service_name} production security configuration is missing: "
+            + ", ".join(missing)
+        )
+
+
 def _lease_key_configured(settings: Settings) -> bool:
     return (
         settings.lease_signing_key is not None
@@ -1323,6 +1346,16 @@ def _orchestrator_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
 
 
 def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
+    _require_production_security_configuration(
+        settings,
+        spec.name,
+        (
+            ServiceIdentity.TASK_API,
+            ServiceIdentity.CREDENTIAL_PROXY,
+            ServiceIdentity.ACTION_HANDS,
+        ),
+        requires_policy=True,
+    )
     closeables: tuple[Any, ...] = ()
     policy: RemotePolicyClient
     credential_proxy: RemoteCredentialProxy | None = None
@@ -1733,7 +1766,7 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         create_contract_app(
             "action-hands-mcp-registry",
             mcp_registry_routes(McpRegistryInternalService(mcp_registry)),
-            workload_identities=mcp_identities or None,
+            workload_identities=mcp_identities,
         ),
     )
     app.mount(
@@ -1754,8 +1787,7 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
                     ),
                 )
             ),
-            workload_identities=_configured_identities(settings, (ServiceIdentity.TASK_API,))
-            or None,
+            workload_identities=_configured_identities(settings, (ServiceIdentity.TASK_API,)),
         ),
     )
     app.mount("/", hands_http_app)
@@ -1794,6 +1826,17 @@ def _policy_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
 
 
 def _credential_proxy_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
+    _require_production_security_configuration(
+        settings,
+        spec.name,
+        (
+            ServiceIdentity.TASK_API,
+            ServiceIdentity.ACTION_HANDS,
+            ServiceIdentity.DELIVERY_WORKER,
+            ServiceIdentity.CREDENTIAL_PROXY,
+        ),
+        requires_policy=True,
+    )
     registry = (
         PostgresCredentialRegistry(settings.resolved_database_url)
         if settings.sql_storage_enabled
@@ -1881,6 +1924,17 @@ def _credential_proxy_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
 
 
 def _artifact_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
+    _require_production_security_configuration(
+        settings,
+        spec.name,
+        (
+            ServiceIdentity.ACTION_HANDS,
+            ServiceIdentity.TASK_API,
+            ServiceIdentity.DELIVERY_WORKER,
+            ServiceIdentity.ARTIFACT_SERVICE,
+        ),
+        requires_policy=True,
+    )
     storage = build_object_storage(settings)
     repository = (
         PostgresArtifactRepository(settings.resolved_database_url)

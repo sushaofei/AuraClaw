@@ -10,6 +10,7 @@ from auraclaw.contracts.errors import ArtifactAccessError
 from auraclaw.contracts.internal import (
     ArtifactCreateUploadRequest,
     ArtifactDeleteRequest,
+    ArtifactDownloadRequest,
     ArtifactFinalizeRequest,
     ArtifactSkillOrphanClaimRequest,
     ArtifactSkillPublicationBindRequest,
@@ -178,6 +179,91 @@ class _DeleteVerifier(_RecoveryVerifier):
         return True
 
 
+class _AllowPolicy:
+    async def validate_decision(self, **_parameters: object) -> bool:
+        return True
+
+
+class _UnavailablePolicy:
+    async def validate_decision(self, **_parameters: object) -> bool:
+        raise TimeoutError("policy timed out")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("policy", [None, _UnavailablePolicy()])
+@pytest.mark.parametrize("operation", ["download", "delete"])
+async def test_artifact_access_fails_closed_before_storage_side_effect(
+    policy: _UnavailablePolicy | None,
+    operation: str,
+) -> None:
+    pending = PendingUpload(
+        tenant_id="tenant-s4",
+        artifact_id="artifact-s4",
+        upload_id="upload-s4",
+        object_key="tenant/artifact/object",
+        root_session_id="root-s4",
+        session_id="session-s4",
+        name="result.txt",
+        media_type="text/plain",
+        expected_size=6,
+        expected_checksum="checksum",
+        classification="internal",
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        retention_until=datetime.now(UTC) - timedelta(seconds=1),
+    )
+    repository = _RecoveryRepository(pending)
+    repository.ready = True
+    verifier = _DeleteVerifier()
+    service = ArtifactInternalService(
+        SeaweedFSS3Presigner(
+            "http://seaweed.test:8333",
+            access_key="access",
+            secret_key="secret",
+            bucket="artifacts",
+            region="us-east-1",
+        ),
+        repository=repository,  # type: ignore[arg-type]
+        object_verifier=verifier,  # type: ignore[arg-type]
+        policy=policy,
+    )
+    context = InternalRequestContext(
+        tenant_id="tenant-s4",
+        service_identity=(
+            ServiceIdentity.DELIVERY_WORKER
+            if operation == "download"
+            else ServiceIdentity.ACTION_HANDS
+        ),
+        request_id=f"{operation}-s4",
+        correlation_id="run-s4",
+        causation_id="decision-s4",
+    )
+    request = (
+        ArtifactDownloadRequest(
+            context=context,
+            artifact_id=pending.artifact_id,
+            version=1,
+            actor_id="delivery-s4",
+            policy_decision_id="decision-s4",
+        )
+        if operation == "download"
+        else ArtifactDeleteRequest(
+            context=context,
+            artifact_id=pending.artifact_id,
+            version=1,
+            actor_id="admin-s4",
+            reason_code="retention_elapsed",
+            policy_decision_id="decision-s4",
+        )
+    )
+    with pytest.raises(ArtifactAccessError, match="policy validation is unavailable"):
+        if operation == "download":
+            await service.download(request)  # type: ignore[arg-type]
+        else:
+            await service.delete(request)  # type: ignore[arg-type]
+    assert repository.delete_claimed is False
+    assert verifier.deleted == []
+
+
 @pytest.mark.asyncio
 async def test_remote_artifact_writer_completes_multipart_upload() -> None:
     completed_xml: list[bytes] = []
@@ -332,6 +418,7 @@ async def test_ready_artifact_delete_enforces_retention_and_is_idempotent() -> N
         ),
         repository=repository,  # type: ignore[arg-type]
         object_verifier=verifier,  # type: ignore[arg-type]
+        policy=_AllowPolicy(),
     )
     request = ArtifactDeleteRequest(
         context=InternalRequestContext(

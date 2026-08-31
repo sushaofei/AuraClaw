@@ -170,6 +170,30 @@ class ArtifactInternalService:
         self._uploads: dict[str, PendingUpload] = {}
         self._ready: dict[tuple[str, str, int], PendingUpload] = {}
 
+    async def _validate_policy_decision(
+        self,
+        *,
+        tenant_id: str,
+        decision_id: str | None,
+        action: str,
+        resource: str,
+    ) -> None:
+        if not decision_id:
+            raise ArtifactAccessError(f"{action} requires policy decision")
+        if self._policy is None:
+            raise ArtifactAccessError("artifact policy validation is unavailable")
+        try:
+            valid = await self._policy.validate_decision(
+                tenant_id=tenant_id,
+                decision_id=decision_id,
+                action=action,
+                resource=resource,
+            )
+        except Exception as exc:
+            raise ArtifactAccessError("artifact policy validation is unavailable") from exc
+        if not valid:
+            raise ArtifactAccessError("artifact policy decision is invalid or expired")
+
     async def create_upload(
         self, request: ArtifactCreateUploadRequest
     ) -> ArtifactUploadResponse:
@@ -405,15 +429,12 @@ class ArtifactInternalService:
             )
         if record is None:
             raise NotFoundError("artifact was not found")
-        if not request.policy_decision_id:
-            raise ArtifactAccessError("artifact download requires policy decision")
-        if self._policy is not None and not await self._policy.validate_decision(
+        await self._validate_policy_decision(
             tenant_id=request.context.tenant_id,
             decision_id=request.policy_decision_id,
             action="artifact.download",
             resource=request.artifact_id,
-        ):
-            raise ArtifactAccessError("artifact policy decision is invalid or expired")
+        )
         url, expires_at = self._presigner.presign(
             "GET", record.object_key, ttl=timedelta(minutes=5)
         )
@@ -424,13 +445,12 @@ class ArtifactInternalService:
             raise ArtifactAccessError("workload may not delete Artifacts")
         if self._repository is None or self._object_verifier is None:
             raise ArtifactAccessError("artifact deletion is unavailable")
-        if self._policy is not None and not await self._policy.validate_decision(
+        await self._validate_policy_decision(
             tenant_id=request.context.tenant_id,
             decision_id=request.policy_decision_id,
             action="artifact.delete",
             resource=request.artifact_id,
-        ):
-            raise ArtifactAccessError("artifact policy decision is invalid or expired")
+        )
         pending = await self._repository.claim_ready_delete(
             request.context.tenant_id,
             request.artifact_id,
@@ -560,15 +580,12 @@ class ArtifactInternalService:
             ):
                 raise ArtifactAccessError("Skill orphan claim was lost")
             return ArtifactSkillOrphanResolveResponse(status="retained")
-        if not request.policy_decision_id:
-            raise ArtifactAccessError("Skill orphan deletion requires policy decision")
-        if self._policy is not None and not await self._policy.validate_decision(
+        await self._validate_policy_decision(
             tenant_id=request.context.tenant_id,
             decision_id=request.policy_decision_id,
             action="artifact.delete",
             resource=request.artifact_id,
-        ):
-            raise ArtifactAccessError("artifact policy decision is invalid or expired")
+        )
         if not await self._object_verifier.delete(pending):
             await self._repository.release_ready_delete(
                 pending, "Skill orphan object deletion failed"
