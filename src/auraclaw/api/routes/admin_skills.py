@@ -17,7 +17,7 @@ from auraclaw.action.skill_lifecycle import (
 )
 from auraclaw.action.skill_packages import SkillPackage, SkillPackageRegistry
 from auraclaw.api.dependencies import RequestIdentity, request_identity
-from auraclaw.contracts.errors import NotFoundError
+from auraclaw.contracts.errors import NotFoundError, VersionConflictError
 from auraclaw.contracts.internal import (
     ArtifactFinalizeResponse,
     ContractModel,
@@ -119,6 +119,14 @@ class SkillPackageUploadManager(Protocol):
 
 
 class SkillManager(Protocol):
+    async def get_admin_snapshot(
+        self, tenant_id: str
+    ) -> tuple[
+        tuple[SkillPackageRecord, ...],
+        tuple[SkillPublicationRecord, ...],
+        tuple[SkillInstallationRecord, ...],
+    ]: ...
+
     async def get_package(
         self,
         tenant_id: str,
@@ -162,6 +170,16 @@ class SkillManager(Protocol):
     ) -> SkillPublicationRecord: ...
 
     async def purge_package(self, command: PurgeSkillPackageCommand) -> SkillPackageRecord: ...
+
+
+class SkillContentReader(Protocol):
+    async def get_skill_markdown(
+        self,
+        tenant_id: str,
+        publisher: str,
+        name: str,
+        version: str,
+    ) -> str | None: ...
 
 
 class SkillPublisherManager(Protocol):
@@ -258,6 +276,7 @@ def create_skill_admin_router(
     *,
     publication_service: SkillPublisher | None = None,
     management_service: SkillManager | None = None,
+    content_reader: SkillContentReader | None = None,
     upload_service: SkillPackageUploadManager | None = None,
     publisher_service: SkillPublisherManager | None = None,
     admission_reader: SkillAdmissionReader | None = None,
@@ -403,32 +422,40 @@ def create_skill_admin_router(
         cursor: Annotated[str | None, Query(max_length=2048)] = None,
         limit: Annotated[int, Query(ge=1, le=500)] = 100,
     ) -> dict[str, Any]:
+        service = _require_management_service(management_service)
+        package_records, publication_state_records, installation_records = (
+            await service.get_admin_snapshot(identity.tenant_id)
+        )
+        packages = {
+            (item.manifest.publisher, item.manifest.name, item.manifest.version): item
+            for item in package_records
+        }
+        publication_records = {
+            (item.publisher, item.name, item.version): item
+            for item in publication_state_records
+        }
         latest: dict[tuple[str, str], PublishedSkill] = {}
-        for publication in registry.list_publications(identity.tenant_id):
-            key = (publication.manifest.publisher, publication.manifest.name)
-            current = latest.get(key)
+        for key, publication_state in publication_records.items():
+            package = packages.get(key)
+            if package is None:
+                continue
+            publication = _published_skill(package, publication_state)
+            skill_key = (publication.manifest.publisher, publication.manifest.name)
+            current = latest.get(skill_key)
             if current is None or _semver_key(publication.manifest.version) > _semver_key(
                 current.manifest.version
             ):
-                latest[key] = publication
-        installations: dict[tuple[str, str], SkillInstallationRecord] = {}
-        publication_records: dict[tuple[str, str, str], SkillPublicationRecord] = {}
-        if management_service is not None:
-            installations = {
-                (item.publisher, item.name): item
-                for item in await management_service.list_installations(identity.tenant_id)
-            }
-            publication_records = {
-                (item.publisher, item.name, item.version): item
-                for item in await management_service.list_publications(identity.tenant_id)
-            }
-        legacy = [_summary(item) for item in latest.values()]
+                latest[skill_key] = publication
+        installations = {
+            (item.publisher, item.name): item
+            for item in installation_records
+        }
         items: list[dict[str, Any]] = []
         normalized_query = (q or "").casefold()
         for publication in latest.values():
             manifest = publication.manifest
             installation = installations.get((manifest.publisher, manifest.name))
-            state = publication_records.get(
+            current_state = publication_records.get(
                 (manifest.publisher, manifest.name, manifest.version)
             )
             if publisher and manifest.publisher != publisher:
@@ -444,7 +471,7 @@ def create_skill_admin_router(
             effective_source_id = (
                 installation.source_id
                 if installation is not None
-                else state.source_id if state is not None else None
+                else current_state.source_id if current_state is not None else None
             )
             if source_id and effective_source_id != source_id:
                 continue
@@ -455,8 +482,8 @@ def create_skill_admin_router(
                 continue
             publication_payload = {
                 "status": publication.status.value,
-                "revision": None if state is None else state.revision,
-                "source_id": None if state is None else state.source_id,
+                "revision": None if current_state is None else current_state.revision,
+                "source_id": None if current_state is None else current_state.source_id,
             }
             installation_payload = (
                 None if installation is None else _installation_summary(installation)
@@ -471,7 +498,7 @@ def create_skill_admin_router(
                 }
             )
         page, next_cursor = _page(items, cursor=cursor, limit=limit, key=_skill_item_key)
-        return {"skills": legacy, "items": page, "next_cursor": next_cursor}
+        return {"skills": page, "items": page, "next_cursor": next_cursor}
 
     @router.get("/skill-admissions")
     async def list_skill_admissions(
@@ -904,22 +931,28 @@ def create_skill_admin_router(
 
     @router.get("/skills/{publisher}/{name}")
     async def get_skill(publisher: str, name: str, identity: Identity) -> dict[str, Any]:
-        publication = registry.get_publication(identity.tenant_id, publisher, name)
-        markdown = registry.skill_markdown(
+        service = _require_management_service(management_service)
+        records = [
+            item
+            for item in await service.list_publications(identity.tenant_id)
+            if item.publisher == publisher and item.name == name
+        ]
+        if not records:
+            raise NotFoundError("Skill publication not found")
+        state = max(records, key=lambda item: _semver_key(item.version))
+        package = await service.get_package(
+            identity.tenant_id, publisher, name, state.version
+        )
+        publication = _published_skill(package, state)
+        markdown = await _skill_markdown(
+            content_reader,
+            registry,
             identity.tenant_id,
             publisher,
             name,
-            publication.manifest.version,
+            state.version,
         )
-        versions = sorted(
-            [
-            item.manifest.version
-            for item in registry.list_publications(identity.tenant_id)
-            if item.manifest.publisher == publisher and item.manifest.name == name
-            ],
-            key=_semver_key,
-            reverse=True,
-        )
+        versions = sorted((item.version for item in records), key=_semver_key, reverse=True)
         payload = _summary(publication, skill_markdown=markdown)
         payload["versions"] = versions
         return payload
@@ -969,8 +1002,20 @@ def create_skill_admin_router(
     async def get_skill_version(
         publisher: str, name: str, version: str, identity: Identity
     ) -> dict[str, Any]:
-        publication = registry.get_publication(identity.tenant_id, publisher, name, version)
-        markdown = registry.skill_markdown(identity.tenant_id, publisher, name, version)
+        service = _require_management_service(management_service)
+        state = await service.get_publication(
+            identity.tenant_id, publisher, name, version
+        )
+        package = await service.get_package(identity.tenant_id, publisher, name, version)
+        publication = _published_skill(package, state)
+        markdown = await _skill_markdown(
+            content_reader,
+            registry,
+            identity.tenant_id,
+            publisher,
+            name,
+            version,
+        )
         return _summary(publication, skill_markdown=markdown)
 
     @router.get("/skills/{publisher}/{name}/installation")
@@ -1491,6 +1536,35 @@ def _package_state_summary(package: SkillPackageRecord) -> dict[str, Any]:
         "retention_updated_at": package.retention_updated_at.isoformat(),
         "purged_at": (None if package.purged_at is None else package.purged_at.isoformat()),
     }
+
+
+def _published_skill(
+    package: SkillPackageRecord,
+    publication: SkillPublicationRecord,
+) -> PublishedSkill:
+    if package.package_digest != publication.package_digest:
+        raise VersionConflictError("Skill package and publication digests do not match")
+    return PublishedSkill(
+        tenant_id=package.tenant_id,
+        manifest=package.manifest,
+        package_digest=package.package_digest,
+        artifact_ref=package.artifact_ref,
+        status=publication.status,
+        revocation_action=publication.revocation_action,
+    )
+
+
+async def _skill_markdown(
+    reader: SkillContentReader | None,
+    registry: SkillPackageRegistry,
+    tenant_id: str,
+    publisher: str,
+    name: str,
+    version: str,
+) -> str | None:
+    if reader is not None:
+        return await reader.get_skill_markdown(tenant_id, publisher, name, version)
+    return registry.skill_markdown(tenant_id, publisher, name, version)
 
 
 def _skill_availability(

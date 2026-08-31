@@ -844,6 +844,7 @@ class SkillPackageStateInternalRequest(ContractModel):
 class SkillPackageStateInternalResponse(ContractModel):
     api_version: str = INTERNAL_API_VERSION
     package: dict[str, Any]
+    skill_markdown: str | None = None
 
 
 class SkillPurgeInternalRequest(ContractModel):

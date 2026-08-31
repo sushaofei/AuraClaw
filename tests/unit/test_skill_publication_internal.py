@@ -30,6 +30,7 @@ from auraclaw.action.skill_publishers import (
     SkillPublisherService,
 )
 from auraclaw.action.skill_rebuild import SkillStateRebuilder
+from auraclaw.api.routes.admin_skills import create_skill_admin_router
 from auraclaw.contracts.capabilities import CapabilityKind
 from auraclaw.contracts.errors import SchemaValidationError
 from auraclaw.contracts.internal import ServiceIdentity
@@ -54,6 +55,7 @@ from auraclaw.contracts.tools import ArtifactRef
 from auraclaw.infrastructure.clients.skill_publication import (
     RemoteSkillPublicationClient,
 )
+from auraclaw.infrastructure.identity.verifier import DevelopmentHeaderIdentityVerifier
 from auraclaw.internal.http import create_contract_app
 from auraclaw.internal.routes import skill_publication_routes
 
@@ -160,13 +162,14 @@ def test_task_api_client_publishes_through_action_hands_service() -> None:
                     rebuilder=rebuilder,
                     publishers=publishers,
                     admissions=lifecycle,
+                    artifacts=artifacts,
                 )
             ),
             workload_identities={"task-token": ServiceIdentity.TASK_API},
         )
         app = FastAPI()
         app.mount("/internal/v1/skill-publications", contract)
-        compatibility_registry = SkillPackageRegistry(
+        task_api_registry = SkillPackageRegistry(
             artifacts=artifacts,
             signature_verifier=HmacSkillSignatureVerifier({"platform": _KEY}),
             resources=HandsResourceRegistry(),
@@ -175,7 +178,6 @@ def test_task_api_client_publishes_through_action_hands_service() -> None:
             "http://hands",
             bearer_token="task-token",
             transport=httpx.ASGITransport(app=app),
-            compatibility_cache=compatibility_registry,
         )
         try:
             registered, _ = await client.register_publisher(
@@ -389,21 +391,55 @@ def test_task_api_client_publishes_through_action_hands_service() -> None:
             )
             assert package_state.retention_revision == 1
             assert package_state.retention_updated_by == "admin-a"
+            assert (
+                await client.get_skill_markdown(
+                    "tenant-a", "platform", "release.prepare", "2.0.0"
+                )
+                == "# Release\n"
+            )
             assert len(await client.list_packages("tenant-a")) == 1
             assert len(await client.list_publications("tenant-a")) == 1
             assert len(await client.list_installations("tenant-a")) == 1
             listed_publishers = await client.list_publishers("tenant-a")
             assert listed_publishers[0][0].publisher == "acme"
+
+            task_api = FastAPI()
+            task_api.state.identity_verifier = DevelopmentHeaderIdentityVerifier()
+            task_api.include_router(
+                create_skill_admin_router(
+                    task_api_registry,
+                    management_service=client,
+                    content_reader=client,
+                )
+            )
+            async with httpx.AsyncClient(
+                base_url="http://task-api",
+                transport=httpx.ASGITransport(app=task_api),
+                headers={"X-Tenant-ID": "tenant-a", "X-Actor-ID": "admin-a"},
+            ) as admin:
+                listed = await admin.get("/v1/admin/skills")
+                assert listed.status_code == 200
+                assert listed.json()["skills"] == listed.json()["items"]
+                assert listed.json()["items"][0]["version"] == "2.0.0"
+                detail = await admin.get(
+                    "/v1/admin/skills/platform/release.prepare"
+                )
+                assert detail.status_code == 200
+                assert detail.json()["skill_markdown"] == "# Release\n"
+                version = await admin.get(
+                    "/v1/admin/skills/platform/release.prepare/versions/2.0.0"
+                )
+                assert version.status_code == 200
+                assert version.json()["package_digest"] == result.package_digest
+                publications = await admin.get("/v1/admin/skill-publications")
+                assert publications.status_code == 200
+                assert publications.json()["publications"][0]["version"] == "2.0.0"
         finally:
             await client.aclose()
 
         assert result.artifact_ref.artifact_id == "art_persisted_skill"
         assert artifacts.calls == 1
-        cached = compatibility_registry.get_publication(
-            "tenant-a", "platform", "release.prepare", "2.0.0"
-        )
-        assert cached.status.value == "revoked"
-        assert cached.package_digest == result.package_digest
+        assert task_api_registry.list_publications("tenant-a") == ()
         stored = await lifecycle.get_publication(
             "tenant-a", "platform", "release.prepare", "2.0.0"
         )

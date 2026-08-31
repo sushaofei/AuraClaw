@@ -826,7 +826,6 @@ def _task_api_app(settings: Settings) -> FastAPI:
         skill_publication = RemoteSkillPublicationClient(
             settings.hands_url,
             bearer_token=_service_bearer_token(settings, ServiceIdentity.TASK_API),
-            compatibility_cache=skill_registry,
         )
         skill_management = skill_publication
         skill_source_management = skill_publication
@@ -863,6 +862,11 @@ def _task_api_app(settings: Settings) -> FastAPI:
             skill_registry,
             publication_service=skill_publication,
             management_service=skill_management,
+            content_reader=(
+                skill_publication
+                if isinstance(skill_publication, RemoteSkillPublicationClient)
+                else None
+            ),
             upload_service=skill_uploads,
             publisher_service=publisher_management,
             admission_reader=skill_publication if skill_lifecycle is None else skill_lifecycle,
@@ -1814,6 +1818,7 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
                         synchronizer=getattr(app.state, "skill_reconciler", None),
                         projector=skill_rebuilder,
                     ),
+                    artifacts=artifact_reader,
                 )
             ),
             workload_identities=_configured_identities(settings, (ServiceIdentity.TASK_API,)),

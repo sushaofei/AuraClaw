@@ -64,7 +64,9 @@ Catalog 的 `availability` 是派生值，常见值包括 `available`、`publica
 GET /v1/admin/skills?q=&publisher=&risk_level=&publication_status=&installation_status=&source_id=&cursor=&limit=
 ```
 
-响应同时保留兼容字段 `skills` 和权威字段 `items`；新客户端应读取 `items` 与 `next_cursor`。
+响应同时保留兼容字段 `skills` 和权威字段 `items`；两者内容相同，新客户端应读取 `items` 与
+`next_cursor`。列表、详情和版本均由 Task API 通过 Hands 内部契约读取 PostgreSQL lifecycle；Task API
+本地 Registry/缓存为空、重启或与 Hands 分进程部署时不影响管理结果。
 
 每个 item 包含：
 
@@ -82,7 +84,9 @@ GET /v1/admin/skills/{publisher}/{name}/management
 GET /v1/admin/skills/{publisher}/{name}/installation
 ```
 
-版本详情包含 `skill_markdown`，只应在授权的管理界面按文本展示。不要将其作为 HTML 直接注入 WebView。
+版本详情包含 `skill_markdown`。正文由 Hands 根据持久 package 的 Artifact 引用经受控 Artifact 下载边界
+读取并校验 digest，Task API 不直连对象存储。只应在授权的管理界面按文本展示，不要将其作为 HTML
+直接注入 WebView。
 
 ## 3. 管理列表与详情
 

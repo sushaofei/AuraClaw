@@ -449,8 +449,10 @@ composition/services.py                   action-hands 对象图与生命周期
 `domain` 和 `contracts` 不导入数据库驱动、FastAPI 或基础设施。入口只调用 `composition`。Source 适配器不
 直接写 Artifact、Catalog 或 Session；发布必须经过 `action` 端口和现有治理链路。
 
-现有 `SkillPackageRegistry` 主要是进程内 Registry。生产实现前需要把 Publication 元数据和包加载
-改为持久端口，确保 action-hands 多副本重启后仍能读取已发布 Skill；Artifact 仍保存不可变包正文。
+`SkillPackageRegistry` 是 Action Hands 内可丢弃、可重建的运行时投影。Publication、Installation、
+Package 与 Source lifecycle 由 PostgreSQL 持久端口负责；Artifact 保存不可变包正文。Task API 的 Skill
+管理列表/详情不读取自己的 Registry，而是通过 Hands 内部契约读取持久快照和受控 `SKILL.md` 内容，
+因此多副本、独立进程和重启不改变管理事实。
 
 ## 10. 管理与可观测性
 
