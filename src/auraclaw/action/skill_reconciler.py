@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import re
@@ -7,7 +8,9 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from urllib.parse import urlsplit
 
+from auraclaw.action.bounded import bounded_partition_map
 from auraclaw.action.ports import CapabilityCatalogStore, CapabilityConnector
 from auraclaw.action.skill_lifecycle import (
     SkillLifecycleStore,
@@ -68,7 +71,24 @@ class SkillPackageReconciler:
         rebuilder: SkillStateRebuilder,
         owner: str | None = None,
         snapshot_provider: Callable[[str], CapabilitySnapshot | None] | None = None,
+        max_concurrent: int = 8,
+        max_concurrent_per_tenant: int | None = None,
+        max_concurrent_per_host: int | None = None,
+        server_timeout_seconds: float = 60.0,
     ) -> None:
+        tenant_limit = (
+            max_concurrent if max_concurrent_per_tenant is None else max_concurrent_per_tenant
+        )
+        host_limit = (
+            max_concurrent if max_concurrent_per_host is None else max_concurrent_per_host
+        )
+        if (
+            max_concurrent < 1
+            or not 1 <= tenant_limit <= max_concurrent
+            or not 1 <= host_limit <= max_concurrent
+            or server_timeout_seconds <= 0
+        ):
+            raise ValueError("Skill reconcile capacity and timeout must be positive")
         self._store = store
         self._connectors = connectors
         self._lifecycle = lifecycle
@@ -76,6 +96,10 @@ class SkillPackageReconciler:
         self._rebuilder = rebuilder
         self._owner = owner or f"skill-reconciler-{uuid.uuid4().hex}"
         self._snapshot_provider = snapshot_provider
+        self._max_concurrent = max_concurrent
+        self._max_concurrent_per_tenant = tenant_limit
+        self._max_concurrent_per_host = host_limit
+        self._server_timeout_seconds = server_timeout_seconds
 
     async def reconcile_all(self) -> int:
         servers = {
@@ -83,11 +107,36 @@ class SkillPackageReconciler:
             for server_id in self._connectors
             if (server := await self._store.get_server(server_id)) is not None
         }
-        results = [
-            await self.reconcile_server(server)
-            for server in sorted(servers.values(), key=lambda item: item.server_id)
-        ]
+        results = await bounded_partition_map(
+            tuple(sorted(servers.values(), key=lambda item: item.server_id)),
+            self._reconcile_isolated,
+            max_concurrent=self._max_concurrent,
+            partitions=(
+                (
+                    lambda server: server.tenant_id or "platform",
+                    self._max_concurrent_per_tenant,
+                ),
+                (
+                    lambda server: urlsplit(server.endpoint).hostname or server.server_id,
+                    self._max_concurrent_per_host,
+                ),
+            ),
+        )
         return sum(result.published_count for result in results)
+
+    async def _reconcile_isolated(
+        self, server: McpServerDefinition
+    ) -> SkillReconcileResult:
+        try:
+            return await asyncio.wait_for(
+                self.reconcile_server(server), timeout=self._server_timeout_seconds
+            )
+        except TimeoutError:
+            return SkillReconcileResult(
+                server_id=server.server_id,
+                published_count=0,
+                error="TimeoutError",
+            )
 
     async def reconcile_source(
         self, tenant_id: str, source_id: str
@@ -144,13 +193,19 @@ class SkillPackageReconciler:
                     published_count=0,
                     error="lease_contended",
                 )
-            snapshot = (
-                self._snapshot_provider(server.server_id)
-                if self._snapshot_provider is not None
-                else None
-            )
-            if snapshot is None:
+            if self._snapshot_provider is None:
                 snapshot = await connector.snapshot(trusted)
+            else:
+                validated_snapshot = self._snapshot_provider(server.server_id)
+                if validated_snapshot is None or int(
+                    validated_snapshot.extra.get("_auraclaw_config_revision", -1)
+                ) != int(server.config_revision or 0):
+                    return SkillReconcileResult(
+                        server_id=server.server_id,
+                        published_count=0,
+                        error="validated_snapshot_unavailable",
+                    )
+                snapshot = validated_snapshot
             lease = await self._renew(lease)
             grouped = _group_skill_resource_uris(snapshot.resources)
             published = 0

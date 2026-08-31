@@ -1581,6 +1581,12 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
                 reconciler=app.state.catalog_reconciler,
                 egress=mcp_egress_client,
                 instance_id=f"action-hands-{secrets.token_hex(8)}",
+                max_concurrent=settings.mcp_reconcile_max_concurrent,
+                max_concurrent_per_tenant=(
+                    settings.mcp_reconcile_max_concurrent_per_tenant
+                ),
+                max_concurrent_per_host=settings.mcp_reconcile_max_concurrent_per_host,
+                server_timeout_seconds=settings.mcp_reconcile_server_timeout_seconds,
             )
             mcp_registry.bind_runtime(manager)
             app.state.mcp_connection_manager = manager
@@ -1734,6 +1740,10 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
             tool_registry=registry,
             hands_router=routed_hands,
             trust_remote_tool_annotations=settings.mcp_trust_remote_tool_annotations,
+            max_concurrent=settings.mcp_reconcile_max_concurrent,
+            max_concurrent_per_tenant=settings.mcp_reconcile_max_concurrent_per_tenant,
+            max_concurrent_per_host=settings.mcp_reconcile_max_concurrent_per_host,
+            server_timeout_seconds=settings.mcp_reconcile_server_timeout_seconds,
         )
         skill_reconciler = SkillPackageReconciler(
             store=capability_catalog_store,
@@ -1742,6 +1752,10 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
             publication=skill_publication,
             rebuilder=skill_rebuilder,
             snapshot_provider=reconciler.snapshot_for,
+            max_concurrent=settings.mcp_reconcile_max_concurrent,
+            max_concurrent_per_tenant=settings.mcp_reconcile_max_concurrent_per_tenant,
+            max_concurrent_per_host=settings.mcp_reconcile_max_concurrent_per_host,
+            server_timeout_seconds=settings.mcp_reconcile_server_timeout_seconds,
         )
         app.state.catalog_reconciler = reconciler
         app.state.skill_reconciler = skill_reconciler

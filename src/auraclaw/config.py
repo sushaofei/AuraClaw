@@ -324,6 +324,12 @@ class Settings(BaseSettings):
     mcp_revision_reconcile_interval_seconds: float = Field(
         default=30.0, ge=5.0, le=3600.0
     )
+    mcp_reconcile_max_concurrent: int = Field(default=8, ge=1, le=1000)
+    mcp_reconcile_max_concurrent_per_tenant: int = Field(default=4, ge=1, le=1000)
+    mcp_reconcile_max_concurrent_per_host: int = Field(default=2, ge=1, le=1000)
+    mcp_reconcile_server_timeout_seconds: float = Field(
+        default=60.0, gt=0.0, le=3600.0
+    )
     mcp_allow_private_auth_none: bool | None = None
     mcp_trust_remote_tool_annotations: bool = False
     skill_signing_key: SecretStr | None = None
@@ -495,6 +501,13 @@ class Settings(BaseSettings):
             raise ValueError(
                 "delivery per-tenant concurrency cannot exceed global concurrency"
             )
+        if (
+            self.mcp_reconcile_max_concurrent_per_tenant
+            > self.mcp_reconcile_max_concurrent
+            or self.mcp_reconcile_max_concurrent_per_host
+            > self.mcp_reconcile_max_concurrent
+        ):
+            raise ValueError("MCP partition concurrency cannot exceed global concurrency")
         return self
 
     @model_validator(mode="after")

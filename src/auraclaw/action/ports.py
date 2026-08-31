@@ -71,6 +71,23 @@ class CatalogSyncHealth:
     quarantined: bool
 
 
+@dataclass(frozen=True)
+class CatalogReconcileLease:
+    server_id: str
+    owner: str
+    fencing_token: int
+    config_revision: int
+    previous_generation: int
+    expires_at: datetime
+
+
+@dataclass(frozen=True)
+class CatalogCommitResult:
+    generation: int
+    committed: bool
+    snapshot_digest: str
+
+
 class InvocationStore(Protocol):
     async def begin(
         self,
@@ -260,7 +277,17 @@ class CapabilityCatalogStore(Protocol):
         self,
         server_id: str,
         capabilities: tuple[CapabilityDescriptor, ...],
-    ) -> None: ...
+        *,
+        lease: CatalogReconcileLease,
+        snapshot_digest: str,
+        source_revision: str | None,
+    ) -> CatalogCommitResult: ...
+
+    async def claim_catalog_reconcile(
+        self, *, server_id: str, owner: str, ttl: timedelta
+    ) -> CatalogReconcileLease | None: ...
+
+    async def release_catalog_reconcile(self, lease: CatalogReconcileLease) -> None: ...
 
     async def get_active_generation(self, server_id: str) -> int | None: ...
 

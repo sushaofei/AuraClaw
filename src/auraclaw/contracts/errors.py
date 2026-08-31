@@ -27,6 +27,10 @@ class VersionConflictError(AuraClawError):
     status_code = 409
 
 
+class StaleCapabilitySnapshotError(VersionConflictError):
+    code = "stale_capability_snapshot"
+
+
 class InvalidTransitionError(AuraClawError):
     code = "invalid_transition"
     status_code = 409
