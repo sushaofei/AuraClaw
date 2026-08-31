@@ -128,11 +128,18 @@ Hands/Delivery 使用 workload identity、`credential_ref`、Policy decision 与
 OAuth refresh、目标/方法 allowlist、请求签名、响应脱敏和 unknown-side-effect 证据。Model Provider Secret 留在 Model Gateway/Vault
 信任域。Vault 不可用时写操作 fail closed。
 
+Production composition 必须配置外部 Vault/KMS，禁止 `InMemoryVault` 与 debug secret fallback；缺少地址、
+token 或连接不可用时启动/readiness fail closed。受管 Java Connector 的 Credential Reference 在服务
+initialize 阶段幂等写入 PostgreSQL Registry；并发 seed 必须定义一致，配置冲突拒绝启动，已撤销引用
+不得因重启重新激活。development 才允许显式内存 Vault。
+
 ### 9. Artifact 与对象存储
 
 生产对象存储使用 S3-compatible adapter（SeaweedFS 或华为 OBS），由 `AURACLAW_ARTIFACT_BACKEND`
 切换；Artifact Service 使用 PostgreSQL 保存 Artifact Metadata、ACL、Version、
 Lineage、Classification、Scan State、Retention 和 Audit；对象存储只保存对象字节。生产禁用本地共享 `artifact_root`。
+`auto` 解析为 local、显式 local 或缺少后端 credential 时 Artifact Service 必须拒绝启动；development
+local backend 不得被 readiness 标记为 production-ready。
 
 上传协议为 createUpload -> presigned PUT/multipart -> finalize。Finalize 校验 tenant/object key、size、checksum、media type，经过
 扫描/分类后才进入 ready。对象 key 使用不可猜测的 tenant/root/artifact/version 前缀；ready version 不可覆盖。下载先经

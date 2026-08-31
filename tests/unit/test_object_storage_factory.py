@@ -59,6 +59,26 @@ def test_build_object_storage_local_has_no_verifier(
     assert bundle.multipart is None
 
 
+def test_production_object_storage_rejects_local_and_missing_credentials() -> None:
+    with pytest.raises(ValueError, match="persistent object storage"):
+        build_object_storage(
+            Settings(
+                _env_file=None,
+                deployment_profile="production",
+                artifact_backend="local",
+            )
+        )
+    with pytest.raises(ValueError, match="SeaweedFS backend requires"):
+        build_object_storage(
+            Settings(
+                _env_file=None,
+                deployment_profile="production",
+                artifact_backend="seaweedfs",
+                seaweedfs_host="seaweed.test",
+            )
+        )
+
+
 def test_obs_backend_requires_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AURACLAW_ARTIFACT_BACKEND", "obs")
     monkeypatch.setenv("OBS_ENDPOINT", "obsv3.example.com")

@@ -2,11 +2,58 @@ from __future__ import annotations
 
 import uuid
 
+from auraclaw.contracts.errors import VersionConflictError
 from auraclaw.contracts.tools import CredentialReference
 from auraclaw.infrastructure.persistence.postgres_common import LazyPool, json_dumps, json_loads
 
 
 class PostgresCredentialRegistry(LazyPool):
+    async def seed_reference(
+        self, tenant_id: str, reference: CredentialReference
+    ) -> bool:
+        pool = await self.pool()
+        async with pool.acquire() as connection, connection.transaction():
+            await connection.execute(
+                """INSERT INTO credential.reference
+                (tenant_id,credential_ref,resource,provider,account_scope,
+                 allowed_operations,expires_at,revoked_at)
+                VALUES ($1,$2,$3,$3,$4,$5::jsonb,$6,NULL)
+                ON CONFLICT (tenant_id,credential_ref) DO NOTHING""",
+                tenant_id,
+                reference.credential_ref,
+                reference.provider,
+                reference.account_scope,
+                json_dumps(reference.allowed_operations),
+                reference.expires_at,
+            )
+            row = await connection.fetchrow(
+                """SELECT * FROM credential.reference
+                WHERE tenant_id=$1 AND credential_ref=$2 FOR UPDATE""",
+                tenant_id,
+                reference.credential_ref,
+            )
+            assert row is not None
+            same_definition = (
+                str(row["provider"]) == reference.provider
+                and str(row["account_scope"]) == reference.account_scope
+                and tuple(json_loads(row["allowed_operations"]))
+                == reference.allowed_operations
+            )
+            if not same_definition:
+                raise VersionConflictError(
+                    "managed credential reference conflicts with persisted definition"
+                )
+            if row["revoked_at"] is not None:
+                return False
+            await connection.execute(
+                """UPDATE credential.reference SET expires_at=GREATEST(expires_at,$3)
+                WHERE tenant_id=$1 AND credential_ref=$2""",
+                tenant_id,
+                reference.credential_ref,
+                reference.expires_at,
+            )
+            return True
+
     async def get_reference(
         self, tenant_id: str, credential_ref: str
     ) -> CredentialReference | None:

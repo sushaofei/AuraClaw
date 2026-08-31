@@ -2500,3 +2500,29 @@ ready Skill Artifact 建立带 fencing 的物理回收流程；不把成功命�
 - [x] Ruff、Mypy、import-linter、定向与完整 Pytest 通过。
 - [x] Git 暂存范围已审查，不包含 `.env`、Secret、缓存、`docs/tmp/` 或个人 VS Code 配置。
 - [x] 本阶段作为 intentional commit 提交并 push；Issue #61 可关闭。
+
+## 阶段 Production Vault/Artifact 门禁与 Connector Credential Seed（Issue #63）
+
+状态：生产 composition fallback 门禁与受管 Connector 凭证引用持久化完成。
+
+### 生产安全边界
+
+- [x] Production Credential Proxy 缺少外部 Vault 地址/token 或配置 debug secrets 时启动失败，不装配 `InMemoryVault`。
+- [x] Vault readiness 区分 development memory 与 production external；外部 Vault 不可用时 readiness fail closed。
+- [x] Production Artifact Service 禁止 local/auto→local，SeaweedFS/OBS 缺少 credential 时在构造阶段失败。
+- [x] Artifact readiness 使用持久后端 verifier 连通性探针，development local 不会被误标为 production-ready。
+
+### Connector Reference 持久化
+
+- [x] Managed Java Connector seed 改为 initialize 阶段异步 PostgreSQL 写入，完成前服务不 ready。
+- [x] 多副本相同定义并发 seed 幂等；provider/scope/operation 定义冲突返回稳定 conflict。
+- [x] 已撤销 reference 不会被 seed 清除 `revoked_at` 或重新激活；production 不创建 development/local/debug tenant 引用。
+- [x] Reference 继续保存 tenant、provider、account scope、allowed operations 与 expiry，invoke 仍从 PostgreSQL 权威读取。
+
+### 验证与交付
+
+- [x] 单元测试覆盖 production Vault/debug/local object storage fail-fast、development local 与 production tenant seed 集合。
+- [x] PostgreSQL 双 Registry 测试覆盖并发 seed、跨副本读取、配置冲突与撤销后重启 seed 不复活。
+- [x] Ruff、Mypy、import-linter、定向与完整 Pytest 通过。
+- [x] Git 暂存范围已审查，不包含 `.env`、Secret、缓存、`docs/tmp/` 或个人 VS Code 配置。
+- [x] 本阶段作为 intentional commit 提交并 push；Issue #63 可关闭。

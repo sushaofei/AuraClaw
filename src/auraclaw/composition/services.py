@@ -714,14 +714,15 @@ def _fencing_token_ledger(
     return InMemoryFencingTokenLedger()
 
 
-def _seed_managed_connector_credentials(
+async def _seed_managed_connector_credentials(
     proxy: CredentialProxy,
     settings: Settings,
-) -> None:
+) -> int:
     expires_at = datetime.now(UTC) + timedelta(days=365)
     debug_tenants = (
         ("local", "development", "1") if settings.deployment_profile == "development" else ()
     )
+    seeded = 0
     for java_server in settings.java_api_servers:
         if java_server.credential_ref is None:
             continue
@@ -734,7 +735,8 @@ def _seed_managed_connector_credentials(
         )
         tenants = {java_server.tenant_id or "platform", *debug_tenants}
         for tenant_id in tenants:
-            proxy.register_reference(tenant_id, reference)
+            seeded += int(await proxy.seed_reference(tenant_id, reference))
+    return seeded
 
 
 def _task_api_app(settings: Settings) -> FastAPI:
@@ -982,8 +984,9 @@ def _readiness(name: str, settings: Settings) -> tuple[bool, dict[str, str]]:
         dependencies["control_workload_identities"] = "ready" if identity_ready else "missing"
         ready = ready and lease_ready and identity_ready
     if name == "artifact-service":
-        storage_ready = (
-            settings.object_storage_enabled or settings.resolved_artifact_backend == "local"
+        storage_ready = settings.object_storage_enabled or (
+            settings.deployment_profile == "development"
+            and settings.resolved_artifact_backend == "local"
         )
         dependencies["object_storage"] = (
             settings.resolved_artifact_backend
@@ -1058,7 +1061,10 @@ def _readiness(name: str, settings: Settings) -> tuple[bool, dict[str, str]]:
         vault_configured = bool(settings.credential_vault_addr) and (
             settings.credential_vault_token is not None
         )
-        vault_ready = vault_configured or not settings.credential_vault_addr
+        vault_ready = vault_configured or (
+            settings.deployment_profile == "development"
+            and not settings.credential_vault_addr
+        )
         dependencies["caller_identities"] = "ready" if identity_ready else "missing"
         dependencies["vault"] = (
             "ready" if vault_configured else ("memory" if vault_ready else "missing")
@@ -1871,6 +1877,11 @@ def _credential_proxy_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         ),
         requires_policy=True,
     )
+    if settings.deployment_profile == "production":
+        if settings.debug_vault_secrets:
+            raise ValueError("credential-proxy production forbids debug Vault secrets")
+        if not settings.credential_vault_addr or settings.credential_vault_token is None:
+            raise ValueError("credential-proxy production requires an external Vault")
     registry = (
         PostgresCredentialRegistry(settings.resolved_database_url)
         if settings.sql_storage_enabled
@@ -1923,13 +1934,15 @@ def _credential_proxy_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         policy=policy,
         mcp_egress=mcp_egress,
     )
-    _seed_managed_connector_credentials(proxy, settings)
-
     async def restore_mcp_egress() -> None:
         snapshot = await _hands_mcp_snapshot(settings)
         if snapshot is None:
             return
         await mcp_egress.restore(snapshot)
+
+    async def initialize() -> None:
+        await _seed_managed_connector_credentials(proxy, settings)
+        await restore_mcp_egress()
 
     async def reconcile_mcp_egress() -> int:
         snapshot = await _hands_mcp_snapshot(settings)
@@ -1937,7 +1950,7 @@ def _credential_proxy_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
             return 0
         return await mcp_egress.reconcile(snapshot)
 
-    app.state.initialize = restore_mcp_egress
+    app.state.initialize = initialize
     app.state.tick = reconcile_mcp_egress
     app.state.worker = True
     app.state.worker_interval = settings.mcp_revision_reconcile_interval_seconds

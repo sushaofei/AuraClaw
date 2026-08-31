@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
@@ -7,7 +8,7 @@ import asyncpg
 import pytest
 
 from auraclaw.config import get_settings
-from auraclaw.contracts.errors import CredentialAccessError
+from auraclaw.contracts.errors import CredentialAccessError, VersionConflictError
 from auraclaw.contracts.internal import (
     InternalRequestContext,
     PolicyEvaluateRequest,
@@ -115,6 +116,17 @@ def test_policy_and_credential_replicas_share_decisions_revocation_and_audit() -
             }
 
             await registry_b.revoke_reference(tenant_id, credential_ref)
+            assert not await proxy_a.seed_reference(
+                tenant_id,
+                CredentialReference(
+                    credential_ref=credential_ref,
+                    provider="managed",
+                    account_scope="account",
+                    allowed_operations=("read",),
+                    expires_at=datetime.now(UTC) + timedelta(days=365),
+                ),
+            )
+            assert await registry_a.get_reference(tenant_id, credential_ref) is None
             with pytest.raises(CredentialAccessError, match="not valid"):
                 await proxy_a.invoke(
                     tenant_id=tenant_id,
@@ -124,6 +136,26 @@ def test_policy_and_credential_replicas_share_decisions_revocation_and_audit() -
                     operation="read",
                     request={},
                     adapter=lambda request, secret: request,
+                )
+            seed_ref = f"connector-seed-{suffix}"
+            seed = CredentialReference(
+                credential_ref=seed_ref,
+                provider="java-connector",
+                account_scope="https://connector.test",
+                allowed_operations=("http.invoke",),
+                expires_at=datetime.now(UTC) + timedelta(days=365),
+            )
+            proxy_b = CredentialProxy(vault, registry=registry_b)
+            results = await asyncio.gather(
+                proxy_a.seed_reference(tenant_id, seed),
+                proxy_b.seed_reference(tenant_id, seed),
+            )
+            assert results == [True, True]
+            assert await registry_b.get_reference(tenant_id, seed_ref) is not None
+            with pytest.raises(VersionConflictError, match="conflicts"):
+                await proxy_b.seed_reference(
+                    tenant_id,
+                    replace(seed, allowed_operations=("admin",)),
                 )
         finally:
             await policy_a.close()

@@ -26,6 +26,10 @@ class CredentialRegistry(Protocol):
         self, tenant_id: str, reference: CredentialReference
     ) -> None: ...
 
+    async def seed_reference(
+        self, tenant_id: str, reference: CredentialReference
+    ) -> bool: ...
+
     async def revoke_reference(self, tenant_id: str, credential_ref: str) -> None: ...
 
     async def record_usage(self, record: dict[str, str]) -> str: ...
@@ -104,6 +108,17 @@ class CredentialProxy:
         self.register_reference(tenant_id, reference)
         if self._registry is not None:
             await self._registry.save_reference(tenant_id, reference)
+
+    async def seed_reference(
+        self, tenant_id: str, reference: CredentialReference
+    ) -> bool:
+        if self._registry is None:
+            self._references.setdefault((tenant_id, reference.credential_ref), reference)
+            return True
+        active = await self._registry.seed_reference(tenant_id, reference)
+        if active:
+            self._references[(tenant_id, reference.credential_ref)] = reference
+        return active
 
     async def invoke(
         self,

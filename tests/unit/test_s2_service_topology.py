@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -11,6 +12,7 @@ from auraclaw.composition.api import create_app
 from auraclaw.composition.cli import _serve_topology, build_parser, main
 from auraclaw.composition.services import (
     SERVICE_BY_COMMAND,
+    _seed_managed_connector_credentials,
     create_service_app,
     service_spec,
 )
@@ -266,6 +268,77 @@ def test_policy_enforcement_services_fail_production_startup_without_policy_url(
     )
     with pytest.raises(ValueError, match="policy-base-url"):
         create_service_app(command, settings)
+
+
+def test_credential_proxy_production_requires_external_vault_and_forbids_debug() -> None:
+    values = {
+        "deployment_profile": "production",
+        "storage_backend": "postgres",
+        "task_api_workload_token": "task-token",
+        "action_hands_workload_token": "hands-token",
+        "delivery_workload_token": "delivery-token",
+        "credential_proxy_workload_token": "credential-token",
+    }
+    with pytest.raises(ValueError, match="external Vault"):
+        create_service_app("credential-proxy", _settings(**values))
+    with pytest.raises(ValueError, match="debug Vault secrets"):
+        create_service_app(
+            "credential-proxy",
+            _settings(
+                **values,
+                credential_vault_addr="http://vault.test",
+                credential_vault_token="vault-token",
+                debug_vault_secrets_json='{"vault/debug#token":"forbidden"}',
+            ),
+        )
+
+
+def test_managed_connector_seed_is_async_and_production_has_no_debug_tenants() -> None:
+    class Recorder:
+        def __init__(self) -> None:
+            self.tenants: list[str] = []
+
+        async def seed_reference(self, tenant_id: str, reference: object) -> bool:
+            del reference
+            self.tenants.append(tenant_id)
+            return True
+
+    configured = json.dumps(
+        [
+            {
+                "server_id": "orders",
+                "title": "Orders",
+                "base_url": "https://orders.test",
+                "credential_ref": "vault/orders#token",
+            }
+        ]
+    )
+    production = Recorder()
+    assert (
+        asyncio.run(
+            _seed_managed_connector_credentials(
+                production,  # type: ignore[arg-type]
+                _settings(
+                    deployment_profile="production",
+                    java_api_servers_json=configured,
+                ),
+            )
+        )
+        == 1
+    )
+    assert production.tenants == ["platform"]
+
+    development = Recorder()
+    assert (
+        asyncio.run(
+            _seed_managed_connector_credentials(
+                development,  # type: ignore[arg-type]
+                _settings(java_api_servers_json=configured),
+            )
+        )
+        == 4
+    )
+    assert set(development.tenants) == {"platform", "local", "development", "1"}
 
 
 def test_hands_exposes_authenticated_internal_contract() -> None:
