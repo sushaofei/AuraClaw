@@ -59,6 +59,11 @@ Model Gateway 将 Provider Token Stream 返回 Agent Runtime；Agent Runtime 负
 
 Model Gateway 不直接连接 Web。
 
+Terminal `completed` 是持久事实的交付结果，不是 Provider stream 的临时信号。Gateway 必须先在同一
+Model Call completion 事务中提交 response、final usage 并结算 reservation，成功后才能向 Runtime
+发送 terminal event。若 Provider 已完成但持久提交失败，stream 以错误结束且不得声称 completed；
+已发送 delta 不构成最终结果，调用进入后续持久 lifecycle/reconciliation 处理。
+
 ## 安全
 
 - Provider Secret 只存在 Gateway/Vault 信任域。

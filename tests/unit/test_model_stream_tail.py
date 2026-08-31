@@ -80,7 +80,7 @@ def _gateway_request() -> ModelGenerateRequest:
 
 
 @pytest.mark.asyncio
-async def test_gateway_yields_completed_before_persisting() -> None:
+async def test_gateway_persists_before_yielding_completed() -> None:
     state = _OrderedState()
     service = ModelGatewayInternalService(_StreamingModel(), state=state)
     events: list[str] = []
@@ -88,17 +88,17 @@ async def test_gateway_yields_completed_before_persisting() -> None:
     async def consume() -> None:
         async for event in service.generate_stream(_gateway_request()):
             events.append(event.type)
-            if event.type == "completed":
-                assert "complete_started" not in state.events
-                state.allow_complete.set()
-
-    await consume()
+    task = asyncio.create_task(consume())
+    await state.complete_started.wait()
+    assert events == ["delta"]
+    state.allow_complete.set()
+    await task
     assert events == ["delta", "completed"]
     assert state.events == ["complete_started", "complete_finished"]
 
 
 @pytest.mark.asyncio
-async def test_gateway_still_returns_completed_when_persist_fails() -> None:
+async def test_gateway_does_not_claim_completed_when_persist_fails() -> None:
     class _FailState:
         async def reserve(self, **kwargs: Any) -> ModelCallReservation:
             del kwargs
@@ -112,9 +112,11 @@ async def test_gateway_still_returns_completed_when_persist_fails() -> None:
             raise RuntimeError("db unavailable")
 
     service = ModelGatewayInternalService(_StreamingModel(), state=_FailState())
-    events = [event async for event in service.generate_stream(_gateway_request())]
-    assert [event.type for event in events] == ["delta", "completed"]
-    assert events[-1].payload["completed_output"] == "hi"
+    events: list[ModelStreamEvent] = []
+    with pytest.raises(RuntimeError, match="db unavailable"):
+        async for event in service.generate_stream(_gateway_request()):
+            events.append(event)
+    assert [event.type for event in events] == ["delta"]
 
 
 @pytest.mark.asyncio

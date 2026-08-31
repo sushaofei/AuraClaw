@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import logging
 from collections.abc import AsyncIterator
 from typing import Protocol
 
@@ -28,8 +27,6 @@ from auraclaw.contracts.tools import PolicyDecision
 from auraclaw.model_gateway.ports import ModelCallReservation, ModelStateStore
 from auraclaw.runtime.model_stream import iter_model_stream
 from auraclaw.runtime.ports import ModelClient, ModelPolicy, ModelRequest, ModelResponse
-
-logger = logging.getLogger(__name__)
 
 
 class ModelPolicyEnforcer(Protocol):
@@ -135,8 +132,12 @@ class ModelGatewayInternalService:
         if response is None:
             raise ModelProviderError("model stream ended without a completed response")
         result = self._to_generate_response(response)
-        # Yield completed before persisting so Runtime receives the terminal event
-        # even if the DB write is slow or the SSE connection drops mid-persist.
+        if self._state is not None:
+            await self._state.complete(
+                tenant_id=request.context.tenant_id,
+                model_call_id=request.model_call_id,
+                response=result,
+            )
         sequence += 1
         yield ModelStreamEvent(
             model_call_id=request.model_call_id,
@@ -144,20 +145,6 @@ class ModelGatewayInternalService:
             type="completed",
             payload=result.model_dump(mode="json"),
         )
-        if self._state is not None:
-            try:
-                await self._state.complete(
-                    tenant_id=request.context.tenant_id,
-                    model_call_id=request.model_call_id,
-                    response=result,
-                )
-            except Exception:
-                logger.exception(
-                    "model call completed for client but persistence failed "
-                    "tenant=%s model_call=%s",
-                    request.context.tenant_id,
-                    request.model_call_id,
-                )
 
     async def cancel(self, request: ModelCancelRequest) -> ModelCancelResponse:
         self._require_runtime(request.context.service_identity)
