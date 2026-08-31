@@ -138,6 +138,11 @@ Issue、文档、日志或测试输出。`.env.example` 只保留无密钥占位
 公开 Ops 与 CLI 只作为 Admin API Client。Projection rebuild/redrive、Delivery redrive/DLQ、Retention、Hands recovery 等操作由
 数据 owner 服务执行，携带 tenant、actor、`operation_id`、幂等和审计上下文。Task API/CLI 不直接使用跨 schema Operations Store。
 
+Projection、Delivery 与 Artifact Owner 在执行 handler 前，必须先以 `operation_id` 和规范化 request digest 原子 claim 持久记录。
+相同请求在其他副本返回 `running` 或最终结果，不重复副作用；相同 ID 的不同 tenant/owner/operation/parameters 返回 conflict。
+claim 由 owner heartbeat 延续。owner 到期后不得自动重放无法确认的运维副作用，而是持久化
+`unknown_side_effect` / `manual_recovery_required`，由操作员核对后以新 operation id 恢复。
+
 ### 11. Streaming 与 Delivery
 
 Runtime producer 不分配依赖进程内存的公开 Session sequence。共享 Replay/Router 分配可恢复 cursor；Runtime handoff、Gateway

@@ -177,6 +177,11 @@ docker compose --env-file .env.prod -f compose.prod.yml up -d agent-runtime
 delivery redrive。任何需要清空 DLQ、缩短 retention 或删除 Artifact 的操作都要记录 tenant、
 actor、command id、correlation/causation 和审批依据。
 
+Owner Admin 操作先持久 claim 再执行。重复 `operation_id` 在 active claim 期间返回 `running`，完成后返回
+同一结果；同 ID 不同参数返回 conflict。若 owner 在结果落库前失联，claim 到期后状态变为
+`unknown_side_effect`，禁止自动重放 rebuild/redrive/retention 等可能已产生副作用的操作。操作员应先核对
+目标 owner schema 和外部系统实际状态，再使用新的 `operation_id` 执行补偿或恢复。
+
 ## 8. 停止条件
 
 出现以下任一情况立即停止发布或扩缩容：迁移 checksum drift、N/N-1 契约不兼容、readiness

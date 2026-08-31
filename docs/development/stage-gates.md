@@ -2376,3 +2376,23 @@ ready Skill Artifact 建立带 fencing 的物理回收流程；不把成功命�
 - [x] Ruff、Mypy、定向与完整 Pytest 通过。
 - [x] Git 暂存范围已审查，不包含 `.env`、Secret、缓存、`docs/tmp/` 或个人 VS Code 配置。
 - [x] 本子阶段作为 intentional commit 提交并 push；Issue #62 在其余持久正确性子阶段完成前保持 open。
+
+## 阶段 Owner Admin 原子 Claim（Issue #62 / Admin 子阶段）
+
+状态：Admin 跨副本幂等子阶段实现和门禁完成；Issue #62 其余子阶段继续跟踪。
+
+### 幂等与恢复
+
+- [x] `0043` 正反迁移为 Projection、Delivery、Artifact Admin Operation 增加 tenant、owner、request digest、actor、correlation/causation、claim/heartbeat/expiry 与安全错误字段。
+- [x] handler 前原子 claim `operation_id`；并发 loser 返回 `running`，完成后任意副本返回同一持久结果。
+- [x] 相同 operation id 配合不同 tenant、owner、operation 或 parameters digest 稳定返回 version conflict。
+- [x] claim heartbeat 仅由 owner/token 续租；owner 到期进入 `unknown_side_effect` 与人工恢复，不自动重放可能已完成的副作用。
+- [x] handler 异常写入脱敏 failed 结果；claim 丢失时调用方收到 manual recovery，不把本地 `_results` 当生产权威状态。
+
+### 验证与交付
+
+- [x] PostgreSQL 集成测试覆盖 Projection、Delivery、Artifact 三个 owner schema 的双副本并发，handler 均只执行一次。
+- [x] 测试覆盖服务重建后的结果复用、同 ID 不同参数 conflict、claim 后崩溃/过期的 unknown side effect。
+- [x] Ruff、Mypy、定向与完整 Pytest 通过。
+- [x] Git 暂存范围已审查，不包含 `.env`、Secret、缓存、`docs/tmp/` 或个人 VS Code 配置。
+- [x] 本子阶段作为 intentional commit 提交并 push；Issue #62 保持 open。
