@@ -4,9 +4,10 @@ import logging
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Protocol
 
-from auraclaw.action.ports import CapabilityCatalogStore, HandsExecutor
+from auraclaw.action.ports import CapabilityCatalogStore, CatalogSyncHealth, HandsExecutor
 from auraclaw.contracts.capabilities import (
     CapabilityDescriptor,
     CapabilityKind,
@@ -86,6 +87,7 @@ class InMemoryCapabilityCatalogStore:
         self._servers: dict[str, McpServerDefinition] = {}
         self._capabilities: dict[str, CapabilityDescriptor] = {}
         self._generations: dict[str, int] = {}
+        self._sync_failures: dict[str, int] = {}
 
     async def upsert_server(self, server: McpServerDefinition) -> None:
         self._servers[server.server_id] = server
@@ -130,9 +132,47 @@ class InMemoryCapabilityCatalogStore:
     async def get_active_generation(self, server_id: str) -> int | None:
         return self._generations.get(server_id)
 
+    async def record_catalog_sync(
+        self,
+        server_id: str,
+        *,
+        succeeded: bool,
+        attempted_at: datetime,
+        safe_error_code: str | None,
+        quarantine_after_failures: int,
+    ) -> CatalogSyncHealth:
+        server = self._servers.get(server_id)
+        if server is None:
+            raise ValueError(f"MCP server is not registered: {server_id}")
+        failures = 0 if succeeded else self._sync_failures.get(server_id, 0) + 1
+        self._sync_failures[server_id] = failures
+        quarantined = not succeeded and failures >= quarantine_after_failures
+        self._servers[server_id] = server.model_copy(
+            update={
+                "status": (
+                    CapabilityStatus.ACTIVE
+                    if succeeded
+                    else CapabilityStatus.QUARANTINED
+                    if quarantined
+                    else server.status
+                ),
+                "metadata": {
+                    **server.metadata,
+                    "last_sync_at": attempted_at.isoformat(),
+                    "last_sync_error": safe_error_code,
+                    "consecutive_sync_failures": failures,
+                    "catalog_quarantined_at": (
+                        attempted_at.isoformat() if quarantined else None
+                    ),
+                },
+            }
+        )
+        return CatalogSyncHealth(failures, quarantined)
+
     async def remove_server(self, server_id: str) -> None:
         self._servers.pop(server_id, None)
         self._generations.pop(server_id, None)
+        self._sync_failures.pop(server_id, None)
         self._capabilities = {
             capability_id: capability
             for capability_id, capability in self._capabilities.items()

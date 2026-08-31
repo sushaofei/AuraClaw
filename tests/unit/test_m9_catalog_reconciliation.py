@@ -381,14 +381,15 @@ def test_catalog_reconciliation_filters_routes_invalidates_and_recovers() -> Non
         for expected in (
             CapabilityStatus.DEGRADED,
             CapabilityStatus.DEGRADED,
-            CapabilityStatus.DEGRADED,
+            CapabilityStatus.QUARANTINED,
         ):
             failure = await reconciler.reconcile_server(current)
             assert failure.status == expected
             current = await store.get_server(server.server_id)
             assert current is not None
-        assert tools.get("github.issue.get", "2.2.0")
-        assert [item.capability_id for item in await catalog.search(tenant_id="tenant-a")]
+        with pytest.raises(PolicyDeniedError, match="not registered"):
+            tools.get("github.issue.get", "2.2.0")
+        assert not await catalog.search(tenant_id="tenant-a")
 
         credentials.failed = False
         recovered = await reconciler.reconcile_server(current)

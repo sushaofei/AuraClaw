@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from datetime import datetime
+
+from auraclaw.action.ports import CatalogSyncHealth
 from auraclaw.contracts.capabilities import (
     CapabilityDescriptor,
     CapabilityKind,
@@ -172,6 +175,50 @@ class PostgresCapabilityCatalogStore(LazyPool):
         )
         return None if value is None else int(value)
 
+    async def record_catalog_sync(
+        self,
+        server_id: str,
+        *,
+        succeeded: bool,
+        attempted_at: datetime,
+        safe_error_code: str | None,
+        quarantine_after_failures: int,
+    ) -> CatalogSyncHealth:
+        if quarantine_after_failures < 1:
+            raise ValueError("quarantine_after_failures must be positive")
+        pool = await self.pool()
+        row = await pool.fetchrow(
+            """UPDATE hands.downstream_mcp_server SET
+               consecutive_sync_failures=CASE WHEN $2 THEN 0
+                 ELSE consecutive_sync_failures+1 END,
+               last_catalog_sync_at=$3,
+               last_catalog_sync_error=CASE WHEN $2 THEN NULL ELSE $4 END,
+               catalog_quarantined_at=CASE
+                 WHEN $2 THEN NULL
+                 WHEN consecutive_sync_failures+1 >= $5
+                   THEN COALESCE(catalog_quarantined_at,$3)
+                 ELSE catalog_quarantined_at END,
+               status=CASE
+                 WHEN $2 THEN 'active'
+                 WHEN consecutive_sync_failures+1 >= $5 THEN 'quarantined'
+                 ELSE status END,
+               updated_at=now()
+            WHERE server_id=$1
+            RETURNING consecutive_sync_failures,catalog_quarantined_at IS NOT NULL
+                      AS quarantined""",
+            server_id,
+            succeeded,
+            attempted_at,
+            safe_error_code,
+            quarantine_after_failures,
+        )
+        if row is None:
+            raise ValueError(f"MCP server is not registered: {server_id}")
+        return CatalogSyncHealth(
+            consecutive_failures=int(row["consecutive_sync_failures"]),
+            quarantined=bool(row["quarantined"]),
+        )
+
     async def remove_server(self, server_id: str) -> None:
         pool = await self.pool()
         async with pool.acquire() as connection, connection.transaction():
@@ -229,6 +276,25 @@ class PostgresCapabilityCatalogStore(LazyPool):
 
 def _server(row: object) -> McpServerDefinition:
     metadata = dict(json_loads(row["metadata"]))  # type: ignore[index]
+    if "consecutive_sync_failures" in row:  # type: ignore[operator]
+        metadata.update(
+            {
+                "consecutive_sync_failures": int(
+                    row["consecutive_sync_failures"]  # type: ignore[index]
+                ),
+                "last_sync_at": (
+                    row["last_catalog_sync_at"].isoformat()  # type: ignore[index]
+                    if row["last_catalog_sync_at"] is not None  # type: ignore[index]
+                    else None
+                ),
+                "last_sync_error": row["last_catalog_sync_error"],  # type: ignore[index]
+                "catalog_quarantined_at": (
+                    row["catalog_quarantined_at"].isoformat()  # type: ignore[index]
+                    if row["catalog_quarantined_at"] is not None  # type: ignore[index]
+                    else None
+                ),
+            }
+        )
     oauth_payload = metadata.pop("_auraclaw_oauth", None)
     allowed_private_hosts = metadata.pop("_auraclaw_allowed_private_hosts", ())
     return McpServerDefinition(

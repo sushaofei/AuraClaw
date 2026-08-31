@@ -118,7 +118,6 @@ class CapabilityCatalogReconciler:
         self._trust_remote_tool_annotations = trust_remote_tool_annotations
         self._quarantine_after_failures = quarantine_after_failures
         self._max_items = max_items
-        self._failures: dict[str, int] = {}
         self._dirty: set[str] = set()
         self._snapshots: dict[str, CapabilitySnapshot] = {}
 
@@ -205,6 +204,13 @@ class CapabilityCatalogReconciler:
             self._snapshots[server.server_id] = snapshot
             self._replace_remote_tools(server, descriptors, connector)
             synced_at = datetime.now(UTC).isoformat()
+            health = await self._store.record_catalog_sync(
+                server.server_id,
+                succeeded=True,
+                attempted_at=datetime.now(UTC),
+                safe_error_code=None,
+                quarantine_after_failures=self._quarantine_after_failures,
+            )
             active = server.model_copy(
                 update={
                     "status": CapabilityStatus.ACTIVE,
@@ -213,6 +219,8 @@ class CapabilityCatalogReconciler:
                         "last_sync_at": synced_at,
                         "last_good_catalog_at": synced_at,
                         "last_sync_error": None,
+                        "consecutive_sync_failures": health.consecutive_failures,
+                        "catalog_quarantined_at": None,
                         "catalog_stale": False,
                         "active_catalog_generation": (
                             await self._store.get_active_generation(server.server_id)
@@ -221,7 +229,6 @@ class CapabilityCatalogReconciler:
                 }
             )
             await self._catalog.register_server(active)
-            self._failures.pop(server.server_id, None)
             self._dirty.discard(server.server_id)
             return McpReconcileResult(
                 server_id=server.server_id,
@@ -230,11 +237,26 @@ class CapabilityCatalogReconciler:
             )
         except Exception as exc:
             self._snapshots.pop(server.server_id, None)
-            failures = self._failures.get(server.server_id, 0) + 1
-            self._failures[server.server_id] = failures
-            status = CapabilityStatus.DEGRADED
+            attempted_at = datetime.now(UTC)
+            health = await self._store.record_catalog_sync(
+                server.server_id,
+                succeeded=False,
+                attempted_at=attempted_at,
+                safe_error_code=type(exc).__name__,
+                quarantine_after_failures=self._quarantine_after_failures,
+            )
+            failures = health.consecutive_failures
+            status = (
+                CapabilityStatus.QUARANTINED
+                if health.quarantined
+                else CapabilityStatus.DEGRADED
+            )
             published_status = (
-                CapabilityStatus.ACTIVE if existing_items else CapabilityStatus.DEGRADED
+                CapabilityStatus.QUARANTINED
+                if health.quarantined
+                else CapabilityStatus.ACTIVE
+                if existing_items
+                else CapabilityStatus.DEGRADED
             )
             await self._catalog.register_server(
                 server.model_copy(
@@ -242,9 +264,14 @@ class CapabilityCatalogReconciler:
                         "status": published_status,
                         "metadata": {
                             **base_metadata,
-                            "last_sync_at": datetime.now(UTC).isoformat(),
+                            "last_sync_at": attempted_at.isoformat(),
                             "last_sync_error": type(exc).__name__,
                             "consecutive_sync_failures": failures,
+                            "catalog_quarantined_at": (
+                                attempted_at.isoformat()
+                                if health.quarantined
+                                else None
+                            ),
                             "catalog_stale": bool(existing_items),
                             "active_catalog_generation": (
                                 await self._store.get_active_generation(server.server_id)
@@ -253,8 +280,10 @@ class CapabilityCatalogReconciler:
                     }
                 )
             )
-            if existing_items:
+            if existing_items and not health.quarantined:
                 self._replace_remote_tools(server, existing_items, connector)
+            elif health.quarantined:
+                self._remove_remote_tools(server)
             return McpReconcileResult(
                 server_id=server.server_id,
                 status=status,
@@ -330,12 +359,10 @@ class CapabilityCatalogReconciler:
         server = await self._store.get_server(server_id)
         if server is None:
             await self._catalog.remove_server(server_id)
-            self._failures.pop(server_id, None)
             self._dirty.discard(server_id)
             return
         self._remove_remote_tools(server)
         await self._catalog.replace_server_capabilities(server_id, ())
-        self._failures.pop(server_id, None)
         self._dirty.discard(server_id)
         self._snapshots.pop(server_id, None)
 

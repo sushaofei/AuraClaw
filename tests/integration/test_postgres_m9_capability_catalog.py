@@ -30,6 +30,7 @@ REGISTRY_MIGRATION = (ROOT / "migrations/0020_mcp_server_registry.sql").read_tex
 CONSISTENCY_MIGRATION = (
     ROOT / "migrations/0041_capability_catalog_consistency.sql"
 ).read_text()
+HEALTH_MIGRATION = (ROOT / "migrations/0045_mcp_catalog_sync_health.sql").read_text()
 pytestmark = pytest.mark.skipif(DATABASE_URL is None, reason="PostgreSQL test URL not configured")
 
 
@@ -41,6 +42,7 @@ def test_postgres_capability_catalog_is_shared_and_tenant_scoped() -> None:
         await connection.execute(MIGRATION)
         await connection.execute(REGISTRY_MIGRATION)
         await connection.execute(CONSISTENCY_MIGRATION)
+        await connection.execute(HEALTH_MIGRATION)
         suffix = uuid4().hex
         tenant_id = f"tenant-capability-{suffix}"
         server_id = f"server-{suffix}"
@@ -117,6 +119,52 @@ def test_postgres_capability_catalog_is_shared_and_tenant_scoped() -> None:
             assert loaded_server is not None
             assert loaded_server.oauth is not None
             assert loaded_server.oauth.resource == "https://tenant.example/mcp"
+
+            first_failure = await store_a.record_catalog_sync(
+                server_id,
+                succeeded=False,
+                attempted_at=datetime.now(UTC),
+                safe_error_code="snapshot_failed",
+                quarantine_after_failures=3,
+            )
+            assert first_failure.consecutive_failures == 1
+            assert not first_failure.quarantined
+            concurrent = await asyncio.gather(
+                store_b.record_catalog_sync(
+                    server_id,
+                    succeeded=False,
+                    attempted_at=datetime.now(UTC),
+                    safe_error_code="snapshot_failed",
+                    quarantine_after_failures=3,
+                ),
+                store_a.record_catalog_sync(
+                    server_id,
+                    succeeded=False,
+                    attempted_at=datetime.now(UTC),
+                    safe_error_code="snapshot_failed",
+                    quarantine_after_failures=3,
+                ),
+            )
+            assert {item.consecutive_failures for item in concurrent} == {2, 3}
+            persisted = await store_b.get_server(server_id)
+            assert persisted is not None
+            assert persisted.status is CapabilityStatus.QUARANTINED
+            assert persisted.metadata["consecutive_sync_failures"] == 3
+            assert not await catalog_b.search(tenant_id=tenant_id, query="release")
+
+            recovered = await store_b.record_catalog_sync(
+                server_id,
+                succeeded=True,
+                attempted_at=datetime.now(UTC),
+                safe_error_code=None,
+                quarantine_after_failures=3,
+            )
+            assert recovered.consecutive_failures == 0
+            assert not recovered.quarantined
+            assert [
+                item.capability_id
+                for item in await catalog_b.search(tenant_id=tenant_id, query="release")
+            ] == [capability_id]
         finally:
             await store_a.close()
             await store_b.close()

@@ -129,6 +129,7 @@ class McpConnectionManager:
             observed = {
                 CapabilityStatus.ACTIVE: McpObservedState.ACTIVE,
                 CapabilityStatus.DEGRADED: McpObservedState.DEGRADED,
+                CapabilityStatus.QUARANTINED: McpObservedState.QUARANTINED,
             }.get(result.status, McpObservedState.QUARANTINED)
             await self._registry.record_runtime(
                 McpServerRuntimeRecord(
@@ -138,7 +139,7 @@ class McpConnectionManager:
                     observed_state=observed,
                     last_test_at=tested_at,
                     last_sync_at=datetime.now(UTC),
-                    consecutive_failures=0 if result.error is None else 1,
+                    consecutive_failures=result.consecutive_failures,
                     safe_error_code=(
                         None if result.error is None else "mcp_catalog_degraded"
                     ),
@@ -209,6 +210,8 @@ class McpConnectionManager:
                     observed_state=(
                         McpObservedState.ACTIVE
                         if result.status is CapabilityStatus.ACTIVE
+                        else McpObservedState.QUARANTINED
+                        if result.status is CapabilityStatus.QUARANTINED
                         else McpObservedState.DEGRADED
                     ),
                     last_sync_at=now,
