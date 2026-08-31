@@ -2674,3 +2674,27 @@ ready Skill Artifact 建立带 fencing 的物理回收流程；不把成功命�
 - [x] 单元与 PostgreSQL 集成覆盖慢操作续租、跨副本 takeover 阻断、同 tenant rebuild 合并和 owner 校验。
 - [x] Ruff、Mypy、import-linter、Compose、定向与完整 Pytest 通过。
 - [x] Git 暂存范围审查、intentional commit 与 push 完成；Issue #69 关闭。
+
+## 阶段 Skill PostgreSQL 确定性锁顺序（Issue #70）
+
+状态：代码、测试和文档完成。
+
+### 锁顺序与原子性
+
+- [x] Source config/snapshot 多 publication 锁统一为 `tenant_id,publisher,name,version` canonical order。
+- [x] Source config 使用单条有序 `FOR UPDATE OF p` 锁完整集合，不再遍历无序引用逐行加锁。
+- [x] Publish、restore、installation、Publisher status/key 路径完成锁层级审计并固化到架构文档。
+- [x] 事务内无 Artifact、MCP 或网络 I/O；statement/lock failure 由 PostgreSQL 完整回滚。
+
+### 安全重试与观测
+
+- [x] `40P01`/`40001` 从整个事务入口有限指数抖动重试，复用原 command/digest/context/revision。
+- [x] 重试耗尽转换为带 retry-after 的稳定 conflict，不泄露数据库驱动异常。
+- [x] retry/retry-exhausted 指标包含 operation 与 SQLSTATE，生产配置可调预算和基础延迟。
+
+### 验证与交付
+
+- [x] 真实 PostgreSQL 并发测试覆盖两个 Source config 对重叠 publication 集合的反向输入顺序。
+- [x] 故障注入覆盖 deadlock/serialization 的成功重试、预算耗尽和指标。
+- [x] Ruff、Mypy、import-linter、Compose、定向与完整 Pytest 通过。
+- [x] Git 暂存范围审查、intentional commit 与 push 完成；Issue #70 关闭。

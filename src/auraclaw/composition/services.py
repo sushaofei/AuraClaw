@@ -342,7 +342,13 @@ def _skill_publication_service(
     selected_lifecycle = lifecycle
     if selected_lifecycle is None:
         if settings.sql_storage_enabled:
-            selected_lifecycle = PostgresSkillLifecycleStore(settings.resolved_database_url)
+            selected_lifecycle = PostgresSkillLifecycleStore(
+                settings.resolved_database_url,
+                transaction_retry_attempts=settings.skill_transaction_retry_attempts,
+                transaction_retry_base_delay=(
+                    settings.skill_transaction_retry_base_delay_seconds
+                ),
+            )
         else:
             selected_lifecycle = InMemorySkillLifecycleStore()
     now = datetime.now(UTC)
@@ -1436,9 +1442,21 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         tool_registry_store = PostgresToolRegistryStore(settings.resolved_database_url)
         hands_metric_store = PostgresObservabilityStore(settings.resolved_database_url)
         skill_lifecycle: SkillLifecycleStore = PostgresSkillLifecycleStore(
-            settings.resolved_database_url
+            settings.resolved_database_url,
+            transaction_retry_attempts=settings.skill_transaction_retry_attempts,
+            transaction_retry_base_delay=(
+                settings.skill_transaction_retry_base_delay_seconds
+            ),
+            metric_writer=hands_metric_store,
         )
-        skill_publisher_store = PostgresSkillPublisherStore(settings.resolved_database_url)
+        skill_publisher_store = PostgresSkillPublisherStore(
+            settings.resolved_database_url,
+            transaction_retry_attempts=settings.skill_transaction_retry_attempts,
+            transaction_retry_base_delay=(
+                settings.skill_transaction_retry_base_delay_seconds
+            ),
+            metric_writer=hands_metric_store,
+        )
     else:
         skill_lifecycle = InMemorySkillLifecycleStore()
         skill_publisher_store = InMemorySkillPublisherStore()

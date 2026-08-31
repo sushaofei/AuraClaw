@@ -412,6 +412,10 @@ class Settings(BaseSettings):
     skill_reliability_claim_ttl_seconds: float = Field(
         default=30.0, gt=0.0, le=3600.0
     )
+    skill_transaction_retry_attempts: int = Field(default=3, ge=1, le=10)
+    skill_transaction_retry_base_delay_seconds: float = Field(
+        default=0.01, ge=0.0, le=1.0
+    )
     resource_gateway_max_concurrent: int = Field(default=32, ge=1, le=10_000)
     resource_gateway_max_queued: int = Field(default=128, ge=1, le=100_000)
     resource_gateway_queue_timeout_seconds: float = Field(default=5.0, gt=0.0, le=3600.0)

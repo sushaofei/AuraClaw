@@ -454,6 +454,20 @@ Package 与 Source lifecycle 由 PostgreSQL 持久端口负责；Artifact 保存
 管理列表/详情不读取自己的 Registry，而是通过 Hands 内部契约读取持久快照和受控 `SKILL.md` 内容，
 因此多副本、独立进程和重启不改变管理事实。
 
+### PostgreSQL 锁层级与事务重试
+
+Skill 控制面事务遵守统一锁层级：command advisory/source lease → source/sync state →
+publisher/key → package → publication（严格按 `tenant_id,publisher,name,version`）→
+publication source/inventory → installation → command/outbox。一次事务需要锁定多条 publication 时，
+必须用单条带 canonical `ORDER BY ... FOR UPDATE OF p` 的查询取得完整集合，禁止遍历无序结果逐条加锁。
+
+这些事务不包含 Artifact、MCP 或网络 I/O，因此 PostgreSQL `40P01` deadlock 与 `40001`
+serialization abort 可以从事务入口整体重试。重试复用原 command id、request digest、actor、
+correlation/causation 和 expected revision；预算耗尽转换为带 `retry_after=1` 的稳定 conflict。
+重试预算和基础抖动由 `AURACLAW_SKILL_TRANSACTION_RETRY_ATTEMPTS`、
+`AURACLAW_SKILL_TRANSACTION_RETRY_BASE_DELAY_SECONDS` 控制；指标
+`postgres.transaction.retry` / `postgres.transaction.retry_exhausted` 携带 operation 与 SQLSTATE。
+
 ## 10. 管理与可观测性
 
 仅提供平台内部管理操作：
