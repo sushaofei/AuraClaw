@@ -473,7 +473,7 @@ class ApprovalRequest(ContractModel):
     run_id: str
     action_digest: str
     policy_version: str
-    expires_at: datetime
+    expires_at: AwareDatetime
 
 
 class ApprovalCommandRequest(ContractModel):
@@ -492,7 +492,8 @@ class ApprovalCommandRequest(ContractModel):
     policy_version: str
     decision: str | None = None
     feedback: str | None = None
-    expires_at: datetime | None = None
+    actor_id: str | None = None
+    expires_at: AwareDatetime | None = None
 
 
 class ApprovalValidationResponse(ContractModel):

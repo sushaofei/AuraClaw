@@ -13,7 +13,11 @@ from auraclaw.artifact.internal_service import ArtifactInternalService
 from auraclaw.composition.services import create_service_app
 from auraclaw.config import Settings
 from auraclaw.contracts.commands import CommandContext
-from auraclaw.contracts.errors import AuraClawError, CredentialAccessError
+from auraclaw.contracts.errors import (
+    ApprovalValidationError,
+    AuraClawError,
+    CredentialAccessError,
+)
 from auraclaw.contracts.events import Actor, NewEvent
 from auraclaw.contracts.hands import HANDS_TOOLS_LIST
 from auraclaw.contracts.internal import (
@@ -714,6 +718,10 @@ async def test_policy_approval_is_bound_to_action_and_human_response_identity() 
         policy_version="production-v1",
     )
     await task.record_human_response(record, decision="approved", feedback=None)
+    with pytest.raises(ApprovalValidationError, match="not committed"):
+        await task.record_human_response(record, decision="rejected", feedback=None)
+    with pytest.raises(ApprovalValidationError, match="different request"):
+        await hands.request_approval(replace(record, action_digest="changed-digest"))
     assert await hands.validate_approval(
         tenant_id="tenant-a",
         approval_id="approval-a",

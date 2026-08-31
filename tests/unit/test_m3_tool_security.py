@@ -960,16 +960,37 @@ def test_runtime_waits_for_approval_then_resumes_same_tool_call() -> None:
     asyncio.run(scenario())
 
 
-def test_approval_response_rebuilds_from_canonical_events_without_projection() -> None:
+def test_approval_response_rebuilds_and_retries_failed_policy_notification() -> None:
     async def scenario() -> None:
+        class FlakyApprovalNotifier:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.actor_ids: list[str | None] = []
+
+            async def record_human_response(
+                self,
+                record: ApprovalRecord,
+                *,
+                decision: str,
+                feedback: str | None,
+                actor_id: str | None = None,
+            ) -> None:
+                del record, decision, feedback
+                self.calls += 1
+                self.actor_ids.append(actor_id)
+                if self.calls == 1:
+                    raise RuntimeError("policy notification interrupted")
+
         tenant_id = "tenant-hitl-events"
         event_store = InMemoryEventStore()
         task_projection = InMemoryTaskProjection()
+        notifier = FlakyApprovalNotifier()
         service = TaskService(
             event_store=event_store,
             relay=OutboxRelay(event_store, task_projection),
             reader=task_projection,
             admission=AllowAllAdmissionController(),
+            approval_notifier=notifier,
         )
         created = await service.create_task(
             goal="approve from events",
@@ -1019,23 +1040,40 @@ def test_approval_response_rebuilds_from_canonical_events_without_projection() -
             ],
             command_result={"approval_id": approval_id},
         )
+        with pytest.raises(RuntimeError, match="notification interrupted"):
+            await service.record_approval_response(
+                session_id=session_id,
+                approval_id=approval_id,
+                decision="approved",
+                feedback=None,
+                context=CommandContext(
+                    command_id="human-approve",
+                    tenant_id=tenant_id,
+                    actor=Actor(type="user", id="human"),
+                    correlation_id=run_id,
+                    expected_version=3,
+                    operation="record_approval_response",
+                ),
+            )
         responded = await service.record_approval_response(
             session_id=session_id,
             approval_id=approval_id,
             decision="approved",
             feedback=None,
             context=CommandContext(
-                command_id="human-approve",
+                command_id="human-approve-retry",
                 tenant_id=tenant_id,
                 actor=Actor(type="user", id="human"),
                 correlation_id=run_id,
-                expected_version=3,
+                expected_version=4,
                 operation="record_approval_response",
             ),
         )
         assert responded["decision"] == "approved"
         events = await event_store.load(tenant_id, session_id)
-        assert any(event.type == "approval.approved" for event in events)
+        assert [event.type for event in events].count("approval.approved") == 1
+        assert notifier.calls == 2
+        assert notifier.actor_ids == ["human", "human"]
         with pytest.raises(NotFoundError, match="apr_missing"):
             await service.record_approval_response(
                 session_id=session_id,

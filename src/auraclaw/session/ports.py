@@ -111,5 +111,10 @@ class AdmissionController(Protocol):
 
 class HumanApprovalNotifier(Protocol):
     async def record_human_response(
-        self, record: ApprovalRecord, *, decision: str, feedback: str | None
+        self,
+        record: ApprovalRecord,
+        *,
+        decision: str,
+        feedback: str | None,
+        actor_id: str | None = None,
     ) -> None: ...

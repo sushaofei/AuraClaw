@@ -73,7 +73,7 @@ registration lease 内仍活跃时，新进程注册会 fail closed。因此显�
 
 ## 生产配置门禁
 
-1. 依次应用 PostgreSQL/KingBase `0010`～`0051` expand migration。`0040`
+1. 依次应用 PostgreSQL/KingBase `0010`～`0052` expand migration。`0040`
    `0022` 增加 registration 与 execution claim 字段和索引；先迁移 Control 数据库，再滚动升级
    Orchestrator，最后升级 Agent Runtime。可选执行 `deploy/postgres/roles.sql` 做硬化，
    当前部署不按服务注入分角色 DSN。
@@ -99,6 +99,8 @@ registration lease 内仍活跃时，新进程注册会 fail closed。因此显�
    先迁移，再滚动 Delivery Worker 与 Action Hands。升级窗口不得混跑不会续租的旧批处理 Worker。
    `0051` 增加 MCP Catalog config revision、reconcile owner/fencing/expiry、active snapshot digest/source
    revision；先迁移再滚动 Action Hands。升级窗口不得混跑会绕过 Catalog CAS 的旧 Reconciler。
+   `0052` 增加 Approval request digest/generation/decision metadata 与 transition audit；先迁移 Policy
+   数据库，再滚动 Policy 和 Task API。升级窗口不得混跑会无条件覆盖 Approval 终态的旧 Policy 副本。
 2. 各服务共享统一 `AURACLAW_DATABASE_URL`（Compose `database_url` secret）；migration 使用
    独立的 `AURACLAW_MIGRATION_DATABASE_URL`。
 3. 所有 Control、Session 与 Hands 副本必须使用相同的 `AURACLAW_LEASE_SIGNING_KEY`，并通过平台
@@ -127,6 +129,11 @@ registration lease 内仍活跃时，新进程注册会 fail closed。因此显�
     60 秒。调整 `AURACLAW_MCP_RECONCILE_*` 前先核对 Credential Proxy、Policy 和远端 host 限额；单 host
     变慢应只造成该 partition 排队。`stale_capability_snapshot` 表示 owner/config/generation CAS 被拒绝，
     不得人工递增 generation 或清空 last-good，应等待当前 owner 完成或下一轮 reconcile。
+11. Approval 冲突排查先查询 `policy.approval` 的 request digest、终态、decided actor/time，再按
+    `policy.approval_transition_audit` 的 request/correlation/causation ID 重建 winner/loser 顺序。Canonical
+    Event 已终结而 Policy 仍 waiting 时，以原完整绑定和相同决定重放通知；Policy 已有相反终态时停止 Tool
+    副作用并升级人工调查，禁止直接 UPDATE 或删除审计行。`approved` 过期后 validate 会 fail closed，但
+    历史状态仍保持 approved，不运行 expire 覆盖它。
 
 升级前检查并修复旧数据：同一部署中若多个容器显式共享 `AURACLAW_RUNTIME_ID`，先改为未配置（使用
 hostname）或注入唯一实例 UID。停止全部旧 Runtime，等待 30 秒，然后将无对应健康实例且状态为
@@ -170,3 +177,7 @@ owner/heartbeat/cancel 字段。回滚到旧版本后 Model Gateway 只能单副
 回滚 `0049` 前停止 Artifact finalize/delete/GC/orphan 新操作，排空 active claim，并逐项解决所有
 `reconciling` 或 `object_state=unknown` 记录。未知对象结果未与存储后端核对前禁止删除 marker/heartbeat
 字段；回滚后 Artifact Service 只能单副本运行，且不得恢复 production `_ready` 快捷授权。
+
+回滚 `0052` 前停止审批请求、Human response 和 Tool 新副作用，确认无 `waiting` Approval 且 Canonical
+审批事件与 Policy 终态一致，并导出 transition audit。回滚后 Policy 失去 CAS/审计保护，只允许单副本
+运行；恢复多副本前必须重新应用迁移并核对 request digest。

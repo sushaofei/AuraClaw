@@ -2723,3 +2723,29 @@ ready Skill Artifact 建立带 fencing 的物理回收流程；不把成功命�
 - [x] 单元测试覆盖 bounded concurrency、慢 Server timeout、commit 后 invalidation 与现有恢复路径。
 - [x] Ruff、Mypy、import-linter、Compose、定向与完整 Pytest 通过。
 - [x] Git 暂存范围审查、intentional commit 与 push 完成；Issue #71 关闭。
+
+## 阶段 Policy Approval 原子单调状态机（Issue #72）
+
+状态：代码、迁移、测试和文档完成。
+
+### 原子转换与幂等
+
+- [x] `0052` 正反迁移增加 request digest/generation、decision actor/time 与事务内 transition audit。
+- [x] approve/reject/cancel/expire 使用行锁和 `waiting` 条件更新；终态不可覆盖且相同决定重放幂等。
+- [x] request replay 比较完整不可变 digest；相同 ID 不同 payload 稳定返回 conflict。
+- [x] expiry 使用数据库时间，validate 核对 tenant/Session/Run/action digest/policy version/expiry 和终态。
+
+### 恢复、安全与审计
+
+- [x] Canonical response 先持久化；Policy 通知失败后同决定重试不重复事件并重新执行幂等通知。
+- [x] Tool 副作用前仍通过 Policy 权威终态校验；approved 不会被稍后 reject/cancel/expire 回退。
+- [x] 审计保留 actor、service identity、decision、request digest、correlation、causation 与 winner/loser。
+- [x] 架构文档和 Runbook 定义通知顺序差异的重放与相反终态人工升级流程。
+
+### 验证与交付
+
+- [x] 内存测试覆盖 request conflict、approve/reject 竞争、终态幂等和过期不可复活。
+- [x] PostgreSQL 双连接测试覆盖唯一 winner、跨副本重试、终态保护与审计字段。
+- [x] 通知故障测试覆盖 Canonical Event 已提交、Policy 首次失败及安全重试。
+- [x] Ruff、Mypy、import-linter、Compose、定向与完整 Pytest 通过。
+- [x] Git 暂存范围审查、intentional commit 与 push 完成；Issue #72 关闭。
