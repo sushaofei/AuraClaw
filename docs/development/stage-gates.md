@@ -2222,7 +2222,7 @@ ready Skill Artifact 建立带 fencing 的物理回收流程；不把成功命�
 
 ## 阶段 Product Activity：产品级对话执行轨迹（AuraX Issue #2）
 
-状态：代码与定向验证完成；完整基础设施集成门禁受现有 Kafka/PostgreSQL/Artifact 环境失败阻塞。
+状态：代码、完整仓库门禁、AuraX E2E 与测试环境发布验证完成。
 
 ### 范围与架构
 
@@ -2245,12 +2245,12 @@ ready Skill Artifact 建立带 fencing 的物理回收流程；不把成功命�
 ### 交付
 
 - [x] AuraX 产品面板、SDK、响应式与 E2E 验收完成。
-- [ ] Git 暂存范围已与现有在途改动隔离，无 Secret、缓存或环境文件。
-- [ ] 本阶段作为 intentional commit 提交并 push。
+- [x] Git 暂存范围已审查，无 Secret、缓存或环境文件；个人 VS Code 配置未进入提交。
+- [x] 本阶段随 AuraClaw `a6d238d` 与 AuraX `03c18c8` intentional commits 提交并 push。
 
 ## 阶段 Skill Admin 管理查询与 AuraX 发布契约（Issue #59）
 
-状态：功能与定向验证完成；完整仓库门禁和生产 WebView/对象存储联调待环境验证。
+状态：功能、完整仓库门禁、测试环境 API 与 AuraX 同源代理验证完成；生产同构对象存储联调待验证。
 
 ### 查询契约
 
@@ -2269,7 +2269,7 @@ ready Skill Artifact 建立带 fencing 的物理回收流程；不把成功命�
 - [x] 定向 API、内部 HTTP client、Mypy、Ruff、import-linter 及完整 unit/e2e 验证通过。
 - [ ] 在生产同构对象存储完成 AuraX WebView CORS/preflight 与 multipart ETag 联调。
 - [x] 完整 `pytest` 及已配置 PostgreSQL 基础设施门禁通过。
-- [ ] 本阶段作为 intentional commit 提交并 push，且不包含现有部署在途改动。
+- [x] 本阶段随 `a6d238d` intentional commit 提交并 push；Secret、缓存、环境文件和个人配置未入库。
 
 ## 阶段 PostgreSQL / KingBase 单方言收敛
 
@@ -2294,4 +2294,4 @@ ready Skill Artifact 建立带 fencing 的物理回收流程；不把成功命�
 - [x] Ruff、Mypy、10 条 import-linter、完整 unit/e2e 与 PostgreSQL/KingBase 定向测试通过。
 - [x] 全量 Pytest 与集成集通过；未配置的 PostgreSQL 生产角色和 SeaweedFS S3 共 3 项按声明跳过。
 - [ ] 在干净 PostgreSQL 与 KingBase 测试库完成 migration up/down、角色矩阵和核心 Store smoke。
-- [ ] 本阶段作为 intentional commit 提交并 push，且不包含现有无关在途改动。
+- [x] 本阶段随 `a6d238d` intentional commit 提交并 push；无关个人配置未入库。
