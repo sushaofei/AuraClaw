@@ -269,3 +269,193 @@ def test_resource_gateway_allows_json_schema_media_type() -> None:
         assert contents[0].inline is True
 
     asyncio.run(scenario())
+
+
+def test_resource_gateway_runs_unrelated_policy_reads_concurrently() -> None:
+    class SlowPolicy:
+        def __init__(self) -> None:
+            self.started = 0
+            self.both_started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def evaluate_action(self, **arguments: object) -> PolicyEvaluation:
+            del arguments
+            self.started += 1
+            if self.started == 2:
+                self.both_started.set()
+            await self.release.wait()
+            return PolicyEvaluation(
+                decision=PolicyDecision.ALLOW,
+                decision_id="decision-concurrent",
+                policy_version="m9-concurrent",
+            )
+
+    async def scenario() -> None:
+        uris = ("memory://docs/a", "memory://docs/b")
+        registry = HandsResourceRegistry(
+            resources=tuple(
+                RegisteredResource(
+                    descriptor=HandsResourceDescriptor(uri=uri, name=uri[-1]),
+                    contents=(HandsResourceContent(uri=uri, text=uri),),
+                    tenant_ids=(tenant,),
+                )
+                for uri, tenant in zip(uris, ("tenant-a", "tenant-b"), strict=True)
+            )
+        )
+        policy = SlowPolicy()
+        gateway = ManagedResourceGateway(
+            registry, artifacts=_artifacts(), policy=policy, max_concurrent=2
+        )
+        first = asyncio.create_task(gateway.read(_trusted(tenant_id="tenant-a"), uris[0]))
+        second = asyncio.create_task(gateway.read(_trusted(tenant_id="tenant-b"), uris[1]))
+        await asyncio.wait_for(policy.both_started.wait(), timeout=1)
+        policy.release.set()
+        results = await asyncio.gather(first, second)
+        assert [result[0].cache_hit for result in results] == [False, False]
+
+    asyncio.run(scenario())
+
+
+def test_resource_gateway_single_flight_artifactizes_once() -> None:
+    class CountingArtifacts:
+        def __init__(self) -> None:
+            self.inner = _artifacts()
+            self.calls = 0
+
+        async def put(self, **arguments: object):  # type: ignore[no-untyped-def]
+            self.calls += 1
+            await asyncio.sleep(0.02)
+            return await self.inner.put(**arguments)  # type: ignore[arg-type]
+
+    class CountingPolicy:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def evaluate_action(self, **arguments: object) -> PolicyEvaluation:
+            del arguments
+            self.calls += 1
+            await asyncio.sleep(0.02)
+            return PolicyEvaluation(
+                decision=PolicyDecision.ALLOW,
+                decision_id="decision-single-flight",
+                policy_version="m9-single-flight",
+            )
+
+    async def scenario() -> None:
+        uri = "memory://docs/single-flight"
+        registry = HandsResourceRegistry(
+            resources=(
+                RegisteredResource(
+                    descriptor=HandsResourceDescriptor(uri=uri, name="single-flight"),
+                    contents=(HandsResourceContent(uri=uri, text="large-payload"),),
+                ),
+            )
+        )
+        artifacts = CountingArtifacts()
+        policy = CountingPolicy()
+        gateway = ManagedResourceGateway(
+            registry,
+            artifacts=artifacts,  # type: ignore[arg-type]
+            policy=policy,
+            max_inline_bytes=4,
+        )
+        first, second = await asyncio.gather(
+            gateway.read(_trusted(), uri), gateway.read(_trusted(), uri)
+        )
+        assert first == second
+        assert policy.calls == 1
+        assert artifacts.calls == 1
+
+    asyncio.run(scenario())
+
+
+def test_resource_invalidation_fences_inflight_cache_publish() -> None:
+    class FirstReadPolicy:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def evaluate_action(self, **arguments: object) -> PolicyEvaluation:
+            del arguments
+            self.calls += 1
+            if self.calls == 1:
+                self.started.set()
+                await self.release.wait()
+            return PolicyEvaluation(
+                decision=PolicyDecision.ALLOW,
+                decision_id=f"decision-{self.calls}",
+                policy_version="m9-invalidate",
+            )
+
+    async def scenario() -> None:
+        uri = "memory://docs/invalidate-race"
+        registry = HandsResourceRegistry(
+            resources=(
+                RegisteredResource(
+                    descriptor=HandsResourceDescriptor(
+                        uri=uri, name="invalidate", source_revision="r1"
+                    ),
+                    contents=(HandsResourceContent(uri=uri, text="r1"),),
+                ),
+            )
+        )
+        policy = FirstReadPolicy()
+        gateway = ManagedResourceGateway(
+            registry, artifacts=_artifacts(), policy=policy, cache_ttl_seconds=60
+        )
+        inflight = asyncio.create_task(gateway.read(_trusted(), uri))
+        await asyncio.wait_for(policy.started.wait(), timeout=1)
+        assert await gateway.invalidate(uri, tenant_id="tenant-a") == 0
+        policy.release.set()
+        assert (await inflight)[0].cache_hit is False
+        assert (await gateway.read(_trusted(), uri))[0].cache_hit is False
+        assert (await gateway.read(_trusted(), uri))[0].cache_hit is True
+        assert policy.calls == 2
+
+    asyncio.run(scenario())
+
+
+def test_resource_single_flight_survives_waiter_cancellation_and_cleans_up() -> None:
+    class SlowPolicy:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def evaluate_action(self, **arguments: object) -> PolicyEvaluation:
+            del arguments
+            self.started.set()
+            await self.release.wait()
+            return PolicyEvaluation(
+                decision=PolicyDecision.ALLOW,
+                decision_id="decision-cancel",
+                policy_version="m9-cancel",
+            )
+
+    async def scenario() -> None:
+        uri = "memory://docs/cancel-waiter"
+        registry = HandsResourceRegistry(
+            resources=(
+                RegisteredResource(
+                    descriptor=HandsResourceDescriptor(uri=uri, name="cancel-waiter"),
+                    contents=(HandsResourceContent(uri=uri, text="safe"),),
+                ),
+            )
+        )
+        policy = SlowPolicy()
+        gateway = ManagedResourceGateway(
+            registry, artifacts=_artifacts(), policy=policy, cache_ttl_seconds=60
+        )
+        owner = asyncio.create_task(gateway.read(_trusted(), uri))
+        await asyncio.wait_for(policy.started.wait(), timeout=1)
+        waiter = asyncio.create_task(gateway.read(_trusted(), uri))
+        await asyncio.sleep(0)
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        policy.release.set()
+        assert (await owner)[0].cache_hit is False
+        assert (await gateway.read(_trusted(), uri))[0].cache_hit is True
+        assert gateway._loads == {}  # type: ignore[attr-defined]
+
+    asyncio.run(scenario())

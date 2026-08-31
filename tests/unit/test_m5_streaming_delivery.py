@@ -107,6 +107,263 @@ def test_runtime_producer_sequences_coalesces_redacts_and_limits_events() -> Non
     asyncio.run(scenario())
 
 
+def test_runtime_event_slow_session_does_not_block_another_session() -> None:
+    class SessionPublisher:
+        def __init__(self) -> None:
+            self.slow_started = asyncio.Event()
+            self.release = asyncio.Event()
+            self.events: list[RuntimeEvent] = []
+
+        async def publish(self, event: RuntimeEvent) -> None:
+            if event.session_id == "session-slow":
+                self.slow_started.set()
+                await self.release.wait()
+            self.events.append(event)
+
+    async def scenario() -> None:
+        target = SessionPublisher()
+        producer = RuntimeEventProducerSDK(target, max_concurrent=2)
+        slow = asyncio.create_task(
+            producer.publish(
+                tenant_id="tenant-m5",
+                root_session_id="session-slow",
+                session_id="session-slow",
+                run_id="run-slow",
+                event_type="runtime.progress",
+                payload={"step": "slow"},
+            )
+        )
+        await asyncio.wait_for(target.slow_started.wait(), timeout=1)
+        fast = await asyncio.wait_for(
+            producer.publish(
+                tenant_id="tenant-m5",
+                root_session_id="session-fast",
+                session_id="session-fast",
+                run_id="run-fast",
+                event_type="runtime.progress",
+                payload={"step": "fast"},
+            ),
+            timeout=1,
+        )
+        assert fast is not None and fast.session_id == "session-fast"
+        target.release.set()
+        assert (await slow) is not None
+
+    asyncio.run(scenario())
+
+
+def test_runtime_event_same_session_preserves_send_order() -> None:
+    class OrderedPublisher:
+        def __init__(self) -> None:
+            self.first_started = asyncio.Event()
+            self.release = asyncio.Event()
+            self.sequences: list[int] = []
+
+        async def publish(self, event: RuntimeEvent) -> None:
+            if not self.sequences:
+                self.first_started.set()
+                await self.release.wait()
+            self.sequences.append(event.sequence)
+
+    async def scenario() -> None:
+        target = OrderedPublisher()
+        producer = RuntimeEventProducerSDK(target, max_concurrent=2)
+        common = {
+            "tenant_id": "tenant-m5",
+            "root_session_id": "session-ordered",
+            "session_id": "session-ordered",
+            "run_id": "run-ordered",
+            "event_type": "runtime.progress",
+            "visibility": "user",
+        }
+        first = asyncio.create_task(producer.publish(**common, payload={"step": 1}))
+        await asyncio.wait_for(target.first_started.wait(), timeout=1)
+        second = asyncio.create_task(producer.publish(**common, payload={"step": 2}))
+        await asyncio.sleep(0.02)
+        assert not second.done()
+        target.release.set()
+        results = await asyncio.gather(first, second)
+        assert [result.sequence for result in results if result is not None] == [1, 2]
+        assert target.sequences == [1, 2]
+
+    asyncio.run(scenario())
+
+
+def test_runtime_event_timeout_releases_keyed_state() -> None:
+    class TimeoutOncePublisher:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def publish(self, event: RuntimeEvent) -> None:
+            del event
+            self.calls += 1
+            if self.calls == 1:
+                await asyncio.sleep(60)
+
+    async def scenario() -> None:
+        target = TimeoutOncePublisher()
+        producer = RuntimeEventProducerSDK(
+            target,
+            publish_timeout_seconds=0.05,
+            queue_timeout_seconds=0.2,
+        )
+        common = {
+            "tenant_id": "tenant-m5",
+            "root_session_id": "session-timeout",
+            "session_id": "session-timeout",
+            "run_id": "run-timeout",
+            "event_type": "runtime.progress",
+            "visibility": "user",
+        }
+        with pytest.raises(RuntimeEventRejectedError, match="publish timed out"):
+            await producer.publish(**common, payload={"step": 1})
+        recovered = await producer.publish(**common, payload={"step": 2})
+        assert recovered is not None and recovered.sequence == 2
+        assert producer._locks._entries == {}  # type: ignore[attr-defined]
+
+    asyncio.run(scenario())
+
+
+def test_runtime_event_same_session_queue_wait_is_bounded() -> None:
+    class BlockingPublisher:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+            self.calls = 0
+
+        async def publish(self, event: RuntimeEvent) -> None:
+            del event
+            self.calls += 1
+            self.started.set()
+            await self.release.wait()
+
+    async def scenario() -> None:
+        target = BlockingPublisher()
+        producer = RuntimeEventProducerSDK(
+            target,
+            max_concurrent=2,
+            max_queued=2,
+            queue_timeout_seconds=0.05,
+            publish_timeout_seconds=2,
+        )
+        common = {
+            "tenant_id": "tenant-m5",
+            "root_session_id": "session-queue-timeout",
+            "session_id": "session-queue-timeout",
+            "run_id": "run-queue-timeout",
+            "event_type": "runtime.progress",
+            "visibility": "user",
+        }
+        owner = asyncio.create_task(producer.publish(**common, payload={"step": 1}))
+        await asyncio.wait_for(target.started.wait(), timeout=1)
+        with pytest.raises(RuntimeEventRejectedError, match="queue wait timed out"):
+            await producer.publish(**common, payload={"step": 2})
+        assert target.calls == 1
+        target.release.set()
+        assert (await owner) is not None
+        assert producer._locks._entries == {}  # type: ignore[attr-defined]
+
+    asyncio.run(scenario())
+
+
+def test_runtime_event_cancellation_releases_session_key() -> None:
+    class CancelOncePublisher:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.calls = 0
+
+        async def publish(self, event: RuntimeEvent) -> None:
+            del event
+            self.calls += 1
+            if self.calls == 1:
+                self.started.set()
+                await asyncio.sleep(60)
+
+    async def scenario() -> None:
+        target = CancelOncePublisher()
+        producer = RuntimeEventProducerSDK(target)
+        common = {
+            "tenant_id": "tenant-m5",
+            "root_session_id": "session-cancel",
+            "session_id": "session-cancel",
+            "run_id": "run-cancel",
+            "event_type": "runtime.progress",
+            "visibility": "user",
+        }
+        cancelled = asyncio.create_task(
+            producer.publish(**common, payload={"step": 1})
+        )
+        await asyncio.wait_for(target.started.wait(), timeout=1)
+        cancelled.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await cancelled
+        recovered = await producer.publish(**common, payload={"step": 2})
+        assert recovered is not None and recovered.sequence == 2
+        assert producer._locks._entries == {}  # type: ignore[attr-defined]
+
+    asyncio.run(scenario())
+
+
+def test_runtime_delta_publish_and_flush_do_not_cross_runs_or_lose_data() -> None:
+    async def scenario() -> None:
+        bus = ReplayRuntimeEventBus()
+        producer = RuntimeEventProducerSDK(bus, delta_flush_bytes=100)
+        common = {
+            "tenant_id": "tenant-m5",
+            "root_session_id": "session-delta-race",
+            "session_id": "session-delta-race",
+            "visibility": "user",
+        }
+        await producer.publish(
+            **common,
+            run_id="run-a",
+            event_type="model.output.delta",
+            payload={"delta": "a1"},
+        )
+        publish_a2 = asyncio.create_task(
+            producer.publish(
+                **common,
+                run_id="run-a",
+                event_type="model.output.delta",
+                payload={"delta": "a2"},
+            )
+        )
+        flush_a = asyncio.create_task(
+            producer.flush(
+                tenant_id="tenant-m5",
+                root_session_id="session-delta-race",
+                session_id="session-delta-race",
+                run_id="run-a",
+            )
+        )
+        flush_b = asyncio.create_task(
+            producer.flush(
+                tenant_id="tenant-m5",
+                root_session_id="session-delta-race",
+                session_id="session-delta-race",
+                run_id="run-b",
+            )
+        )
+        await publish_a2
+        emitted_a = await flush_a
+        emitted_b = await flush_b
+        trailing = await producer.flush(
+            tenant_id="tenant-m5",
+            root_session_id="session-delta-race",
+            session_id="session-delta-race",
+            run_id="run-a",
+        )
+        deltas = [
+            event.payload["delta"]
+            for event in (emitted_a, trailing)
+            if event is not None
+        ]
+        assert "".join(deltas) == "a1a2"
+        assert emitted_b is None
+
+    asyncio.run(scenario())
+
+
 def test_streaming_gateway_authorizes_replays_and_signals_expired_cursor() -> None:
     async def scenario() -> None:
         projection = InMemoryTaskProjection()

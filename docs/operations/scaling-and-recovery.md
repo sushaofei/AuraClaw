@@ -48,6 +48,10 @@ registration lease 内仍活跃时，新进程注册会 fail closed。因此显�
   `AURACLAW_HANDS_MAX_QUEUED` / `AURACLAW_HANDS_MAX_QUEUED_PER_TENANT` 限制等待者。队列等待超过
   `AURACLAW_HANDS_QUEUE_TIMEOUT_SECONDS` 时返回可重试背压；相同 idempotency key 的等待同样受该
   时间与队列上限约束，不形成无界 single-flight waiter。
+- Resource Gateway 的 cache miss 按 tenant/session/URI/revision single-flight；invalidate generation 防止
+  旧 load 重新发布 cache。Policy、扫描和 Artifact 写入不持有全局 cache lock，且受独立并发/队列上限约束。
+- Runtime Event Producer 只按 tenant/session 串行 sequence 与 send；慢 Kafka publish 不阻塞其他
+  Session。Delta buffer 按 run 隔离，Kafka timeout 或 caller cancellation 后 keyed state 会回收。
 - Skill 管理读取始终经 Hands 查询 PostgreSQL lifecycle，`SKILL.md` 经 Artifact 边界读取；Task API
   的进程内 Skill Registry 不是管理事实源，清空缓存或重启 Task API 不需要预热才能提供管理查询。
 - Model Gateway 为每个 Model Call 持久化 execution owner、claim token 与 heartbeat。任意副本可写
@@ -95,6 +99,10 @@ registration lease 内仍活跃时，新进程注册会 fail closed。因此显�
    `tool.gateway.queue.depth`、`tool.gateway.queue.latency.seconds`、`tool.gateway.in_flight` 与
    `tool.gateway.backpressure.count`；持续全局饱和优先增加副本，单 tenant 饱和应调整该 tenant 工作负载
    或显式容量策略，不能取消隔离上限。
+7. Resource Gateway 默认 32 个 load 槽、128 个 unique-key waiter、5 秒等待超时；Runtime Event
+   Producer 默认 64 个 publish 槽、1024 个 waiter、5 秒队列超时和 10 秒底层 publish 超时。分别观察
+   `resource.gateway.*` 与 `runtime.event.*` queue/in-flight/latency/backpressure 指标。单 Session Kafka
+   超时应只增加该 key 的 timeout，不应伴随其他 Session queue latency 同步上升。
 
 升级前检查并修复旧数据：同一部署中若多个容器显式共享 `AURACLAW_RUNTIME_ID`，先改为未配置（使用
 hostname）或注入唯一实例 UID。停止全部旧 Runtime，等待 30 秒，然后将无对应健康实例且状态为

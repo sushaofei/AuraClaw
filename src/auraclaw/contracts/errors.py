@@ -135,3 +135,11 @@ class SyncInvokeBusyError(AuraClawError):
         retry_after: int = 2,
     ) -> None:
         super().__init__(message, detail=detail, retry_after=retry_after)
+
+
+class ResourceBusyError(AuraClawError):
+    code = "resource_gateway_busy"
+    status_code = 429
+
+    def __init__(self, message: str = "resource gateway capacity is exhausted") -> None:
+        super().__init__(message, retry_after=1)
