@@ -65,6 +65,12 @@ class InvocationStatusRecord:
     cancel_requested: bool = False
 
 
+@dataclass(frozen=True)
+class CatalogSyncHealth:
+    consecutive_failures: int
+    quarantined: bool
+
+
 class InvocationStore(Protocol):
     async def begin(
         self,
@@ -257,6 +263,16 @@ class CapabilityCatalogStore(Protocol):
     ) -> None: ...
 
     async def get_active_generation(self, server_id: str) -> int | None: ...
+
+    async def record_catalog_sync(
+        self,
+        server_id: str,
+        *,
+        succeeded: bool,
+        attempted_at: datetime,
+        safe_error_code: str | None,
+        quarantine_after_failures: int,
+    ) -> CatalogSyncHealth: ...
 
     async def remove_server(self, server_id: str) -> None: ...
 

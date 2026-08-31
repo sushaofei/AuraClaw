@@ -2418,3 +2418,23 @@ ready Skill Artifact 建立带 fencing 的物理回收流程；不把成功命�
 - [x] Ruff、Mypy、定向与完整 Pytest 通过。
 - [x] Git 暂存范围已审查，不包含 `.env`、Secret、缓存、`docs/tmp/` 或个人 VS Code 配置。
 - [x] 本子阶段作为 intentional commit 提交并 push；Issue #62 保持 open。
+
+## 阶段 MCP Catalog 持久失败与隔离（Issue #62 / MCP Catalog 子阶段）
+
+状态：Catalog 失败/quarantine 子阶段实现和门禁完成；Issue #62 的 MCP Lifecycle/Delivery 子阶段继续跟踪。
+
+### 持久状态与恢复
+
+- [x] `0045` 正反迁移增加连续同步失败、最后同步、safe error 与 quarantine 时间字段。
+- [x] 失败计数由 PostgreSQL 原子递增，跨 Reconciler 副本与进程重启保持单调；成功完整同步清零。
+- [x] 达到阈值后 Server 持久进入 quarantined，从 Catalog 和本地 Tool Router 移除新业务可见性。
+- [x] last-known-good Catalog generation 保留为恢复证据，失败轮次不替换或删除；成功后解除隔离。
+- [x] Runtime observed health 记录持久 failure count 和 quarantined 状态，不再把每次失败硬编码为 1。
+
+### 验证与交付
+
+- [x] PostgreSQL 测试覆盖两个 Store 实例并发递增、阈值隔离、持久元数据、不可见性和成功恢复。
+- [x] 单元测试覆盖 degraded 到 quarantined 的状态转换、Tool Router 撤销和成功重新发布。
+- [x] Ruff、Mypy、import-linter、定向与完整 Pytest 通过。
+- [x] Git 暂存范围已审查，不包含 `.env`、Secret、缓存、`docs/tmp/` 或个人 VS Code 配置。
+- [x] 本子阶段作为 intentional commit 提交并 push；Issue #62 保持 open。

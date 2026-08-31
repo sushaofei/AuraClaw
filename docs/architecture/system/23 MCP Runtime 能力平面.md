@@ -551,6 +551,13 @@ last-known-good generation。Hands 副本启动时即使远端暂不可达，也
 Tool Router。schema/content digest 在未 bump version 时发生变化会把本轮标记为 degraded/stale 并保留
 旧 generation。disabled/retired 是 desired governance 状态，仍立即阻止新任务发现。
 
+连续同步失败计数不是 Reconciler 进程内状态。每个失败轮次在
+`hands.downstream_mcp_server` 原子递增 `consecutive_sync_failures`，成功轮次清零；进程重启和多副本
+并发不能使计数倒退。达到配置阈值后 Server 进入 `quarantined`，保留 last-known-good generation 作为
+恢复证据，但从 Catalog 查询和本地 Tool Router 移除，不再对新业务流量可见。后续完整快照校验成功时
+原子清零失败状态、解除 quarantine 并发布新 generation。持久状态只保存安全错误码/类型，不保存远端
+响应正文。
+
 MCP observed state 按 `(server_id, instance_id)` 保存；Admin API 同时返回实例列表和聚合状态。聚合采用
 `active > degraded > loading > pending > unavailable > quarantined > disabled`，因此一个失败副本不能用
 最后写入覆盖仍健康的副本。desired configuration、实例 observed health 和 published Catalog generation
@@ -779,6 +786,7 @@ Capability Gateway -> External MCP Server
 |---|---|
 | Catalog 不可用 | 已固定且未撤销的绑定可短时使用；新发现 fail closed |
 | Server 列表超时 | 使用有 TTL 的目录快照并标记 stale，不升级版本 |
+| 连续同步失败达到阈值 | 持久 quarantine，保留 last-good 证据但停止新发现；成功完整同步后恢复 |
 | Resource 在读取后变化 | 以 digest/revision 标识已用版本；需强一致时读取 Artifact 快照 |
 | Tool 响应丢失 | 查询 Hands Invocation Store；副作用未知则返回 `unknown` |
 | Runtime 在 Skill 中途死亡 | 从 Canonical Event + Checkpoint 的 activation/step cursor 恢复 |
