@@ -267,6 +267,8 @@ def test_env_templates_are_ready_to_copy() -> None:
         "AURACLAW_MODEL_API_KEY",
         "AURACLAW_MODEL_BASE_URL",
         "AURACLAW_MODEL_NAME",
+        # Development may use SeaweedFS while test/production use OBS.
+        "AURACLAW_ARTIFACT_BACKEND",
         "AURACLAW_CREDENTIAL_VAULT_ADDR",
         "AURACLAW_CORS_ALLOW_ORIGINS",
             "AURACLAW_MIGRATIONS_DIRECTORY",

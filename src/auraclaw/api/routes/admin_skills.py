@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import json
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, Literal, Protocol
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from pydantic import AwareDatetime, Field, model_validator
 
 from auraclaw.action.skill_lifecycle import (
@@ -19,7 +20,6 @@ from auraclaw.api.dependencies import RequestIdentity, request_identity
 from auraclaw.contracts.errors import NotFoundError
 from auraclaw.contracts.internal import (
     ArtifactFinalizeResponse,
-    ArtifactUploadResponse,
     ContractModel,
 )
 from auraclaw.contracts.skills import (
@@ -83,20 +83,6 @@ class SkillSourceRequest(ContractModel):
     priority: int = Field(default=0, ge=-1000, le=1000)
 
 
-class CreateSkillPackageUploadRequest(ContractModel):
-    name: str = Field(min_length=1, max_length=512)
-    expected_size: int = Field(ge=1, le=_MAX_ENCODED_UPLOAD_BYTES)
-    expected_checksum: str = Field(pattern=r"^[0-9a-f]{64}$")
-
-
-class FinalizeSkillPackageUploadRequest(ContractModel):
-    upload_id: str = Field(min_length=1, max_length=256)
-    version: int = Field(default=1, ge=1)
-    size: int = Field(ge=1, le=_MAX_ENCODED_UPLOAD_BYTES)
-    checksum: str = Field(pattern=r"^[0-9a-f]{64}$")
-    parts: tuple[dict[str, object], ...] = Field(default=(), max_length=10_000)
-
-
 class RegisterSkillPublisherRequest(ContractModel):
     display_name: str = Field(min_length=1, max_length=256)
 
@@ -120,27 +106,13 @@ class SkillPublisher(Protocol):
 
 
 class SkillPackageUploadManager(Protocol):
-    async def create(
+    async def stage(
         self,
         *,
         tenant_id: str,
         name: str,
-        expected_size: int,
-        expected_checksum: str,
-        correlation_id: str,
-        command_id: str,
-    ) -> ArtifactUploadResponse: ...
-
-    async def finalize(
-        self,
-        *,
-        tenant_id: str,
-        artifact_id: str,
-        version: int,
-        upload_id: str,
-        size: int,
+        content: bytes,
         checksum: str,
-        parts: tuple[dict[str, object], ...],
         correlation_id: str,
         command_id: str,
     ) -> ArtifactFinalizeResponse: ...
@@ -1058,12 +1030,20 @@ def create_skill_admin_router(
         "/skill-package-uploads",
         status_code=status.HTTP_201_CREATED,
     )
-    async def create_skill_package_upload(
-        payload: CreateSkillPackageUploadRequest,
+    async def proxy_skill_package_upload(
+        request: Request,
         identity: Identity,
         command_id: Annotated[
             str,
             Header(alias="Idempotency-Key", min_length=1, max_length=256),
+        ],
+        upload_name: Annotated[
+            str,
+            Header(alias="X-Upload-Name", min_length=1, max_length=512),
+        ],
+        expected_checksum: Annotated[
+            str,
+            Header(alias="X-Content-SHA256", pattern=r"^[0-9a-f]{64}$"),
         ],
     ) -> dict[str, Any]:
         if upload_service is None:
@@ -1071,41 +1051,37 @@ def create_skill_admin_router(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Skill package upload service is not configured",
             )
-        result = await upload_service.create(
-            tenant_id=identity.tenant_id,
-            name=payload.name,
-            expected_size=payload.expected_size,
-            expected_checksum=payload.expected_checksum,
-            correlation_id=identity.correlation_id,
-            command_id=command_id,
-        )
-        return result.model_dump(mode="json")
-
-    @router.post(
-        "/skill-package-uploads/{artifact_id}:finalize",
-    )
-    async def finalize_skill_package_upload(
-        artifact_id: str,
-        payload: FinalizeSkillPackageUploadRequest,
-        identity: Identity,
-        command_id: Annotated[
-            str,
-            Header(alias="Idempotency-Key", min_length=1, max_length=256),
-        ],
-    ) -> dict[str, Any]:
-        if upload_service is None:
+        if request.headers.get("content-type", "").split(";", 1)[0].strip() != (
+            "application/vnd.auraclaw.skill-package+json"
+        ):
             raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Skill package upload service is not configured",
+                status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+                detail="Skill package upload content type is invalid",
             )
-        result = await upload_service.finalize(
+        content = bytearray()
+        async for chunk in request.stream():
+            if len(content) + len(chunk) > _MAX_ENCODED_UPLOAD_BYTES:
+                raise HTTPException(
+                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    detail="Skill package upload exceeds 24 MiB",
+                )
+            content.extend(chunk)
+        if not content:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="Skill package upload is empty",
+            )
+        checksum = hashlib.sha256(content).hexdigest()
+        if checksum != expected_checksum:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="Skill package upload checksum mismatch",
+            )
+        result = await upload_service.stage(
             tenant_id=identity.tenant_id,
-            artifact_id=artifact_id,
-            version=payload.version,
-            upload_id=payload.upload_id,
-            size=payload.size,
-            checksum=payload.checksum,
-            parts=payload.parts,
+            name=upload_name,
+            content=bytes(content),
+            checksum=checksum,
             correlation_id=identity.correlation_id,
             command_id=command_id,
         )

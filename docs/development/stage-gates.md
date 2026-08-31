@@ -1718,7 +1718,7 @@ uninstall、revoke 和 purge 三种不同语义。
 
 ### 两阶段上传与统一准入
 
-- [x] Admin API 提供 Skill 专用 create/finalize 上传契约，支持单段与 multipart 预签名直传。
+- [x] Admin API 提供 Skill 专用代理上传契约；Task API 内部按对象存储能力完成 single/multipart 与 finalize。
 - [x] Task API workload 只能创建和完成 `internal`、24 MiB 内、带 retention 的 `skill-upload:*` Skill Artifact。
 - [x] Artifact Ref 发布经 workload-authenticated 内部契约交给 Action Hands，并复用同一
   `SkillPublicationService` 完成 Source、allowlist、Archive、Manifest、测试向量、digest 与签名准入。
@@ -2263,11 +2263,12 @@ ready Skill Artifact 建立带 fencing 的物理回收流程；不把成功命�
 ### 发布、安全与架构
 
 - [x] direct files 与 staged artifact publication 继续进入同一 admission 服务。
-- [x] staged upload 契约包含 expiry、single/multipart URL、checksum、size 和 completed parts。
+- [x] staged upload 只接收受限二进制正文、文件名和 SHA-256；对象存储 URL、upload ID、parts 与 ETag 不出 AuraClaw。
 - [x] API 只依赖 Skill 管理 Ports；生命周期写入仍走既有 command services，读模型不成为事实源。
 - [x] Publisher 私钥、credential value、Skill 包正文和内部异常不进入管理列表。
 - [x] 定向 API、内部 HTTP client、Mypy、Ruff、import-linter 及完整 unit/e2e 验证通过。
-- [ ] 在生产同构对象存储完成 AuraX WebView CORS/preflight 与 multipart ETag 联调。
+- [x] 测试 OBS 完成 single/multipart 代理上传、服务端 ETag 收集、checksum 校验、finalize 与对象清理；
+  AuraX 不直连对象存储，WebView CORS 不再适用。
 - [x] 完整 `pytest` 及已配置 PostgreSQL 基础设施门禁通过。
 - [x] 本阶段随 `a6d238d` intentional commit 提交并 push；Secret、缓存、环境文件和个人配置未入库。
 

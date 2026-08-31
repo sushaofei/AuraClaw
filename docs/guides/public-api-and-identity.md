@@ -843,9 +843,12 @@ tenant Registry 的 active key 独立验签。CLI 不接受命令行私钥，也
 各自权威生命周期状态，`availability` 只是服务端根据两者派生的管理展示结果。客户端不得把 Publication
 的 `active` 当成 tenant 已启用，也不得逐行查询 Installation 或从 Source allowlist 反推 Publisher。
 
-已签名大包使用 `skill-package-uploads` 创建预签名 single/multipart 上传计划，客户端上传 canonical archive
-后以 checksum、size、parts finalize，再用 `artifact_ref + expected_digest` 发布。WebView 只向短期预签名 URL
-上传对象，私钥和长期凭据不得进入 AuraX；最终路径、签名、digest 与内容扫描仍由 AuraClaw admission 完成。
+已签名大包通过 `POST /v1/admin/skill-package-uploads` 把 canonical archive 代理给 AuraClaw。请求使用
+`application/vnd.auraclaw.skill-package+json`，并携带 `X-Upload-Name`、`X-Content-SHA256` 与
+`Idempotency-Key`；Task API 对正文实行 24 MiB 上限并复算 SHA-256。AuraClaw 内部按对象存储能力选择
+single 或 multipart、收集 ETag 并 finalize，只向客户端返回最终 `artifact_ref`。AuraX 不接收预签名 URL、
+upload ID、part URL、ETag、对象存储 endpoint 或凭据；随后仍使用 `artifact_ref + expected_digest` 进入
+统一发布准入。
 
 签名通过后，服务端还会扫描可执行扩展与 magic、高置信凭据、Secret 赋值和 Prompt Injection 模式。
 命中后 API 以受控 `skill_content_*` 策略错误拒绝，本次 admission 在内部记为 `quarantined`，但不会把

@@ -389,7 +389,7 @@ uv run auraclaw operations redrive --tenant tenant_1 --queue delivery --item-id 
 uv run python scripts/release_gate.py
 ```
 
-签名 Skill 包可在本地校验声明式测试并通过两阶段 Artifact 上传发布：
+签名 Skill 包可在本地校验声明式测试，并通过 AuraClaw 代理写入 Artifact 后发布：
 
 ```bash
 uv run auraclaw skills validate path/to/skill
@@ -401,6 +401,8 @@ AURACLAW_API_TOKEN=... uv run auraclaw skills publish path/to/skill \
 目录必须包含已签名的 `manifest.json` 与 `SKILL.md`。`skills test` 只接受并校验
 `tests/*.json` 声明式向量，不执行包内代码；`skills publish` 从
 `AURACLAW_API_TOKEN`（或 `--token-env` 指定的环境变量）读取令牌，不接受命令行明文令牌。
+CLI 和 AuraX 都只上传到 AuraClaw；对象存储 single/multipart、ETag 与 finalize 留在服务端内部，
+客户端不接收 OBS/S3 endpoint 或预签名 URL。
 外部 Publisher 使用 Ed25519 离线签名。32-byte raw private key 必须以无 padding 的 base64url 放在
 `AURACLAW_SKILL_SIGNING_KEY`（或 `--private-key-env` 指定的 Secret 环境变量），不能作为命令行参数：
 

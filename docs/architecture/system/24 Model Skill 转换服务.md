@@ -178,6 +178,11 @@ flowchart LR
 转换服务对 PostgreSQL Source 只使用只读账号。凭证以 `credential_ref` 配置，由受管连接器持有，不进入
 Runtime、MCP Resource、Skill 包、日志或 Artifact。
 
+管理端 staged Skill 包采用 AuraClaw 代理上传：AuraX/CLI 只把受限 canonical archive 发送给 Task API，
+Task API 校验大小与 SHA-256 后，通过 workload-authenticated Artifact 契约取得内部上传计划，并在服务端
+完成 single/multipart、ETag 收集和 finalize。对象存储 endpoint、预签名 URL、upload ID、part URL 与
+长期凭据均不进入 AuraX；从 OBS 切换到其他 Artifact 后端不改变公开客户端契约。
+
 ## 4. 源快照契约
 
 ### 4.1 发布选择
