@@ -417,6 +417,8 @@ class ModelCancelResponse(ContractModel):
     api_version: str = INTERNAL_API_VERSION
     model_call_id: str
     cancelled: bool
+    status: str = "unknown"
+    provider_cancellable: bool = False
 
 
 class RuntimeServiceConfig(ContractModel):

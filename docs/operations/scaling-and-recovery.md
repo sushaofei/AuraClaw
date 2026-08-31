@@ -45,10 +45,13 @@ registration lease 内仍活跃时，新进程注册会 fail closed。因此显�
   `invocation_recovery_required`。waiting approval 的 payload 持久化并在重启后复用。
 - Skill 管理读取始终经 Hands 查询 PostgreSQL lifecycle，`SKILL.md` 经 Artifact 边界读取；Task API
   的进程内 Skill Registry 不是管理事实源，清空缓存或重启 Task API 不需要预热才能提供管理查询。
+- Model Gateway 为每个 Model Call 持久化 execution owner、claim token 与 heartbeat。任意副本可写
+  cancel request，owner 协作取消 Provider；断线或 owner 失联进入 `reconciling` 并保留 token
+  reservation，禁止在结果未知时自动重放或释放额度。
 
 ## 生产配置门禁
 
-1. 依次应用 PostgreSQL/KingBase `0010`～`0047` expand migration。`0040`
+1. 依次应用 PostgreSQL/KingBase `0010`～`0048` expand migration。`0040`
    `0022` 增加 registration 与 execution claim 字段和索引；先迁移 Control 数据库，再滚动升级
    Orchestrator，最后升级 Agent Runtime。可选执行 `deploy/postgres/roles.sql` 做硬化，
    当前部署不按服务注入分角色 DSN。
@@ -66,6 +69,8 @@ registration lease 内仍活跃时，新进程注册会 fail closed。因此显�
    滚动 Hands 管理面，升级窗口暂停 MCP enable/disable/retire/reconcile 命令。
    `0047` 增加 Delivery tenant/sink 全局熔断、generation 和半开探针 owner；先迁移再滚动 Delivery，
    升级窗口不得混跑仍以进程内计数决定外呼的旧 Worker。
+   `0048` 扩展 Model Call execution owner、claim/heartbeat/expiry、cancel/reconciliation 与终态时间；
+   先迁移再滚动 Model Gateway，升级窗口不得混跑会绕过 claim 或将 cancel request 直接视为成功的旧副本。
 2. 各服务共享统一 `AURACLAW_DATABASE_URL`（Compose `database_url` secret）；migration 使用
    独立的 `AURACLAW_MIGRATION_DATABASE_URL`。
 3. 所有 Control、Session 与 Hands 副本必须使用相同的 `AURACLAW_LEASE_SIGNING_KEY`，并通过平台
@@ -110,3 +115,7 @@ hostname）或注入唯一实例 UID。停止全部旧 Runtime，等待 30 秒�
 
 回滚 `0047` 前停止 Delivery 新 Job 领取并排空 attempting attempt。记录仍处于 open/half-open 的 Sink，
 确认外部依赖恢复后才能删除共享状态；回滚到旧版本时 Delivery 只能单副本运行，否则熔断阈值不再全局一致。
+
+回滚 `0048` 前停止 Model Gateway 新调用并排空 active claim。逐项核对 `cancel_requested` 与
+`reconciling` 调用、确认 Provider 最终结果并完成额度结算；存在活跃 claim 或未知结果时禁止删除
+owner/heartbeat/cancel 字段。回滚到旧版本后 Model Gateway 只能单副本运行。

@@ -582,3 +582,43 @@ def test_openai_compatible_provider_maps_timeout() -> None:
         await client.aclose()
 
     asyncio.run(scenario())
+
+
+def test_openai_compatible_provider_cancels_active_stream_by_model_call() -> None:
+    class BlockingProvider(OpenAICompatibleProvider):
+        def __init__(self) -> None:
+            super().__init__(base_url="https://models.example/v1", model="model")
+            self.started = asyncio.Event()
+
+        async def _generate_stream(self, request: Any, *, credential: str):
+            del request, credential
+            self.started.set()
+            await asyncio.Event().wait()
+            yield  # pragma: no cover
+
+    async def scenario() -> None:
+        provider = BlockingProvider()
+
+        async def consume() -> None:
+            async for _chunk in provider.generate_stream(
+                ModelRequest(
+                    model_call_id="model-cancel",
+                    tenant_id="tenant-m8",
+                    run_id="run-m8",
+                    messages=(),
+                ),
+                credential="secret",
+            ):
+                pass
+
+        running = asyncio.create_task(consume())
+        await provider.started.wait()
+        cancellation = await provider.cancel("model-cancel")
+        assert cancellation.stopped
+        assert not cancellation.usage_final
+        with pytest.raises(asyncio.CancelledError):
+            await running
+        assert not (await provider.cancel("model-cancel")).stopped
+        await provider.aclose()
+
+    asyncio.run(scenario())

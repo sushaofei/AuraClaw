@@ -64,6 +64,22 @@ Model Call completion 事务中提交 response、final usage 并结算 reservati
 发送 terminal event。若 Provider 已完成但持久提交失败，stream 以错误结束且不得声称 completed；
 已发送 delta 不构成最终结果，调用进入后续持久 lifecycle/reconciliation 处理。
 
+每个执行中的 Model Call 由 PostgreSQL 中的 `execution_owner + claim_token` 唯一约束，owner 定期续租
+`heartbeat_at/claim_expires_at`。任意 Gateway 副本收到认证后的 cancel 都只先写共享
+`cancel_requested`；owner 从心跳观察到请求后调用 Provider Adapter 的协作取消，确认本地 Provider
+task 已停止且拿到权威 final usage 后才提交 `cancelled`、结算实际 usage 并释放剩余 token reservation。Provider 不支持取消时响应明确标记
+`provider_cancellable=false`，不得把“已请求”谎报为“已取消”；若 Provider 已自然完成，durable
+`completed` 可以赢得竞态。
+
+OpenAI-compatible HTTP stream 可协作停止本地 task，但中途断流通常没有权威 partial usage，因此进入
+`reconciling(cancel_usage_unknown)` 并保留 reservation，而不是把已消耗成本当作零。客户端断开不等于
+业务取消。断开、owner/claim 丢失或 Provider 已返回但结果能否生效不确定时，调用进入
+`reconciling`，保留额度 reservation 且禁止自动重放，等待 Provider 查询能力或人工核对。`completed` 与
+`cancelled` 都是单调终态，迟到的旧 claim 不能覆盖终态；tenant、run 和 request digest 不匹配均
+fail closed。Model Call 保存 actor/service identity、correlation/causation、Provider correlation ref、
+安全 error code 与各阶段时间；运维指标从状态、heartbeat age、cancel latency、reconciliation backlog
+和 usage reservation/settlement 聚合，日志不作为唯一审计事实。
+
 ## 安全
 
 - Provider Secret 只存在 Gateway/Vault 信任域。
@@ -90,3 +106,4 @@ cache_hit
 - Agent Runtime 无法读取 Provider Secret。
 - 完整模型输出最终进入 Session，Token Delta 只进入 Runtime Bus。
 - 租户预算耗尽时产生可解释的 Policy/Failure Event。
+- 跨副本取消由持久 owner/heartbeat 协作完成；断线和未知 Provider 结果不会被误记为 cancelled 或自动重放。

@@ -8,6 +8,8 @@ import httpx
 
 from auraclaw.contracts.internal import (
     InternalRequestContext,
+    ModelCancelRequest,
+    ModelCancelResponse,
     ModelGenerateRequest,
     ModelGenerateResponse,
     ModelStreamEvent,
@@ -53,6 +55,23 @@ class RemoteModelClient:
         if response is None:
             raise RuntimeError("model stream ended without a completed response")
         return response
+
+    async def cancel(self, request: ModelRequest) -> ModelCancelResponse:
+        return await self._contract.call(
+            "/internal/v1/model/cancel",
+            ModelCancelRequest(
+                context=InternalRequestContext(
+                    tenant_id=request.tenant_id,
+                    service_identity=ServiceIdentity.AGENT_RUNTIME,
+                    request_id=f"cancel-{request.model_call_id}",
+                    correlation_id=request.run_id,
+                    causation_id=request.model_call_id,
+                ),
+                model_call_id=request.model_call_id,
+                run_id=request.run_id,
+            ),
+            ModelCancelResponse,
+        )
 
     async def generate_stream(
         self, request: ModelRequest

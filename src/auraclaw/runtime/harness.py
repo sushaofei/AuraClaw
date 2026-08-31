@@ -1234,13 +1234,62 @@ class AgentHarness:
             except StopAsyncIteration:
                 return None
 
+        async def _wait_for_business_cancel() -> str:
+            while True:
+                if await self._control.is_cancelled(
+                    assignment.tenant_id, assignment.session_id, assignment.run_id
+                ):
+                    return "run cancelled"
+                if assignment.deadline is not None and datetime.now(UTC) >= assignment.deadline:
+                    return "runtime deadline exceeded"
+                await asyncio.sleep(1.0)
+
         stream = iter_model_stream(self._model, request)
         iterator = stream.__aiter__()
+        cancel_watch = asyncio.create_task(_wait_for_business_cancel())
+
+        async def _next_or_cancel(task: asyncio.Task[Any]) -> Any | None:
+            done, _ = await asyncio.wait(
+                {task, cancel_watch}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if cancel_watch not in done:
+                try:
+                    return await task
+                except BaseException:
+                    cancel_watch.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await cancel_watch
+                    raise
+            reason = await cancel_watch
+            cancel = getattr(self._model, "cancel", None)
+            grace = 0.0
+            if callable(cancel):
+                try:
+                    result = await cancel(request)
+                    if bool(getattr(result, "provider_cancellable", False)):
+                        grace = 6.0
+                except Exception:
+                    logger.exception(
+                        "failed to propagate model cancellation model_call=%s",
+                        request.model_call_id,
+                    )
+            if grace:
+                with suppress(BaseException):
+                    await asyncio.wait_for(asyncio.shield(task), timeout=grace)
+            if not task.done():
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+            aclose = getattr(stream, "aclose", None)
+            if aclose is not None:
+                await aclose()
+            raise RuntimeCancelledError(f"{reason}: {assignment.run_id}")
+
         first_chunk_task = asyncio.create_task(_next_chunk(iterator))
         try:
             if prep is not None:
                 await prep
-            chunk = await first_chunk_task
+            chunk = await _next_or_cancel(first_chunk_task)
         except BaseException:
             if not first_chunk_task.done():
                 first_chunk_task.cancel()
@@ -1249,8 +1298,14 @@ class AgentHarness:
             aclose = getattr(stream, "aclose", None)
             if aclose is not None:
                 await aclose()
+            cancel_watch.cancel()
+            with suppress(asyncio.CancelledError):
+                await cancel_watch
             raise
         if chunk is None:
+            cancel_watch.cancel()
+            with suppress(asyncio.CancelledError):
+                await cancel_watch
             raise ModelProviderError("model stream ended without a completed response")
         while True:
             if chunk.kind == "delta":
@@ -1271,9 +1326,13 @@ class AgentHarness:
                         )
             elif chunk.kind == "completed":
                 response = chunk.response
-            chunk = await _next_chunk(iterator)
+            next_chunk_task = asyncio.create_task(_next_chunk(iterator))
+            chunk = await _next_or_cancel(next_chunk_task)
             if chunk is None:
                 break
+        cancel_watch.cancel()
+        with suppress(asyncio.CancelledError):
+            await cancel_watch
         if response is None:
             raise ModelProviderError("model stream ended without a completed response")
         return response, sequence

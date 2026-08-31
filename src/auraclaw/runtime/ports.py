@@ -41,6 +41,13 @@ class ModelRequest:
 
 
 @dataclass(frozen=True)
+class ProviderCancellationResult:
+    stopped: bool
+    usage: dict[str, int | float] = field(default_factory=dict)
+    usage_final: bool = False
+
+
+@dataclass(frozen=True)
 class ToolCall:
     tool_invocation_id: str
     name: str

@@ -2545,3 +2545,30 @@ ready Skill Artifact 建立带 fencing 的物理回收流程；不把成功命�
 - [x] Ruff、Mypy、import-linter、定向与完整 Pytest 通过。
 - [x] Git 暂存范围已审查，不包含 `.env`、Secret、缓存、`docs/tmp/` 或个人 VS Code 配置。
 - [x] 本子阶段作为 intentional commit 提交并 push；Issue #64 保持 open。
+
+## 阶段 Model Gateway 持久执行归属与跨副本取消（Issue #64）
+
+状态：代码、迁移、测试和文档完成。
+
+### 执行状态机
+
+- [x] `0048` 正反迁移增加 execution owner、claim token、heartbeat/expiry、cancel request 与终态时间。
+- [x] Model Call 原子 claim；活跃 claim 不会被另一副本重复执行，过期 claim 进入 `reconciling` 且不自动重放。
+- [x] 完成与失败写入校验 claim；`completed/cancelled` 终态单调，迟到 owner 不能覆盖。
+- [x] `reconciling` 保留 token reservation，避免未知 Provider 结果下错误释放额度。
+
+### 取消与恢复
+
+- [x] 任意认证 Gateway 副本可持久请求取消，owner 通过 heartbeat 观察并协作中断 Provider。
+- [x] OpenAI-compatible Adapter 按 `model_call_id` 取消本地 active stream；缺少权威 partial usage 时进入 reconciliation。
+- [x] Provider 不支持取消时明确返回 capability，`cancel_requested` 不冒充 `cancelled`，自然完成可赢得竞态。
+- [x] Provider 返回权威 final usage 的成功取消原子结算 usage 并释放剩余 reservation；usage 未知时保留额度。
+- [x] 客户端断开与业务取消分离；断开、owner 丢失和未知结果进入 `reconciling`。
+- [x] cancel 校验 tenant/run，重复请求幂等，跨 tenant 不泄露调用存在性。
+
+### 验证与交付
+
+- [x] 单元测试覆盖跨副本取消、支持/不支持 Provider、Provider task 中断、Runtime 显式取消传播和断线 reconciliation。
+- [x] PostgreSQL 集成覆盖原子 claim、heartbeat、终态单调、tenant/run 校验及过期 owner 保留额度。
+- [x] Ruff、Mypy、import-linter、迁移 roundtrip、定向与完整 Pytest 通过。
+- [x] Git 暂存范围审查、intentional commit 与 push 完成；Issue #64 可关闭。
