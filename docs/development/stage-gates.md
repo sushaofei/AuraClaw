@@ -2250,7 +2250,7 @@ ready Skill Artifact 建立带 fencing 的物理回收流程；不把成功命�
 
 ## 阶段 Skill Admin 管理查询与 AuraX 发布契约（Issue #59）
 
-状态：功能、完整仓库门禁、测试环境 API 与 AuraX 同源代理验证完成；生产同构对象存储联调待验证。
+状态：功能、完整仓库门禁、AuraX 同源代理以及三环境 OBS 配置与真实上传验证全部完成。
 
 ### 查询契约
 
@@ -2270,7 +2270,8 @@ ready Skill Artifact 建立带 fencing 的物理回收流程；不把成功命�
 - [x] 测试 OBS 完成 single/multipart 代理上传、服务端 ETag 收集、checksum 校验、finalize 与对象清理；
   AuraX 不直连对象存储，WebView CORS 不再适用。
 - [x] 完整 `pytest` 及已配置 PostgreSQL 基础设施门禁通过。
-- [x] 本阶段随 `a6d238d` intentional commit 提交并 push；Secret、缓存、环境文件和个人配置未入库。
+- [x] 本阶段随 `a6d238d`、`1d9708a` 和 `85eefb6` intentional commits 提交并 push；
+  Secret、缓存、环境文件和个人配置未入库。
 
 ## 阶段 PostgreSQL / KingBase 单方言收敛
 
