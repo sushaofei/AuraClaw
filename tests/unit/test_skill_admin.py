@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -32,6 +33,7 @@ from auraclaw.composition.providers import (
 from auraclaw.composition.services import create_service_app
 from auraclaw.config import Settings, get_settings
 from auraclaw.contracts.errors import SkillContentRejectedError
+from auraclaw.contracts.internal import ArtifactFinalizeResponse
 from auraclaw.contracts.skills import (
     PublishSkillCommand,
     SkillManifest,
@@ -430,7 +432,57 @@ def test_task_api_service_exposes_skill_admin_routes() -> None:
     assert "/v1/admin/skill-sources/{source_id}:sync" in paths
     assert "/v1/admin/skill-publishers/{publisher}/status:revoke" in paths
     assert "/v1/admin/skill-package-uploads" in paths
-    assert "/v1/admin/skill-package-uploads/{artifact_id}:finalize" in paths
+    assert "/v1/admin/skill-package-uploads/{artifact_id}:finalize" not in paths
+
+
+def test_skill_package_upload_is_proxied_and_integrity_checked() -> None:
+    content = b'{"files":{"SKILL.md":"proxy upload"}}'
+    checksum = hashlib.sha256(content).hexdigest()
+
+    class Uploads:
+        async def stage(self, **kwargs: object) -> ArtifactFinalizeResponse:
+            assert kwargs["tenant_id"] == "tenant-1"
+            assert kwargs["name"] == "package.skill.json"
+            assert kwargs["content"] == content
+            assert kwargs["checksum"] == checksum
+            return ArtifactFinalizeResponse(
+                artifact_ref={
+                    "artifact_id": "art_proxy",
+                    "version": 1,
+                    "content_hash": checksum,
+                    "media_type": "application/vnd.auraclaw.skill-package+json",
+                    "size": len(content),
+                },
+                status="ready",
+            )
+
+    app = create_app(profile="task-api")
+    app.include_router(
+        create_skill_admin_router(
+            services._skill_registry_service(get_settings()),
+            upload_service=Uploads(),
+        )
+    )
+    headers = {
+        "X-Tenant-ID": "tenant-1",
+        "X-Actor-ID": "admin-1",
+        "Idempotency-Key": "proxy-upload-1",
+        "X-Upload-Name": "package.skill.json",
+        "X-Content-SHA256": checksum,
+        "Content-Type": "application/vnd.auraclaw.skill-package+json",
+    }
+    with TestClient(app) as client:
+        uploaded = client.post(
+            "/v1/admin/skill-package-uploads", headers=headers, content=content
+        )
+        assert uploaded.status_code == 201, uploaded.text
+        assert uploaded.json()["artifact_ref"]["artifact_id"] == "art_proxy"
+        mismatch = client.post(
+            "/v1/admin/skill-package-uploads",
+            headers={**headers, "X-Content-SHA256": "0" * 64},
+            content=content,
+        )
+        assert mismatch.status_code == 422
 
 
 def test_skill_source_admin_api_manages_and_synchronizes_sources() -> None:

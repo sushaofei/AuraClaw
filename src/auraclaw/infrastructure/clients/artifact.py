@@ -120,7 +120,7 @@ class RemoteArtifactWriter:
 
 
 class RemoteSkillPackageUploadClient:
-    """Task API adapter for presigned, staged Skill package uploads."""
+    """Task API adapter that proxies Skill package bytes to object storage."""
 
     def __init__(
         self,
@@ -128,26 +128,31 @@ class RemoteSkillPackageUploadClient:
         *,
         bearer_token: str,
         transport: httpx.AsyncBaseTransport | None = None,
+        object_transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self._client = httpx.AsyncClient(base_url=base_url, transport=transport)
+        self._objects = httpx.AsyncClient(transport=object_transport, timeout=60.0)
         self._contract = HttpContractClient(self._client, bearer_token=bearer_token)
 
     async def aclose(self) -> None:
         await self._client.aclose()
+        await self._objects.aclose()
 
-    async def create(
+    async def stage(
         self,
         *,
         tenant_id: str,
         name: str,
-        expected_size: int,
-        expected_checksum: str,
+        content: bytes,
+        checksum: str,
         correlation_id: str,
         command_id: str,
-    ) -> ArtifactUploadResponse:
+    ) -> ArtifactFinalizeResponse:
+        if hashlib.sha256(content).hexdigest() != checksum:
+            raise ArtifactAccessError("Skill package proxy checksum mismatch")
         request_id = command_id
         scope = f"skill-upload:{request_id}"
-        return await self._contract.call(
+        upload = await self._contract.call(
             "/internal/v1/artifacts/uploads/create",
             ArtifactCreateUploadRequest(
                 context=InternalRequestContext(
@@ -161,28 +166,39 @@ class RemoteSkillPackageUploadClient:
                 session_id=scope,
                 name=name,
                 media_type="application/vnd.auraclaw.skill-package+json",
-                expected_size=expected_size,
-                expected_checksum=expected_checksum,
+                expected_size=len(content),
+                expected_checksum=checksum,
                 classification="internal",
                 retention_until=datetime.now(UTC) + timedelta(days=90),
             ),
             ArtifactUploadResponse,
         )
-
-    async def finalize(
-        self,
-        *,
-        tenant_id: str,
-        artifact_id: str,
-        version: int,
-        upload_id: str,
-        size: int,
-        checksum: str,
-        parts: tuple[dict[str, object], ...],
-        correlation_id: str,
-        command_id: str,
-    ) -> ArtifactFinalizeResponse:
-        request_id = command_id
+        completed_parts: tuple[dict[str, object], ...] = ()
+        media_type = "application/vnd.auraclaw.skill-package+json"
+        if upload.upload_mode == "multipart":
+            if upload.part_size is None or not upload.part_urls:
+                raise ArtifactAccessError("Skill package multipart plan is invalid")
+            parts: list[dict[str, object]] = []
+            for index, part_url in enumerate(upload.part_urls, start=1):
+                offset = (index - 1) * upload.part_size
+                response = await self._objects.put(
+                    part_url,
+                    content=content[offset : offset + upload.part_size],
+                    headers={"Content-Type": media_type},
+                )
+                etag = response.headers.get("ETag")
+                if response.is_error or not etag:
+                    raise ArtifactAccessError("Skill package multipart upload failed")
+                parts.append({"part_number": index, "etag": etag})
+            completed_parts = tuple(parts)
+        else:
+            response = await self._objects.put(
+                upload.upload_url,
+                content=content,
+                headers={"Content-Type": media_type},
+            )
+            if response.is_error:
+                raise ArtifactAccessError("Skill package object upload failed")
         return await self._contract.call(
             "/internal/v1/artifacts/uploads/finalize",
             ArtifactFinalizeRequest(
@@ -193,12 +209,12 @@ class RemoteSkillPackageUploadClient:
                     correlation_id=correlation_id,
                     causation_id=request_id,
                 ),
-                artifact_id=artifact_id,
-                version=version,
-                upload_id=upload_id,
-                size=size,
+                artifact_id=upload.artifact_id,
+                version=upload.version,
+                upload_id=upload.upload_id,
+                size=len(content),
                 checksum=checksum,
-                parts=parts,
+                parts=completed_parts,
             ),
             ArtifactFinalizeResponse,
         )

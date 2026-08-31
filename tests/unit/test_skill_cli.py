@@ -257,27 +257,11 @@ def test_cli_publish_uses_staged_upload_then_artifact_publication() -> None:
             if request.method == "POST" and request.url.path.endswith(
                 "/skill-package-uploads"
             ):
+                assert request.read() == archive
+                assert request.headers["X-Content-SHA256"] == checksum
+                assert request.headers["X-Upload-Name"].endswith(".skill.json")
                 return httpx.Response(
                     201,
-                    json={
-                        "api_version": "2026-07-28",
-                        "artifact_id": "art_cli",
-                        "version": 1,
-                        "upload_id": "upl_cli",
-                        "upload_url": "https://objects.test/staged",
-                        "expires_at": "2026-08-29T00:00:00Z",
-                        "upload_mode": "single",
-                        "part_urls": [],
-                    },
-                )
-            if request.method == "PUT":
-                assert request.read() == archive
-                return httpx.Response(200)
-            if request.method == "POST" and request.url.path.endswith(
-                "/art_cli:finalize"
-            ):
-                return httpx.Response(
-                    200,
                     json={
                         "api_version": "2026-07-28",
                         "artifact_ref": {
@@ -328,8 +312,6 @@ def test_cli_publish_uses_staged_upload_then_artifact_publication() -> None:
         assert result["status"] == "active"
         assert seen == [
             "POST /v1/admin/skill-package-uploads",
-            "PUT /staged",
-            "POST /v1/admin/skill-package-uploads/art_cli:finalize",
             "POST /v1/admin/skill-publications",
         ]
 

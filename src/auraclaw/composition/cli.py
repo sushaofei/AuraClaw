@@ -378,61 +378,22 @@ async def _publish_skill_archive(
         token=token,
         command_id=command_id,
     )
-    create = await client.post(
+    staged = await client.post(
         "/v1/admin/skill-package-uploads",
         headers={
             **headers,
             "Idempotency-Key": _skill_subcommand_id(command_id, "upload"),
-        },
-        json={
-            "name": (
+            "Content-Type": "application/vnd.auraclaw.skill-package+json",
+            "X-Upload-Name": (
                 f"{package.manifest.publisher}.{package.manifest.name}-"
                 f"{package.manifest.version}.skill.json"
             ),
-            "expected_size": len(archive),
-            "expected_checksum": checksum,
+            "X-Content-SHA256": checksum,
         },
+        content=archive,
     )
-    _require_cli_success(create, "create staged upload")
-    upload = create.json()
-    parts: list[dict[str, object]] = []
-    if upload.get("upload_mode") == "multipart":
-        part_size = int(upload["part_size"])
-        for number, url in enumerate(upload.get("part_urls", ()), start=1):
-            offset = (number - 1) * part_size
-            response = await client.put(
-                str(url),
-                content=archive[offset : offset + part_size],
-                headers={"Content-Type": "application/vnd.auraclaw.skill-package+json"},
-            )
-            _require_cli_success(response, f"upload part {number}")
-            etag = response.headers.get("ETag")
-            if not etag:
-                raise SystemExit(f"upload part {number} did not return ETag")
-            parts.append({"part_number": number, "etag": etag})
-    else:
-        response = await client.put(
-            str(upload["upload_url"]),
-            content=archive,
-            headers={"Content-Type": "application/vnd.auraclaw.skill-package+json"},
-        )
-        _require_cli_success(response, "upload Skill package")
-    finalized = await client.post(
-        f"/v1/admin/skill-package-uploads/{upload['artifact_id']}:finalize",
-        headers={
-            **headers,
-            "Idempotency-Key": _skill_subcommand_id(command_id, "finalize"),
-        },
-        json={
-            "upload_id": upload["upload_id"],
-            "version": upload["version"],
-            "size": len(archive),
-            "checksum": checksum,
-            "parts": parts,
-        },
-    )
-    _require_cli_success(finalized, "finalize staged upload")
-    artifact_ref = finalized.json()["artifact_ref"]
+    _require_cli_success(staged, "proxy staged upload")
+    artifact_ref = staged.json()["artifact_ref"]
     published = await client.post(
         "/v1/admin/skill-publications",
         headers={**headers, "X-Expected-Revision": str(expected_revision)},

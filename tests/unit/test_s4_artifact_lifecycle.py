@@ -1,3 +1,4 @@
+import hashlib
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
@@ -477,26 +478,17 @@ async def test_task_api_staged_upload_client_uses_restricted_artifact_contract()
         "http://artifact.test",
         bearer_token="task-token",
         transport=httpx.ASGITransport(app=app),
+        object_transport=httpx.MockTransport(lambda _: httpx.Response(200)),
     )
     try:
-        upload = await client.create(
+        content = b"0123456789"
+        finalized = await client.stage(
             tenant_id="tenant-s4",
             name="package.skill.json",
-            expected_size=10,
-            expected_checksum="a" * 64,
+            content=content,
+            checksum=hashlib.sha256(content).hexdigest(),
             correlation_id="skill-upload-s4",
-            command_id="skill-upload-s4:create",
-        )
-        finalized = await client.finalize(
-            tenant_id="tenant-s4",
-            artifact_id=upload.artifact_id,
-            version=upload.version,
-            upload_id=upload.upload_id,
-            size=10,
-            checksum="a" * 64,
-            parts=(),
-            correlation_id="skill-upload-s4",
-            command_id="skill-upload-s4:finalize",
+            command_id="skill-upload-s4",
         )
         assert finalized.status == "ready"
         assert finalized.artifact_ref["media_type"] == (

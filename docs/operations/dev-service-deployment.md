@@ -41,7 +41,10 @@
 ```dotenv
 AURACLAW_IMAGE=auraclaw:dev
 KAFKA_HOST=10.244.16.132
-SEAWEEDFS_HOST=10.244.16.132
+AURACLAW_ARTIFACT_BACKEND=obs
+OBS_ENDPOINT=obsv3.example.com
+OBS_BUCKET=auraclaw-artifacts
+OBS_REGION=replace-with-obs-region
 # 其余 DSN / token / 模型 key 用服务器现网值（cp .env.test.example .env.test）
 ```
 
