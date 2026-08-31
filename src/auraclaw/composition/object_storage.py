@@ -21,6 +21,16 @@ class ObjectStorageBundle:
 
 def build_object_storage(settings: Settings) -> ObjectStorageBundle:
     backend = settings.resolved_artifact_backend
+    if settings.deployment_profile == "production":
+        if backend == "local":
+            raise ValueError("artifact-service production requires persistent object storage")
+        if backend == "obs" and (settings.obs_ak is None or settings.obs_sk is None):
+            raise ValueError("artifact-service production OBS credentials are missing")
+        if backend == "seaweedfs" and (
+            settings.seaweedfs_access_key is None
+            or settings.seaweedfs_secret_key is None
+        ):
+            raise ValueError("artifact-service production SeaweedFS credentials are missing")
 
     if backend == "obs":
         access_key = (

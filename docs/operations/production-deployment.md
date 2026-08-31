@@ -37,6 +37,11 @@ docker network inspect auraclaw-platform >/dev/null 2>&1 ||
 及 OBS 配置。Agent Runtime 没有数据库、模型、Vault 或 OBS Secret；chaintower
 身份密钥只挂到 Task API。只有对应 owner service 获得这些凭据。
 
+Credential Proxy 的 production 入口要求外部 Vault 地址和 token，禁止 debug secret JSON。Artifact
+Service 要求明确的 SeaweedFS/OBS backend 与对应 access/secret key；`local` 或 `auto` 回退到 local
+会在启动时失败。服务启动完成前会持久 seed 受管 Connector reference；若已有定义冲突则停止启动，
+若引用已撤销则保持撤销，需显式管理员恢复而不是靠重启。
+
 ## 3. 预检与迁移
 
 ```bash
