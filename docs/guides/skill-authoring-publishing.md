@@ -1,5 +1,29 @@
 # Skill 生成、发布与维护手册
 
+## 从 0 到发布的完整流程
+
+首次准备 Publisher：
+
+`确认租户与发布主体 → 生成 Ed25519 密钥对 → 注册 Publisher → 将公钥登记为 active key → 妥善保管私钥`
+
+首次生成并发布 Skill：
+
+`创建 Skill 目录 → 编写 manifest.json → 编写 SKILL.md → 添加 tests/*.json → 使用 Publisher 私钥签名 → 使用对应公钥执行 validate → 执行声明式 test → CLI 将 canonical archive 上传到 AuraClaw → AuraClaw 代理写入 OBS 并完成 Artifact finalize → 使用 artifact_ref 创建 Publication → AuraClaw 执行 digest、签名、Publisher、Source 和内容安全准入 → 创建或更新 Installation → 检查 Catalog、Publication、Installation 和 Admission 审计 → 发布完成`
+
+后续版本维护：
+
+`修改 Skill → 按 SemVer 提升版本 → 更新测试 → 重新签名 → validate → test → 通过 AuraClaw 代理上传 → 创建新版本 Publication → 验证准入与安装状态`
+
+安全或下线维护：
+
+`普通停止新任务使用 → disable Installation → 需要卸载时进入 draining → 全部引用结束后 uninstalled`
+
+`来源退役或版本在连续完整快照中缺失 → Publication 进入 retired → 来源恢复后由管理员显式 restore`
+
+`发现密钥或内容安全事件 → suspend Publisher 或 revoke key/Publication/Publisher → 选择 pause 或 cancel 运行时动作 → 检查审计与受影响 binding`
+
+其中，Publisher 只把公钥登记到 AuraClaw；私钥不上传。AuraX、CLI 和其他客户端只连接 AuraClaw，不直接连接 OBS。
+
 本文面向 Skill 作者、Publisher 管理员和发布运维人员，说明如何创建一个 AuraClaw Skill，完成本地校验、签名、发布、升级、下线与安全维护。
 
 AuraX、CLI 和其他管理端只与 AuraClaw 通信。客户端不会直连 OBS，也不需要保存 OBS endpoint、AK/SK、上传 ID、分片 ETag 或预签名 URL；AuraClaw 负责对象存储上传、完整性校验和 Artifact 绑定。
