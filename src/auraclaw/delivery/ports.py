@@ -1,4 +1,5 @@
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Protocol
 
@@ -9,6 +10,23 @@ from auraclaw.contracts.delivery import (
     SinkResponse,
 )
 from auraclaw.contracts.events import CanonicalEvent
+
+
+@dataclass(frozen=True)
+class SinkCircuitPermit:
+    allowed: bool
+    state: str
+    generation: int
+    probe_token: str | None = None
+
+
+@dataclass(frozen=True)
+class SinkCircuitSnapshot:
+    state: str
+    failure_count: int
+    generation: int
+    open_until: datetime | None = None
+    probe_owner: str | None = None
 
 
 class DeliveryOutboxItem(Protocol):
@@ -62,6 +80,32 @@ class DeliveryStore(Protocol):
         worker_id: str,
         claim_ttl: timedelta,
     ) -> DeliveryJob | None: ...
+
+    async def acquire_sink_circuit(
+        self,
+        tenant_id: str,
+        sink_id: str,
+        *,
+        worker_id: str,
+        failure_threshold: int,
+        reset_after: timedelta,
+        probe_ttl: timedelta,
+    ) -> SinkCircuitPermit: ...
+
+    async def record_sink_circuit_result(
+        self,
+        tenant_id: str,
+        sink_id: str,
+        response: SinkResponse,
+        *,
+        failure_threshold: int,
+        reset_after: timedelta,
+        probe_token: str | None,
+    ) -> SinkCircuitSnapshot: ...
+
+    async def get_sink_circuit(
+        self, tenant_id: str, sink_id: str
+    ) -> SinkCircuitSnapshot | None: ...
 
 
 class DeliverySecretResolver(Protocol):

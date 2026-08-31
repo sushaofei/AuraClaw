@@ -471,6 +471,88 @@ def test_delivery_worker_recovers_retries_and_deduplicates_business_delivery() -
     asyncio.run(scenario())
 
 
+def test_delivery_sink_circuit_is_shared_and_allows_one_half_open_probe() -> None:
+    async def scenario() -> None:
+        store = InMemoryDeliveryJobStore()
+        sink = ResultSinkConfig(
+            sink_id="shared-circuit",
+            tenant_id="tenant-circuit",
+            session_id="session-circuit",
+            sink_type="recording",
+            target_ref="managed://shared-circuit",
+        )
+        await store.register_sink(sink)
+        failed = SinkResponse(False, True, "HTTP 503")
+        permit = await store.acquire_sink_circuit(
+            sink.tenant_id,
+            sink.sink_id,
+            worker_id="worker-a",
+            failure_threshold=2,
+            reset_after=timedelta(0),
+            probe_ttl=timedelta(seconds=10),
+        )
+        assert permit.allowed
+        await store.record_sink_circuit_result(
+            sink.tenant_id,
+            sink.sink_id,
+            failed,
+            failure_threshold=2,
+            reset_after=timedelta(0),
+            probe_token=permit.probe_token,
+        )
+        permit = await store.acquire_sink_circuit(
+            sink.tenant_id,
+            sink.sink_id,
+            worker_id="worker-b",
+            failure_threshold=2,
+            reset_after=timedelta(0),
+            probe_ttl=timedelta(seconds=10),
+        )
+        assert permit.allowed
+        opened = await store.record_sink_circuit_result(
+            sink.tenant_id,
+            sink.sink_id,
+            failed,
+            failure_threshold=2,
+            reset_after=timedelta(0),
+            probe_token=permit.probe_token,
+        )
+        assert opened.state == "open" and opened.failure_count == 2
+
+        permits = await asyncio.gather(
+            *(
+                store.acquire_sink_circuit(
+                    sink.tenant_id,
+                    sink.sink_id,
+                    worker_id=worker_id,
+                    failure_threshold=2,
+                    reset_after=timedelta(0),
+                    probe_ttl=timedelta(seconds=10),
+                )
+                for worker_id in ("worker-a", "worker-b")
+            )
+        )
+        probes = [item for item in permits if item.allowed]
+        assert len(probes) == 1
+        assert probes[0].state == "half_open" and probes[0].probe_token
+        assert (await store.get_sink_circuit(sink.tenant_id, sink.sink_id)).probe_owner in {
+            "worker-a",
+            "worker-b",
+        }
+
+        closed = await store.record_sink_circuit_result(
+            sink.tenant_id,
+            sink.sink_id,
+            SinkResponse(True, summary="HTTP 204"),
+            failure_threshold=2,
+            reset_after=timedelta(0),
+            probe_token=probes[0].probe_token,
+        )
+        assert closed.state == "closed" and closed.failure_count == 0
+
+    asyncio.run(scenario())
+
+
 def test_webhook_uses_stable_idempotency_and_hmac_signature() -> None:
     async def scenario() -> None:
         captured: dict[str, str] = {}

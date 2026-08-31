@@ -95,6 +95,18 @@ Webhook Payload 至少包含 `delivery_id`、`event_id`、`session_id`、事件�
 - Sink ACK/NACK 和响应摘要进入 Attempt History。
 - Manual Redelivery 创建新的 attempt，不修改历史证据。
 
+## 跨副本熔断
+
+熔断范围是 `(tenant_id, sink_id)`，属于 Delivery Job Store 的共享业务状态，不属于某个
+Worker 进程。连续可重试失败、`open_until`、generation、半开探针 owner/token/TTL 均持久化；
+所有副本先原子申请调用许可，再访问 Sink。熔断打开后其他副本停止外呼，到期时仅一个副本取得
+half-open 探针；探针 owner 失联后可按 TTL 接管。服务重启不得清空失败阈值或提前关闭熔断。
+
+熔断只限制外部调用，不代替 Delivery Job 状态机。被熔断阻止的 Job 仍记录可重试 attempt，继续遵守
+原 delivery ID、退避、最大次数与 DLQ 规则。阈值、打开时长和探针 TTL 分别由
+`AURACLAW_DELIVERY_CIRCUIT_FAILURE_THRESHOLD`、`AURACLAW_DELIVERY_CIRCUIT_RESET_SECONDS`、
+`AURACLAW_DELIVERY_CIRCUIT_PROBE_TTL_SECONDS` 配置。Admin `status` 传 tenant/sink 可查询当前状态。
+
 ## 与 Outbox 的边界
 
 Session Outbox 保证“需要投递”不会丢；Delivery Job Store 保证“投递过程”可恢复。Result Delivery 自身不能扫描 Session 状态推测哪些任务应该投递。

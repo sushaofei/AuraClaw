@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from uuid import uuid4
 
@@ -13,7 +13,19 @@ from auraclaw.contracts.delivery import (
     SinkResponse,
 )
 from auraclaw.contracts.events import CanonicalEvent, utc_now
+from auraclaw.delivery.ports import SinkCircuitPermit, SinkCircuitSnapshot
 from auraclaw.infrastructure.delivery.common import build_delivery_job
+
+
+@dataclass
+class _MemoryCircuit:
+    state: str = "closed"
+    failure_count: int = 0
+    open_until: datetime | None = None
+    generation: int = 0
+    probe_owner: str | None = None
+    probe_token: str | None = None
+    probe_expires_at: datetime | None = None
 
 
 class InMemoryDeliveryJobStore:
@@ -21,6 +33,7 @@ class InMemoryDeliveryJobStore:
         self._sinks: dict[tuple[str, str], ResultSinkConfig] = {}
         self._jobs: dict[str, DeliveryJob] = {}
         self._attempts: list[DeliveryAttempt] = []
+        self._circuits: dict[tuple[str, str], _MemoryCircuit] = {}
         self._lock = asyncio.Lock()
 
     async def register_sink(self, sink: ResultSinkConfig) -> None:
@@ -196,3 +209,94 @@ class InMemoryDeliveryJobStore:
             )
             self._jobs[delivery_id] = updated
             return updated
+
+    async def acquire_sink_circuit(
+        self,
+        tenant_id: str,
+        sink_id: str,
+        *,
+        worker_id: str,
+        failure_threshold: int,
+        reset_after: timedelta,
+        probe_ttl: timedelta,
+    ) -> SinkCircuitPermit:
+        del failure_threshold, reset_after
+        now = utc_now()
+        async with self._lock:
+            circuit = self._circuits.setdefault((tenant_id, sink_id), _MemoryCircuit())
+            if circuit.state == "closed":
+                return SinkCircuitPermit(True, "closed", circuit.generation)
+            if circuit.state == "open" and (
+                circuit.open_until is None or circuit.open_until > now
+            ):
+                return SinkCircuitPermit(False, "open", circuit.generation)
+            if circuit.state == "half_open" and (
+                circuit.probe_expires_at is None or circuit.probe_expires_at > now
+            ):
+                return SinkCircuitPermit(False, "half_open", circuit.generation)
+            token = uuid4().hex
+            circuit.state = "half_open"
+            circuit.generation += 1
+            circuit.probe_owner = worker_id
+            circuit.probe_token = token
+            circuit.probe_expires_at = now + probe_ttl
+            return SinkCircuitPermit(
+                True, "half_open", circuit.generation, probe_token=token
+            )
+
+    async def record_sink_circuit_result(
+        self,
+        tenant_id: str,
+        sink_id: str,
+        response: SinkResponse,
+        *,
+        failure_threshold: int,
+        reset_after: timedelta,
+        probe_token: str | None,
+    ) -> SinkCircuitSnapshot:
+        now = utc_now()
+        async with self._lock:
+            circuit = self._circuits.setdefault((tenant_id, sink_id), _MemoryCircuit())
+            if circuit.state == "half_open" and circuit.probe_token != probe_token:
+                return self._circuit_snapshot(circuit)
+            if response.succeeded:
+                changed = circuit.state != "closed" or circuit.failure_count != 0
+                circuit.state = "closed"
+                circuit.failure_count = 0
+                circuit.open_until = None
+                circuit.probe_owner = None
+                circuit.probe_token = None
+                circuit.probe_expires_at = None
+                circuit.generation += int(changed)
+            elif response.retryable:
+                circuit.failure_count += 1
+                if (
+                    circuit.state == "half_open"
+                    or circuit.failure_count >= failure_threshold
+                ):
+                    circuit.state = "open"
+                    circuit.failure_count = max(
+                        circuit.failure_count, failure_threshold
+                    )
+                    circuit.open_until = now + reset_after
+                    circuit.probe_owner = None
+                    circuit.probe_token = None
+                    circuit.probe_expires_at = None
+                    circuit.generation += 1
+            return self._circuit_snapshot(circuit)
+
+    async def get_sink_circuit(
+        self, tenant_id: str, sink_id: str
+    ) -> SinkCircuitSnapshot | None:
+        circuit = self._circuits.get((tenant_id, sink_id))
+        return None if circuit is None else self._circuit_snapshot(circuit)
+
+    @staticmethod
+    def _circuit_snapshot(circuit: _MemoryCircuit) -> SinkCircuitSnapshot:
+        return SinkCircuitSnapshot(
+            state=circuit.state,
+            failure_count=circuit.failure_count,
+            generation=circuit.generation,
+            open_until=circuit.open_until,
+            probe_owner=circuit.probe_owner,
+        )

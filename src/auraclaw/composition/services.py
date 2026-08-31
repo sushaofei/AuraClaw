@@ -2084,6 +2084,9 @@ def _delivery_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
             ParentSessionResultSink(session, NoOpOutboxRelay()),
             CredentialProxyWebhookSink(policy, credentials),
         ),
+        circuit_failure_threshold=settings.delivery_circuit_failure_threshold,
+        circuit_reset_after=timedelta(seconds=settings.delivery_circuit_reset_seconds),
+        circuit_probe_ttl=timedelta(seconds=settings.delivery_circuit_probe_ttl_seconds),
     )
     closeables: tuple[Any, ...] = (session, policy, credentials)
     if settings.sql_storage_enabled:
@@ -2101,8 +2104,27 @@ def _delivery_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
     async def delivery_status(parameters: dict[str, Any]) -> dict[str, Any]:
         tenant_id = str(parameters.get("tenant_id", ""))
         session_id = str(parameters.get("session_id", ""))
+        sink_id = str(parameters.get("sink_id", ""))
         jobs = await store.list_jobs(tenant_id, session_id) if tenant_id and session_id else []
-        return {"jobs": len(jobs)}
+        circuit = (
+            await store.get_sink_circuit(tenant_id, sink_id)
+            if tenant_id and sink_id
+            else None
+        )
+        return {
+            "jobs": len(jobs),
+            "circuit": None
+            if circuit is None
+            else {
+                "state": circuit.state,
+                "failure_count": circuit.failure_count,
+                "generation": circuit.generation,
+                "open_until": circuit.open_until.isoformat()
+                if circuit.open_until is not None
+                else None,
+                "probe_owner": circuit.probe_owner,
+            },
+        }
 
     async def delivery_redrive(parameters: dict[str, Any]) -> dict[str, Any]:
         changed = await worker.redeliver(

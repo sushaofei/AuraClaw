@@ -68,7 +68,12 @@ class ResultDeliveryWorker:
         circuit_breaker: CircuitBreaker | None = None,
         worker_id: str | None = None,
         claim_ttl: timedelta = timedelta(seconds=30),
+        circuit_failure_threshold: int = 3,
+        circuit_reset_after: timedelta = timedelta(seconds=30),
+        circuit_probe_ttl: timedelta = timedelta(seconds=10),
     ) -> None:
+        if circuit_failure_threshold < 1:
+            raise ValueError("circuit_failure_threshold must be positive")
         self._outbox = outbox
         self._event_store = event_store
         self._relay = relay
@@ -76,9 +81,12 @@ class ResultDeliveryWorker:
         self._adapters = {adapter.sink_type: adapter for adapter in adapters}
         self._max_attempts = max_attempts
         self._base_retry_delay = base_retry_delay
-        self._circuit = circuit_breaker or CircuitBreaker()
+        self._local_circuit = circuit_breaker
         self._worker_id = worker_id or f"delivery-{uuid4().hex}"
         self._claim_ttl = claim_ttl
+        self._circuit_failure_threshold = circuit_failure_threshold
+        self._circuit_reset_after = circuit_reset_after
+        self._circuit_probe_ttl = circuit_probe_ttl
 
     async def ingest_once(self, *, limit: int = 100) -> int:
         ingested = 0
@@ -126,17 +134,44 @@ class ResultDeliveryWorker:
         config = await self._store.get_sink(job.tenant_id, job.sink_id)
         adapter = self._adapters.get(job.sink_type)
         now = datetime.now(UTC)
+        probe_token: str | None = None
+        attempted_sink = False
         if config is None or adapter is None:
             response = SinkResponse(False, False, "delivery adapter or sink config not found")
-        elif not self._circuit.allow(job.sink_id, now):
-            response = SinkResponse(False, True, "sink circuit is open")
         else:
-            await self._write_status(job, DeliveryStatus.ATTEMPTING, "attempting")
-            try:
-                response = await adapter.deliver(job, config)
-            except Exception as exc:
-                response = SinkResponse(False, True, type(exc).__name__)
-        self._circuit.record(job.sink_id, response, now)
+            if self._local_circuit is not None:
+                allowed = self._local_circuit.allow(job.sink_id, now)
+            else:
+                permit = await self._store.acquire_sink_circuit(
+                    job.tenant_id,
+                    job.sink_id,
+                    worker_id=self._worker_id,
+                    failure_threshold=self._circuit_failure_threshold,
+                    reset_after=self._circuit_reset_after,
+                    probe_ttl=self._circuit_probe_ttl,
+                )
+                allowed = permit.allowed
+                probe_token = permit.probe_token
+            if not allowed:
+                response = SinkResponse(False, True, "sink circuit is open")
+            else:
+                attempted_sink = True
+                await self._write_status(job, DeliveryStatus.ATTEMPTING, "attempting")
+                try:
+                    response = await adapter.deliver(job, config)
+                except Exception as exc:
+                    response = SinkResponse(False, True, type(exc).__name__)
+        if self._local_circuit is not None:
+            self._local_circuit.record(job.sink_id, response, now)
+        elif attempted_sink:
+            await self._store.record_sink_circuit_result(
+                job.tenant_id,
+                job.sink_id,
+                response,
+                failure_threshold=self._circuit_failure_threshold,
+                reset_after=self._circuit_reset_after,
+                probe_token=probe_token,
+            )
         delay = self._base_retry_delay * (2 ** max(0, job.attempt_count - 1))
         updated = await self._store.record_attempt(
             job,
