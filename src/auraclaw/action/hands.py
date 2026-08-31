@@ -10,6 +10,7 @@ from auraclaw.action.ports import ResourceReader
 from auraclaw.action.tool_gateway import ToolGateway, ToolRegistry
 from auraclaw.contracts.hands import (
     HandsCancelResponse,
+    HandsInvocationStatusResponse,
     HandsPage,
     HandsPromptDescriptor,
     HandsPromptResult,
@@ -154,9 +155,30 @@ class HandsGateway:
         result = await self._gateway.execute(invocation)
         return _tool_result(result)
 
-    async def cancel_invocation(self, tool_invocation_id: str) -> HandsCancelResponse:
-        cancelled = await self._gateway.cancel(tool_invocation_id)
+    async def cancel_invocation(
+        self, trusted: HandsTrustedContext, tool_invocation_id: str
+    ) -> HandsCancelResponse:
+        cancelled = await self._gateway.cancel(
+            tool_invocation_id, tenant_id=trusted.tenant_id
+        )
         return HandsCancelResponse(cancelled=cancelled)
+
+    async def get_invocation_status(
+        self, trusted: HandsTrustedContext, tool_invocation_id: str
+    ) -> HandsInvocationStatusResponse:
+        status = await self._gateway.get_authoritative_status(
+            trusted.tenant_id, tool_invocation_id
+        )
+        if status is None:
+            return HandsInvocationStatusResponse(found=False)
+        state, side_effect, error_code, cancel_requested = status
+        return HandsInvocationStatusResponse(
+            found=True,
+            status=state,
+            side_effect_status=side_effect,
+            error_code=error_code,
+            cancel_requested=cancel_requested,
+        )
 
 
 def _tool_result(result: ToolResult) -> HandsToolResult:

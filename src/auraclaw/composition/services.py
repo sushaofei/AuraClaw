@@ -1600,6 +1600,7 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         credential_proxy=credential_proxy,
         invocation_store=invocation_store,
         approval_controller=policy if isinstance(policy, RemotePolicyClient) else None,
+        instance_id=f"action-hands-{secrets.token_hex(8)}",
     )
     token = _agent_runtime_token(settings) or ""
     key = _lease_signing_key(settings)

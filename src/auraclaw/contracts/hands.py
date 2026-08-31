@@ -21,6 +21,7 @@ HANDS_RESOURCES_READ = "/internal/v1/hands/resources/read"
 HANDS_PROMPTS_LIST = "/internal/v1/hands/prompts/list"
 HANDS_PROMPTS_GET = "/internal/v1/hands/prompts/get"
 HANDS_INVOCATIONS_CANCEL = "/internal/v1/hands/invocations/cancel"
+HANDS_INVOCATIONS_STATUS = "/internal/v1/hands/invocations/status"
 
 
 class HandsTrustedContext(ContractModel):
@@ -191,6 +192,14 @@ class HandsCancelRequest(ContractModel):
 
 class HandsCancelResponse(ContractModel):
     cancelled: bool
+
+
+class HandsInvocationStatusResponse(ContractModel):
+    found: bool
+    status: str | None = None
+    side_effect_status: str | None = None
+    error_code: str | None = None
+    cancel_requested: bool = False
 
 
 class HandsReadResourceResponse(ContractModel):

@@ -39,10 +39,13 @@ registration lease 内仍活跃时，新进程注册会 fail closed。因此显�
   claim 均可恢复，DLQ 与人工 redelivery 使用稳定 delivery ID。
 - Streaming 的 sequence、Replay Event 与 Connection Registry 位于 PostgreSQL；实例切换不依赖
   进程内 cursor。Hands、Model、Policy、Credential 与 Artifact 同样使用共享状态和原子 claim。
+- Hands 以 Invocation execution claim 约束每个副作用 owner，并持续 heartbeat。Cancel 落到非 owner
+  副本时写共享请求，由 owner 在轮询窗口内停止；`executing` claim 过期不得自动重放，而是进入
+  `invocation_recovery_required`。waiting approval 的 payload 持久化并在重启后复用。
 
 ## 生产配置门禁
 
-1. 依次应用 PostgreSQL/KingBase `0010`～`0043` expand migration。`0040`
+1. 依次应用 PostgreSQL/KingBase `0010`～`0044` expand migration。`0040`
    `0022` 增加 registration 与 execution claim 字段和索引；先迁移 Control 数据库，再滚动升级
    Orchestrator，最后升级 Agent Runtime。可选执行 `deploy/postgres/roles.sql` 做硬化，
    当前部署不按服务注入分角色 DSN。
@@ -52,6 +55,8 @@ registration lease 内仍活跃时，新进程注册会 fail closed。因此显�
    不允许新版本在生产环境回退到内存 ledger。
    `0043` 扩展 Projection、Delivery、Artifact Admin Operation claim；迁移后先滚动 owner 服务，
    再恢复 Task API/CLI 运维流量。
+   `0044` 扩展 Hands Invocation execution claim、heartbeat 与 cancellation；先迁移数据库，再滚动
+   Action Hands。升级期间不得同时运行会绕过 claim 的旧 Hands 副本。
 2. 各服务共享统一 `AURACLAW_DATABASE_URL`（Compose `database_url` secret）；migration 使用
    独立的 `AURACLAW_MIGRATION_DATABASE_URL`。
 3. 所有 Control、Session 与 Hands 副本必须使用相同的 `AURACLAW_LEASE_SIGNING_KEY`，并通过平台
@@ -84,3 +89,6 @@ hostname）或注入唯一实例 UID。停止全部旧 Runtime，等待 30 秒�
 
 回滚 `0043` 前停止新的 Owner Admin 请求并等待所有 `running` claim 完成。存在未完成 claim 或
 `unknown_side_effect` 时禁止删除 claim/audit 字段；先完成人工核对并记录恢复结果。
+
+回滚 `0044` 前停止 Hands 新调用并排空所有 `accepted|executing|waiting_approval` Invocation；逐项核对
+`unknown` 和已请求取消的外部副作用。存在活跃 execution claim 时禁止删除 owner/heartbeat/cancel 字段。

@@ -102,6 +102,23 @@ Tool Gateway 是 MCP Capability Gateway 的行动子集。Resource 读取、Skil
 - 外部副作用未知时返回 `unknown`，由 Agent/Human 决定补偿或查询。
 - Orchestrator 只恢复 Runtime，不盲目重放 Tool Call。
 
+## 持久执行归属
+
+- 生产环境以 `hands.invocation` 的 `(tenant_id, idempotency_key)` 原子 claim 为执行权威；
+  进程内 task、status、cache 和 keyed lock 只用于本副本加速。
+- claim 保存 owner、不可猜测 token、heartbeat 与 expiry。只有未过期 claim owner 能进入
+  `executing` 或提交结果；其他副本返回 `invocation_in_progress` 或已持久结果。
+- `accepted` 在副作用开始前过期可以安全重领；`executing` 过期一律转为 `unknown` 与人工恢复，
+  不自动重放外部副作用。
+- 审批请求的标准化结果以 `waiting_approval` 持久保存。无 approval 的重试复用原请求；携带有效
+  approval 的重试才能重新 claim 并继续。
+- 取消先按 tenant 写入共享 `cancel_requested_at`。实际 owner 轮询该状态并取消本地执行；等待审批
+  可直接转为 `cancelled`。不可中断的外部调用保持 `side_effect_status=unknown`。
+- Invocation 状态查询读取持久 Store；连接断开、HTTP 超时或 Runtime/Hands 重启均不等于取消。
+
+本地并发协调按 `(tenant_id, idempotency_key)` 分片，并在调用结束后删除锁项。不同 key 的 Policy、
+Approval、MCP 和 Tool I/O 不共享副本级临界区；跨副本幂等仍只由 PostgreSQL claim 保证。
+
 ## 审批绑定
 
 执行高风险动作前校验：

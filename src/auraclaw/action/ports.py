@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Protocol
 
 from auraclaw.contracts.capabilities import CapabilityDescriptor, McpServerDefinition
@@ -51,20 +51,61 @@ class PolicyEvaluator(Protocol):
 
 @dataclass(frozen=True)
 class InvocationBegin:
+    acquired: bool = False
     conflict: bool = False
+    claim_token: str | None = None
     cached_result: Any | None = None
+
+
+@dataclass(frozen=True)
+class InvocationStatusRecord:
+    status: str
+    side_effect_status: str
+    error_code: str | None = None
+    cancel_requested: bool = False
 
 
 class InvocationStore(Protocol):
     async def begin(
-        self, invocation: ToolInvocation, argument_digest: str
+        self,
+        invocation: ToolInvocation,
+        argument_digest: str,
+        *,
+        owner: str,
+        claim_token: str,
+        claim_ttl: timedelta,
     ) -> InvocationBegin: ...
 
-    async def set_status(
-        self, invocation: ToolInvocation, status: str, *, error_code: str | None = None
-    ) -> None: ...
+    async def mark_executing(
+        self, invocation: ToolInvocation, *, claim_token: str
+    ) -> bool: ...
 
-    async def complete(self, invocation: ToolInvocation, result: Any) -> None: ...
+    async def wait_for_approval(
+        self, invocation: ToolInvocation, result: Any, *, claim_token: str
+    ) -> bool: ...
+
+    async def renew(
+        self,
+        invocation: ToolInvocation,
+        *,
+        owner: str,
+        claim_token: str,
+        claim_ttl: timedelta,
+    ) -> bool: ...
+
+    async def request_cancel(self, tenant_id: str, tool_invocation_id: str) -> bool: ...
+
+    async def is_cancel_requested(
+        self, invocation: ToolInvocation, *, claim_token: str
+    ) -> bool: ...
+
+    async def get_status(
+        self, tenant_id: str, tool_invocation_id: str
+    ) -> InvocationStatusRecord | None: ...
+
+    async def complete(
+        self, invocation: ToolInvocation, result: Any, *, claim_token: str
+    ) -> bool: ...
 
 
 class ApprovalController(Protocol):

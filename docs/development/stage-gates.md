@@ -2396,3 +2396,25 @@ ready Skill Artifact 建立带 fencing 的物理回收流程；不把成功命�
 - [x] Ruff、Mypy、定向与完整 Pytest 通过。
 - [x] Git 暂存范围已审查，不包含 `.env`、Secret、缓存、`docs/tmp/` 或个人 VS Code 配置。
 - [x] 本子阶段作为 intentional commit 提交并 push；Issue #62 保持 open。
+
+## 阶段 Hands 持久执行归属与跨副本取消（Issue #62 / Hands 子阶段）
+
+状态：Hands 跨副本执行生命周期子阶段实现和门禁完成；Issue #62 的 MCP/Delivery 子阶段继续跟踪。
+
+### 持久状态与恢复
+
+- [x] `0044` 正反迁移增加 execution owner、claim token、heartbeat/expiry 和 cancellation request。
+- [x] `(tenant_id, idempotency_key)` 在副作用前原子 claim；只有未过期 owner 可 dispatch 和提交结果。
+- [x] `accepted` 过期可安全重领；`executing` 过期进入 unknown/manual recovery，不自动重放副作用。
+- [x] waiting approval 持久保存原 approval payload；重启和副本切换复用审批，批准后才重新 claim。
+- [x] Cancel 以认证 tenant 写共享状态，非 owner 副本可请求取消，owner 协作停止；重复请求幂等。
+- [x] Invocation status HTTP/In-process Contract 以 PostgreSQL Store 为生产权威来源。
+- [x] ToolGateway 副本级全局锁收窄为 tenant/idempotency keyed lock，不同调用可以并发。
+
+### 验证与交付
+
+- [x] PostgreSQL 集成测试覆盖双副本原子 claim、跨副本取消、持久状态查询、审批恢复与执行 owner 失联。
+- [x] 单元测试覆盖不同 idempotency key 并发、同 key 去重、取消和 Hands HTTP/In-process 状态查询。
+- [x] Ruff、Mypy、定向与完整 Pytest 通过。
+- [x] Git 暂存范围已审查，不包含 `.env`、Secret、缓存、`docs/tmp/` 或个人 VS Code 配置。
+- [x] 本子阶段作为 intentional commit 提交并 push；Issue #62 保持 open。

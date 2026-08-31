@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from auraclaw.action.hands import HandsGateway
 from auraclaw.contracts.hands import (
+    HandsInvocationStatusResponse,
     HandsPage,
     HandsPromptDescriptor,
     HandsPromptResult,
@@ -103,6 +104,16 @@ class InProcessHandsClient:
         assignment: RuntimeAssignment,
         tool_invocation_id: str,
     ) -> bool:
-        del assignment
-        result = await self._gateway.cancel_invocation(tool_invocation_id)
+        result = await self._gateway.cancel_invocation(
+            self._trusted(assignment), tool_invocation_id
+        )
         return result.cancelled
+
+    async def get_invocation_status(
+        self,
+        assignment: RuntimeAssignment,
+        tool_invocation_id: str,
+    ) -> HandsInvocationStatusResponse:
+        return await self._gateway.get_invocation_status(
+            self._trusted(assignment), tool_invocation_id
+        )

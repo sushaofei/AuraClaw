@@ -58,6 +58,7 @@ MIGRATION = "\n".join(
         "migrations/0009_s3_owner_boundaries.sql",
         "migrations/0013_s4_artifact_lifecycle.sql",
         "migrations/0043_admin_operation_claims.sql",
+        "migrations/0044_hands_invocation_claims.sql",
     )
 )
 pytestmark = pytest.mark.skipif(DATABASE_URL is None, reason="PostgreSQL test URL not configured")
@@ -97,16 +98,39 @@ def test_s3_owner_state_survives_process_local_clients() -> None:
                 fencing_token=1,
                 actor_id="runtime-s3",
             )
-            assert not (await invocation_store.begin(invocation, "digest-a")).conflict
+            started = await invocation_store.begin(
+                invocation,
+                "digest-a",
+                owner="hands-a",
+                claim_token="claim-a",
+                claim_ttl=timedelta(seconds=30),
+            )
+            assert started.acquired
             result = ToolResult(
                 status=ToolResultStatus.SUCCESS,
                 content={"accepted": True},
                 side_effect_status="completed",
             )
-            await invocation_store.complete(invocation, result)
-            cached = await invocation_store.begin(invocation, "digest-a")
+            assert await invocation_store.complete(
+                invocation, result, claim_token="claim-a"
+            )
+            cached = await invocation_store.begin(
+                invocation,
+                "digest-a",
+                owner="hands-b",
+                claim_token="claim-b",
+                claim_ttl=timedelta(seconds=30),
+            )
             assert cached.cached_result == result
-            assert (await invocation_store.begin(invocation, "digest-b")).conflict
+            assert (
+                await invocation_store.begin(
+                    invocation,
+                    "digest-b",
+                    owner="hands-b",
+                    claim_token="claim-b",
+                    claim_ttl=timedelta(seconds=30),
+                )
+            ).conflict
             interrupted = ToolInvocation(
                 **{
                     **invocation.__dict__,
@@ -114,8 +138,29 @@ def test_s3_owner_state_survives_process_local_clients() -> None:
                     "idempotency_key": f"interrupted-idem-{suffix}",
                 }
             )
-            await invocation_store.begin(interrupted, "digest-interrupted")
-            recovered = await invocation_store.begin(interrupted, "digest-interrupted")
+            await invocation_store.begin(
+                interrupted,
+                "digest-interrupted",
+                owner="hands-a",
+                claim_token="claim-interrupted",
+                claim_ttl=timedelta(seconds=30),
+            )
+            assert await invocation_store.mark_executing(
+                interrupted, claim_token="claim-interrupted"
+            )
+            await connection.execute(
+                """UPDATE hands.invocation SET execution_claim_expires_at=now()-interval '1 second'
+                WHERE tenant_id=$1 AND tool_invocation_id=$2""",
+                tenant_id,
+                interrupted.tool_invocation_id,
+            )
+            recovered = await invocation_store.begin(
+                interrupted,
+                "digest-interrupted",
+                owner="hands-b",
+                claim_token="claim-recovery",
+                claim_ttl=timedelta(seconds=30),
+            )
             assert recovered.cached_result.status is ToolResultStatus.UNKNOWN
 
             context = InternalRequestContext(

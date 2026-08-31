@@ -3,6 +3,9 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import secrets
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
@@ -165,6 +168,29 @@ class JsonSchemaValidator:
 
 
 
+class _KeyedLocks:
+    def __init__(self) -> None:
+        self._guard = asyncio.Lock()
+        self._entries: dict[tuple[str, str], tuple[asyncio.Lock, int]] = {}
+
+    @asynccontextmanager
+    async def hold(self, key: tuple[str, str]) -> AsyncIterator[None]:
+        async with self._guard:
+            lock, references = self._entries.get(key, (asyncio.Lock(), 0))
+            self._entries[key] = (lock, references + 1)
+        await lock.acquire()
+        try:
+            yield
+        finally:
+            lock.release()
+            async with self._guard:
+                current, references = self._entries[key]
+                if references == 1:
+                    self._entries.pop(key, None)
+                else:
+                    self._entries[key] = (current, references - 1)
+
+
 class ToolGateway:
     def __init__(
         self,
@@ -180,7 +206,14 @@ class ToolGateway:
         approval_controller: ApprovalController | None = None,
         max_inline_bytes: int = 64 * 1024,
         approval_ttl: timedelta = timedelta(hours=1),
+        instance_id: str | None = None,
+        execution_claim_ttl: timedelta = timedelta(seconds=30),
+        cancellation_poll_interval: float = 1.0,
     ) -> None:
+        if execution_claim_ttl <= timedelta(0):
+            raise ValueError("execution_claim_ttl must be positive")
+        if cancellation_poll_interval <= 0:
+            raise ValueError("cancellation_poll_interval must be positive")
         self._registry = registry
         self._policy = policy
         self._approvals = approvals
@@ -192,17 +225,23 @@ class ToolGateway:
         self._approval_controller = approval_controller
         self._max_inline_bytes = max_inline_bytes
         self._approval_ttl = approval_ttl
+        self._instance_id = instance_id or f"hands-{secrets.token_hex(8)}"
+        self._execution_claim_ttl = execution_claim_ttl
+        self._cancellation_poll_interval = cancellation_poll_interval
         self._results: dict[tuple[str, str], tuple[str, ToolResult]] = {}
         self._pending_approvals: dict[tuple[str, str, str], ApprovalRecord] = {}
-        self._inflight: dict[str, asyncio.Task[Any]] = {}
-        self._statuses: dict[str, str] = {}
-        self._lock = asyncio.Lock()
+        self._inflight: dict[tuple[str, str], asyncio.Task[Any]] = {}
+        self._claim_tokens: dict[tuple[str, str], str] = {}
+        self._claim_monitors: dict[tuple[str, str], asyncio.Task[None]] = {}
+        self._statuses: dict[tuple[str, str], str] = {}
+        self._locks = _KeyedLocks()
 
     async def execute(self, invocation: ToolInvocation) -> ToolResult:
         task = asyncio.current_task()
+        execution_key = (invocation.tenant_id, invocation.tool_invocation_id)
         if task is not None:
-            self._inflight[invocation.tool_invocation_id] = task
-        self._statuses[invocation.tool_invocation_id] = "accepted"
+            self._inflight[execution_key] = task
+        self._statuses[execution_key] = "accepted"
         try:
             result = await self._execute_once(invocation)
         except asyncio.CancelledError:
@@ -213,21 +252,72 @@ class ToolGateway:
                 side_effect_status="unknown",
             )
             if self._invocation_store is not None:
-                await self._invocation_store.complete(invocation, result)
+                claim_token = self._claim_tokens.get(execution_key)
+                if claim_token is not None:
+                    committed = await self._invocation_store.complete(
+                        invocation, result, claim_token=claim_token
+                    )
+                    if not committed:
+                        result = ToolResult(
+                            status=ToolResultStatus.UNKNOWN,
+                            summary="cancelled invocation could not commit its terminal state",
+                            error_code="invocation_completion_uncommitted",
+                            side_effect_status="unknown",
+                        )
         finally:
-            self._inflight.pop(invocation.tool_invocation_id, None)
-        self._statuses[invocation.tool_invocation_id] = result.status.value
+            monitor = self._claim_monitors.pop(execution_key, None)
+            if monitor is not None:
+                monitor.cancel()
+                await asyncio.gather(monitor, return_exceptions=True)
+            self._claim_tokens.pop(execution_key, None)
+            self._inflight.pop(execution_key, None)
+        self._statuses[execution_key] = result.status.value
         return result
 
-    async def cancel(self, tool_invocation_id: str) -> bool:
-        task = self._inflight.get(tool_invocation_id)
-        if task is None or task.done():
-            return False
-        task.cancel()
-        return True
+    async def cancel(
+        self, tool_invocation_id: str, *, tenant_id: str | None = None
+    ) -> bool:
+        persisted = False
+        if self._invocation_store is not None and tenant_id is not None:
+            persisted = await self._invocation_store.request_cancel(
+                tenant_id, tool_invocation_id
+            )
+        tasks = [
+            task
+            for (candidate_tenant, candidate_id), task in self._inflight.items()
+            if candidate_id == tool_invocation_id
+            and (tenant_id is None or candidate_tenant == tenant_id)
+            and not task.done()
+        ]
+        for task in tasks:
+            task.cancel()
+        return persisted or bool(tasks)
 
     def get_status(self, tool_invocation_id: str) -> str | None:
-        return self._statuses.get(tool_invocation_id)
+        matches = [
+            status
+            for (_tenant_id, candidate_id), status in self._statuses.items()
+            if candidate_id == tool_invocation_id
+        ]
+        return matches[0] if len(matches) == 1 else None
+
+    async def get_authoritative_status(
+        self, tenant_id: str, tool_invocation_id: str
+    ) -> tuple[str, str, str | None, bool] | None:
+        if self._invocation_store is not None:
+            status = await self._invocation_store.get_status(
+                tenant_id, tool_invocation_id
+            )
+            if status is None:
+                return None
+            return (
+                status.status,
+                status.side_effect_status,
+                status.error_code,
+                status.cancel_requested,
+            )
+        local = self._statuses.get((tenant_id, tool_invocation_id))
+        return None if local is None else (local, "unknown", None, False)
 
     async def _execute_once(self, invocation: ToolInvocation) -> ToolResult:
         capability = self._registry.get(invocation.tool_name, invocation.tool_version)
@@ -236,7 +326,7 @@ class ToolGateway:
             invocation.tool_name, invocation.tool_version, invocation.arguments
         )
         cache_key = (invocation.tenant_id, invocation.idempotency_key)
-        async with self._lock:
+        async with self._locks.hold(cache_key):
             previous = self._results.get(cache_key)
             if previous is not None:
                 previous_digest, previous_result = previous
@@ -249,7 +339,14 @@ class ToolGateway:
                 return previous_result
 
             if self._invocation_store is not None:
-                persisted = await self._invocation_store.begin(invocation, digest)
+                claim_token = secrets.token_urlsafe(24)
+                persisted = await self._invocation_store.begin(
+                    invocation,
+                    digest,
+                    owner=self._instance_id,
+                    claim_token=claim_token,
+                    claim_ttl=self._execution_claim_ttl,
+                )
                 if persisted.conflict:
                     return ToolResult(
                         status=ToolResultStatus.DENIED,
@@ -258,6 +355,18 @@ class ToolGateway:
                     )
                 if isinstance(persisted.cached_result, ToolResult):
                     return persisted.cached_result
+                if not persisted.acquired or persisted.claim_token is None:
+                    return ToolResult(
+                        status=ToolResultStatus.UNKNOWN,
+                        summary="tool invocation execution claim was not acquired",
+                        error_code="invocation_claim_failed",
+                        side_effect_status="not_started",
+                    )
+                execution_key = (invocation.tenant_id, invocation.tool_invocation_id)
+                self._claim_tokens[execution_key] = persisted.claim_token
+                self._claim_monitors[execution_key] = asyncio.create_task(
+                    self._monitor_claim(invocation, persisted.claim_token)
+                )
 
             evaluated = self._policy.evaluate(capability, invocation)
             evaluation = await evaluated if inspect.isawaitable(evaluated) else evaluated
@@ -275,9 +384,10 @@ class ToolGateway:
                     summary="tool policy denied execution",
                     error_code="policy_denied",
                 )
-                self._results[cache_key] = (digest, result)
                 if self._invocation_store is not None:
-                    await self._invocation_store.complete(invocation, result)
+                    if not await self._complete_claimed(invocation, result):
+                        return self._claim_lost_result("before policy result was committed")
+                self._results[cache_key] = (digest, result)
                 return result
             if decision is PolicyDecision.REQUIRE_APPROVAL and not (
                 capability.runtime_location == "remote-mcp"
@@ -322,18 +432,89 @@ class ToolGateway:
                         error_code="approval_required",
                     )
                     if self._invocation_store is not None:
-                        await self._invocation_store.set_status(
-                            invocation, "waiting_approval", error_code="approval_required"
+                        claim_token = self._claim_token(invocation)
+                        parked = await self._invocation_store.wait_for_approval(
+                            invocation, result, claim_token=claim_token
                         )
+                        if not parked:
+                            return self._claim_lost_result(
+                                "before approval state was committed"
+                            )
                     return result
 
+            if self._invocation_store is not None:
+                claim_token = self._claim_token(invocation)
+                if not await self._invocation_store.mark_executing(
+                    invocation, claim_token=claim_token
+                ):
+                    return self._claim_lost_result("before dispatch")
             result = await self._dispatch(
                 invocation, capability, policy_decision_id=decision_id
             )
-            self._results[cache_key] = (digest, result)
             if self._invocation_store is not None:
-                await self._invocation_store.complete(invocation, result)
+                if not await self._complete_claimed(invocation, result):
+                    return ToolResult(
+                        status=ToolResultStatus.UNKNOWN,
+                        summary="tool invocation completed after its execution claim was lost",
+                        error_code="invocation_completion_uncommitted",
+                        side_effect_status="unknown",
+                    )
+            self._results[cache_key] = (digest, result)
             return result
+
+    def _claim_token(self, invocation: ToolInvocation) -> str:
+        return self._claim_tokens[(invocation.tenant_id, invocation.tool_invocation_id)]
+
+    @staticmethod
+    def _claim_lost_result(phase: str) -> ToolResult:
+        return ToolResult(
+            status=ToolResultStatus.UNKNOWN,
+            summary=f"tool invocation claim expired {phase}",
+            error_code="invocation_claim_lost",
+            side_effect_status="not_started",
+        )
+
+    async def _complete_claimed(
+        self, invocation: ToolInvocation, result: ToolResult
+    ) -> bool:
+        assert self._invocation_store is not None
+        return await self._invocation_store.complete(
+            invocation, result, claim_token=self._claim_token(invocation)
+        )
+
+    async def _monitor_claim(
+        self, invocation: ToolInvocation, claim_token: str
+    ) -> None:
+        assert self._invocation_store is not None
+        parent = self._inflight.get((invocation.tenant_id, invocation.tool_invocation_id))
+        loop = asyncio.get_running_loop()
+        next_renewal = loop.time() + self._execution_claim_ttl.total_seconds() / 3
+        try:
+            while True:
+                await asyncio.sleep(self._cancellation_poll_interval)
+                if await self._invocation_store.is_cancel_requested(
+                    invocation, claim_token=claim_token
+                ):
+                    if parent is not None and not parent.done():
+                        parent.cancel()
+                    return
+                if loop.time() >= next_renewal:
+                    renewed = await self._invocation_store.renew(
+                        invocation,
+                        owner=self._instance_id,
+                        claim_token=claim_token,
+                        claim_ttl=self._execution_claim_ttl,
+                    )
+                    if not renewed:
+                        if parent is not None and not parent.done():
+                            parent.cancel()
+                        return
+                    next_renewal = (
+                        loop.time() + self._execution_claim_ttl.total_seconds() / 3
+                    )
+        except Exception:
+            if parent is not None and not parent.done():
+                parent.cancel()
 
     async def _resolve_approval(
         self,
