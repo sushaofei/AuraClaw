@@ -52,6 +52,11 @@ Runtime Context 包含：Sandbox Spec、网络策略、Tool Permission、Artifac
   `invocation_recovery_required`；操作员核对外部系统后再决定补偿。
 - waiting approval 释放 execution claim 但保留原 approval payload；批准后以同一幂等键重新 claim，
   避免副本切换或重启创建重复审批。
+- 同实例 single-flight 只按 `(tenant_id, idempotency_key)` 协调；不同 key 的 Policy、Approval、MCP、
+  Connector 与 Tool I/O 不共享执行锁。跨副本正确性仍由 PostgreSQL claim 保证。
+- 容量控制与幂等协调分离：调用先进入有限队列，再受全局与 per-tenant semaphore 双层限制。
+  per-tenant 上限必须小于等于全局上限，避免单一 tenant 占满副本；队列满或等待超时返回可重试的
+  `hands_capacity_exhausted`，且尚未创建持久 execution claim、没有外部副作用。
 
 ## 外部系统调用
 
@@ -84,6 +89,10 @@ Hands / Tool Adapter
 ```text
 sandbox_startup
 execution_latency
+tool.gateway.queue.depth
+tool.gateway.queue.latency.seconds
+tool.gateway.in_flight
+tool.gateway.backpressure.count
 resource_exhausted
 network_denied
 runtime_crash

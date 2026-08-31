@@ -23,6 +23,7 @@ from auraclaw.contracts.tools import (
     ApprovalRecord,
     ApprovalStatus,
     CredentialReference,
+    PolicyDecision,
     RiskLevel,
     ToolCapability,
     ToolInvocation,
@@ -90,10 +91,11 @@ def _invocation(
     key: str = "stable-key",
     approval_id: str | None = None,
     credential_ref: str | None = None,
+    tenant_id: str = "tenant-m3",
 ) -> ToolInvocation:
     return ToolInvocation(
         tool_invocation_id=f"tool-{key}",
-        tenant_id="tenant-m3",
+        tenant_id=tenant_id,
         root_session_id="session-m3",
         session_id="session-m3",
         run_id="run-m3",
@@ -173,6 +175,21 @@ def test_tool_gateway_surfaces_controlled_boundary_reason() -> None:
         assert result.summary == "chaintower MCP call is missing trusted user context"
 
     asyncio.run(scenario())
+
+
+def test_tool_gateway_rejects_invalid_tenant_capacity() -> None:
+    with pytest.raises(ValueError, match="tenant tool capacity"):
+        ToolGateway(
+            registry=ToolRegistry((_capability(ToolPermission.READ_ONLY),)),
+            policy=PolicyEngine(),
+            approvals=InMemoryApprovalProjection(),
+            hands=RecordingHands({"ok": True}),
+            artifacts=ArtifactStore(
+                InMemoryObjectStorage(), signing_key=b"invalid-capacity-key"
+            ),
+            max_concurrent=1,
+            max_concurrent_per_tenant=2,
+        )
 
 
 def test_schema_validation_happens_before_hands_execution() -> None:
@@ -595,6 +612,244 @@ def test_gateway_does_not_serialize_unrelated_invocations() -> None:
         release.set()
         results = await asyncio.gather(first, second)
         assert all(result.status.value == "success" for result in results)
+
+    asyncio.run(scenario())
+
+
+def test_slow_policy_does_not_block_another_tenant() -> None:
+    class SlowPolicy:
+        version = "slow-policy-v1"
+
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def evaluate(
+            self, capability: ToolCapability, invocation: ToolInvocation
+        ) -> PolicyDecision:
+            del capability
+            if invocation.tenant_id == "tenant-slow":
+                self.started.set()
+                await self.release.wait()
+            return PolicyDecision.ALLOW
+
+    async def scenario() -> None:
+        policy = SlowPolicy()
+        gateway = ToolGateway(
+            registry=ToolRegistry((_capability(ToolPermission.READ_ONLY),)),
+            policy=policy,
+            approvals=InMemoryApprovalProjection(),
+            hands=RecordingHands({"ok": True}),
+            artifacts=ArtifactStore(
+                InMemoryObjectStorage(), signing_key=b"slow-policy-artifact-key"
+            ),
+            max_concurrent=2,
+            max_concurrent_per_tenant=1,
+        )
+        slow = asyncio.create_task(
+            gateway.execute(_invocation(key="slow-policy", tenant_id="tenant-slow"))
+        )
+        await asyncio.wait_for(policy.started.wait(), timeout=1)
+        unrelated = await asyncio.wait_for(
+            gateway.execute(_invocation(key="fast-policy", tenant_id="tenant-fast")),
+            timeout=1,
+        )
+        assert unrelated.status.value == "success"
+        policy.release.set()
+        assert (await slow).status.value == "success"
+
+    asyncio.run(scenario())
+
+
+def test_slow_approval_lookup_does_not_block_another_tenant() -> None:
+    class ApprovalPolicy:
+        version = "approval-policy-v1"
+
+        def evaluate(
+            self, capability: ToolCapability, invocation: ToolInvocation
+        ) -> PolicyDecision:
+            del capability, invocation
+            return PolicyDecision.REQUIRE_APPROVAL
+
+    class SlowApprovals:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def get(
+            self, tenant_id: str, approval_id: str
+        ) -> ApprovalRecord | None:
+            del tenant_id, approval_id
+            return None
+
+        async def find_approved(
+            self,
+            tenant_id: str,
+            session_id: str,
+            digest: str,
+            policy_version: str,
+        ) -> ApprovalRecord | None:
+            del session_id, digest, policy_version
+            if tenant_id == "tenant-slow":
+                self.started.set()
+                await self.release.wait()
+            return None
+
+    async def scenario() -> None:
+        approvals = SlowApprovals()
+        gateway = ToolGateway(
+            registry=ToolRegistry((_capability(),)),
+            policy=ApprovalPolicy(),
+            approvals=approvals,
+            hands=RecordingHands({"ok": True}),
+            artifacts=ArtifactStore(
+                InMemoryObjectStorage(), signing_key=b"slow-approval-artifact-key"
+            ),
+            max_concurrent=2,
+            max_concurrent_per_tenant=1,
+        )
+        slow = asyncio.create_task(
+            gateway.execute(_invocation(key="slow-approval", tenant_id="tenant-slow"))
+        )
+        await asyncio.wait_for(approvals.started.wait(), timeout=1)
+        unrelated = await asyncio.wait_for(
+            gateway.execute(_invocation(key="fast-approval", tenant_id="tenant-fast")),
+            timeout=1,
+        )
+        assert unrelated.error_code == "approval_required"
+        approvals.release.set()
+        assert (await slow).error_code == "approval_required"
+
+    asyncio.run(scenario())
+
+
+def test_tenant_capacity_preserves_fairness_and_bounds_queue() -> None:
+    class MetricRecorder:
+        def __init__(self) -> None:
+            self.points: list[Any] = []
+
+        async def write_metric(self, metric: Any) -> None:
+            self.points.append(metric)
+
+    async def scenario() -> None:
+        tenant_a_started = asyncio.Event()
+        tenant_b_started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def handler(arguments: dict[str, Any]) -> dict[str, Any]:
+            target = str(arguments["target"])
+            if target == "a-1":
+                tenant_a_started.set()
+                await release.wait()
+            elif target == "b-1":
+                tenant_b_started.set()
+            return {"target": target}
+
+        metrics = MetricRecorder()
+        gateway = ToolGateway(
+            registry=ToolRegistry((_capability(ToolPermission.READ_ONLY),)),
+            policy=PolicyEngine(),
+            approvals=InMemoryApprovalProjection(),
+            hands=LocalHandsService(
+                workspace_root=Path.cwd(), handlers={"managed": handler}
+            ),
+            artifacts=ArtifactStore(
+                InMemoryObjectStorage(), signing_key=b"capacity-artifact-key"
+            ),
+            max_concurrent=2,
+            max_concurrent_per_tenant=1,
+            max_queued=2,
+            max_queued_per_tenant=1,
+            queue_timeout=2,
+            metric_writer=metrics,
+        )
+        first_a = asyncio.create_task(
+            gateway.execute(
+                _invocation(target="a-1", key="a-1", tenant_id="tenant-a")
+            )
+        )
+        await asyncio.wait_for(tenant_a_started.wait(), timeout=1)
+        queued_a = asyncio.create_task(
+            gateway.execute(
+                _invocation(target="a-2", key="a-2", tenant_id="tenant-a")
+            )
+        )
+        await asyncio.sleep(0)
+        rejected_a = await gateway.execute(
+            _invocation(target="a-3", key="a-3", tenant_id="tenant-a")
+        )
+        assert rejected_a.error_code == "hands_capacity_exhausted"
+        assert rejected_a.metadata["capacity_reason"] == "tenant_queue_full"
+
+        tenant_b = await asyncio.wait_for(
+            gateway.execute(
+                _invocation(target="b-1", key="b-1", tenant_id="tenant-b")
+            ),
+            timeout=1,
+        )
+        assert tenant_b.status.value == "success"
+        assert tenant_b_started.is_set()
+        assert not queued_a.done()
+        release.set()
+        assert (await first_a).status.value == "success"
+        assert (await queued_a).status.value == "success"
+
+        names = {point.name for point in metrics.points}
+        assert {
+            "tool.gateway.queue.depth",
+            "tool.gateway.queue.latency.seconds",
+            "tool.gateway.in_flight",
+            "tool.gateway.backpressure.count",
+        }.issubset(names)
+        assert any(
+            point.name == "tool.gateway.backpressure.count"
+            and point.tenant_id == "tenant-a"
+            and point.labels["reason"] == "tenant_queue_full"
+            for point in metrics.points
+        )
+
+    asyncio.run(scenario())
+
+
+def test_same_key_wait_is_bounded_without_duplicate_dispatch() -> None:
+    async def scenario() -> None:
+        started = asyncio.Event()
+        release = asyncio.Event()
+        calls = 0
+
+        async def handler(arguments: dict[str, Any]) -> dict[str, Any]:
+            nonlocal calls
+            calls += 1
+            started.set()
+            await release.wait()
+            return arguments
+
+        gateway = ToolGateway(
+            registry=ToolRegistry((_capability(ToolPermission.READ_ONLY),)),
+            policy=PolicyEngine(),
+            approvals=InMemoryApprovalProjection(),
+            hands=LocalHandsService(
+                workspace_root=Path.cwd(), handlers={"managed": handler}
+            ),
+            artifacts=ArtifactStore(
+                InMemoryObjectStorage(), signing_key=b"same-key-capacity-key"
+            ),
+            max_concurrent=1,
+            max_concurrent_per_tenant=1,
+            max_queued=2,
+            max_queued_per_tenant=2,
+            queue_timeout=0.05,
+        )
+        owner = asyncio.create_task(gateway.execute(_invocation(key="bounded-same-key")))
+        await asyncio.wait_for(started.wait(), timeout=1)
+        waiter = await asyncio.wait_for(
+            gateway.execute(_invocation(key="bounded-same-key")), timeout=1
+        )
+        assert waiter.error_code == "hands_capacity_exhausted"
+        assert waiter.metadata["capacity_reason"] == "queue_timeout"
+        assert calls == 1
+        release.set()
+        assert (await owner).status.value == "success"
 
     asyncio.run(scenario())
 

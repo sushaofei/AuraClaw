@@ -400,6 +400,11 @@ class Settings(BaseSettings):
     )
     artifact_claim_ttl_seconds: float = Field(default=30.0, ge=3.0, le=3600.0)
     artifact_orphan_claim_limit: int = Field(default=1, ge=1, le=100)
+    hands_max_concurrent: int = Field(default=32, ge=1, le=10_000)
+    hands_max_concurrent_per_tenant: int = Field(default=8, ge=1, le=10_000)
+    hands_max_queued: int = Field(default=256, ge=1, le=100_000)
+    hands_max_queued_per_tenant: int = Field(default=32, ge=1, le=100_000)
+    hands_queue_timeout_seconds: float = Field(default=5.0, gt=0.0, le=3600.0)
     runtime_event_backend: Literal["auto", "memory", "kafka"] = "auto"
     kafka_host: str | None = Field(default=None, validation_alias="KAFKA_HOST")
     kafka_port: int = Field(default=9092, validation_alias="KAFKA_PORT")
@@ -454,6 +459,16 @@ class Settings(BaseSettings):
                 "Coordinator/worker/reviewer assignment roles are chosen by "
                 "Orchestrator, not by this setting."
             )
+        return self
+
+    @model_validator(mode="after")
+    def validate_hands_capacity(self) -> Settings:
+        if self.hands_max_concurrent_per_tenant > self.hands_max_concurrent:
+            raise ValueError(
+                "hands per-tenant concurrency cannot exceed global concurrency"
+            )
+        if self.hands_max_queued_per_tenant > self.hands_max_queued:
+            raise ValueError("hands per-tenant queue cannot exceed global queue")
         return self
 
     @model_validator(mode="after")

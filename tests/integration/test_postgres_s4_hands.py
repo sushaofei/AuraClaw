@@ -322,3 +322,88 @@ def test_cancel_sent_to_another_hands_replica_stops_the_owner() -> None:
             await connection.close()
 
     asyncio.run(scenario())
+
+
+def test_same_key_waiter_timeout_does_not_stop_owner_heartbeat() -> None:
+    async def scenario() -> None:
+        assert DATABASE_URL is not None
+        connection = await asyncpg.connect(DATABASE_URL)
+        await connection.execute(MIGRATION)
+        suffix = uuid4().hex
+        tenant_id = f"tenant-hands-waiter-{suffix}"
+        invocation = ToolInvocation(
+            tool_invocation_id=f"invocation-{suffix}",
+            tenant_id=tenant_id,
+            root_session_id=f"root-{suffix}",
+            session_id=f"session-{suffix}",
+            run_id=f"run-{suffix}",
+            tool_name="managed",
+            tool_version="1",
+            arguments={"value": 1},
+            expected_side_effect="read",
+            idempotency_key=f"idem-{suffix}",
+            deadline=None,
+            fencing_token=1,
+            actor_id="runtime-s4",
+        )
+        started = asyncio.Event()
+        release = asyncio.Event()
+        calls = 0
+
+        async def slow(arguments: dict[str, object]) -> dict[str, object]:
+            nonlocal calls
+            calls += 1
+            started.set()
+            await release.wait()
+            return arguments
+
+        capability = ToolCapability(
+            name="managed",
+            version="1",
+            description="same-key waiter heartbeat test",
+            input_schema={"type": "object"},
+            output_schema={"type": "object"},
+            permission=ToolPermission.READ_ONLY,
+            risk_level=RiskLevel.LOW,
+        )
+        store = PostgresInvocationStore(DATABASE_URL)
+        gateway = ToolGateway(
+            registry=ToolRegistry((capability,)),
+            policy=PolicyEngine(),
+            approvals=InMemoryApprovalProjection(),
+            hands=LocalHandsService(workspace_root=ROOT, handlers={"managed": slow}),
+            artifacts=ArtifactStore(
+                InMemoryObjectStorage(), signing_key=b"hands-waiter-heartbeat-key"
+            ),
+            invocation_store=store,
+            instance_id="hands-waiter-owner",
+            execution_claim_ttl=timedelta(seconds=1.2),
+            cancellation_poll_interval=0.01,
+            max_concurrent=1,
+            max_concurrent_per_tenant=1,
+            queue_timeout=0.05,
+        )
+        owner: asyncio.Task[ToolResult] | None = None
+        try:
+            owner = asyncio.create_task(gateway.execute(invocation))
+            await asyncio.wait_for(started.wait(), timeout=2)
+            waiter = await asyncio.wait_for(gateway.execute(invocation), timeout=2)
+            assert waiter.error_code == "hands_capacity_exhausted"
+            assert waiter.metadata["capacity_reason"] == "queue_timeout"
+            await asyncio.sleep(1.5)
+            release.set()
+            result = await asyncio.wait_for(owner, timeout=2)
+            assert result.status is ToolResultStatus.SUCCESS
+            assert calls == 1
+        finally:
+            release.set()
+            if owner is not None and not owner.done():
+                owner.cancel()
+                await asyncio.gather(owner, return_exceptions=True)
+            await store.close()
+            await connection.execute(
+                "DELETE FROM hands.invocation WHERE tenant_id=$1", tenant_id
+            )
+            await connection.close()
+
+    asyncio.run(scenario())
