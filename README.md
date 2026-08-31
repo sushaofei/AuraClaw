@@ -391,6 +391,9 @@ uv run python scripts/release_gate.py
 
 签名 Skill 包可在本地校验声明式测试，并通过 AuraClaw 代理写入 Artifact 后发布：
 
+完整操作流程见 [Skill 生成、发布与维护手册](docs/guides/skill-authoring-publishing.md)，
+客户端接口与状态语义见 [Skill 接口手册](docs/guides/skill-api.md)。
+
 ```bash
 uv run auraclaw skills validate path/to/skill
 uv run auraclaw skills test path/to/skill
