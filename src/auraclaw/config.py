@@ -437,6 +437,8 @@ class Settings(BaseSettings):
     kafka_port: int = Field(default=9092, validation_alias="KAFKA_PORT")
     kafka_runtime_topic: str = "managed-agent.runtime-events"
     kafka_streaming_group: str = "streaming-ingestor"
+    kafka_skill_lifecycle_topic: str = "managed-agent.skill-lifecycle"
+    skill_lifecycle_replica_id: str | None = None
     runtime_event_retention_events: int = 1_000
     runtime_event_publish_max_concurrent: int = Field(default=64, ge=1, le=10_000)
     runtime_event_publish_max_queued: int = Field(default=1_024, ge=1, le=100_000)

@@ -508,6 +508,14 @@ single-flight 串行发布本地投影：并发到达的新请求推进 generati
 L1 + Artifact。跨副本低延迟预热的后续广播必须让每个 Hands 副本收到 lifecycle revision；普通共享
 consumer group 只投递给一个副本，不能用作本地缓存广播语义。
 
+跨副本传播按 [ADR-004](../decisions/ADR-004-skill-cache-and-replica-convergence.md) 实现。mutation 的本地
+rebuild 成功后写入 `hands.skill_lifecycle_broadcast_outbox`，同一 tenant 由数据库分配单调 revision；relay
+竞争领取 outbox 并发布 `managed-agent.skill-lifecycle` 元数据事件。每个 Hands 副本使用独立 consumer group，
+事件按 tenant key 分区。消费者先执行 revision fence，再回读 PostgreSQL 并调用同一增量 rebuilder；消息中的
+snapshot digest 用于诊断和幂等观测，不作为可加载状态。producer 成功但 outbox ack 失败可能产生重复事件，
+revision fence 必须消除副作用。Kafka 延迟、停机或 poison event 不能放宽治理，启动 snapshot、冷 miss
+read-through 和周期 reconciliation 继续保证最终收敛。
+
 管理动作必须区分租户意图和全局安全状态：
 
 - `disable`：Installation `active -> disabled`，停止新发现/新绑定；

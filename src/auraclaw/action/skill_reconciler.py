@@ -18,9 +18,9 @@ from auraclaw.action.skill_lifecycle import (
     SkillSourcePackageIdentity,
     SkillSourceSnapshotCommit,
 )
+from auraclaw.action.skill_lifecycle_events import SkillTenantRebuilder
 from auraclaw.action.skill_packages import SkillPackage, skill_package_digest
 from auraclaw.action.skill_publication import SkillPublicationService
-from auraclaw.action.skill_rebuild import SkillStateRebuilder
 from auraclaw.contracts.capabilities import McpServerDefinition
 from auraclaw.contracts.errors import VersionConflictError
 from auraclaw.contracts.hands import (
@@ -68,7 +68,7 @@ class SkillPackageReconciler:
         connectors: dict[str, CapabilityConnector],
         lifecycle: SkillLifecycleStore,
         publication: SkillPublicationService,
-        rebuilder: SkillStateRebuilder,
+        rebuilder: SkillTenantRebuilder,
         owner: str | None = None,
         snapshot_provider: Callable[[str], CapabilitySnapshot | None] | None = None,
         max_concurrent: int = 8,

@@ -8,6 +8,7 @@ from typing import Any, cast
 from auraclaw.action.ports import ArtifactContentReader
 from auraclaw.action.skill_content_cache import SkillPackageContentCache
 from auraclaw.action.skill_lifecycle import SkillLifecycleStore
+from auraclaw.action.skill_lifecycle_events import SkillTenantRebuilder
 from auraclaw.action.skill_management import SkillManagementService
 from auraclaw.action.skill_packages import (
     SkillPackage,
@@ -16,7 +17,6 @@ from auraclaw.action.skill_packages import (
 )
 from auraclaw.action.skill_publication import SkillPublicationService
 from auraclaw.action.skill_publishers import SkillPublisherService
-from auraclaw.action.skill_rebuild import SkillStateRebuilder
 from auraclaw.action.skill_sources import SkillSourceService
 from auraclaw.contracts.errors import (
     AuthorizationError,
@@ -87,7 +87,7 @@ class SkillPublicationInternalService:
         publication: SkillPublicationService,
         *,
         management: SkillManagementService | None = None,
-        rebuilder: SkillStateRebuilder | None = None,
+        rebuilder: SkillTenantRebuilder | None = None,
         publishers: SkillPublisherService | None = None,
         admissions: SkillLifecycleStore | None = None,
         sources: SkillSourceService | None = None,
