@@ -228,7 +228,7 @@ uv run python scripts/materialize_compose_secrets.py \
 uv run python scripts/compose_preflight.py --env-file .env.prod
 docker compose --env-file .env.prod -f compose.prod.yml \
   --profile migrate run --rm migrate migrate up \
-  --target 0041 --directory /app/migrations
+  --target 0054 --directory /app/migrations
 docker compose --env-file .env.prod -f compose.prod.yml up -d --wait
 ```
 
