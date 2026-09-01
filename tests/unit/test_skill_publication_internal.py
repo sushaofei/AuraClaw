@@ -16,6 +16,7 @@ from auraclaw.action.capability_catalog import (
     InMemoryCapabilityCatalogStore,
 )
 from auraclaw.action.mcp_primitives import HandsResourceRegistry
+from auraclaw.action.skill_content_cache import SkillPackageContentCache
 from auraclaw.action.skill_internal_service import SkillPublicationInternalService
 from auraclaw.action.skill_lifecycle import InMemorySkillLifecycleStore
 from auraclaw.action.skill_management import SkillManagementService
@@ -65,6 +66,7 @@ _KEY = b"internal-skill-publication-key"
 class _ArtifactWriter:
     def __init__(self) -> None:
         self.calls = 0
+        self.read_calls = 0
         self.contents: dict[str, bytes] = {}
 
     async def put(self, **kwargs: object) -> ArtifactRef:
@@ -89,6 +91,7 @@ class _ArtifactWriter:
         correlation_id: str,
     ) -> bytes:
         del tenant_id, actor_id, correlation_id
+        self.read_calls += 1
         return self.contents[artifact_ref.artifact_id]
 
 
@@ -141,11 +144,13 @@ def test_task_api_client_publishes_through_action_hands_service() -> None:
         )
         catalog_store = InMemoryCapabilityCatalogStore()
         catalog = CapabilityCatalog(catalog_store)
+        package_cache = SkillPackageContentCache(artifacts)
         rebuilder = SkillStateRebuilder(
             lifecycle=lifecycle,
             artifacts=artifacts,
             registry=registry,
             catalog=catalog,
+            content_cache=package_cache,
         )
         management = SkillManagementService(
             lifecycle=lifecycle,
@@ -163,6 +168,7 @@ def test_task_api_client_publishes_through_action_hands_service() -> None:
                     publishers=publishers,
                     admissions=lifecycle,
                     artifacts=artifacts,
+                    package_cache=package_cache,
                 )
             ),
             workload_identities={"task-token": ServiceIdentity.TASK_API},
@@ -391,12 +397,19 @@ def test_task_api_client_publishes_through_action_hands_service() -> None:
             )
             assert package_state.retention_revision == 1
             assert package_state.retention_updated_by == "admin-a"
+            reads_before_detail = artifacts.read_calls
+            assert await client.get_skill_markdown(
+                "tenant-a", "platform", "release.prepare", "2.0.0"
+            ) == "# Release\n"
+            reads_after_first_detail = artifacts.read_calls
             assert (
                 await client.get_skill_markdown(
                     "tenant-a", "platform", "release.prepare", "2.0.0"
                 )
                 == "# Release\n"
             )
+            assert reads_after_first_detail <= reads_before_detail + 1
+            assert artifacts.read_calls == reads_after_first_detail
             assert len(await client.list_packages("tenant-a")) == 1
             assert len(await client.list_publications("tenant-a")) == 1
             assert len(await client.list_installations("tenant-a")) == 1

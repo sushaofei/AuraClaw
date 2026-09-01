@@ -6,7 +6,7 @@ import hashlib
 import hmac
 import json
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import PurePosixPath
@@ -593,6 +593,26 @@ class SkillPackageRegistry:
             return None
         return raw.decode()
 
+    def cached_package(
+        self,
+        tenant_id: str,
+        publisher: str,
+        name: str,
+        version: str,
+        package_digest: str,
+    ) -> SkillPackage | None:
+        """Return immutable package content only when the pinned digest still matches."""
+        key = (tenant_id, publisher, name, version)
+        package = self._packages.get(key)
+        publication = self._publications.get(key)
+        if (
+            package is None
+            or publication is None
+            or publication.package_digest != package_digest
+        ):
+            return None
+        return package
+
     def load_part(
         self,
         tenant_id: str,
@@ -632,10 +652,12 @@ class SkillResolver:
         registry: SkillPackageRegistry,
         catalog: CapabilityCatalogStore,
         policy: ResourcePolicyEvaluator | None = None,
+        reload_tenant: Callable[[str], Awaitable[object]] | None = None,
     ) -> None:
         self._registry = registry
         self._catalog = catalog
         self._policy = policy
+        self._reload_tenant = reload_tenant
 
     async def resolve(
         self,
@@ -659,6 +681,18 @@ class SkillResolver:
             ),
             None,
         )
+        if publication is None and self._reload_tenant is not None:
+            await self._reload_tenant(tenant_id)
+            publication = next(
+                (
+                    candidate
+                    for candidate in self._registry.candidates(
+                        tenant_id, name, publisher=publisher
+                    )
+                    if version_satisfies(candidate.manifest.version, version)
+                ),
+                None,
+            )
         if publication is None:
             raise NotFoundError("No active Skill version satisfies the request")
         manifest = publication.manifest

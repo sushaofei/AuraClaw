@@ -109,6 +109,7 @@ class ManagedResourceGateway:
         metric_writer: MetricWriter | None = None,
         catalog_store: CapabilityCatalogStore | None = None,
         connectors: Mapping[str, CapabilityConnector] | None = None,
+        miss_loader: Callable[[str, str], Awaitable[object]] | None = None,
     ) -> None:
         if max_inline_bytes < 1 or max_resource_bytes < max_inline_bytes:
             raise ValueError("Resource size limits are invalid")
@@ -140,6 +141,7 @@ class ManagedResourceGateway:
         self._metric_writer = metric_writer
         self._catalog_store = catalog_store
         self._connectors = connectors if connectors is not None else {}
+        self._miss_loader = miss_loader
 
     async def is_available(
         self, tenant_id: str, capability: CapabilityDescriptor
@@ -247,6 +249,17 @@ class ManagedResourceGateway:
             return _ResolvedResource(registered.descriptor, load_local)
         except KeyError:
             pass
+        if self._miss_loader is not None and uri.startswith("skill://"):
+            await self._miss_loader(trusted.tenant_id, uri)
+            try:
+                registered = self._registry.get_resource(trusted.tenant_id, uri)
+
+                async def load_rebuilt() -> tuple[HandsResourceContent, ...]:
+                    return registered.contents
+
+                return _ResolvedResource(registered.descriptor, load_rebuilt)
+            except KeyError:
+                pass
         if self._catalog_store is not None:
             capabilities = await self._catalog_store.list_capabilities(trusted.tenant_id)
             for capability in capabilities:

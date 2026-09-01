@@ -57,6 +57,16 @@ registration lease 内仍活跃时，新进程注册会 fail closed。因此显�
   Session。Delta buffer 按 run 隔离，Kafka timeout 或 caller cancellation 后 keyed state 会回收。
 - Skill 管理读取始终经 Hands 查询 PostgreSQL lifecycle，`SKILL.md` 经 Artifact 边界读取；Task API
   的进程内 Skill Registry 不是管理事实源，清空缓存或重启 Task API 不需要预热才能提供管理查询。
+  Hands 使用 `AURACLAW_SKILL_CONTENT_CACHE_MAX_BYTES`、
+  `AURACLAW_SKILL_CONTENT_CACHE_MAX_ENTRIES` 和 `AURACLAW_SKILL_CONTENT_CACHE_TTL_SECONDS` 控制按
+  tenant/package digest 隔离的本地不可变包缓存。管理详情、冷副本重建和并发 read-through 共享该
+  cache；同 digest 并发只允许一次 Artifact 下载。周期 `skill-state` 对账会复用 Registry 中 digest
+  一致的包，观察 `skill.package.download.*`、`skill.cache.*`、`skill.load.singleflight.waiters`、
+  `skill.rebuild.packages.*` 和 `skill.rebuild.duration.seconds`。未变化 digest 持续下载表示副本频繁重启、
+  cache 容量不足或 Registry 未能收敛，应先排查这些原因，不应直接增加 Redis。
+  Runtime resolve 或 `skill://` read 在冷副本 miss 时会触发 tenant 增量重建后重试。该 read-through 是
+  可用性兜底，不替代启动 readiness：新 Hands 副本只有完成初始 lifecycle snapshot 后才能接流量。
+  Redis 当前不是依赖；未来可选 L2 必须经 ADR、容量基准和机密数据评审，且故障时回退到 Artifact。
   Publication Reliability 每轮只领取 `AURACLAW_SKILL_RELIABILITY_MAX_CONCURRENT` 条 Outbox，按 tenant
   合并 rebuild、跨 tenant 并行，并以 `AURACLAW_SKILL_RELIABILITY_CLAIM_TTL_SECONDS` 续租；complete/fail
   影响零行视为 owner 丢失，不把旧 worker 的结果冒充成功。

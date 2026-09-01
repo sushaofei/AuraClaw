@@ -187,6 +187,50 @@ def test_resource_read_does_not_require_approval() -> None:
     asyncio.run(scenario())
 
 
+def test_skill_resource_miss_rebuilds_local_replica_before_failing() -> None:
+    async def scenario() -> None:
+        uri = "skill://platform/release.prepare/1.0.0/SKILL.md"
+        registry = HandsResourceRegistry()
+        rebuilds = 0
+
+        async def rebuild(tenant_id: str, requested_uri: str) -> None:
+            nonlocal rebuilds
+            assert tenant_id == "tenant-a"
+            assert requested_uri == uri
+            rebuilds += 1
+            registry.register_resource(
+                RegisteredResource(
+                    descriptor=HandsResourceDescriptor(
+                        uri=uri,
+                        name="SKILL.md",
+                        mime_type="text/markdown",
+                        source_revision="1.0.0",
+                    ),
+                    contents=(
+                        HandsResourceContent(
+                            uri=uri,
+                            mime_type="text/markdown",
+                            text="# Release",
+                        ),
+                    ),
+                    tenant_ids=(tenant_id,),
+                )
+            )
+
+        gateway = ManagedResourceGateway(
+            registry,
+            artifacts=_artifacts(),
+            miss_loader=rebuild,
+        )
+
+        contents = await gateway.read(_trusted(), uri)
+
+        assert contents[0].text == "# Release"
+        assert rebuilds == 1
+
+    asyncio.run(scenario())
+
+
 def test_resource_gateway_routes_catalog_resource_to_live_connector() -> None:
     async def scenario() -> None:
         uri = "repo://remote/docs/release"
