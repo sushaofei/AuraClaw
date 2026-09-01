@@ -3003,4 +3003,4 @@ active-reference barrier，并简化 AuraX 卸载入口。
 - [x] AuraX SDK（47 tests）、TypeScript、lint 与桌面 E2E（11 tests）通过。
 - [ ] Compose 与测试环境 Skill 激活回归通过。
 - [x] GitHub Issue #79 记录脱敏故障链、修复方案与验收标准。
-- [ ] Intentional commit、push 和测试环境回归完成。
+- [x] AuraClaw/AuraX intentional commit、push、测试环境发布及 quarantined 降级语义回归完成。
