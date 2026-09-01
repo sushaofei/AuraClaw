@@ -2946,3 +2946,14 @@ active-reference barrier，并简化 AuraX 卸载入口。
 - [x] AuraX 对话选择器只展示 `active` 或 `disabled` Installation，不对 `uninstalled` 错发 enable。
 - [x] 后端单元测试和 AuraX E2E 覆盖 Purge 后不可见语义。
 - [x] Ruff、Mypy、import-linter、完整 Pytest（539 passed、3 skipped）以及 AuraX 单测（47 passed）、E2E（9 passed）和生产构建通过。
+
+## 阶段 Skill 签名兼容与 Purge 后重发（Issue #77）
+
+状态：完成。实现、完整质量门禁、提交、推送与测试环境发布均已完成。
+
+- [x] 新签名显式写入 `signature_payload_version=v2`；未版本化历史签名兼容 schema 扩展前 payload。
+- [x] Purged Package 坐标允许原子重发，Publication 与 Installation revision 单调递增。
+- [x] 被替换的 purged Package 进入独立审计 tombstone，历史 binding 继续固定旧 digest/ArtifactRef。
+- [x] 内存与 PostgreSQL 测试覆盖同版本重发，签名回归覆盖旧包验签。
+- [x] Ruff、Mypy、import-linter、完整 Pytest（541 passed、3 skipped）、Compose、release gate 与迁移回滚测试通过。
+- [x] Git 暂存范围审查、intentional commit、push 和测试环境发布完成。

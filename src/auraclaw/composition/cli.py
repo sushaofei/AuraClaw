@@ -294,6 +294,7 @@ def _sign_external_skill_directory(
         raise SystemExit("Skill manifest must be a JSON object")
     if raw_manifest.get("publisher") != publisher:
         raise SystemExit("--publisher must match manifest publisher")
+    raw_manifest["signature_payload_version"] = "v2"
     raw_manifest["signature_key_id"] = key_id
     raw_manifest["signature"] = "ed25519:unsigned"
     try:

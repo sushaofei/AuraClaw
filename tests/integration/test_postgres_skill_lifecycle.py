@@ -39,6 +39,7 @@ from auraclaw.contracts.skills import (
     SkillInstallationStatus,
     SkillManifest,
     SkillPackageRecord,
+    SkillPackageRetentionStatus,
     SkillPublicationRecord,
     SkillPublicationStatus,
     SkillRevocationAction,
@@ -81,6 +82,7 @@ MIGRATION = "\n".join(
         (ROOT / "migrations/0038_skill_installation_draining.sql").read_text(),
         (ROOT / "migrations/0050_batch_worker_lease_safety.sql").read_text(),
         (ROOT / "migrations/0054_skill_lifecycle_broadcast_outbox.sql").read_text(),
+        (ROOT / "migrations/0055_skill_package_republish.sql").read_text(),
     )
 )
 pytestmark = pytest.mark.skipif(DATABASE_URL is None, reason="PostgreSQL test URL not configured")
@@ -270,6 +272,242 @@ async def _ensure_skill_lifecycle_schema(connection: asyncpg.Connection) -> None
         await connection.execute(
             (ROOT / "migrations/0054_skill_lifecycle_broadcast_outbox.sql").read_text()
         )
+    republish_schema_current = await connection.fetchval(
+        """SELECT to_regclass('hands.skill_package_tombstone') IS NOT NULL
+        AND NOT EXISTS (
+            SELECT 1 FROM pg_constraint constraint_record
+            JOIN pg_class relation ON relation.oid=constraint_record.conrelid
+            JOIN pg_namespace namespace ON namespace.oid=relation.relnamespace
+            WHERE namespace.nspname='hands'
+              AND relation.relname='skill_publication'
+              AND constraint_record.contype='f'
+              AND constraint_record.conname IN (
+                'skill_publication_package_digest_fk',
+                'skill_publication_tenant_id_publisher_name_version_package_fkey'
+              )
+              AND NOT constraint_record.condeferrable
+        )"""
+    )
+    if not republish_schema_current:
+        await connection.execute(
+            (ROOT / "migrations/0055_skill_package_republish.sql").read_text()
+        )
+
+
+def test_postgres_republish_replaces_purged_coordinate_and_archives_tombstone() -> None:
+    async def scenario() -> None:
+        assert DATABASE_URL is not None
+        connection = await asyncpg.connect(DATABASE_URL)
+        await _ensure_skill_lifecycle_schema(connection)
+        suffix = uuid4().hex
+        tenant_id = f"tenant-republish-{suffix}"
+        source_id = f"sks_republish_{suffix}"
+        store = PostgresSkillLifecycleStore(DATABASE_URL)
+        now = datetime.now(UTC)
+        old_digest = f"sha256:{'a' * 64}"
+        new_digest = f"sha256:{'b' * 64}"
+        manifest = SkillManifest(
+            name="release.prepare",
+            version="1.0.0",
+            description="Republish integration test",
+            publisher="platform",
+            signature="hmac-sha256:test",
+        )
+        old_package = SkillPackageRecord(
+            tenant_id=tenant_id,
+            manifest=manifest,
+            package_digest=old_digest,
+            artifact_ref=ArtifactRef(
+                artifact_id=f"old-artifact-{suffix}",
+                version=1,
+                content_hash="a" * 64,
+                media_type="application/octet-stream",
+                size=1,
+            ),
+            retention_status=SkillPackageRetentionStatus.PURGED,
+            retention_until=now,
+            retention_revision=2,
+            retention_updated_by="purger",
+            retention_updated_at=now,
+            created_at=now - timedelta(days=1),
+            purged_at=now,
+        )
+        old_publication = SkillPublicationRecord(
+            publication_id=f"skp_{suffix}",
+            tenant_id=tenant_id,
+            publisher="platform",
+            name="release.prepare",
+            version="1.0.0",
+            package_digest=old_digest,
+            status=SkillPublicationStatus.REVOKED,
+            source_id=source_id,
+            revision=2,
+            created_by="publisher",
+            updated_by="purger",
+            created_at=now - timedelta(days=1),
+            updated_at=now,
+            reason_code="operator_purge",
+            revocation_action=SkillRevocationAction.CANCEL,
+            revocation_policy_version="skill-revocation-v1",
+            revocation_policy_decision_id=f"purge-{suffix}",
+        )
+        old_installation = SkillInstallationRecord(
+            installation_id=f"ski_{suffix}",
+            tenant_id=tenant_id,
+            publisher="platform",
+            name="release.prepare",
+            pinned_package_digest=old_digest,
+            auto_upgrade=False,
+            status=SkillInstallationStatus.UNINSTALLED,
+            revision=3,
+            created_by="publisher",
+            updated_by="purger",
+            created_at=now - timedelta(days=1),
+            updated_at=now,
+            reason_code="operator_purge",
+            uninstall_action=SkillRevocationAction.CANCEL,
+            uninstall_policy_version="skill-uninstall-v1",
+            uninstall_policy_decision_id=f"purge-{suffix}",
+        )
+        try:
+            await store.put_source(
+                SkillSourceRecord(
+                    source_id=source_id,
+                    tenant_id=tenant_id,
+                    kind=SkillSourceKind.MCP,
+                    desired_state=SkillSourceDesiredState.ENABLED,
+                    publisher_allowlist=("platform",),
+                    created_by="test",
+                    updated_by="test",
+                    created_at=now,
+                    updated_at=now,
+                ),
+                expected_revision=0,
+            )
+            await store.put_package(old_package)
+            await store.put_publication(
+                old_publication.model_copy(
+                    update={
+                        "status": SkillPublicationStatus.ACTIVE,
+                        "revision": 1,
+                        "reason_code": None,
+                        "revocation_action": None,
+                        "revocation_policy_version": None,
+                        "revocation_policy_decision_id": None,
+                    }
+                ),
+                expected_revision=0,
+            )
+            await store.put_publication(old_publication, expected_revision=1)
+            active_installation = old_installation.model_copy(
+                update={
+                    "status": SkillInstallationStatus.ACTIVE,
+                    "revision": 1,
+                    "reason_code": None,
+                    "uninstall_action": None,
+                    "uninstall_policy_version": None,
+                    "uninstall_policy_decision_id": None,
+                }
+            )
+            await store.put_installation(active_installation, expected_revision=0)
+            await store.put_installation(
+                active_installation.model_copy(
+                    update={
+                        "status": SkillInstallationStatus.DISABLED,
+                        "revision": 2,
+                        "reason_code": "operator_purge",
+                    }
+                ),
+                expected_revision=1,
+            )
+            await store.put_installation(old_installation, expected_revision=2)
+
+            new_package = old_package.model_copy(
+                update={
+                    "package_digest": new_digest,
+                    "artifact_ref": replace(
+                        old_package.artifact_ref,
+                        artifact_id=f"new-artifact-{suffix}",
+                        content_hash="b" * 64,
+                    ),
+                    "retention_status": SkillPackageRetentionStatus.RETAINED,
+                    "retention_until": now + timedelta(days=90),
+                    "retention_revision": 1,
+                    "retention_updated_by": "publisher",
+                    "retention_updated_at": now + timedelta(seconds=1),
+                    "created_at": now + timedelta(seconds=1),
+                    "purged_at": None,
+                }
+            )
+            new_publication = old_publication.model_copy(
+                update={
+                    "package_digest": new_digest,
+                    "status": SkillPublicationStatus.ACTIVE,
+                    "revision": 3,
+                    "updated_by": "publisher",
+                    "updated_at": now + timedelta(seconds=1),
+                    "reason_code": None,
+                    "revocation_action": None,
+                    "revocation_policy_version": None,
+                    "revocation_policy_decision_id": None,
+                }
+            )
+            new_installation = old_installation.model_copy(
+                update={
+                    "version_constraint": "=1.0.0",
+                    "pinned_package_digest": new_digest,
+                    "status": SkillInstallationStatus.ACTIVE,
+                    "source_id": source_id,
+                    "revision": 4,
+                    "updated_by": "publisher",
+                    "updated_at": now + timedelta(seconds=1),
+                    "reason_code": None,
+                    "uninstall_action": None,
+                    "uninstall_policy_version": None,
+                    "uninstall_policy_decision_id": None,
+                }
+            )
+            result = await store.commit_publish(
+                SkillPublishCommit(
+                    command_id=f"republish-{suffix}",
+                    request_digest=new_digest,
+                    actor_id="publisher",
+                    source_id=source_id,
+                    correlation_id=f"corr-{suffix}",
+                    causation_id=f"republish-{suffix}",
+                    expected_publication_revision=2,
+                    package=new_package,
+                    publication=new_publication,
+                    installation=new_installation,
+                    occurred_at=now + timedelta(seconds=1),
+                    replace_purged=True,
+                    expected_installation_revision=3,
+                )
+            )
+            assert result.package.package_digest == new_digest
+            assert result.publication.status is SkillPublicationStatus.ACTIVE
+            assert result.installation == new_installation
+            assert await store.list_package_tombstones(
+                tenant_id, "platform", "release.prepare"
+            ) == (old_package,)
+        finally:
+            await store.close()
+            for table in (
+                "skill_outbox",
+                "skill_command",
+                "skill_publication_source",
+                "skill_installation",
+                "skill_publication",
+                "skill_package_tombstone",
+                "skill_package",
+                "skill_source",
+            ):
+                await connection.execute(
+                    f"DELETE FROM hands.{table} WHERE tenant_id=$1", tenant_id
+                )
+            await connection.close()
+
+    asyncio.run(scenario())
 
 
 def test_postgres_skill_lifecycle_broadcast_outbox_is_monotonic_and_claimed_once() -> None:

@@ -210,12 +210,23 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
                     raise VersionConflictError("Skill command id was reused")
                 return await _load_publish_result(connection, commit, replayed=True)
 
-            await _put_package_transaction(connection, package)
-            committed_publication = await _put_publication_transaction(
-                connection,
-                publication,
-                expected_revision=commit.expected_publication_revision,
-            )
+            committed_installation: SkillInstallationRecord | None
+            if commit.replace_purged:
+                (
+                    package,
+                    committed_publication,
+                    committed_installation,
+                ) = await _replace_purged_package_transaction(connection, commit)
+            else:
+                await _put_package_transaction(connection, package)
+                committed_publication = await _put_publication_transaction(
+                    connection,
+                    publication,
+                    expected_revision=commit.expected_publication_revision,
+                )
+                committed_installation = await _put_installation_transaction(
+                    connection, commit.installation
+                )
             await connection.execute(
                 """INSERT INTO hands.skill_publication_source
                 (tenant_id,publisher,name,version,source_id,available,
@@ -266,9 +277,6 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
                 if selected_row is None:
                     raise VersionConflictError("Skill publication source selection failed")
                 committed_publication = _publication(dict(selected_row))
-            committed_installation = await _put_installation_transaction(
-                connection, commit.installation
-            )
             result = SkillPublishCommitResult(
                 package=package,
                 publication=committed_publication,
@@ -552,6 +560,20 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
             """SELECT * FROM hands.skill_package WHERE tenant_id=$1
             ORDER BY publisher,name,version""",
             tenant_id,
+        )
+        return tuple(_package(dict(row)) for row in rows)
+
+    async def list_package_tombstones(
+        self, tenant_id: str, publisher: str, name: str
+    ) -> tuple[SkillPackageRecord, ...]:
+        pool = await self.pool()
+        rows = await pool.fetch(
+            """SELECT * FROM hands.skill_package_tombstone
+            WHERE tenant_id=$1 AND publisher=$2 AND name=$3
+            ORDER BY archived_at DESC,tombstone_id DESC""",
+            tenant_id,
+            publisher,
+            name,
         )
         return tuple(_package(dict(row)) for row in rows)
 
@@ -1520,6 +1542,203 @@ async def _put_package_transaction(
     )
     if digest is None or str(digest) != record.package_digest:
         raise VersionConflictError("Skill version is immutable")
+
+
+async def _replace_purged_package_transaction(
+    connection: asyncpg.Connection, commit: SkillPublishCommit
+) -> tuple[SkillPackageRecord, SkillPublicationRecord, SkillInstallationRecord]:
+    package = commit.package
+    publication = commit.publication
+    installation = commit.installation
+    manifest = package.manifest
+    if installation is None or commit.expected_installation_revision is None:
+        raise VersionConflictError("Purged Skill replacement requires an installation")
+
+    await connection.execute(
+        "SET CONSTRAINTS hands.skill_publication_package_digest_fk DEFERRED"
+    )
+    package_row = await connection.fetchrow(
+        """SELECT * FROM hands.skill_package
+        WHERE tenant_id=$1 AND publisher=$2 AND name=$3 AND version=$4
+        FOR UPDATE""",
+        package.tenant_id,
+        manifest.publisher,
+        manifest.name,
+        manifest.version,
+    )
+    publication_row = await connection.fetchrow(
+        """SELECT * FROM hands.skill_publication
+        WHERE tenant_id=$1 AND publisher=$2 AND name=$3 AND version=$4
+        FOR UPDATE""",
+        package.tenant_id,
+        manifest.publisher,
+        manifest.name,
+        manifest.version,
+    )
+    installation_row = await connection.fetchrow(
+        """SELECT * FROM hands.skill_installation
+        WHERE tenant_id=$1 AND publisher=$2 AND name=$3
+        FOR UPDATE""",
+        package.tenant_id,
+        manifest.publisher,
+        manifest.name,
+    )
+    if package_row is None or publication_row is None or installation_row is None:
+        raise VersionConflictError("Purged Skill replacement state is incomplete")
+
+    previous_package = _package(dict(package_row))
+    previous_publication = _publication(dict(publication_row))
+    previous_installation = _installation(dict(installation_row))
+    if (
+        package.retention_status is not SkillPackageRetentionStatus.RETAINED
+        or publication.status is not SkillPublicationStatus.ACTIVE
+        or publication.package_digest != package.package_digest
+        or installation.status is not SkillInstallationStatus.ACTIVE
+        or installation.pinned_package_digest != package.package_digest
+        or previous_package.retention_status is not SkillPackageRetentionStatus.PURGED
+        or previous_package.legal_hold
+        or previous_publication.status is not SkillPublicationStatus.REVOKED
+        or previous_installation.status is not SkillInstallationStatus.UNINSTALLED
+    ):
+        raise VersionConflictError("Only a fully purged Skill can be republished")
+    if previous_publication.revision != commit.expected_publication_revision:
+        raise VersionConflictError("Skill publication revision conflict")
+    if previous_installation.revision != commit.expected_installation_revision:
+        raise VersionConflictError("Skill installation revision conflict")
+    _require_next_revision(
+        publication.revision, previous_publication.revision, "publication"
+    )
+    _require_next_revision(
+        installation.revision, previous_installation.revision, "installation"
+    )
+
+    await connection.execute(
+        """INSERT INTO hands.skill_package_tombstone
+        (tenant_id,publisher,name,version,package_digest,manifest_json,
+         artifact_ref,signature_key_id,retention_status,retention_until,
+         legal_hold,retention_revision,retention_updated_by,
+         retention_updated_at,created_at,purged_at,
+         replacement_package_digest,archived_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)""",
+        previous_package.tenant_id,
+        previous_package.manifest.publisher,
+        previous_package.manifest.name,
+        previous_package.manifest.version,
+        previous_package.package_digest,
+        package_row["manifest_json"],
+        package_row["artifact_ref"],
+        previous_package.signature_key_id,
+        previous_package.retention_status.value,
+        previous_package.retention_until,
+        previous_package.legal_hold,
+        previous_package.retention_revision,
+        previous_package.retention_updated_by,
+        previous_package.retention_updated_at,
+        previous_package.created_at,
+        previous_package.purged_at,
+        package.package_digest,
+        commit.occurred_at,
+    )
+    updated_package_row = await connection.fetchrow(
+        """UPDATE hands.skill_package SET
+        package_digest=$1,manifest_json=$2::jsonb,artifact_ref=$3::jsonb,
+        signature_key_id=$4,retention_status=$5,retention_until=$6,
+        legal_hold=$7,retention_revision=$8,retention_updated_by=$9,
+        retention_updated_at=$10,created_at=$11,purged_at=$12
+        WHERE tenant_id=$13 AND publisher=$14 AND name=$15 AND version=$16
+          AND package_digest=$17 AND retention_status='purged'
+        RETURNING *""",
+        package.package_digest,
+        json_dumps(manifest.model_dump(mode="json")),
+        json_dumps(_artifact_payload(package.artifact_ref)),
+        package.signature_key_id,
+        package.retention_status.value,
+        package.retention_until,
+        package.legal_hold,
+        package.retention_revision,
+        package.retention_updated_by,
+        package.retention_updated_at,
+        package.created_at,
+        package.purged_at,
+        package.tenant_id,
+        manifest.publisher,
+        manifest.name,
+        manifest.version,
+        previous_package.package_digest,
+    )
+    updated_publication_row = await connection.fetchrow(
+        """UPDATE hands.skill_publication SET
+        package_digest=$1,status=$2,source_id=$3,revision=$4,
+        updated_by=$5,updated_at=$6,reason_code=$7,revocation_action=$8,
+        revocation_policy_version=$9,revocation_policy_decision_id=$10
+        WHERE tenant_id=$11 AND publisher=$12 AND name=$13 AND version=$14
+          AND publication_id=$15 AND package_digest=$16 AND revision=$17
+          AND status='revoked'
+        RETURNING *""",
+        publication.package_digest,
+        publication.status.value,
+        publication.source_id,
+        publication.revision,
+        publication.updated_by,
+        publication.updated_at,
+        publication.reason_code,
+        (
+            publication.revocation_action.value
+            if publication.revocation_action is not None
+            else None
+        ),
+        publication.revocation_policy_version,
+        publication.revocation_policy_decision_id,
+        publication.tenant_id,
+        publication.publisher,
+        publication.name,
+        publication.version,
+        previous_publication.publication_id,
+        previous_publication.package_digest,
+        previous_publication.revision,
+    )
+    updated_installation_row = await connection.fetchrow(
+        """UPDATE hands.skill_installation SET
+        version_constraint=$1,pinned_package_digest=$2,status=$3,source_id=$4,
+        auto_upgrade=$5,revision=$6,updated_by=$7,updated_at=$8,
+        reason_code=$9,uninstall_action=$10,uninstall_policy_version=$11,
+        uninstall_policy_decision_id=$12
+        WHERE tenant_id=$13 AND publisher=$14 AND name=$15
+          AND installation_id=$16 AND revision=$17 AND status='uninstalled'
+        RETURNING *""",
+        installation.version_constraint,
+        installation.pinned_package_digest,
+        installation.status.value,
+        installation.source_id,
+        installation.auto_upgrade,
+        installation.revision,
+        installation.updated_by,
+        installation.updated_at,
+        installation.reason_code,
+        (
+            installation.uninstall_action.value
+            if installation.uninstall_action is not None
+            else None
+        ),
+        installation.uninstall_policy_version,
+        installation.uninstall_policy_decision_id,
+        installation.tenant_id,
+        installation.publisher,
+        installation.name,
+        previous_installation.installation_id,
+        previous_installation.revision,
+    )
+    if (
+        updated_package_row is None
+        or updated_publication_row is None
+        or updated_installation_row is None
+    ):
+        raise VersionConflictError("Purged Skill replacement revision conflict")
+    return (
+        _package(dict(updated_package_row)),
+        _publication(dict(updated_publication_row)),
+        _installation(dict(updated_installation_row)),
+    )
 
 
 async def _put_publication_transaction(

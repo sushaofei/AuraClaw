@@ -68,10 +68,12 @@ UP = "\n".join(
         (ROOT / "migrations/0039_skill_publisher_runtime_revocation.sql").read_text(),
         (ROOT / "migrations/0050_batch_worker_lease_safety.sql").read_text(),
         (ROOT / "migrations/0054_skill_lifecycle_broadcast_outbox.sql").read_text(),
+        (ROOT / "migrations/0055_skill_package_republish.sql").read_text(),
     )
 )
 DOWN = "\n".join(
     (
+        (ROOT / "migrations/0055_skill_package_republish.down.sql").read_text(),
         (ROOT / "migrations/0054_skill_lifecycle_broadcast_outbox.down.sql").read_text(),
         (ROOT / "migrations/0039_skill_publisher_runtime_revocation.down.sql").read_text(),
         (ROOT / "migrations/0038_skill_installation_draining.down.sql").read_text(),

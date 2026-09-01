@@ -9,7 +9,10 @@ from typing import Protocol
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
-from auraclaw.action.skill_packages import SkillPackage, skill_signing_payload
+from auraclaw.action.skill_packages import (
+    SkillPackage,
+    skill_signing_payload_candidates,
+)
 from auraclaw.contracts.errors import (
     NotFoundError,
     PolicyDeniedError,
@@ -424,12 +427,27 @@ class SkillPublisherTrustService:
             signature = _decode_urlsafe(manifest.signature.removeprefix("ed25519:"))
             if len(signature) != 64:
                 raise ValueError
-            Ed25519PublicKey.from_public_bytes(_decode_public_key(key.public_key)).verify(
-                signature, skill_signing_payload(package)
+            public_key = Ed25519PublicKey.from_public_bytes(
+                _decode_public_key(key.public_key)
             )
+            if not any(
+                _verify_signature(public_key, signature, payload)
+                for payload in skill_signing_payload_candidates(package)
+            ):
+                raise InvalidSignature
         except (InvalidSignature, ValueError) as exc:
             raise PolicyDeniedError("Skill package signature is invalid") from exc
         return key.key_id
+
+
+def _verify_signature(
+    key: Ed25519PublicKey, signature: bytes, payload: bytes
+) -> bool:
+    try:
+        key.verify(signature, payload)
+    except InvalidSignature:
+        return False
+    return True
 
 
 def _decode_public_key(value: str) -> bytes:
