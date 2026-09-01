@@ -346,6 +346,7 @@ class SkillManifest(ContractModel):
     max_steps: int = Field(default=20, ge=1, le=1000)
     timeout_seconds: int = Field(default=900, ge=1, le=86400)
     publisher: str = Field(min_length=1, max_length=128, pattern=_SKILL_NAME)
+    signature_payload_version: Literal["v2"] | None = None
     signature_key_id: str | None = Field(
         default=None, min_length=1, max_length=128, pattern=_SKILL_NAME
     )

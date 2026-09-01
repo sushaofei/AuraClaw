@@ -134,6 +134,7 @@ def test_external_publisher_can_sign_and_validate_without_exposing_private_key(
     )
 
     assert package.manifest.signature_key_id == "key-2026-a"
+    assert package.manifest.signature_payload_version == "v2"
     assert package.manifest.signature.startswith("ed25519:")
     manifest_text = (tmp_path / "manifest.json").read_text()
     encoded_private_key = base64.urlsafe_b64encode(private_bytes).rstrip(b"=").decode()

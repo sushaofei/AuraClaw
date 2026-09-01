@@ -37,6 +37,7 @@ from auraclaw.contracts.skills import (
     SkillInstallationRecord,
     SkillInstallationStatus,
     SkillPackageRecord,
+    SkillPackageRetentionStatus,
     SkillPublicationRecord,
     SkillPublicationStatus,
     SkillSourceDesiredState,
@@ -218,10 +219,34 @@ class SkillPublicationService:
         desired_status = (
             SkillPublicationStatus.ACTIVE if command.activate else SkillPublicationStatus.STAGED
         )
-        if existing is not None and existing.package_digest != digest:
+        persisted_package = (
+            None
+            if existing is None
+            else await self._lifecycle.get_package(
+                command.tenant_id,
+                manifest.publisher,
+                manifest.name,
+                manifest.version,
+            )
+        )
+        existing_installation = await self._lifecycle.get_installation(
+            command.tenant_id, manifest.publisher, manifest.name
+        )
+        replace_purged = (
+            existing is not None
+            and persisted_package is not None
+            and persisted_package.retention_status is SkillPackageRetentionStatus.PURGED
+            and not persisted_package.legal_hold
+            and existing.status is SkillPublicationStatus.REVOKED
+            and existing_installation is not None
+            and existing_installation.status is SkillInstallationStatus.UNINSTALLED
+            and desired_status is SkillPublicationStatus.ACTIVE
+        )
+        if existing is not None and existing.package_digest != digest and not replace_purged:
             raise VersionConflictError("Skill version is immutable")
         if (
             existing is not None
+            and not replace_purged
             and existing.status is not desired_status
             and not (
                 existing.status in {
@@ -236,6 +261,7 @@ class SkillPublicationService:
             )
         if (
             existing is not None
+            and not replace_purged
             and existing.status is not desired_status
             and existing.revision != command.expected_revision
         ):
@@ -244,7 +270,14 @@ class SkillPublicationService:
             raise VersionConflictError("Skill publication revision conflict")
 
         now = datetime.now(UTC)
-        if existing is None:
+        if existing is None or replace_purged:
+            if replace_purged:
+                self._registry.forget_package(
+                    command.tenant_id,
+                    manifest.publisher,
+                    manifest.name,
+                    manifest.version,
+                )
             if artifact_ref is None:
                 publication = await self._registry.publish(
                     command.tenant_id,
@@ -277,12 +310,6 @@ class SkillPublicationService:
                 created_at=now,
             )
         else:
-            persisted_package = await self._lifecycle.get_package(
-                command.tenant_id,
-                manifest.publisher,
-                manifest.name,
-                manifest.version,
-            )
             if persisted_package is None:
                 raise VersionConflictError(
                     "Skill publication references a missing package"
@@ -320,6 +347,22 @@ class SkillPublicationService:
                 updated_at=now,
             )
             expected_publication_revision = 0
+        elif replace_purged:
+            record = existing.model_copy(
+                update={
+                    "package_digest": package_record.package_digest,
+                    "status": SkillPublicationStatus.ACTIVE,
+                    "source_id": source.source_id,
+                    "revision": existing.revision + 1,
+                    "updated_by": command.actor_id,
+                    "updated_at": now,
+                    "reason_code": None,
+                    "revocation_action": None,
+                    "revocation_policy_version": None,
+                    "revocation_policy_decision_id": None,
+                }
+            )
+            expected_publication_revision = existing.revision
         elif existing.status is not desired_status:
             record = existing.model_copy(
                 update={
@@ -336,12 +379,32 @@ class SkillPublicationService:
             record = existing
             expected_publication_revision = existing.revision
 
-        installation = await self._new_installation(
-            command,
-            source,
-            package_record,
-            now,
-        )
+        installation: SkillInstallationRecord | None
+        if replace_purged:
+            assert existing_installation is not None
+            installation = existing_installation.model_copy(
+                update={
+                    "version_constraint": f"={manifest.version}",
+                    "pinned_package_digest": package_record.package_digest,
+                    "status": SkillInstallationStatus.ACTIVE,
+                    "source_id": source.source_id,
+                    "auto_upgrade": False,
+                    "revision": existing_installation.revision + 1,
+                    "updated_by": command.actor_id,
+                    "updated_at": now,
+                    "reason_code": None,
+                    "uninstall_action": None,
+                    "uninstall_policy_version": None,
+                    "uninstall_policy_decision_id": None,
+                }
+            )
+        else:
+            installation = await self._new_installation(
+                command,
+                source,
+                package_record,
+                now,
+            )
         committed = await self._lifecycle.commit_publish(
             SkillPublishCommit(
                 command_id=command.command_id,
@@ -358,6 +421,12 @@ class SkillPublicationService:
                 installation=installation,
                 occurred_at=now,
                 source_lease=source_lease,
+                replace_purged=replace_purged,
+                expected_installation_revision=(
+                    existing_installation.revision
+                    if replace_purged and existing_installation is not None
+                    else None
+                ),
             )
         )
         if self._artifact_lifecycle is not None:

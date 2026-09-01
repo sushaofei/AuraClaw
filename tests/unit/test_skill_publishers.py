@@ -21,6 +21,7 @@ from auraclaw.action.skill_packages import (
     SkillPackage,
     SkillPackageRegistry,
     skill_signing_payload,
+    skill_signing_payload_candidates,
 )
 from auraclaw.action.skill_publication import SkillPublicationService
 from auraclaw.action.skill_publishers import (
@@ -117,6 +118,46 @@ def _package(private_key: Ed25519PrivateKey, key_id: str, version: str) -> Skill
         manifest=manifest,
         files={"manifest.json": manifest.model_dump_json().encode(), **files},
     )
+
+
+def test_unversioned_legacy_signature_survives_manifest_schema_additions() -> None:
+    async def scenario() -> None:
+        private_key = Ed25519PrivateKey.generate()
+        public_key = _b64(
+            private_key.public_key().public_bytes(
+                serialization.Encoding.Raw,
+                serialization.PublicFormat.Raw,
+            )
+        )
+        store = InMemorySkillPublisherStore()
+        service = SkillPublisherService(store)
+        await service.register(_publisher_command())
+        await service.rotate_key(_rotate("legacy-key", public_key, 1, "legacy-rotate"))
+
+        unsigned = SkillManifest(
+            name="legacy.release",
+            version="1.0.0",
+            description="Signed before workflow fields existed",
+            publisher="acme",
+            signature_key_id="legacy-key",
+            signature="ed25519:unsigned",
+        )
+        files = {"SKILL.md": b"# Legacy\n"}
+        unsigned_package = SkillPackage(manifest=unsigned, files=files)
+        candidates = skill_signing_payload_candidates(unsigned_package)
+        assert len(candidates) == 2
+        signature = _b64(private_key.sign(candidates[1]))
+        manifest = unsigned.model_copy(update={"signature": f"ed25519:{signature}"})
+        package = SkillPackage(
+            manifest=manifest,
+            files={"manifest.json": manifest.model_dump_json().encode(), **files},
+        )
+
+        assert await SkillPublisherTrustService(store).verify_for_admission(
+            "tenant-a", package
+        ) == "legacy-key"
+
+    asyncio.run(scenario())
 
 
 def test_publisher_rotation_admission_restore_and_revocation() -> None:

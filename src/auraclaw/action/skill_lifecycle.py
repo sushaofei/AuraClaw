@@ -46,6 +46,8 @@ class SkillPublishCommit:
     installation: SkillInstallationRecord | None
     occurred_at: datetime
     source_lease: SkillSourceLease | None = None
+    replace_purged: bool = False
+    expected_installation_revision: int | None = None
 
 
 @dataclass(frozen=True)
@@ -276,6 +278,10 @@ class SkillLifecycleStore(Protocol):
 
     async def list_packages(self, tenant_id: str) -> tuple[SkillPackageRecord, ...]: ...
 
+    async def list_package_tombstones(
+        self, tenant_id: str, publisher: str, name: str
+    ) -> tuple[SkillPackageRecord, ...]: ...
+
     async def update_package_retention(
         self, record: SkillPackageRecord, *, expected_revision: int
     ) -> SkillPackageRecord: ...
@@ -357,6 +363,7 @@ class SkillLifecycleStore(Protocol):
 class InMemorySkillLifecycleStore:
     _admission_audits: list[SkillAdmissionAuditRecord] = field(default_factory=list)
     _packages: dict[PackageKey, SkillPackageRecord] = field(default_factory=dict)
+    _package_tombstones: list[SkillPackageRecord] = field(default_factory=list)
     _publications: dict[PublicationKey, SkillPublicationRecord] = field(
         default_factory=dict
     )
@@ -523,45 +530,52 @@ class InMemorySkillLifecycleStore:
                     replayed=True,
                 )
             packages = dict(self._packages)
+            package_tombstones = list(self._package_tombstones)
             publications = dict(self._publications)
             installations = dict(self._installations)
             try:
-                package = await self.put_package(commit.package)
-                publication_key = _publication_key(commit.publication)
-                current_publication = self._publications.get(publication_key)
-                if (
-                    current_publication is not None
-                    and commit.publication.revision
-                    == commit.expected_publication_revision
-                    and current_publication.package_digest
-                    == commit.publication.package_digest
-                    and current_publication.status is commit.publication.status
-                ):
-                    publication = current_publication
+                if commit.replace_purged:
+                    package, publication, installation = self._replace_purged(commit)
                 else:
-                    publication = await self.put_publication(
-                        commit.publication,
-                        expected_revision=commit.expected_publication_revision,
-                    )
-                installation = None
-                if commit.installation is not None:
-                    current = self._installations.get(_installation_key(commit.installation))
-                    if current is None:
-                        installation = await self.put_installation(
-                            commit.installation, expected_revision=0
-                        )
-                    elif (
-                        current.status is not commit.installation.status
-                        or current.pinned_package_digest
-                        != commit.installation.pinned_package_digest
+                    package = await self.put_package(commit.package)
+                    publication_key = _publication_key(commit.publication)
+                    current_publication = self._publications.get(publication_key)
+                    if (
+                        current_publication is not None
+                        and commit.publication.revision
+                        == commit.expected_publication_revision
+                        and current_publication.package_digest
+                        == commit.publication.package_digest
+                        and current_publication.status is commit.publication.status
                     ):
-                        raise VersionConflictError(
-                            "Skill installation revision conflict"
-                        )
+                        publication = current_publication
                     else:
-                        installation = current
+                        publication = await self.put_publication(
+                            commit.publication,
+                            expected_revision=commit.expected_publication_revision,
+                        )
+                    installation = None
+                    if commit.installation is not None:
+                        current = self._installations.get(
+                            _installation_key(commit.installation)
+                        )
+                        if current is None:
+                            installation = await self.put_installation(
+                                commit.installation, expected_revision=0
+                            )
+                        elif (
+                            current.status is not commit.installation.status
+                            or current.pinned_package_digest
+                            != commit.installation.pinned_package_digest
+                        ):
+                            raise VersionConflictError(
+                                "Skill installation revision conflict"
+                            )
+                        else:
+                            installation = current
             except Exception:
                 self._packages = packages
+                self._package_tombstones = package_tombstones
                 self._publications = publications
                 self._installations = installations
                 raise
@@ -596,6 +610,52 @@ class InMemorySkillLifecycleStore:
                 payload=_publish_outbox_payload(result),
             )
             return result
+
+    def _replace_purged(
+        self, commit: SkillPublishCommit
+    ) -> tuple[
+        SkillPackageRecord,
+        SkillPublicationRecord,
+        SkillInstallationRecord | None,
+    ]:
+        key = _package_key(commit.package)
+        existing_package = self._packages.get(key)
+        existing_publication = self._publications.get(key)
+        installation_key = (
+            commit.package.tenant_id,
+            commit.package.manifest.publisher,
+            commit.package.manifest.name,
+        )
+        existing_installation = self._installations.get(installation_key)
+        if (
+            commit.package.retention_status.value != "retained"
+            or commit.publication.status is not SkillPublicationStatus.ACTIVE
+            or commit.publication.package_digest != commit.package.package_digest
+            or commit.installation is None
+            or commit.installation.status.value != "active"
+            or commit.installation.pinned_package_digest
+            != commit.package.package_digest
+            or existing_package is None
+            or existing_package.retention_status.value != "purged"
+            or existing_package.legal_hold
+            or existing_publication is None
+            or existing_publication.status is not SkillPublicationStatus.REVOKED
+            or existing_publication.revision != commit.expected_publication_revision
+            or existing_installation is None
+            or existing_installation.status.value != "uninstalled"
+            or existing_installation.revision
+            != commit.expected_installation_revision
+        ):
+            raise VersionConflictError("Purged Skill replacement preconditions changed")
+        if commit.publication.revision != existing_publication.revision + 1:
+            raise VersionConflictError("Skill publication next revision is invalid")
+        if commit.installation.revision != existing_installation.revision + 1:
+            raise VersionConflictError("Skill installation next revision is invalid")
+        self._package_tombstones.append(existing_package)
+        self._packages[key] = commit.package
+        self._publications[key] = commit.publication
+        self._installations[installation_key] = commit.installation
+        return commit.package, commit.publication, commit.installation
 
     def _select_publication_source(
         self, publication: SkillPublicationRecord
@@ -726,6 +786,17 @@ class InMemorySkillLifecycleStore:
                     item.manifest.version,
                 ),
             )
+        )
+
+    async def list_package_tombstones(
+        self, tenant_id: str, publisher: str, name: str
+    ) -> tuple[SkillPackageRecord, ...]:
+        return tuple(
+            item
+            for item in self._package_tombstones
+            if item.tenant_id == tenant_id
+            and item.manifest.publisher == publisher
+            and item.manifest.name == name
         )
 
     async def update_package_retention(

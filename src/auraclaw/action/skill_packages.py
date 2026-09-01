@@ -167,8 +167,13 @@ class HmacSkillSignatureVerifier:
         key = self._publisher_keys.get(package.manifest.publisher)
         if key is None:
             return False
-        expected = hmac.new(key, skill_signing_payload(package), hashlib.sha256).hexdigest()
-        return hmac.compare_digest(package.manifest.signature, f"hmac-sha256:{expected}")
+        return any(
+            hmac.compare_digest(
+                package.manifest.signature,
+                f"hmac-sha256:{hmac.new(key, payload, hashlib.sha256).hexdigest()}",
+            )
+            for payload in skill_signing_payload_candidates(package)
+        )
 
     def sign(self, manifest: SkillManifest, files: Mapping[str, bytes]) -> str:
         key = self._publisher_keys.get(manifest.publisher)
@@ -206,7 +211,11 @@ class Ed25519SkillSignatureVerifier:
             )
             if len(signature) != 64:
                 return False
-            key.verify(signature, skill_signing_payload(package))
+            if not any(
+                _verify_ed25519_signature(key, signature, payload)
+                for payload in skill_signing_payload_candidates(package)
+            ):
+                return False
         except (InvalidSignature, ValueError, binascii.Error):
             return False
         return True
@@ -411,6 +420,21 @@ class SkillPackageRegistry:
             for resource in _package_resources(tenant_id, normalized, digest):
                 self._resources.register_resource(resource)
         return publication
+
+    def forget_package(
+        self, tenant_id: str, publisher: str, name: str, version: str
+    ) -> None:
+        key = (tenant_id, publisher, name, version)
+        package = self._packages.pop(key, None)
+        publication = self._publications.pop(key, None)
+        self._discoverable.discard(key)
+        if package is None or publication is None or self._resources is None:
+            return
+        for resource in _package_resources(
+            tenant_id, package, publication.package_digest
+        ):
+            if resource.descriptor.uri is not None:
+                self._resources.unregister_resource(resource.descriptor.uri)
 
     def revoke(
         self,
@@ -867,8 +891,25 @@ class SkillResolver:
 
 
 def skill_signing_payload(package: SkillPackage) -> bytes:
+    return _skill_signing_payload(package, legacy=False)
+
+
+def skill_signing_payload_candidates(package: SkillPackage) -> tuple[bytes, ...]:
+    current = skill_signing_payload(package)
+    if package.manifest.signature_payload_version is not None:
+        return (current,)
+    legacy = _skill_signing_payload(package, legacy=True)
+    return (current,) if legacy == current else (current, legacy)
+
+
+def _skill_signing_payload(package: SkillPackage, *, legacy: bool) -> bytes:
     manifest = package.manifest.model_dump(mode="json")
     manifest["signature"] = None
+    if manifest.get("signature_payload_version") is None:
+        manifest.pop("signature_payload_version", None)
+    if legacy:
+        manifest.pop("workflow", None)
+        manifest.pop("required_references", None)
     if manifest.get("signature_key_id") is None:
         manifest.pop("signature_key_id", None)
     file_digests = {
@@ -881,6 +922,16 @@ def skill_signing_payload(package: SkillPackage) -> bytes:
         sort_keys=True,
         separators=(",", ":"),
     ).encode()
+
+
+def _verify_ed25519_signature(
+    key: Ed25519PublicKey, signature: bytes, payload: bytes
+) -> bool:
+    try:
+        key.verify(signature, payload)
+    except InvalidSignature:
+        return False
+    return True
 
 
 def skill_package_digest(package: SkillPackage) -> str:

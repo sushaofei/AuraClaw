@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -9,8 +10,15 @@ from auraclaw.action.capability_catalog import (
     SkillBindingStatusExecutor,
     skill_binding_status_tool,
 )
+from auraclaw.action.mcp_primitives import HandsResourceRegistry
 from auraclaw.action.skill_lifecycle import InMemorySkillLifecycleStore
 from auraclaw.action.skill_management import SkillManagementService
+from auraclaw.action.skill_packages import (
+    HmacSkillSignatureVerifier,
+    SkillPackage,
+    SkillPackageRegistry,
+)
+from auraclaw.action.skill_publication import SkillPublicationService
 from auraclaw.contracts.errors import (
     InvalidTransitionError,
     PolicyDeniedError,
@@ -94,6 +102,20 @@ class _RetiredActivator:
 class _Artifacts:
     def __init__(self) -> None:
         self.deleted: list[str] = []
+        self.written: dict[str, bytes] = {}
+
+    async def put(self, **kwargs: object) -> ArtifactRef:
+        content = kwargs["content"]
+        assert isinstance(content, bytes)
+        artifact_id = f"art_republished_{len(self.written) + 1}"
+        self.written[artifact_id] = content
+        return ArtifactRef(
+            artifact_id=artifact_id,
+            version=1,
+            content_hash=hashlib.sha256(content).hexdigest(),
+            media_type="application/vnd.auraclaw.skill-package+json",
+            size=len(content),
+        )
 
     async def delete(self, *, artifact_ref: ArtifactRef, **kwargs: object) -> None:
         del kwargs
@@ -714,6 +736,66 @@ def test_purge_ignores_retention_and_history_but_rejects_active_bindings() -> No
         assert artifacts.deleted == ["art_skill"]
         assert await service.purge_package(command) == purged
         assert artifacts.deleted == ["art_skill"]
+
+        verifier = HmacSkillSignatureVerifier(
+            {"platform": b"republish-signing-key"}
+        )
+        unsigned = SkillManifest(
+            name="release.prepare",
+            version="1.0.0",
+            description="Republished release preparation",
+            publisher="platform",
+            signature_payload_version="v2",
+            signature="hmac-sha256:unsigned",
+        )
+        files = {"SKILL.md": b"# Republished Release\n"}
+        manifest = unsigned.model_copy(
+            update={"signature": verifier.sign(unsigned, files)}
+        )
+        republished = await SkillPublicationService(
+            registry=SkillPackageRegistry(
+                artifacts=artifacts,
+                signature_verifier=verifier,
+                resources=HandsResourceRegistry(),
+            ),
+            lifecycle=lifecycle,
+            artifacts=artifacts,
+        ).publish(
+            PublishSkillCommand(
+                tenant_id="tenant-a",
+                actor_id="publisher-a",
+                source_id="sks_admin_upload",
+                command_id="republish-1",
+                correlation_id="corr-republish",
+                causation_id="republish-1",
+            ),
+            SkillPackage(
+                manifest=manifest,
+                files={"manifest.json": manifest.model_dump_json().encode(), **files},
+            ),
+        )
+        assert republished.package_digest != purged.package_digest
+        current = await lifecycle.get_package(
+            "tenant-a", "platform", "release.prepare", "1.0.0"
+        )
+        assert current is not None and current.retention_status.value == "retained"
+        assert current.artifact_ref.artifact_id == "art_republished_1"
+        current_publication = await lifecycle.get_publication(
+            "tenant-a", "platform", "release.prepare", "1.0.0"
+        )
+        assert current_publication is not None
+        assert current_publication.status is SkillPublicationStatus.ACTIVE
+        assert current_publication.revision == 3
+        current_installation = await lifecycle.get_installation(
+            "tenant-a", "platform", "release.prepare"
+        )
+        assert current_installation is not None
+        assert current_installation.status is SkillInstallationStatus.ACTIVE
+        assert current_installation.revision == 4
+        tombstones = await lifecycle.list_package_tombstones(
+            "tenant-a", "platform", "release.prepare"
+        )
+        assert tombstones == (purged,)
 
     asyncio.run(scenario())
 

@@ -16,6 +16,7 @@ DO_BUILD=1
 DO_UP=1
 DO_MIGRATE=0
 DO_HEALTH=1
+MIGRATE_TARGET="${AURACLAW_MIGRATE_TARGET:-0055}"
 
 usage() {
   cat <<'EOF'
@@ -141,8 +142,8 @@ COMPOSE_CMD+=' $(test -f compose.kafka-fix.yml && echo -f compose.kafka-fix.yml)
 COMPOSE_CMD+=' $(test -f compose.hotfix-errors.yml && echo -f compose.hotfix-errors.yml)'
 
 if [[ "${DO_MIGRATE}" -eq 1 ]]; then
-  echo "==> migrate"
-  remote "${COMPOSE_CMD} --profile migrate run --rm migrate"
+  echo "==> migrate target ${MIGRATE_TARGET}"
+  remote "AURACLAW_MIGRATE_TARGET=$(printf '%q' "${MIGRATE_TARGET}") ${COMPOSE_CMD} --profile migrate run --rm migrate"
 fi
 
 if [[ "${DO_UP}" -eq 1 ]]; then

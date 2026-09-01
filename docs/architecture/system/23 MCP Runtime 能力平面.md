@@ -593,6 +593,14 @@ Artifact metadata 都完成删除后，Lifecycle 才以 optimistic revision 把 
 actor/time。若此后 Package tombstone 写入发生冲突，重试会利用 Artifact delete 幂等性收敛，不能只改
 retention 状态来伪装物理删除。
 
+`purged` tombstone 不永久占用 `(tenant, publisher, name, version)`。相同坐标再次发布时，Lifecycle 仅在
+Package 已 purged、Publication 已 revoked、Installation 已 uninstalled 且无 legal hold 时执行原子替换：
+旧 Package 快照进入 `skill_package_tombstone` 审计表，当前 Package、Publication 和 Installation 以单调
+revision 重新激活。历史 binding 仍固定旧 digest 与旧 ArtifactRef，不会被新包重定向。
+
+新签名 Manifest 显式携带 `signature_payload_version=v2`。未携带版本的旧包可按 schema 扩展前后的两种
+canonical payload 验证；显式版本不允许兼容回退，从而兼顾历史签名可用性与新签名的确定性。
+
 ## 4. 发现、加载与调用
 
 ### 4.1 协议发现和目录同步

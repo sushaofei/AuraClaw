@@ -288,6 +288,8 @@ AURACLAW_SKILL_SIGNING_KEY='<private key>' \
 ```
 
 命令会原子更新 `manifest.json`，并输出 `publisher`、`name`、`version`、`signature_key_id`、公钥和 package digest，不输出私钥。
+新签名会写入 `signature_payload_version: "v2"`，使签名字段集合不再随 Manifest 默认字段增加而隐式漂移。
+未声明 payload version 的历史包仍按当前与旧字段集合兼容验签；显式声明 `v2` 的包只按 v2 验证，避免降级。
 
 ### 5.2 登记 Publisher 和公钥
 

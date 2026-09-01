@@ -425,6 +425,23 @@ class InProcessSkillStateProjector:
             for item in await self._lifecycle.list_installations(tenant_id)
         }
         for publication in await self._lifecycle.list_publications(tenant_id):
+            package = await self._lifecycle.get_package(
+                tenant_id,
+                publication.publisher,
+                publication.name,
+                publication.version,
+            )
+            if (
+                package is not None
+                and package.retention_status is SkillPackageRetentionStatus.PURGED
+            ):
+                self._registry.forget_package(
+                    tenant_id,
+                    publication.publisher,
+                    publication.name,
+                    publication.version,
+                )
+                continue
             if publication.status is SkillPublicationStatus.REVOKED:
                 cached = self._registry.get_publication(
                     tenant_id,
