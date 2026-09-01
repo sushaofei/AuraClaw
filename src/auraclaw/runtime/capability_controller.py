@@ -12,7 +12,7 @@ from typing import Any
 from urllib.parse import quote
 
 from auraclaw.contracts.capabilities import RequiredCapabilityRef
-from auraclaw.contracts.errors import NotFoundError
+from auraclaw.contracts.errors import NotFoundError, SkillPromptBudgetExceededError
 from auraclaw.contracts.events import NewEvent
 from auraclaw.contracts.skills import SkillActivation
 from auraclaw.control.ports import RuntimeAssignment
@@ -59,13 +59,17 @@ class RuntimeCapabilityController:
         skill_content_cache_max_bytes: int = 16 * 1024 * 1024,
         skill_content_cache_max_entries: int = 1024,
         skill_content_cache_ttl_seconds: float = 900.0,
+        skill_prompt_max_bytes: int = 256 * 1024,
+        skill_prompt_max_estimated_tokens: int = 65_536,
     ) -> None:
         if (
             skill_content_cache_max_bytes < 1
             or skill_content_cache_max_entries < 1
             or skill_content_cache_ttl_seconds <= 0
+            or skill_prompt_max_bytes < 1
+            or skill_prompt_max_estimated_tokens < 1
         ):
-            raise ValueError("Runtime Skill content cache limits must be positive")
+            raise ValueError("Runtime Skill content and prompt limits must be positive")
         self._client = client
         self._max_candidates = max_candidates
         self._max_loaded = max_loaded
@@ -75,6 +79,8 @@ class RuntimeCapabilityController:
         self._skill_content_cache_max_bytes = skill_content_cache_max_bytes
         self._skill_content_cache_max_entries = skill_content_cache_max_entries
         self._skill_content_cache_ttl_seconds = skill_content_cache_ttl_seconds
+        self._skill_prompt_max_bytes = skill_prompt_max_bytes
+        self._skill_prompt_max_estimated_tokens = skill_prompt_max_estimated_tokens
         self._skill_content_cache: OrderedDict[
             tuple[str, str, str, str, str], _RunSkillContentEntry
         ] = OrderedDict()
@@ -339,36 +345,7 @@ class RuntimeCapabilityController:
         state: dict[str, Any],
     ) -> tuple[dict[str, Any], ...]:
         messages: list[dict[str, Any]] = []
-        emitted: set[tuple[str, str, str, str]] = set()
-        pending: list[tuple[str, str, str, str]] = []
-        for item in state.get("active_skills", ()):
-            if not isinstance(item, dict):
-                continue
-            binding = item.get("binding")
-            if not isinstance(binding, dict):
-                continue
-            dependencies = binding.get("resolved_skills", ())
-            skill_refs = [dependency for dependency in dependencies if isinstance(dependency, dict)]
-            skill_refs.append(
-                {
-                    "publisher": binding["publisher"],
-                    "skill_name": binding["skill_name"],
-                    "skill_version": binding["skill_version"],
-                    "package_digest": binding["package_digest"],
-                }
-            )
-            for skill_ref in skill_refs:
-                identity = (
-                    str(skill_ref["publisher"]),
-                    str(skill_ref["skill_name"]),
-                    str(skill_ref["skill_version"]),
-                    str(skill_ref["package_digest"]),
-                )
-                if identity in emitted:
-                    continue
-                emitted.add(identity)
-                pending.append(identity)
-
+        pending = self._active_skill_identities(state)
         if not pending:
             self._trusted_message_metrics[self._run_key(assignment)] = {
                 "skill.runtime.active.count": 0.0,
@@ -377,6 +354,7 @@ class RuntimeCapabilityController:
                 "skill.runtime.content_cache.hit.count": 0.0,
                 "skill.runtime.content_cache.miss.count": 0.0,
                 "skill.runtime.trusted_messages.latency.seconds": 0.0,
+                "skill.runtime.prompt.rejected.count": 0.0,
             }
             return tuple(messages)
 
@@ -395,7 +373,7 @@ class RuntimeCapabilityController:
             )
         )
         cache_hits = 0
-        prompt_bytes = 0
+        contents: list[str] = []
         for identity, (text, cache_hit) in zip(pending, loaded, strict=True):
             cache_hits += int(cache_hit)
             if text:
@@ -404,29 +382,56 @@ class RuntimeCapabilityController:
                     f"{identity[0]}/{identity[1]}@{identity[2]} "
                     f"(digest {identity[3]}):\n{text}"
                 )
-                prompt_bytes += len(content.encode())
-                messages.append(
-                    {
-                        "role": "system",
-                        "content": content,
-                    }
-                )
+                contents.append(content)
+        prompt_bytes = sum(len(content.encode()) for content in contents)
+        estimated_tokens = _estimate_tokens(prompt_bytes)
+        rejected = (
+            prompt_bytes > self._skill_prompt_max_bytes
+            or estimated_tokens > self._skill_prompt_max_estimated_tokens
+        )
         self._trusted_message_metrics[self._run_key(assignment)] = {
             "skill.runtime.active.count": float(len(pending)),
             "skill.runtime.prompt.bytes": float(prompt_bytes),
-            "skill.runtime.prompt.estimated_tokens": float((prompt_bytes + 3) // 4),
+            "skill.runtime.prompt.estimated_tokens": float(estimated_tokens),
             "skill.runtime.content_cache.hit.count": float(cache_hits),
             "skill.runtime.content_cache.miss.count": float(len(pending) - cache_hits),
             "skill.runtime.trusted_messages.latency.seconds": (
                 time.monotonic() - started
             ),
+            "skill.runtime.prompt.rejected.count": float(rejected),
         }
+        if rejected:
+            raise SkillPromptBudgetExceededError(
+                "Activated Skill instructions exceed the Runtime prompt budget",
+                detail=(
+                    f"prompt_bytes={prompt_bytes},max_bytes={self._skill_prompt_max_bytes},"
+                    f"estimated_tokens={estimated_tokens},"
+                    f"max_estimated_tokens={self._skill_prompt_max_estimated_tokens}"
+                ),
+            )
+        messages.extend({"role": "system", "content": content} for content in contents)
         return tuple(messages)
 
     def trusted_message_metrics(
         self, assignment: RuntimeAssignment
     ) -> dict[str, float]:
         return dict(self._trusted_message_metrics.get(self._run_key(assignment), {}))
+
+    def prompt_cache_key(
+        self, assignment: RuntimeAssignment, state: dict[str, Any]
+    ) -> str | None:
+        identities = self._active_skill_identities(state)
+        if not identities:
+            return None
+        payload = json.dumps(
+            {
+                "tenant_id": assignment.tenant_id,
+                "skill_digests": [identity[3] for identity in identities],
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        return f"auraclaw-skill:{hashlib.sha256(payload).hexdigest()[:48]}"
 
     async def release_run(self, assignment: RuntimeAssignment) -> None:
         run_prefix = self._run_key(assignment)
@@ -545,6 +550,40 @@ class RuntimeCapabilityController:
         for key in keys:
             entry = self._skill_content_cache.pop(key)
             self._skill_content_cache_bytes -= entry.size
+
+    @staticmethod
+    def _active_skill_identities(
+        state: dict[str, Any],
+    ) -> list[tuple[str, str, str, str]]:
+        identities: list[tuple[str, str, str, str]] = []
+        emitted: set[tuple[str, str, str, str]] = set()
+        for item in state.get("active_skills", ()):
+            if not isinstance(item, dict):
+                continue
+            binding = item.get("binding")
+            if not isinstance(binding, dict):
+                continue
+            dependencies = binding.get("resolved_skills", ())
+            skill_refs = [dependency for dependency in dependencies if isinstance(dependency, dict)]
+            skill_refs.append(
+                {
+                    "publisher": binding["publisher"],
+                    "skill_name": binding["skill_name"],
+                    "skill_version": binding["skill_version"],
+                    "package_digest": binding["package_digest"],
+                }
+            )
+            for skill_ref in skill_refs:
+                identity = (
+                    str(skill_ref["publisher"]),
+                    str(skill_ref["skill_name"]),
+                    str(skill_ref["skill_version"]),
+                    str(skill_ref["package_digest"]),
+                )
+                if identity not in emitted:
+                    emitted.add(identity)
+                    identities.append(identity)
+        return identities
 
     async def execute(
         self,
@@ -1051,6 +1090,12 @@ def _contextualize_contents(
 def _activation_id(assignment: RuntimeAssignment, activation_key: str) -> str:
     value = f"{assignment.tenant_id}:{assignment.session_id}:{assignment.run_id}:{activation_key}"
     return f"ska_{hashlib.sha256(value.encode()).hexdigest()[:32]}"
+
+
+def _estimate_tokens(utf8_bytes: int) -> int:
+    # Provider-neutral conservative estimate: CJK is commonly close to one token
+    # per three UTF-8 bytes, while English/code generally uses more bytes per token.
+    return (utf8_bytes + 2) // 3
 
 
 def _digest(value: object) -> str:

@@ -13,6 +13,7 @@ from auraclaw.contracts.observability import (
     AlertSeverity,
     AuditEvent,
     MetricPoint,
+    MetricSummary,
     TraceContext,
     TraceSpan,
 )
@@ -31,6 +32,10 @@ class ObservabilityStore(Protocol):
     async def session_records(self, tenant_id: str, session_id: str) -> dict[str, list[Any]]: ...
 
     async def metric_snapshot(self) -> list[MetricPoint]: ...
+
+    async def metric_summary(
+        self, tenant_id: str, *, window_hours: int
+    ) -> list[MetricSummary]: ...
 
 
 class EventReader(Protocol):
@@ -246,6 +251,15 @@ class ObservabilityService:
     async def metrics(self) -> list[MetricPoint]:
         return await self._store.metric_snapshot()
 
+    async def metric_summary(
+        self, tenant_id: str, *, window_hours: int
+    ) -> list[MetricSummary]:
+        if window_hours < 1 or window_hours > 720:
+            raise ValueError("metric summary window must be between 1 and 720 hours")
+        return await self._store.metric_summary(
+            tenant_id, window_hours=window_hours
+        )
+
     @staticmethod
     def _as_mapping(value: Any) -> dict[str, Any]:
         if isinstance(value, dict):
@@ -285,6 +299,7 @@ class ObservabilityProjector:
         "child.delegated",
         "session.handed_off",
         "run.cancelled",
+        "run.failed",
         "tool.call.requested",
         "tool.call.completed",
         "delivery.retrying",
@@ -361,6 +376,18 @@ class ObservabilityProjector:
                 1,
                 context=context,
                 deduplication_key=f"{event.event_id}:delivery.dlq.count",
+            )
+        if (
+            event.type == "run.failed"
+            and event.payload.get("error_code") == "skill_prompt_budget_exceeded"
+        ):
+            await self._service.metric(
+                "skill.runtime.prompt.rejected.count",
+                1,
+                context=context,
+                deduplication_key=(
+                    f"{event.event_id}:skill.runtime.prompt.rejected.count"
+                ),
             )
         result = event.payload.get("result")
         if (

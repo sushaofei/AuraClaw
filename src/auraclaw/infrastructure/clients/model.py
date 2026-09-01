@@ -115,6 +115,7 @@ class RemoteModelClient:
             data_classification=request.policy.data_classification,
             max_output_tokens=request.max_output_tokens,
             runtime_metrics=request.runtime_metrics,
+            prompt_cache_key=request.prompt_cache_key,
         )
 
     async def _consume_stream(

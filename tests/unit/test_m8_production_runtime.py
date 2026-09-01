@@ -276,9 +276,11 @@ def test_settings_only_accept_provider_neutral_model_names(monkeypatch: pytest.M
     monkeypatch.setenv("AURACLAW_MODEL_API_KEY", "neutral-secret")
     monkeypatch.setenv("AURACLAW_MODEL_BASE_URL", "https://models.example/v1")
     monkeypatch.setenv("AURACLAW_MODEL_NAME", "example-model")
+    monkeypatch.setenv("AURACLAW_MODEL_PROMPT_CACHE_KEY_ENABLED", "true")
     configured = Settings(_env_file=None)
     assert configured.model_gateway_configured is True
     assert configured.model_provider == "openai_compatible"
+    assert configured.model_prompt_cache_key_enabled is True
 
 
 def test_named_env_files_select_resources_without_environment_label(
@@ -440,6 +442,10 @@ def test_openai_compatible_provider_streams_usage_and_tools() -> None:
                     "prompt_tokens": 3,
                     "completion_tokens": 2,
                     "total_tokens": 5,
+                    "prompt_tokens_details": {
+                        "cached_tokens": 2,
+                        "cache_write_tokens": 1,
+                    },
                 },
             },
         ]
@@ -451,6 +457,7 @@ def test_openai_compatible_provider_streams_usage_and_tools() -> None:
         provider = OpenAICompatibleProvider(
             base_url="https://models.example/v1/",
             model="example-model",
+            prompt_cache_key_enabled=True,
             client=client,
         )
         response = await provider.generate(
@@ -460,6 +467,7 @@ def test_openai_compatible_provider_streams_usage_and_tools() -> None:
                 run_id="run-m8",
                 messages=({"role": "user", "content": "hello"},),
                 max_output_tokens=32,
+                prompt_cache_key="auraclaw-skill:stable",
             ),
             credential="gateway-only-secret",
         )
@@ -470,11 +478,14 @@ def test_openai_compatible_provider_streams_usage_and_tools() -> None:
             "input_tokens": 3,
             "output_tokens": 2,
             "total_tokens": 5,
+            "cached_input_tokens": 2,
+            "cache_write_input_tokens": 1,
         }
         assert response.tool_calls[0].arguments == {"query": "state"}
         assert captured["authorization"] == "Bearer gateway-only-secret"
         assert captured["body"]["stream"] is True
         assert captured["body"]["max_tokens"] == 32
+        assert captured["body"]["prompt_cache_key"] == "auraclaw-skill:stable"
         assert "thinking" not in captured["body"]
 
     asyncio.run(scenario())
@@ -511,6 +522,7 @@ def test_openai_compatible_provider_sends_thinking_disabled() -> None:
         await client.aclose()
         assert response.completed_output == "ok"
         assert captured["body"]["thinking"] == {"type": "disabled"}
+        assert "prompt_cache_key" not in captured["body"]
 
     asyncio.run(scenario())
 

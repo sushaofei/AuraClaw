@@ -2527,6 +2527,10 @@ def _runtime_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
             skill_content_cache_ttl_seconds=(
                 settings.runtime_skill_content_cache_ttl_seconds
             ),
+            skill_prompt_max_bytes=settings.runtime_skill_prompt_max_bytes,
+            skill_prompt_max_estimated_tokens=(
+                settings.runtime_skill_prompt_max_estimated_tokens
+            ),
         ),
         collaboration_controller=RuntimeCollaborationController(collaboration),
     )

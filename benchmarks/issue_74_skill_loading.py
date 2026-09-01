@@ -117,6 +117,12 @@ async def runtime_hotpath() -> None:
                         skill_content_cache_max_bytes=max(
                             16 * 1024 * 1024, active_skills * body_size
                         ),
+                        skill_prompt_max_bytes=max(
+                            256 * 1024, active_skills * (body_size + 256)
+                        ),
+                        skill_prompt_max_estimated_tokens=max(
+                            65_536, active_skills * (body_size + 256)
+                        ),
                     )
                     for client in clients
                 ]

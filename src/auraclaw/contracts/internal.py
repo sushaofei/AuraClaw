@@ -387,6 +387,7 @@ class ModelGenerateRequest(ContractModel):
     data_classification: str = "internal"
     max_output_tokens: int = Field(default=8192, gt=0)
     runtime_metrics: dict[str, float] = Field(default_factory=dict, max_length=16)
+    prompt_cache_key: str | None = Field(default=None, min_length=1, max_length=64)
 
 
 class ModelGenerateResponse(ContractModel):

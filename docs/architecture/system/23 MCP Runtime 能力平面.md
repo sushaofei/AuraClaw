@@ -527,6 +527,21 @@ Publication/Trust/撤销决策。正文不进入 Runtime checkpoint、Session Ev
 数值遥测；这些值不参与 Model Call 幂等摘要。Model Gateway 记录 active Skill 数、prompt bytes、估算
 tokens、正文 cache hit/miss、trusted-message 组装耗时和 Provider TTFT，不记录正文。
 
+Runtime 还根据 tenant 与有序 package digest 生成不超过 64 字符的稳定 `prompt_cache_key`；key 不包含
+Skill 名称、正文、Session 或 Run 标识，因此同 tenant 的相同 Skill 前缀可跨 Run 复用，tenant 之间不会
+共享 bucket。OpenAI-compatible Adapter 仅在 `AURACLAW_MODEL_PROMPT_CACHE_KEY_ENABLED=true` 时发送该
+字段，默认关闭以兼容会拒绝未知参数的第三方实现；关闭或 Provider 不支持时仍依赖稳定前缀正常推理。
+Provider usage 中的 `prompt_tokens_details.cached_tokens`/`cache_write_tokens` 被归一化为数值指标，不能
+根据“已发送 key”推断命中。当前字段依据
+[OpenAI Prompt Caching 指南](https://developers.openai.com/api/docs/guides/latest-model?model=gpt-5.5)，
+其他 Provider 必须单独声明兼容能力。
+
+Skill system message 在送入 Model Gateway 前受总量双门禁保护：默认最多 256 KiB、保守估算最多
+65,536 tokens，分别由 `AURACLAW_RUNTIME_SKILL_PROMPT_MAX_BYTES` 与
+`AURACLAW_RUNTIME_SKILL_PROMPT_MAX_ESTIMATED_TOKENS` 配置。估算按 UTF-8 三字节/token 处理，以覆盖
+CJK 的保守边界。任一门禁超限返回 `skill_prompt_budget_exceeded`，只记录实际/上限数值；禁止静默截断
+已签名指令，也不把正文写入错误、Event 或指标。需要更大上下文时必须先确认目标模型窗口与成本再显式调高。
+
 管理动作必须区分租户意图和全局安全状态：
 
 - `disable`：Installation `active -> disabled`，停止新发现/新绑定；

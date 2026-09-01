@@ -100,6 +100,22 @@ stream_disconnect
 cache_hit
 ```
 
+OpenAI-compatible Chat Completions Adapter 默认只使用 Provider 的隐式 prefix cache；只有显式声明
+`AURACLAW_MODEL_PROMPT_CACHE_KEY_ENABLED=true` 才发送 Runtime 提供的 tenant 隔离稳定 key，避免未知
+字段破坏第三方兼容服务。Gateway 将 `prompt_tokens_details.cached_tokens` 和 `cache_write_tokens` 归一化为
+`cached_input_tokens`/`cache_write_input_tokens`，并记录：
+
+```text
+model.prompt_cache.cached_input_tokens
+model.prompt_cache.write_input_tokens
+model.prompt_cache.hit_ratio
+model.ttft.seconds
+```
+
+cache key 和 Runtime 旁路指标不参与 Model Call request digest；它们只改变性能与观测，不能让同一业务请求
+因重试时的耗时或 cache 状态变化产生幂等冲突。不能用配置开关代替实际 usage：只有 Provider 返回的 cached
+tokens 才算命中。
+
 ## 验收条件
 
 - 更换 Provider 不需要修改 Session、Tool Gateway 或 Orchestrator。
