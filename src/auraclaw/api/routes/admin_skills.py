@@ -15,8 +15,13 @@ from auraclaw.action.skill_lifecycle import (
     SkillAdmissionMetricRecord,
     SkillAdmissionPage,
 )
-from auraclaw.action.skill_packages import SkillPackage, SkillPackageRegistry
+from auraclaw.action.skill_packages import (
+    SkillPackage,
+    SkillPackageRegistry,
+    skill_capability_descriptor,
+)
 from auraclaw.api.dependencies import RequestIdentity, request_identity
+from auraclaw.contracts.capabilities import CapabilityDescriptor
 from auraclaw.contracts.errors import NotFoundError, VersionConflictError
 from auraclaw.contracts.internal import (
     ArtifactFinalizeResponse,
@@ -117,6 +122,12 @@ class SkillPackageUploadManager(Protocol):
         correlation_id: str,
         command_id: str,
     ) -> ArtifactFinalizeResponse: ...
+
+
+class SkillCapabilityAvailability(Protocol):
+    async def is_available(
+        self, tenant_id: str, capability: CapabilityDescriptor
+    ) -> bool: ...
 
 
 class SkillManager(Protocol):
@@ -282,6 +293,7 @@ def create_skill_admin_router(
     publisher_service: SkillPublisherManager | None = None,
     admission_reader: SkillAdmissionReader | None = None,
     source_service: SkillSourceManager | None = None,
+    capability_availability: SkillCapabilityAvailability | None = None,
     admission_metrics_window_hours: int = 24,
     admission_quarantine_alert_ratio: float = 0.25,
     admission_quarantine_alert_min_samples: int = 20,
@@ -490,13 +502,23 @@ def create_skill_admin_router(
             installation_payload = (
                 None if installation is None else _installation_summary(installation)
             )
+            availability = _skill_availability(publication, installation)
+            if (
+                availability == "available"
+                and capability_availability is not None
+                and not await capability_availability.is_available(
+                    identity.tenant_id,
+                    skill_capability_descriptor(publication),
+                )
+            ):
+                availability = "dependencies_unavailable"
             items.append(
                 {
                     **_summary(publication),
                     "latest_version": manifest.version,
                     "publication": publication_payload,
                     "installation": installation_payload,
-                    "availability": _skill_availability(publication, installation),
+                    "availability": availability,
                 }
             )
         page, next_cursor = _page(items, cursor=cursor, limit=limit, key=_skill_item_key)

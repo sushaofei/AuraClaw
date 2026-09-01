@@ -32,6 +32,7 @@ from auraclaw.composition.providers import (
 )
 from auraclaw.composition.services import create_service_app
 from auraclaw.config import Settings, get_settings
+from auraclaw.contracts.capabilities import CapabilityDescriptor
 from auraclaw.contracts.errors import SkillContentRejectedError
 from auraclaw.contracts.internal import ArtifactFinalizeResponse
 from auraclaw.contracts.skills import (
@@ -213,6 +214,16 @@ def test_skill_admission_queries_are_tenant_scoped_filterable_and_aggregated() -
 
 
 def test_skill_admin_manages_installation_and_revocation_separately() -> None:
+    class Availability:
+        available = True
+
+        async def is_available(
+            self, tenant_id: str, capability: CapabilityDescriptor
+        ) -> bool:
+            assert tenant_id == "tenant-1"
+            assert capability.canonical_name == "release.prepare"
+            return self.available
+
     app = create_app(profile="task-api")
     registry = services._skill_registry_service(get_settings())
     lifecycle = InMemorySkillLifecycleStore()
@@ -241,11 +252,13 @@ def test_skill_admin_manages_installation_and_revocation_separately() -> None:
             registry=registry,
         ),
     )
+    availability = Availability()
     app.include_router(
         create_skill_admin_router(
             registry,
             publication_service=publication_service,
             management_service=management,
+            capability_availability=availability,
         )
     )
     asyncio.run(
@@ -271,6 +284,13 @@ def test_skill_admin_manages_installation_and_revocation_separately() -> None:
         assert skills[0]["status"] == "active"
         assert listed.json()["items"][0]["availability"] == "available"
         assert listed.json()["items"][0]["installation"]["revision"] == 1
+
+        availability.available = False
+        unavailable = client.get("/v1/admin/skills", headers=headers)
+        assert unavailable.json()["items"][0]["availability"] == (
+            "dependencies_unavailable"
+        )
+        availability.available = True
 
         installations = client.get(
             "/v1/admin/skill-installations?status=active", headers=headers

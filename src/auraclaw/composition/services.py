@@ -74,6 +74,7 @@ from auraclaw.action.skill_management import (
 )
 from auraclaw.action.skill_packages import (
     HmacSkillSignatureVerifier,
+    SkillDependencyAvailability,
     SkillPackageRegistry,
     SkillResolver,
 )
@@ -893,6 +894,9 @@ def _task_api_app(settings: Settings) -> FastAPI:
             publisher_service=publisher_management,
             admission_reader=skill_publication if skill_lifecycle is None else skill_lifecycle,
             source_service=skill_source_management,
+            capability_availability=SkillDependencyAvailability(
+                capability_catalog_store
+            ),
             admission_metrics_window_hours=settings.skill_admission_metrics_window_hours,
             admission_quarantine_alert_ratio=(settings.skill_admission_quarantine_alert_ratio),
             admission_quarantine_alert_min_samples=(
