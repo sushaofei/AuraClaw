@@ -324,6 +324,7 @@ class PostgresCapabilityCatalogStore(LazyPool):
             JOIN hands.downstream_mcp_server AS s ON s.server_id=c.server_id
             WHERE (c.tenant_id IS NULL OR c.tenant_id=$1)
               AND s.enabled AND s.status IN ('active','degraded')
+              AND c.catalog_generation=s.active_catalog_generation
             ORDER BY c.canonical_name,c.version""",
             tenant_id,
         )
@@ -351,7 +352,8 @@ class PostgresCapabilityCatalogStore(LazyPool):
             JOIN hands.downstream_mcp_server AS s ON s.server_id=c.server_id
             WHERE c.capability_id=$1
               AND (c.tenant_id IS NULL OR c.tenant_id=$2)
-              AND s.enabled AND s.status IN ('active','degraded')""",
+              AND s.enabled AND s.status IN ('active','degraded')
+              AND c.catalog_generation=s.active_catalog_generation""",
             capability_id,
             tenant_id,
         )

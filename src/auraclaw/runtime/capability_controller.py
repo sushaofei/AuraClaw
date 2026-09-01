@@ -10,6 +10,7 @@ from typing import Any
 from urllib.parse import quote
 
 from auraclaw.contracts.capabilities import RequiredCapabilityRef
+from auraclaw.contracts.errors import NotFoundError
 from auraclaw.contracts.events import NewEvent
 from auraclaw.contracts.skills import SkillActivation
 from auraclaw.control.ports import RuntimeAssignment
@@ -696,7 +697,28 @@ class RuntimeCapabilityController:
                 str(resource["uri_template"]),
                 dict(call.arguments.get("arguments", {})),
             )
-        contents = await self._client.read_resource(assignment, uri)
+        try:
+            contents = await self._client.read_resource(assignment, uri)
+        except (KeyError, NotFoundError):
+            loaded_capabilities = dict(state.get("loaded", {}))
+            loaded_capabilities.pop(capability_id, None)
+            state["loaded"] = loaded_capabilities
+            candidates = dict(state.get("candidates", {}))
+            candidates.pop(capability_id, None)
+            state["candidates"] = candidates
+            return CapabilityExecution(
+                result={
+                    "status": "error",
+                    "error_code": "resource_not_found",
+                    "summary": (
+                        "The Resource disappeared after it was loaded. Search the "
+                        "capability catalog again or continue without this Resource."
+                    ),
+                    "capability_id": capability_id,
+                    "retryable": True,
+                },
+                state=state,
+            )
         evidence = _resource_evidence(capability_id, uri, contents)
         contextualized = _contextualize_contents(contents)
         return CapabilityExecution(

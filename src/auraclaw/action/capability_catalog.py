@@ -92,6 +92,12 @@ class SkillPublisherSecurityReader(Protocol):
     ) -> SkillPublisherKeyRecord | None: ...
 
 
+class CapabilityAvailability(Protocol):
+    async def is_available(
+        self, tenant_id: str, capability: CapabilityDescriptor
+    ) -> bool: ...
+
+
 class InMemoryCapabilityCatalogStore:
     def __init__(self) -> None:
         self._servers: dict[str, McpServerDefinition] = {}
@@ -299,8 +305,24 @@ class InMemoryCapabilityCatalogStore:
 
 
 class CapabilityCatalog:
-    def __init__(self, store: CapabilityCatalogStore) -> None:
+    def __init__(
+        self,
+        store: CapabilityCatalogStore,
+        *,
+        availability: CapabilityAvailability | None = None,
+    ) -> None:
         self._store = store
+        self._availability = availability
+
+    def set_availability(self, availability: CapabilityAvailability) -> None:
+        self._availability = availability
+
+    async def _is_available(
+        self, tenant_id: str, capability: CapabilityDescriptor
+    ) -> bool:
+        return self._availability is None or await self._availability.is_available(
+            tenant_id, capability
+        )
 
     async def register_server(self, server: McpServerDefinition) -> None:
         await self._store.upsert_server(server)
@@ -402,6 +424,8 @@ class CapabilityCatalog:
                 continue
             if server_id is not None and capability.server_id != server_id:
                 continue
+            if not await self._is_available(tenant_id, capability):
+                continue
             score = _score(capability, query_tokens)
             if query_tokens and score == 0:
                 continue
@@ -446,6 +470,8 @@ class CapabilityCatalog:
             CapabilityStatus.ACTIVE,
             CapabilityStatus.DEGRADED,
         }:
+            return None
+        if not await self._is_available(tenant_id, capability):
             return None
         return capability
 

@@ -1535,6 +1535,7 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         retired_activator=skill_publication,
     )
     resources = skill_registry.resources or HandsResourceRegistry()
+    capability_connectors: dict[str, Any] = {}
     resource_gateway = ManagedResourceGateway(
         resources,
         artifacts=artifacts,
@@ -1543,7 +1544,10 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         max_queued=settings.resource_gateway_max_queued,
         queue_timeout_seconds=settings.resource_gateway_queue_timeout_seconds,
         metric_writer=hands_metric_store,
+        catalog_store=capability_catalog_store,
+        connectors=capability_connectors,
     )
+    capability_catalog.set_availability(resource_gateway)
     skill_resolver = SkillResolver(
         skill_registry,
         capability_catalog_store,
@@ -1618,7 +1622,7 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         app.state.skill_reliability_result = await skill_reliability.run_once()
         app.state.skill_admission_maintenance_result = await skill_admission_maintenance.run_once()
 
-    app.state.capability_connectors = {}
+    app.state.capability_connectors = capability_connectors
     app.state.catalog_reconciler = None
     app.state.initialize = initialize_registry
     routed_hands = RoutedHandsExecutor(

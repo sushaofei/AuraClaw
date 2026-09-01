@@ -73,7 +73,7 @@ registration lease 内仍活跃时，新进程注册会 fail closed。因此显�
 
 ## 生产配置门禁
 
-1. 依次应用 PostgreSQL/KingBase `0010`～`0052` expand migration。`0040`
+1. 依次应用 PostgreSQL/KingBase `0010`～`0053` migration。`0040`
    `0022` 增加 registration 与 execution claim 字段和索引；先迁移 Control 数据库，再滚动升级
    Orchestrator，最后升级 Agent Runtime。可选执行 `deploy/postgres/roles.sql` 做硬化，
    当前部署不按服务注入分角色 DSN。
@@ -101,6 +101,10 @@ registration lease 内仍活跃时，新进程注册会 fail closed。因此显�
    revision；先迁移再滚动 Action Hands。升级窗口不得混跑会绕过 Catalog CAS 的旧 Reconciler。
    `0052` 增加 Approval request digest/generation/decision metadata 与 transition audit；先迁移 Policy
    数据库，再滚动 Policy 和 Task API。升级窗口不得混跑会无条件覆盖 Approval 终态的旧 Policy 副本。
+   `0053` 是 Action Hands 数据一致性迁移：删除已退役的 `auraclaw-price-insight` Provider，并清除
+   非 active generation 的 Capability 残留；迁移后滚动 Action Hands，确认
+   `capability.catalog.backing_missing` 不持续增长。该数据清理不可通过 down migration 恢复，若需恢复
+   Provider，必须重新注册并发布经过完整校验的新 snapshot。
 2. 各服务共享统一 `AURACLAW_DATABASE_URL`（Compose `database_url` secret）；migration 使用
    独立的 `AURACLAW_MIGRATION_DATABASE_URL`。
 3. 所有 Control、Session 与 Hands 副本必须使用相同的 `AURACLAW_LEASE_SIGNING_KEY`，并通过平台

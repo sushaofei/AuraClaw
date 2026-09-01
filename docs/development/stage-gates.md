@@ -2749,3 +2749,26 @@ ready Skill Artifact 建立带 fencing 的物理回收流程；不把成功命�
 - [x] 通知故障测试覆盖 Canonical Event 已提交、Policy 首次失败及安全重试。
 - [x] Ruff、Mypy、import-linter、Compose、定向与完整 Pytest 通过。
 - [x] Git 暂存范围审查、intentional commit 与 push 完成；Issue #72 关闭。
+
+## 阶段 Resource Catalog Backing 一致性（Issue #73）
+
+状态：代码、迁移、测试和文档完成。
+
+### 发现、路由与恢复
+
+- [x] Capability search/load 仅暴露 active generation 且有 tenant 可见 Registry 或当前 Connector backing 的 Resource。
+- [x] Resource Gateway 按本地 Registry 或 MCP Connector 路由，统一执行 Policy、内容扫描和 Artifact 化。
+- [x] Resource 在 load 后消失返回结构化 `resource_not_found`，撤销 Runtime 候选并允许 Agent 重新搜索或降级。
+- [x] backing 缺失与读时消失分别记录低基数健康指标，不记录 URI 正文。
+
+### 升级与契约
+
+- [x] `0053` 清除已移除的 `auraclaw-price-insight` Provider 和非 active generation Catalog 残留。
+- [x] 架构文档固定 Skill package reference 的 `skill://` URI 契约，禁止用 `repo://` 指向包内文件。
+- [x] 运维文档记录数据迁移不可逆、滚动顺序、恢复方式与健康指标。
+
+### 验证与交付
+
+- [x] 单元测试覆盖 orphaned backing、远端 Provider 路由、read-time not-found 与独立失败恢复。
+- [x] PostgreSQL migration roundtrip/数据清理、Ruff、Mypy、import-linter 与完整 Pytest 通过。
+- [x] Git 暂存范围审查、intentional commit 与 push 完成；Issue #73 关闭。
