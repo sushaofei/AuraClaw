@@ -2429,6 +2429,11 @@ def _model_gateway_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         if settings.sql_storage_enabled
         else None
     )
+    metric_store = (
+        PostgresObservabilityStore(settings.resolved_database_url)
+        if settings.sql_storage_enabled
+        else None
+    )
     token = settings.workload_token_value(ServiceIdentity.MODEL_GATEWAY.value)
     policy = RemotePolicyClient(
         settings.policy_base_url,
@@ -2445,6 +2450,7 @@ def _model_gateway_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         policy=policy,
         state=state,
         tenant_token_limit=settings.model_tenant_token_limit_per_hour,
+        metric_writer=metric_store,
     )
     app = _base_service_app(
         spec,
@@ -2452,6 +2458,7 @@ def _model_gateway_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         closeables=(
             *((policy,) if policy is not None else ()),
             *((state,) if state is not None else ()),
+            *((metric_store,) if metric_store is not None else ()),
             model,
         ),
     )
@@ -2509,7 +2516,18 @@ def _runtime_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         model=model,
         tools=hands,
         runtime_events=providers.get_runtime_event_publisher(),
-        capability_controller=RuntimeCapabilityController(hands),
+        capability_controller=RuntimeCapabilityController(
+            hands,
+            skill_content_cache_max_bytes=(
+                settings.runtime_skill_content_cache_max_bytes
+            ),
+            skill_content_cache_max_entries=(
+                settings.runtime_skill_content_cache_max_entries
+            ),
+            skill_content_cache_ttl_seconds=(
+                settings.runtime_skill_content_cache_ttl_seconds
+            ),
+        ),
         collaboration_controller=RuntimeCollaborationController(collaboration),
     )
     worker = RemoteRuntimeWorker(control, harness)

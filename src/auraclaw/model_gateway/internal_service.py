@@ -3,10 +3,12 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
+import time
 from collections.abc import AsyncIterator
 from contextlib import suppress
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Protocol
 from uuid import uuid4
 
@@ -27,6 +29,7 @@ from auraclaw.contracts.internal import (
     ModelStreamEvent,
     ServiceIdentity,
 )
+from auraclaw.contracts.observability import MetricPoint
 from auraclaw.contracts.tools import PolicyDecision
 from auraclaw.model_gateway.ports import ModelCallReservation, ModelStateStore
 from auraclaw.runtime.model_stream import iter_model_stream
@@ -60,6 +63,22 @@ class ModelPolicyEnforcer(Protocol):
     ) -> PolicyEvaluation: ...
 
 
+class MetricWriter(Protocol):
+    async def write_metric(self, metric: MetricPoint) -> None: ...
+
+
+_RUNTIME_METRICS = frozenset(
+    {
+        "skill.runtime.active.count",
+        "skill.runtime.prompt.bytes",
+        "skill.runtime.prompt.estimated_tokens",
+        "skill.runtime.content_cache.hit.count",
+        "skill.runtime.content_cache.miss.count",
+        "skill.runtime.trusted_messages.latency.seconds",
+    }
+)
+
+
 class ModelGatewayInternalService:
     def __init__(
         self,
@@ -71,6 +90,7 @@ class ModelGatewayInternalService:
         gateway_id: str | None = None,
         claim_ttl: timedelta = timedelta(seconds=30),
         heartbeat_interval: float = 5.0,
+        metric_writer: MetricWriter | None = None,
     ) -> None:
         self._model = model
         self._policy = policy
@@ -79,6 +99,7 @@ class ModelGatewayInternalService:
         self._gateway_id = gateway_id or f"model-gateway-{uuid4().hex}"
         self._claim_ttl = claim_ttl
         self._heartbeat_interval = heartbeat_interval
+        self._metric_writer = metric_writer
 
     @staticmethod
     def _require_runtime(identity: ServiceIdentity) -> None:
@@ -135,6 +156,9 @@ class ModelGatewayInternalService:
         )
         sequence = 0
         response: ModelResponse | None = None
+        provider_started = time.monotonic()
+        first_output_recorded = False
+        metric_tasks = [asyncio.create_task(self._emit_runtime_metrics(request))]
         try:
             async for chunk in iter_model_stream(
                 self._model,
@@ -143,6 +167,7 @@ class ModelGatewayInternalService:
                     tenant_id=request.context.tenant_id,
                     run_id=request.run_id,
                     messages=request.messages,
+                    session_id=request.session_id,
                     tools=request.tools,
                     policy=ModelPolicy(
                         capability=request.capability,
@@ -151,11 +176,23 @@ class ModelGatewayInternalService:
                         data_classification=request.data_classification,
                     ),
                     max_output_tokens=request.max_output_tokens,
+                    runtime_metrics=request.runtime_metrics,
                 ),
             ):
                 if chunk.kind == "delta":
                     if not chunk.delta:
                         continue
+                    if not first_output_recorded:
+                        first_output_recorded = True
+                        metric_tasks.append(
+                            asyncio.create_task(
+                                self._emit_metric(
+                                    "model.ttft.seconds",
+                                    time.monotonic() - provider_started,
+                                    request,
+                                )
+                            )
+                        )
                     sequence += 1
                     yield ModelStreamEvent(
                         model_call_id=request.model_call_id,
@@ -165,6 +202,17 @@ class ModelGatewayInternalService:
                     )
                 elif chunk.kind == "completed":
                     response = chunk.response
+                    if not first_output_recorded:
+                        first_output_recorded = True
+                        metric_tasks.append(
+                            asyncio.create_task(
+                                self._emit_metric(
+                                    "model.ttft.seconds",
+                                    time.monotonic() - provider_started,
+                                    request,
+                                )
+                            )
+                        )
         except asyncio.CancelledError:
             if self._state is not None and claim_token is not None:
                 outcome = monitor_state.cancel_outcome
@@ -223,6 +271,7 @@ class ModelGatewayInternalService:
                 monitor.cancel()
                 with suppress(asyncio.CancelledError):
                     await monitor
+            await asyncio.gather(*metric_tasks, return_exceptions=True)
         if response is None:
             if self._state is not None:
                 await self._state.fail(
@@ -426,12 +475,50 @@ class ModelGatewayInternalService:
         }:
             raise PolicyDeniedError("Model policy denied generation")
 
+    async def _emit_runtime_metrics(self, request: ModelGenerateRequest) -> None:
+        await asyncio.gather(
+            *(
+                self._emit_metric(name, float(value), request)
+                for name, value in request.runtime_metrics.items()
+                if name in _RUNTIME_METRICS
+                and math.isfinite(float(value))
+                and float(value) >= 0
+            )
+        )
+
+    async def _emit_metric(
+        self, name: str, value: float, request: ModelGenerateRequest
+    ) -> None:
+        if self._metric_writer is None:
+            return
+        try:
+            await asyncio.wait_for(
+                self._metric_writer.write_metric(
+                    MetricPoint(
+                        name=name,
+                        value=value,
+                        observed_at=datetime.now(UTC),
+                        tenant_id=request.context.tenant_id,
+                        session_id=request.session_id,
+                        run_id=request.run_id,
+                        deduplication_key=(
+                            f"{request.context.tenant_id}:"
+                            f"{request.model_call_id}:{name}"
+                        ),
+                    )
+                ),
+                timeout=0.1,
+            )
+        except Exception:
+            return
+
     @staticmethod
     def _request_digest(request: ModelGenerateRequest) -> str:
         return hashlib.sha256(
             json.dumps(
                 {
                     "run_id": request.run_id,
+                    "session_id": request.session_id,
                     "messages": request.messages,
                     "tools": request.tools,
                     "capability": request.capability,

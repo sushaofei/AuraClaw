@@ -516,6 +516,17 @@ snapshot digest 用于诊断和幂等观测，不作为可加载状态。produce
 revision fence 必须消除副作用。Kafka 延迟、停机或 poison event 不能放宽治理，启动 snapshot、冷 miss
 read-through 和周期 reconciliation 继续保证最终收敛。
 
+Agent Runtime 为每个 `(tenant_id, session_id, run_id, package_digest, path)` 维护容量、条目数和 TTL
+有界的进程内正文 cache，并用 single-flight 合并同一 run 的并发读取。它只避免同一 run 在后续模型轮次
+重复从 Hands 获取不可变 `SKILL.md`；每轮仍重新查询固定 binding disposition，cache 命中不得跳过
+Publication/Trust/撤销决策。正文不进入 Runtime checkpoint、Session Event、Kafka 或 Model Gateway
+遥测，run 完成、失败、取消或因撤销暂停时立即释放，进程异常时随进程消失。
+
+完整 Skill system message 仍在每个模型请求中提供，以保持执行语义；稳定顺序和稳定前缀允许 Provider
+采用 prompt caching，但不能假设任意 Provider 已启用。Runtime 只向 Model Gateway 传递 allowlist 内的
+数值遥测；这些值不参与 Model Call 幂等摘要。Model Gateway 记录 active Skill 数、prompt bytes、估算
+tokens、正文 cache hit/miss、trusted-message 组装耗时和 Provider TTFT，不记录正文。
+
 管理动作必须区分租户意图和全局安全状态：
 
 - `disable`：Installation `active -> disabled`，停止新发现/新绑定；

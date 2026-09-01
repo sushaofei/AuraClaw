@@ -2826,3 +2826,30 @@ Issue #74 保持 open，后续继续性能基准和 Runtime prompt 热路径优�
 
 - [x] Ruff、Mypy、import-linter、Compose、定向与完整 Pytest 通过。
 - [x] Git 暂存范围审查、intentional commit 与 push 完成；Issue #74 保持 open。
+
+## 阶段 Runtime Skill 热路径与容量基准（Issue #74 / Runtime 子阶段）
+
+状态：Runtime run 级正文 cache、旁路观测、容量基准、测试和文档完成；Issue #74 保持 open，后续评估
+Provider prompt caching 和生产基线。
+
+### Runtime 正文复用与安全边界
+
+- [x] Runtime 按 tenant/session/run/digest/path 缓存不可变正文，容量、条目、TTL 可配置，并以
+  single-flight 合并并发冷读。
+- [x] 每个模型轮次仍独立查询 binding disposition；正文命中不跳过 lifecycle、Policy、Trust 或撤销。
+- [x] run 完成、失败、取消或因撤销暂停时释放正文；正文不写 checkpoint、Session Event 或遥测。
+- [x] Runtime 到 Model Gateway 的旁路指标不参与 Model Call 幂等摘要。
+
+### 观测、容量与 Redis gate
+
+- [x] 指标覆盖 active Skill、prompt bytes/估算 tokens、正文 hit/miss、组装耗时和 Provider TTFT。
+- [x] 可复现基准覆盖 1/2/4 副本、10/100/1000 Publication、10 KiB/100 KiB/1 MiB 包，以及
+  cold/hot/单副本 restart；Runtime 热路径记录 p50/p95/p99。
+- [x] 基准记录冻结 Redis decision gate：当前不引入 Redis，冷启动先采用滚动预热、Artifact 容量和
+  受控并发，Redis 不承担一致性。
+
+### 验证与交付
+
+- [x] 单元测试覆盖正文热命中、run 清理、disposition 每轮复查、指标 allowlist 与 TTFT。
+- [x] Ruff、Mypy、import-linter、Compose、定向与完整 Pytest 通过。
+- [x] Git 暂存范围审查、intentional commit 与 push 完成；Issue #74 保持 open。

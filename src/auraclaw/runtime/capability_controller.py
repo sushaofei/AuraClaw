@@ -5,6 +5,8 @@ import copy
 import hashlib
 import json
 import re
+import time
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote
@@ -35,6 +37,13 @@ class CapabilityAdmissionError(RuntimeError):
     """Raised before the first model call when a fixed capability cannot be loaded."""
 
 
+@dataclass(frozen=True)
+class _RunSkillContentEntry:
+    text: str
+    size: int
+    expires_at: float
+
+
 class RuntimeCapabilityController:
     """Owns model-visible capability selection while the Gateway owns authority."""
 
@@ -47,13 +56,36 @@ class RuntimeCapabilityController:
         max_searches: int = 4,
         max_loads: int = 4,
         max_schema_bytes: int = 64 * 1024,
+        skill_content_cache_max_bytes: int = 16 * 1024 * 1024,
+        skill_content_cache_max_entries: int = 1024,
+        skill_content_cache_ttl_seconds: float = 900.0,
     ) -> None:
+        if (
+            skill_content_cache_max_bytes < 1
+            or skill_content_cache_max_entries < 1
+            or skill_content_cache_ttl_seconds <= 0
+        ):
+            raise ValueError("Runtime Skill content cache limits must be positive")
         self._client = client
         self._max_candidates = max_candidates
         self._max_loaded = max_loaded
         self._max_searches = max_searches
         self._max_loads = max_loads
         self._max_schema_bytes = max_schema_bytes
+        self._skill_content_cache_max_bytes = skill_content_cache_max_bytes
+        self._skill_content_cache_max_entries = skill_content_cache_max_entries
+        self._skill_content_cache_ttl_seconds = skill_content_cache_ttl_seconds
+        self._skill_content_cache: OrderedDict[
+            tuple[str, str, str, str, str], _RunSkillContentEntry
+        ] = OrderedDict()
+        self._skill_content_loads: dict[
+            tuple[str, str, str, str, str], asyncio.Task[str]
+        ] = {}
+        self._skill_content_cache_bytes = 0
+        self._skill_content_lock = asyncio.Lock()
+        self._trusted_message_metrics: dict[
+            tuple[str, str, str], dict[str, float]
+        ] = {}
 
     @staticmethod
     def empty_state() -> dict[str, Any]:
@@ -338,21 +370,134 @@ class RuntimeCapabilityController:
                 pending.append(identity)
 
         if not pending:
+            self._trusted_message_metrics[self._run_key(assignment)] = {
+                "skill.runtime.active.count": 0.0,
+                "skill.runtime.prompt.bytes": 0.0,
+                "skill.runtime.prompt.estimated_tokens": 0.0,
+                "skill.runtime.content_cache.hit.count": 0.0,
+                "skill.runtime.content_cache.miss.count": 0.0,
+                "skill.runtime.trusted_messages.latency.seconds": 0.0,
+            }
             return tuple(messages)
 
+        started = time.monotonic()
         loaded = await asyncio.gather(
             *(
-                self._client.load_skill_part(
+                self._load_skill_text(
                     assignment,
                     publisher=identity[0],
                     name=identity[1],
                     version=identity[2],
+                    package_digest=identity[3],
                     path="SKILL.md",
                 )
                 for identity in pending
             )
         )
-        for identity, parts in zip(pending, loaded, strict=True):
+        cache_hits = 0
+        prompt_bytes = 0
+        for identity, (text, cache_hit) in zip(pending, loaded, strict=True):
+            cache_hits += int(cache_hit)
+            if text:
+                content = (
+                    "Activated signed AuraClaw Skill "
+                    f"{identity[0]}/{identity[1]}@{identity[2]} "
+                    f"(digest {identity[3]}):\n{text}"
+                )
+                prompt_bytes += len(content.encode())
+                messages.append(
+                    {
+                        "role": "system",
+                        "content": content,
+                    }
+                )
+        self._trusted_message_metrics[self._run_key(assignment)] = {
+            "skill.runtime.active.count": float(len(pending)),
+            "skill.runtime.prompt.bytes": float(prompt_bytes),
+            "skill.runtime.prompt.estimated_tokens": float((prompt_bytes + 3) // 4),
+            "skill.runtime.content_cache.hit.count": float(cache_hits),
+            "skill.runtime.content_cache.miss.count": float(len(pending) - cache_hits),
+            "skill.runtime.trusted_messages.latency.seconds": (
+                time.monotonic() - started
+            ),
+        }
+        return tuple(messages)
+
+    def trusted_message_metrics(
+        self, assignment: RuntimeAssignment
+    ) -> dict[str, float]:
+        return dict(self._trusted_message_metrics.get(self._run_key(assignment), {}))
+
+    async def release_run(self, assignment: RuntimeAssignment) -> None:
+        run_prefix = self._run_key(assignment)
+        async with self._skill_content_lock:
+            tasks = [
+                task
+                for key, task in self._skill_content_loads.items()
+                if key[:3] == run_prefix
+            ]
+            for task in tasks:
+                task.cancel()
+            self._remove_run_entries_locked(run_prefix)
+            self._trusted_message_metrics.pop(run_prefix, None)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+            async with self._skill_content_lock:
+                self._remove_run_entries_locked(run_prefix)
+
+    async def _load_skill_text(
+        self,
+        assignment: RuntimeAssignment,
+        *,
+        publisher: str,
+        name: str,
+        version: str,
+        package_digest: str,
+        path: str,
+    ) -> tuple[str, bool]:
+        key = (*self._run_key(assignment), package_digest, path)
+        now = time.monotonic()
+        async with self._skill_content_lock:
+            entry = self._skill_content_cache.get(key)
+            if entry is not None and entry.expires_at > now:
+                self._skill_content_cache.move_to_end(key)
+                return entry.text, True
+            if entry is not None:
+                self._skill_content_cache.pop(key)
+                self._skill_content_cache_bytes -= entry.size
+            task = self._skill_content_loads.get(key)
+            if task is None:
+                task = asyncio.create_task(
+                    self._fetch_skill_text(
+                        key,
+                        assignment,
+                        publisher=publisher,
+                        name=name,
+                        version=version,
+                        path=path,
+                    )
+                )
+                self._skill_content_loads[key] = task
+        return await asyncio.shield(task), False
+
+    async def _fetch_skill_text(
+        self,
+        key: tuple[str, str, str, str, str],
+        assignment: RuntimeAssignment,
+        *,
+        publisher: str,
+        name: str,
+        version: str,
+        path: str,
+    ) -> str:
+        try:
+            parts = await self._client.load_skill_part(
+                assignment,
+                publisher=publisher,
+                name=name,
+                version=version,
+                path=path,
+            )
             text = next(
                 (
                     str(part["text"])
@@ -361,18 +506,45 @@ class RuntimeCapabilityController:
                 ),
                 "",
             )
-            if text:
-                messages.append(
-                    {
-                        "role": "system",
-                        "content": (
-                            "Activated signed AuraClaw Skill "
-                            f"{identity[0]}/{identity[1]}@{identity[2]} "
-                            f"(digest {identity[3]}):\n{text}"
+            size = len(text.encode())
+            async with self._skill_content_lock:
+                if size <= self._skill_content_cache_max_bytes:
+                    self._skill_content_cache[key] = _RunSkillContentEntry(
+                        text=text,
+                        size=size,
+                        expires_at=(
+                            time.monotonic()
+                            + self._skill_content_cache_ttl_seconds
                         ),
-                    }
-                )
-        return tuple(messages)
+                    )
+                    self._skill_content_cache.move_to_end(key)
+                    self._skill_content_cache_bytes += size
+                    while self._skill_content_cache and (
+                        len(self._skill_content_cache)
+                        > self._skill_content_cache_max_entries
+                        or self._skill_content_cache_bytes
+                        > self._skill_content_cache_max_bytes
+                    ):
+                        _evicted_key, evicted = (
+                            self._skill_content_cache.popitem(last=False)
+                        )
+                        self._skill_content_cache_bytes -= evicted.size
+            return text
+        finally:
+            async with self._skill_content_lock:
+                current = asyncio.current_task()
+                if self._skill_content_loads.get(key) is current:
+                    self._skill_content_loads.pop(key, None)
+
+    @staticmethod
+    def _run_key(assignment: RuntimeAssignment) -> tuple[str, str, str]:
+        return assignment.tenant_id, assignment.session_id, assignment.run_id
+
+    def _remove_run_entries_locked(self, run_prefix: tuple[str, str, str]) -> None:
+        keys = [key for key in self._skill_content_cache if key[:3] == run_prefix]
+        for key in keys:
+            entry = self._skill_content_cache.pop(key)
+            self._skill_content_cache_bytes -= entry.size
 
     async def execute(
         self,

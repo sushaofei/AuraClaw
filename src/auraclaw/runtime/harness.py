@@ -121,6 +121,8 @@ class AgentHarness:
         if any(
             event.type == "run.completed" and event.run_id == assignment.run_id for event in events
         ):
+            if self._capability_controller is not None:
+                await self._capability_controller.release_run(assignment)
             await self._control.finish_assignment(self._task_id(assignment), "completed")
             return
         if self._capability_controller is not None or self._collaboration_controller is not None:
@@ -156,6 +158,7 @@ class AgentHarness:
                 model_call_id=model_call_id,
                 tenant_id=assignment.tenant_id,
                 run_id=assignment.run_id,
+                session_id=assignment.session_id,
                 messages=messages,
                 policy=self._policy,
                 max_output_tokens=assignment.budget.max_output_tokens,
@@ -363,6 +366,7 @@ class AgentHarness:
                     model_call_id=model_call_id,
                     tenant_id=assignment.tenant_id,
                     run_id=assignment.run_id,
+                    session_id=assignment.session_id,
                     messages=(
                         *trusted,
                         *self._build_capability_messages(turn_events),
@@ -370,6 +374,13 @@ class AgentHarness:
                     tools=model_tools,
                     policy=self._policy,
                     max_output_tokens=remaining_output_tokens,
+                    runtime_metrics=(
+                        self._capability_controller.trusted_message_metrics(
+                            assignment
+                        )
+                        if self._capability_controller is not None
+                        else {}
+                    ),
                 )
                 await self._record_model_input(
                     assignment,
@@ -695,6 +706,8 @@ class AgentHarness:
                 visibility=Visibility.USER,
             )
             await self._save_checkpoint(assignment, "capability.completed", state)
+            if self._capability_controller is not None:
+                await self._capability_controller.release_run(assignment)
             await self._control.finish_assignment(self._task_id(assignment), "completed")
             return
         raise BudgetExceededError("Runtime capability step budget was exhausted")
@@ -732,6 +745,7 @@ class AgentHarness:
         state = {**state, "skill_revocation": evidence}
         if action == "pause":
             await self._save_checkpoint(assignment, "capability.skill_revoked_paused", state)
+            await self._capability_controller.release_run(assignment)
             await self._control.suspend_assignment(self._task_id(assignment), "skill_revoked")
             return True
         events = await self._session.load(assignment)
@@ -756,6 +770,7 @@ class AgentHarness:
             visibility=Visibility.USER,
         )
         await self._save_checkpoint(assignment, "capability.skill_revoked_cancelled", state)
+        await self._capability_controller.release_run(assignment)
         await self._control.finish_assignment(self._task_id(assignment), "cancelled")
         return True
 
@@ -767,6 +782,8 @@ class AgentHarness:
             and event.run_id == assignment.run_id
             for event in events
         ):
+            if self._capability_controller is not None:
+                await self._capability_controller.release_run(assignment)
             return
         checkpoint = await self._control.load_checkpoint(
             assignment.tenant_id,
@@ -825,6 +842,8 @@ class AgentHarness:
             identity=assignment.run_id,
             visibility=Visibility.USER,
         )
+        if self._capability_controller is not None:
+            await self._capability_controller.release_run(assignment)
 
     async def _record_approval_wait(
         self,
