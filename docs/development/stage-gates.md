@@ -2937,3 +2937,12 @@ active-reference barrier，并简化 AuraX 卸载入口。
 - [x] 生产 Compose 最小权限 Secret 测试覆盖 Session 的 Action Hands token 挂载。
 - [x] AuraX 对网关隐藏的 403 显示安全且准确的治理失败提示。
 - [x] Ruff、Mypy、import-linter、完整 Pytest（539 passed、3 skipped）以及 AuraX 单测（47 passed）、E2E（9 passed）和生产构建通过。
+
+## 阶段 Purged Skill 可见性收敛（Issue #76）
+
+状态：已完成。Package tombstone 继续保留在治理与审计接口，但不得进入普通 Catalog 或对话选择器。
+
+- [x] `/v1/admin/skills` 排除 `retention_status=purged` 的 Package，并保留 management tombstone。
+- [x] AuraX 对话选择器只展示 `active` 或 `disabled` Installation，不对 `uninstalled` 错发 enable。
+- [x] 后端单元测试和 AuraX E2E 覆盖 Purge 后不可见语义。
+- [x] Ruff、Mypy、import-linter、完整 Pytest（539 passed、3 skipped）以及 AuraX 单测（47 passed）、E2E（9 passed）和生产构建通过。
