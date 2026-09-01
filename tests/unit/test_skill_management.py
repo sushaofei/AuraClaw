@@ -104,13 +104,14 @@ class _BindingReferences:
     def __init__(self, referenced: bool = False) -> None:
         self.referenced = referenced
         self.active = referenced
+        self.active_queries: list[dict[str, object]] = []
 
     async def has_reference(self, **kwargs: object) -> bool:
         del kwargs
         return self.referenced
 
     async def has_active_skill_reference(self, **kwargs: object) -> bool:
-        del kwargs
+        self.active_queries.append(kwargs)
         return self.active
 
 
@@ -644,7 +645,7 @@ def test_security_revoke_can_override_ordinary_retirement() -> None:
     asyncio.run(scenario())
 
 
-def test_purge_requires_expired_uninstalled_revoked_unreferenced_package() -> None:
+def test_purge_ignores_retention_and_history_but_rejects_active_bindings() -> None:
     async def scenario() -> None:
         _unused, lifecycle, projector = await _service()
         artifacts = _Artifacts()
@@ -654,7 +655,6 @@ def test_purge_requires_expired_uninstalled_revoked_unreferenced_package() -> No
             projector=projector,
             artifacts=artifacts,
             binding_references=references,
-            purge_quiescence=timedelta(0),
         )
         await service.change_installation(
             _installation_command(
@@ -686,37 +686,29 @@ def test_purge_requires_expired_uninstalled_revoked_unreferenced_package() -> No
             )
         )
         package = await service.get_package("tenant-a", "platform", "release.prepare", "1.0.0")
-        package = await lifecycle.update_package_retention(
-            package.model_copy(
-                update={
-                    "retention_until": datetime.now(UTC) - timedelta(seconds=1),
-                    "retention_revision": 2,
-                    "retention_updated_by": "retention-worker",
-                    "retention_updated_at": datetime.now(UTC),
-                }
-            ),
-            expected_revision=1,
-        )
+        assert package.retention_until > datetime.now(UTC)
         command = PurgeSkillPackageCommand(
             tenant_id="tenant-a",
             actor_id="admin-a",
             publisher="platform",
             name="release.prepare",
             version="1.0.0",
-            reason_code="retention_elapsed",
+            reason_code="operator_purge",
             command_id="purge-1",
             expected_revision=package.retention_revision,
             correlation_id="corr-purge",
             causation_id="purge-1",
         )
-        with pytest.raises(PolicyDeniedError, match="Session binding"):
+        with pytest.raises(PolicyDeniedError, match="active Session binding"):
             await service.purge_package(command)
         assert artifacts.deleted == []
+        assert references.active_queries[-1]["package_digest"] == package.package_digest
 
-        references.referenced = False
+        references.active = False
+        assert references.referenced
         purged = await service.purge_package(command)
         assert purged.retention_status.value == "purged"
-        assert purged.retention_revision == 3
+        assert purged.retention_revision == 2
         assert purged.retention_updated_by == "admin-a"
         assert purged.purged_at is not None
         assert artifacts.deleted == ["art_skill"]
@@ -726,7 +718,7 @@ def test_purge_requires_expired_uninstalled_revoked_unreferenced_package() -> No
     asyncio.run(scenario())
 
 
-def test_purge_rejects_retention_period_and_legal_hold() -> None:
+def test_purge_rejects_legal_hold() -> None:
     async def scenario() -> None:
         _unused, lifecycle, projector = await _service()
         artifacts = _Artifacts()
@@ -735,7 +727,6 @@ def test_purge_rejects_retention_period_and_legal_hold() -> None:
             projector=projector,
             artifacts=artifacts,
             binding_references=_BindingReferences(),
-            purge_quiescence=timedelta(0),
         )
         await service.change_installation(
             _installation_command(
@@ -766,25 +757,10 @@ def test_purge_rejects_retention_period_and_legal_hold() -> None:
                 causation_id="revoke-retention",
             )
         )
-        command = PurgeSkillPackageCommand(
-            tenant_id="tenant-a",
-            actor_id="admin-a",
-            publisher="platform",
-            name="release.prepare",
-            version="1.0.0",
-            reason_code="retention_elapsed",
-            command_id="purge-retention",
-            expected_revision=1,
-            correlation_id="corr-retention",
-            causation_id="purge-retention",
-        )
-        with pytest.raises(PolicyDeniedError, match="retention period"):
-            await service.purge_package(command)
         package = await service.get_package("tenant-a", "platform", "release.prepare", "1.0.0")
         package = await lifecycle.update_package_retention(
             package.model_copy(
                 update={
-                    "retention_until": datetime.now(UTC) - timedelta(seconds=1),
                     "legal_hold": True,
                     "retention_revision": 2,
                     "retention_updated_by": "legal",
@@ -793,10 +769,20 @@ def test_purge_rejects_retention_period_and_legal_hold() -> None:
             ),
             expected_revision=1,
         )
+        command = PurgeSkillPackageCommand(
+            tenant_id="tenant-a",
+            actor_id="admin-a",
+            publisher="platform",
+            name="release.prepare",
+            version="1.0.0",
+            reason_code="operator_purge",
+            command_id="purge-legal-hold",
+            expected_revision=package.retention_revision,
+            correlation_id="corr-legal-hold",
+            causation_id="purge-legal-hold",
+        )
         with pytest.raises(PolicyDeniedError, match="legal hold"):
-            await service.purge_package(
-                command.model_copy(update={"expected_revision": package.retention_revision})
-            )
+            await service.purge_package(command)
         assert artifacts.deleted == []
 
     asyncio.run(scenario())

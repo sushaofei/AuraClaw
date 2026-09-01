@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Protocol
 
 from auraclaw.action.ports import ArtifactDeleter, SkillBindingReferenceReader
@@ -61,14 +61,12 @@ class SkillManagementService:
         artifacts: ArtifactDeleter | None = None,
         binding_references: SkillBindingReferenceReader | None = None,
         retired_activator: SkillRetiredActivator | None = None,
-        purge_quiescence: timedelta = timedelta(minutes=5),
     ) -> None:
         self._lifecycle = lifecycle
         self._projector = projector
         self._artifacts = artifacts
         self._binding_references = binding_references
         self._retired_activator = retired_activator
-        self._purge_quiescence = purge_quiescence
 
     async def get_package(
         self,
@@ -370,9 +368,6 @@ class SkillManagementService:
         )
         if publication.status is not SkillPublicationStatus.REVOKED:
             raise PolicyDeniedError("Skill publication must be revoked before purge")
-        now = datetime.now(UTC)
-        if publication.updated_at + self._purge_quiescence > now:
-            raise PolicyDeniedError("Skill publication revocation is not yet quiescent")
         installation = await self._lifecycle.get_installation(
             command.tenant_id, command.publisher, command.name
         )
@@ -380,14 +375,15 @@ class SkillManagementService:
             raise PolicyDeniedError("Skill must be uninstalled before package purge")
         if package.legal_hold:
             raise PolicyDeniedError("Skill package is under legal hold")
-        if package.retention_until > now:
-            raise PolicyDeniedError("Skill package retention period has not elapsed")
-        if await self._binding_references.has_reference(
+        if await self._binding_references.has_active_skill_reference(
             tenant_id=command.tenant_id,
-            package_digest=package.package_digest,
+            publisher=command.publisher,
+            name=command.name,
             correlation_id=command.correlation_id,
+            package_digest=package.package_digest,
         ):
-            raise PolicyDeniedError("Skill package is referenced by a Session binding")
+            raise PolicyDeniedError("Skill package has an active Session binding")
+        now = datetime.now(UTC)
         await self._artifacts.delete(
             tenant_id=command.tenant_id,
             artifact_ref=package.artifact_ref,

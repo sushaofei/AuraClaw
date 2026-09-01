@@ -109,6 +109,7 @@ def test_postgres_concurrent_idempotency_outbox_snapshot_and_rebuild() -> None:
 
             top_level_digest = f"sha256:{'a' * 64}"
             nested_digest = f"sha256:{'b' * 64}"
+            dependency_digest = f"sha256:{'d' * 64}"
             await store.append(
                 root_session_id=session_id,
                 session_id=session_id,
@@ -131,7 +132,18 @@ def test_postgres_concurrent_idempotency_outbox_snapshot_and_rebuild() -> None:
                         type="skill.activated",
                         payload={
                             "activation": {
-                                "binding": {"package_digest": nested_digest}
+                                "binding": {
+                                    "publisher": "acme",
+                                    "skill_name": "release.prepare",
+                                    "package_digest": nested_digest,
+                                    "resolved_skills": [
+                                        {
+                                            "publisher": "acme",
+                                            "skill_name": "audit.verify",
+                                            "package_digest": dependency_digest,
+                                        }
+                                    ],
+                                }
                             }
                         },
                     ),
@@ -146,6 +158,37 @@ def test_postgres_concurrent_idempotency_outbox_snapshot_and_rebuild() -> None:
             )
             assert not await store.has_skill_package_reference(
                 tenant_id, f"sha256:{'c' * 64}"
+            )
+            assert await store.has_active_skill_reference(
+                tenant_id, "acme", "release.prepare", top_level_digest
+            )
+            assert await store.has_active_skill_reference(
+                tenant_id, "acme", "release.prepare", nested_digest
+            )
+            assert await store.has_active_skill_reference(
+                tenant_id, "acme", "audit.verify", dependency_digest
+            )
+            assert not await store.has_active_skill_reference(
+                tenant_id, "acme", "release.prepare", f"sha256:{'c' * 64}"
+            )
+            await store.append(
+                root_session_id=session_id,
+                session_id=session_id,
+                run_id="run-skill-reference",
+                context=CommandContext(
+                    command_id="skill-reference-completed",
+                    tenant_id=tenant_id,
+                    actor=Actor(type="runtime", id="postgres-test-runtime"),
+                    correlation_id="corr-skill-reference",
+                    causation_id="skill-reference-events",
+                    expected_version=4,
+                    operation="complete_skill_reference_run",
+                ),
+                events=(NewEvent(type="run.completed", payload={}),),
+                command_result={"completed": True},
+            )
+            assert not await store.has_active_skill_reference(
+                tenant_id, "acme", "release.prepare", nested_digest
             )
         finally:
             await store.close()

@@ -130,6 +130,7 @@ def test_remote_artifact_reader_uses_governed_delete_contract() -> None:
             payload = request.read().decode()
             assert "delete-decision-1" in payload
             assert "retention_elapsed" in payload
+            assert '"purpose":"skill_package_purge"' in payload
             return httpx.Response(
                 200,
                 json={

@@ -193,6 +193,7 @@ class PostgresArtifactRepository(LazyPool):
         version: int,
         *,
         claim_ttl: timedelta = timedelta(seconds=30),
+        ignore_retention: bool = False,
     ) -> PendingUpload | None:
         pool = await self.pool()
         await pool.execute(
@@ -216,7 +217,9 @@ class PostgresArtifactRepository(LazyPool):
                     status='deleting' AND gc_claim_expires_at <= now()))
               AND deleted_at IS NULL AND object_state='known' AND NOT legal_hold
               AND object_side_effect_started_at IS NULL
-              AND retention_until IS NOT NULL AND retention_until <= now()
+              AND (($6 AND media_type='application/vnd.auraclaw.skill-package+json'
+                        AND skill_bound_at IS NOT NULL)
+                   OR (retention_until IS NOT NULL AND retention_until <= now()))
               AND (gc_claim_expires_at IS NULL OR gc_claim_expires_at <= now())
             RETURNING *""",
             tenant_id,
@@ -224,6 +227,7 @@ class PostgresArtifactRepository(LazyPool):
             version,
             token,
             claim_ttl,
+            ignore_retention,
         )
         return self._pending(row) if row is not None else None
 

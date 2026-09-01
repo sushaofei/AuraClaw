@@ -44,6 +44,8 @@ def test_same_command_is_idempotent() -> None:
 def test_active_skill_reference_ends_only_with_run_terminal_event() -> None:
     async def scenario() -> None:
         store = InMemoryEventStore()
+        primary_digest = f"sha256:{'a' * 64}"
+        dependency_digest = f"sha256:{'b' * 64}"
         base = CommandContext(
             command_id="activate-skill",
             tenant_id="tenant_1",
@@ -64,8 +66,13 @@ def test_active_skill_reference_ends_only_with_run_terminal_event() -> None:
                             "binding": {
                                 "publisher": "acme",
                                 "skill_name": "release.prepare",
+                                "package_digest": primary_digest,
                                 "resolved_skills": [
-                                    {"publisher": "acme", "name": "audit.verify"}
+                                    {
+                                        "publisher": "acme",
+                                        "name": "audit.verify",
+                                        "package_digest": dependency_digest,
+                                    }
                                 ],
                             }
                         }
@@ -82,6 +89,15 @@ def test_active_skill_reference_ends_only_with_run_terminal_event() -> None:
         )
         assert not await store.has_active_skill_reference(
             "tenant_1", "other", "release.prepare"
+        )
+        assert await store.has_active_skill_reference(
+            "tenant_1", "acme", "release.prepare", primary_digest
+        )
+        assert await store.has_active_skill_reference(
+            "tenant_1", "acme", "audit.verify", dependency_digest
+        )
+        assert not await store.has_active_skill_reference(
+            "tenant_1", "acme", "release.prepare", f"sha256:{'c' * 64}"
         )
 
         await store.append(
@@ -101,6 +117,9 @@ def test_active_skill_reference_ends_only_with_run_terminal_event() -> None:
         )
         assert not await store.has_active_skill_reference(
             "tenant_1", "acme", "audit.verify"
+        )
+        assert not await store.has_active_skill_reference(
+            "tenant_1", "acme", "release.prepare", primary_digest
         )
 
     asyncio.run(scenario())

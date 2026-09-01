@@ -180,6 +180,7 @@ class RemoteArtifactReader:
                 actor_id=actor_id,
                 reason_code=reason_code,
                 policy_decision_id=evaluation.decision_id,
+                purpose="skill_package_purge",
             ),
             ArtifactDeleteResponse,
         )

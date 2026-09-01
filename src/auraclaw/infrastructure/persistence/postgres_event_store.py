@@ -90,25 +90,36 @@ class PostgresEventStore(LazyPool):
         return bool(await pool.fetchval(query, tenant_id, package_digest))
 
     async def has_active_skill_reference(
-        self, tenant_id: str, publisher: str, name: str
+        self,
+        tenant_id: str,
+        publisher: str,
+        name: str,
+        package_digest: str | None = None,
     ) -> bool:
         pool = await self.pool()
         query = """SELECT EXISTS(
             SELECT 1 FROM session_core.canonical_event a
             WHERE a.tenant_id=$1 AND a.event_type='skill.activated'
-              AND (
-                (a.payload#>>'{activation,binding,publisher}'=$2
-                 AND COALESCE(
-                   a.payload#>>'{activation,binding,skill_name}',
-                   a.payload#>>'{activation,binding,name}')=$3)
-                OR EXISTS(
-                  SELECT 1 FROM jsonb_array_elements(COALESCE(
-                    a.payload#>'{activation,binding,resolved_skills}',
-                    '[]'::jsonb)) dependency
-                  WHERE dependency->>'publisher'=$2
-                    AND COALESCE(
-                      dependency->>'skill_name',dependency->>'name')=$3)
-              )
+              AND (($4::text IS NULL AND (
+                    (a.payload#>>'{activation,binding,publisher}'=$2
+                     AND COALESCE(
+                       a.payload#>>'{activation,binding,skill_name}',
+                       a.payload#>>'{activation,binding,name}')=$3)
+                    OR EXISTS(
+                      SELECT 1 FROM jsonb_array_elements(COALESCE(
+                        a.payload#>'{activation,binding,resolved_skills}',
+                        '[]'::jsonb)) dependency
+                      WHERE dependency->>'publisher'=$2
+                        AND COALESCE(
+                          dependency->>'skill_name',dependency->>'name')=$3)))
+                   OR ($4::text IS NOT NULL AND (
+                    a.payload->>'package_digest'=$4
+                    OR a.payload#>>'{activation,binding,package_digest}'=$4
+                    OR EXISTS(
+                      SELECT 1 FROM jsonb_array_elements(COALESCE(
+                        a.payload#>'{activation,binding,resolved_skills}',
+                        '[]'::jsonb)) dependency
+                      WHERE dependency->>'package_digest'=$4))))
               AND NOT EXISTS(
                 SELECT 1 FROM session_core.canonical_event t
                 WHERE t.tenant_id=a.tenant_id
@@ -116,7 +127,7 @@ class PostgresEventStore(LazyPool):
                   AND t.event_type IN
                     ('run.completed','run.failed','run.cancelled'))
         )"""
-        return bool(await pool.fetchval(query, tenant_id, publisher, name))
+        return bool(await pool.fetchval(query, tenant_id, publisher, name, package_digest))
 
     async def load_root(
         self,

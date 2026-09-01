@@ -405,7 +405,9 @@ AURACLAW_API_TOKEN='<access token>' \
 
 ### Package 清理
 
-Package 只有在 retention 到期、无 legal hold 且没有引用时才能 purge。服务端是最终判定方；不要通过对象存储控制台直接删除 Skill Artifact。
+Package 只有在 Publication 已 revoke、Installation 已 uninstalled、无 legal hold 且没有活动 binding 时才能
+purge。`retention_until` 和终态 Session 的历史 binding 不阻止物理清理；活动引用按待删 Package digest
+精确判断。服务端是最终判定方，不要通过对象存储控制台直接删除 Skill Artifact。
 
 ## 11. 故障处理
 

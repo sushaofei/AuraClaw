@@ -2906,3 +2906,24 @@ Hands 治理执行 Tool/Resource；任意代码执行继续禁止。
 - [x] Ruff、Mypy、import-linter、定向与完整 Pytest 通过。
 - [x] ADR、架构、authoring、实施与 stage gate 文档同步。
 - [x] Git 暂存范围审查、intentional commit 与 push 完成；Issue #75 关闭。
+
+## 阶段 Skill 删除语义简化（Issue #76）
+
+状态：完成。Purge 从固定 retention/历史引用模型调整为精确 Package digest 的
+active-reference barrier，并简化 AuraX 卸载入口。
+
+### Lifecycle 与删除安全
+
+- [x] Purge 仍要求 Publication revoked、Installation uninstalled、无 legal hold 和 expected retention revision。
+- [x] `retention_until` 与 revoke 固定静默窗口不再阻止 Skill Purge；兼容字段暂时保留。
+- [x] 终态 Session 的历史 binding 不阻止删除可执行 Artifact；Package digest 与 purged tombstone 继续保留审计。
+- [x] Canonical Event Store 按待删 Package digest 权威查询 active binding，并在活动 Run 终态前 fail closed。
+- [x] Artifact delete、metadata tombstone、Package purged tombstone 和幂等重试语义保持不变。
+
+### 产品、文档与验证
+
+- [x] AuraX 使用单一卸载入口选择 graceful/force，并只在后端前置状态满足时展示 Purge。
+- [x] 单元、Admin API、内部契约、PostgreSQL/对象存储集成和桌面 E2E 覆盖新语义。
+- [x] 架构、Skill API、authoring 指南和阶段门禁同步。
+- [x] Ruff、Mypy、import-linter、定向与完整 Pytest（538 passed、3 skipped）通过。
+- [x] Git 暂存范围审查、intentional commit 与 push 完成；Issue #76 可关闭。
