@@ -66,6 +66,10 @@ class BudgetExceededError(AuraClawError):
     status_code = 409
 
 
+class SkillPromptBudgetExceededError(BudgetExceededError):
+    code = "skill_prompt_budget_exceeded"
+
+
 class ModelAuthenticationError(AuraClawError):
     code = "model_authentication_failed"
     status_code = 502

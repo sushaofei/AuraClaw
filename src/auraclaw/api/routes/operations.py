@@ -1,6 +1,7 @@
+from dataclasses import asdict
 from typing import Annotated
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 
 from auraclaw.api.dependencies import (
     RequestIdentity,
@@ -48,4 +49,20 @@ async def metric_snapshot(
             for point in points
             if point.tenant_id in {None, identity.tenant_id}
         ],
+    }
+
+
+@router.get("/metrics/summary")
+async def metric_summary(
+    identity: Identity,
+    service: Service,
+    window_hours: int = Query(default=24, ge=1, le=720),
+) -> dict[str, object]:
+    summaries = await service.metric_summary(
+        identity.tenant_id, window_hours=window_hours
+    )
+    return {
+        "tenant_id": identity.tenant_id,
+        "window_hours": window_hours,
+        "metrics": [asdict(summary) for summary in summaries],
     }

@@ -16,8 +16,9 @@ from auraclaw.composition.providers import (
 )
 from auraclaw.config import get_settings
 from auraclaw.contracts.commands import CommandContext
-from auraclaw.contracts.events import Actor
+from auraclaw.contracts.events import Actor, CanonicalEvent
 from auraclaw.contracts.observability import TraceContext
+from auraclaw.contracts.state import Visibility
 from auraclaw.gateways.task.admission import AllowAllAdmissionController
 from auraclaw.infrastructure.artifacts.store import ArtifactStore, InMemoryObjectStorage
 from auraclaw.infrastructure.observability.stores import (
@@ -113,6 +114,82 @@ def test_trace_audit_metrics_alerts_and_timeline_share_correlation_context() -> 
     asyncio.run(scenario())
 
 
+def test_metric_summary_is_windowed_and_tenant_isolated() -> None:
+    async def scenario() -> None:
+        events = InMemoryEventStore()
+        store = InMemoryObservabilityStore()
+        service = ObservabilityService(store, events)
+        context = TraceContext(
+            trace_id="a" * 32,
+            span_id="b" * 16,
+            tenant_id="tenant-summary",
+        )
+        other = TraceContext(
+            trace_id="c" * 32,
+            span_id="d" * 16,
+            tenant_id="other-tenant",
+        )
+        for value in (1.0, 2.0, 3.0, 4.0):
+            await service.metric("model.ttft.seconds", value, context=context)
+        await service.metric("model.ttft.seconds", 999.0, context=other)
+
+        summaries = await service.metric_summary("tenant-summary", window_hours=24)
+        summary = next(item for item in summaries if item.name == "model.ttft.seconds")
+
+        assert summary.count == 4
+        assert summary.total == 10.0
+        assert summary.average == 2.5
+        assert summary.minimum == 1.0
+        assert summary.maximum == 4.0
+        assert summary.p50 == 2.5
+        assert summary.p95 == pytest.approx(3.85)
+        assert summary.p99 == pytest.approx(3.97)
+
+    asyncio.run(scenario())
+
+
+def test_skill_prompt_budget_failure_projects_durable_rejection_metric() -> None:
+    async def scenario() -> None:
+        events = InMemoryEventStore()
+        store = InMemoryObservabilityStore()
+        service = ObservabilityService(store, events)
+        projector = ObservabilityProjector(service)
+        event = CanonicalEvent(
+            event_id="evt-skill-prompt-rejected",
+            tenant_id="tenant-summary",
+            root_session_id="session-summary",
+            session_id="session-summary",
+            run_id="run-summary",
+            aggregate_version=1,
+            type="run.failed",
+            occurred_at=datetime.now(UTC),
+            actor=Actor(type="runtime", id="runtime-summary"),
+            correlation_id="correlation-summary",
+            causation_id="causation-summary",
+            visibility=Visibility.USER,
+            schema_version=1,
+            payload={
+                "error": "Activated Skill instructions exceed the Runtime prompt budget",
+                "error_code": "skill_prompt_budget_exceeded",
+            },
+        )
+
+        await projector.project((event,))
+
+        points = await store.metric_snapshot()
+        rejected = [
+            point
+            for point in points
+            if point.name == "skill.runtime.prompt.rejected.count"
+        ]
+        assert len(rejected) == 1
+        assert rejected[0].value == 1
+        records = await store.session_records("tenant-summary", "session-summary")
+        assert [audit.action for audit in records["audits"]] == ["run.failed"]
+
+    asyncio.run(scenario())
+
+
 def test_canonical_event_relay_derives_idempotent_cross_component_telemetry() -> None:
     async def scenario() -> None:
         events = InMemoryEventStore()
@@ -198,6 +275,12 @@ def test_http_trace_context_is_returned_and_tenant_timeline_is_authorized(
             headers={"X-Tenant-ID": "other-tenant"},
         )
         assert denied.status_code == 404
+        metrics = client.get(
+            "/v1/operations/metrics/summary?window_hours=24",
+            headers={"X-Tenant-ID": "tenant-m6-api"},
+        )
+        assert metrics.status_code == 200
+        assert metrics.json()["window_hours"] == 24
     get_settings.cache_clear()
 
 

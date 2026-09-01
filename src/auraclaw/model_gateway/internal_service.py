@@ -75,6 +75,7 @@ _RUNTIME_METRICS = frozenset(
         "skill.runtime.content_cache.hit.count",
         "skill.runtime.content_cache.miss.count",
         "skill.runtime.trusted_messages.latency.seconds",
+        "skill.runtime.prompt.rejected.count",
     }
 )
 
@@ -177,6 +178,7 @@ class ModelGatewayInternalService:
                     ),
                     max_output_tokens=request.max_output_tokens,
                     runtime_metrics=request.runtime_metrics,
+                    prompt_cache_key=request.prompt_cache_key,
                 ),
             ):
                 if chunk.kind == "delta":
@@ -202,6 +204,12 @@ class ModelGatewayInternalService:
                     )
                 elif chunk.kind == "completed":
                     response = chunk.response
+                    if response is not None:
+                        metric_tasks.append(
+                            asyncio.create_task(
+                                self._emit_prompt_cache_metrics(response.usage, request)
+                            )
+                        )
                     if not first_output_recorded:
                         first_output_recorded = True
                         metric_tasks.append(
@@ -511,6 +519,25 @@ class ModelGatewayInternalService:
             )
         except Exception:
             return
+
+    async def _emit_prompt_cache_metrics(
+        self,
+        usage: dict[str, int | float],
+        request: ModelGenerateRequest,
+    ) -> None:
+        input_tokens = max(0.0, float(usage.get("input_tokens", 0)))
+        cached_tokens = max(0.0, float(usage.get("cached_input_tokens", 0)))
+        write_tokens = max(0.0, float(usage.get("cache_write_input_tokens", 0)))
+        metrics = {
+            "model.prompt_cache.cached_input_tokens": cached_tokens,
+            "model.prompt_cache.write_input_tokens": write_tokens,
+            "model.prompt_cache.hit_ratio": (
+                min(1.0, cached_tokens / input_tokens) if input_tokens else 0.0
+            ),
+        }
+        await asyncio.gather(
+            *(self._emit_metric(name, value, request) for name, value in metrics.items())
+        )
 
     @staticmethod
     def _request_digest(request: ModelGenerateRequest) -> str:

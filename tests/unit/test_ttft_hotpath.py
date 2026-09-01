@@ -6,7 +6,7 @@ from typing import Any
 import pytest
 
 from auraclaw.action.ports import PolicyEvaluation
-from auraclaw.contracts.errors import PolicyDeniedError
+from auraclaw.contracts.errors import PolicyDeniedError, SkillPromptBudgetExceededError
 from auraclaw.contracts.internal import (
     InternalRequestContext,
     ModelGenerateRequest,
@@ -35,7 +35,12 @@ class _StreamingModel:
                 deltas=("hi",),
                 tool_calls=(),
                 finish_reason="stop",
-                usage={"input_tokens": 1, "output_tokens": 1},
+                usage={
+                    "input_tokens": 4,
+                    "output_tokens": 1,
+                    "cached_input_tokens": 3,
+                    "cache_write_input_tokens": 1,
+                },
             ),
         )
 
@@ -179,6 +184,9 @@ async def test_model_gateway_records_runtime_skill_metrics_and_ttft() -> None:
     assert by_name["skill.runtime.prompt.bytes"].value == 2048.0
     assert by_name["model.ttft.seconds"].value >= 0
     assert by_name["model.ttft.seconds"].session_id == "session_1"
+    assert by_name["model.prompt_cache.cached_input_tokens"].value == 3.0
+    assert by_name["model.prompt_cache.write_input_tokens"].value == 1.0
+    assert by_name["model.prompt_cache.hit_ratio"].value == 0.75
     assert "not.allowed" not in by_name
 
 
@@ -300,6 +308,81 @@ async def test_run_skill_content_cache_reuses_body_but_not_binding_disposition()
     assert controller.trusted_message_metrics(assignment) == {}
     assert await controller.trusted_messages(assignment, state)
     assert client.content_calls == 2
+
+
+def test_skill_prompt_cache_key_is_stable_across_runs_and_tenant_scoped() -> None:
+    controller = RuntimeCapabilityController(object())  # type: ignore[arg-type]
+    state = {
+        "active_skills": [
+            {
+                "binding": {
+                    "publisher": "auraclaw",
+                    "skill_name": "a",
+                    "skill_version": "1.0.0",
+                    "package_digest": "digest-a",
+                    "resolved_skills": (),
+                }
+            }
+        ]
+    }
+    first = _assignment()
+    second = RuntimeAssignment(
+        **{**first.__dict__, "run_id": "run_2", "lease_id": "lease_2"}
+    )
+    other_tenant = RuntimeAssignment(
+        **{**first.__dict__, "tenant_id": "t2", "lease_id": "lease_3"}
+    )
+
+    assert controller.prompt_cache_key(first, state) == controller.prompt_cache_key(
+        second, state
+    )
+    assert controller.prompt_cache_key(first, state) != controller.prompt_cache_key(
+        other_tenant, state
+    )
+    assert len(controller.prompt_cache_key(first, state) or "") <= 64
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("max_bytes", "max_tokens"),
+    ((128, 1_000_000), (1_000_000, 16)),
+)
+async def test_skill_prompt_budget_rejects_without_silent_truncation(
+    max_bytes: int, max_tokens: int
+) -> None:
+    class _Client:
+        async def load_skill_part(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+            del args, kwargs
+            return [{"text": "sensitive-marker-" + "x" * 256}]
+
+    controller = RuntimeCapabilityController(
+        _Client(),  # type: ignore[arg-type]
+        skill_prompt_max_bytes=max_bytes,
+        skill_prompt_max_estimated_tokens=max_tokens,
+    )
+    state = {
+        "active_skills": [
+            {
+                "binding": {
+                    "publisher": "auraclaw",
+                    "skill_name": "large",
+                    "skill_version": "1.0.0",
+                    "package_digest": "digest-large",
+                    "resolved_skills": (),
+                }
+            }
+        ]
+    }
+
+    with pytest.raises(SkillPromptBudgetExceededError) as raised:
+        await controller.trusted_messages(_assignment(), state)
+
+    assert raised.value.code == "skill_prompt_budget_exceeded"
+    assert "sensitive-marker" not in str(raised.value)
+    assert "sensitive-marker" not in str(raised.value.detail)
+    assert controller.trusted_message_metrics(_assignment())[
+        "skill.runtime.prompt.rejected.count"
+    ] == 1.0
 
 
 @pytest.mark.asyncio

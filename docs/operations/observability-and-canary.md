@@ -12,7 +12,20 @@ Response、凭证或 Secret；敏感 Payload 只允许保存受控 `payload_ref`
 ```text
 GET /v1/operations/sessions/{session_id}/timeline
 GET /v1/operations/metrics
+GET /v1/operations/metrics/summary?window_hours=24
 ```
+
+`metrics/summary` 在 tenant 边界内按指标返回 count、sum、average、min、max、p50、p95、p99，窗口限制
+1～720 小时。Skill 加载灰度至少观察以下门禁：
+
+- 同一 run 第二轮后的 `skill.runtime.content_cache.miss.count` 应为 0；持续非零停止放量。
+- `skill.runtime.prompt.rejected.count` 应为 0；出现时按 prompt budget 处理，不复制正文到工单。
+- `model.prompt_cache.hit_ratio` 只在 Provider 返回 cached tokens 后评估；开关开启 24 小时且合格长前缀
+  样本不少于 100 时，p50 仍为 0 需要检查前缀稳定性或关闭无收益的显式 key。
+- `model.ttft.seconds` 使用业务既有 Task-start SLO；相对开关前 24 小时 p95 退化超过 20% 时回滚 cache key
+  开关。该相对阈值用于 canary，不替代 Provider 自身可用性 SLO。
+- Hands 滚动替换每次只启动一个冷副本；readiness 前的 Artifact 下载量不得超过
+  `Publication 数 × 平均包大小` 的单副本容量模型，热 reconciliation 下载必须为 0。
 
 排障顺序：先用 Root/Session ID 打开 Timeline，确认最后一个 Canonical Event；再按 Run、Tool、
 Delivery 或 Approval ID 定位 Span/Audit；最后检查 Projection、Lease、Unknown Side Effect 和

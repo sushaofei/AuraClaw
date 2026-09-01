@@ -52,3 +52,7 @@ Artifact 形成不可接受的压力时，才重新评估可选 L2；届时必�
 - 新增 `managed-agent.skill-lifecycle` topic 和 `0054_skill_lifecycle_broadcast_outbox` migration。
 - 每个副本的 group id 包含 replica identity，扩容不会与现有副本竞争事件。
 - Redis 不是 AuraClaw Skill 加载路径的部署依赖。
+- Runtime 以 run 级正文 cache 消除重复 Hands 读取，以独立 prompt budget fail closed；Provider cache key
+  仅按声明能力开启，实际收益只由 cached token/TTFT 基线判定。
+- 1/2/4 副本真实 PostgreSQL/Kafka fan-out 验收与容量矩阵通过，当前没有触发 Redis L2 decision gate；
+  后续 Redis 只能由新的生产证据和独立 ADR/Issue 启动，不再作为 Issue #74 的未完成项。

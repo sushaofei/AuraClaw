@@ -59,6 +59,19 @@ class MetricPoint:
 
 
 @dataclass(frozen=True)
+class MetricSummary:
+    name: str
+    count: int
+    total: float
+    average: float
+    minimum: float
+    maximum: float
+    p50: float
+    p95: float
+    p99: float
+
+
+@dataclass(frozen=True)
 class AuditEvent:
     audit_id: str
     occurred_at: datetime

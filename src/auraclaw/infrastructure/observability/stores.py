@@ -7,7 +7,13 @@ from dataclasses import asdict
 from datetime import UTC, datetime
 from typing import Any
 
-from auraclaw.contracts.observability import Alert, AuditEvent, MetricPoint, TraceSpan
+from auraclaw.contracts.observability import (
+    Alert,
+    AuditEvent,
+    MetricPoint,
+    MetricSummary,
+    TraceSpan,
+)
 from auraclaw.infrastructure.persistence.postgres_common import (
     LazyPool as _LazyPool,
 )
@@ -91,6 +97,22 @@ class InMemoryObservabilityStore:
 
     async def metric_snapshot(self) -> list[MetricPoint]:
         return list(self._metrics)
+
+    async def metric_summary(
+        self, tenant_id: str, *, window_hours: int
+    ) -> list[MetricSummary]:
+        cutoff = datetime.now(UTC).timestamp() - window_hours * 3600
+        grouped: dict[str, list[float]] = {}
+        for point in self._metrics:
+            if point.tenant_id not in {None, tenant_id}:
+                continue
+            if point.observed_at.timestamp() < cutoff:
+                continue
+            grouped.setdefault(point.name, []).append(point.value)
+        return [
+            _metric_summary(name, values)
+            for name, values in sorted(grouped.items())
+        ]
 
 
 class PostgresObservabilityStore(_LazyPool):
@@ -199,6 +221,65 @@ class PostgresObservabilityStore(_LazyPool):
             for row in rows
         ]
 
+    async def metric_summary(
+        self, tenant_id: str, *, window_hours: int
+    ) -> list[MetricSummary]:
+        pool = await self.pool()
+        rows = await pool.fetch(
+            """SELECT metric_name, count(*) AS sample_count,
+                      sum(value) AS total, avg(value) AS average,
+                      min(value) AS minimum, max(value) AS maximum,
+                      percentile_cont(0.50) WITHIN GROUP (ORDER BY value) AS p50,
+                      percentile_cont(0.95) WITHIN GROUP (ORDER BY value) AS p95,
+                      percentile_cont(0.99) WITHIN GROUP (ORDER BY value) AS p99
+               FROM observability.metric_point
+               WHERE (tenant_id IS NULL OR tenant_id=$1)
+                 AND observed_at >= now() - ($2 * interval '1 hour')
+               GROUP BY metric_name ORDER BY metric_name""",
+            tenant_id,
+            window_hours,
+        )
+        return [
+            MetricSummary(
+                name=str(row["metric_name"]),
+                count=int(row["sample_count"]),
+                total=float(row["total"]),
+                average=float(row["average"]),
+                minimum=float(row["minimum"]),
+                maximum=float(row["maximum"]),
+                p50=float(row["p50"]),
+                p95=float(row["p95"]),
+                p99=float(row["p99"]),
+            )
+            for row in rows
+        ]
+
     @staticmethod
     def serialize(value: Any) -> dict[str, Any]:
         return asdict(value)
+
+
+def _metric_summary(name: str, values: list[float]) -> MetricSummary:
+    ordered = sorted(values)
+
+    def percentile(fraction: float) -> float:
+        if len(ordered) == 1:
+            return ordered[0]
+        position = (len(ordered) - 1) * fraction
+        lower = int(position)
+        upper = min(len(ordered) - 1, lower + 1)
+        weight = position - lower
+        return ordered[lower] + (ordered[upper] - ordered[lower]) * weight
+
+    total = sum(ordered)
+    return MetricSummary(
+        name=name,
+        count=len(ordered),
+        total=total,
+        average=total / len(ordered),
+        minimum=ordered[0],
+        maximum=ordered[-1],
+        p50=percentile(0.50),
+        p95=percentile(0.95),
+        p99=percentile(0.99),
+    )

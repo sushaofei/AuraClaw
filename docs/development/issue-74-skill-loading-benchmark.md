@@ -36,3 +36,14 @@ PYTHONPATH=src .venv/bin/python benchmarks/issue_74_skill_loading.py
 违反 readiness/SLO、Artifact 下载成为已证实瓶颈，且调整 L1/预热并发/部署节奏后仍无法达标。任何 L2 都
 必须具备 tenant quota、value size 上限、TLS/ACL、数据驻留、digest 重验，以及 Redis 故障时回退
 `L1 + Artifact` 的路径；不得保存 Publication/Installation/Trust/撤销权威状态。
+
+## 真实中间件验收
+
+`tests/integration/test_issue74_skill_multireplica.py` 使用真实 PostgreSQL broadcast outbox 和真实 Kafka
+topic，分别启动 1、2、4 个具有唯一 group id 的消费者。2026-09-01 本机环境中三组均通过：一次 outbox
+发布到达每个副本，每个副本只应用一次 tenant revision。`tests/integration/test_postgres_m6.py` 同时验证
+真实 PostgreSQL 指标窗口的 p50/p95 聚合。
+
+这组测试验证多副本收敛和生产观测查询；Publication 数/包大小的极端矩阵继续由同文件前述容量模型计算，
+避免 CI 固定制造最高 4 GiB 的无价值流量。上线前使用真实包分布复跑 canary，判定规则见
+`docs/operations/observability-and-canary.md`。

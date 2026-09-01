@@ -53,6 +53,11 @@ def _error_payload(error: BaseException) -> str:
     return message.strip()
 
 
+def _error_code(error: BaseException) -> str:
+    code = getattr(error, "code", None)
+    return str(code) if isinstance(code, str) and code else type(error).__name__
+
+
 class InjectionPoint(StrEnum):
     BEFORE_MODEL = "before_model"
     AFTER_MODEL = "after_model"
@@ -380,6 +385,13 @@ class AgentHarness:
                         )
                         if self._capability_controller is not None
                         else {}
+                    ),
+                    prompt_cache_key=(
+                        self._capability_controller.prompt_cache_key(
+                            assignment, capability_state
+                        )
+                        if self._capability_controller is not None
+                        else None
                     ),
                 )
                 await self._record_model_input(
@@ -824,6 +836,7 @@ class AgentHarness:
                                 "policy_version": binding["policy_version"],
                                 "policy_decision_id": binding.get("policy_decision_id"),
                                 "error": _error_payload(error),
+                                "error_code": _error_code(error),
                             },
                         )
                     ],
@@ -838,6 +851,7 @@ class AgentHarness:
             {
                 "run_id": assignment.run_id,
                 "error": _error_payload(error),
+                "error_code": _error_code(error),
             },
             identity=assignment.run_id,
             visibility=Visibility.USER,

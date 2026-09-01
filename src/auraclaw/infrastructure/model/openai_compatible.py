@@ -38,6 +38,7 @@ class OpenAICompatibleProvider:
         name: str = "openai_compatible",
         timeout_seconds: float = 120.0,
         thinking_enabled: bool | None = None,
+        prompt_cache_key_enabled: bool = False,
         client: httpx.AsyncClient | None = None,
     ) -> None:
         self.name = name
@@ -45,6 +46,7 @@ class OpenAICompatibleProvider:
         self._endpoint = self._chat_completions_endpoint(base_url)
         self._timeout = timeout_seconds
         self._thinking_enabled = thinking_enabled
+        self._prompt_cache_key_enabled = prompt_cache_key_enabled
         self._client = client
         self._owns_client = client is None
         self._active_tasks: dict[str, asyncio.Task[object]] = {}
@@ -142,6 +144,8 @@ class OpenAICompatibleProvider:
             payload["thinking"] = {
                 "type": "enabled" if self._thinking_enabled else "disabled",
             }
+        if self._prompt_cache_key_enabled and request.prompt_cache_key is not None:
+            payload["prompt_cache_key"] = request.prompt_cache_key
 
         started = time.perf_counter()
         first_delta_logged = False
@@ -286,13 +290,27 @@ class OpenAICompatibleProvider:
         normalized: dict[str, int | float] = {}
         aliases = {
             "prompt_tokens": "input_tokens",
+            "input_tokens": "input_tokens",
             "completion_tokens": "output_tokens",
+            "output_tokens": "output_tokens",
             "total_tokens": "total_tokens",
         }
         for key, target in aliases.items():
             value = usage.get(key)
             if isinstance(value, (int, float)) and not isinstance(value, bool):
                 normalized[target] = value
+        prompt_details = usage.get("prompt_tokens_details")
+        if not isinstance(prompt_details, dict):
+            prompt_details = usage.get("input_tokens_details")
+        if isinstance(prompt_details, dict):
+            detail_aliases = {
+                "cached_tokens": "cached_input_tokens",
+                "cache_write_tokens": "cache_write_input_tokens",
+            }
+            for key, target in detail_aliases.items():
+                value = prompt_details.get(key)
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    normalized[target] = value
         return normalized
 
     @staticmethod

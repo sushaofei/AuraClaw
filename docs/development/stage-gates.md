@@ -2853,3 +2853,28 @@ Provider prompt caching 和生产基线。
 - [x] 单元测试覆盖正文热命中、run 清理、disposition 每轮复查、指标 allowlist 与 TTFT。
 - [x] Ruff、Mypy、import-linter、Compose、定向与完整 Pytest 通过。
 - [x] Git 暂存范围审查、intentional commit 与 push 完成；Issue #74 保持 open。
+
+## 阶段 Prompt Cache、容量保护与 Issue #74 收口
+
+状态：实现、真实中间件验收、完整门禁、文档和关闭决策完成；Issue #74 已完成收口。
+
+### Provider cache 与容量保护
+
+- [x] Runtime 生成 tenant 隔离、跨 Run 稳定且不含正文的 prompt cache key；内部契约限制最多 64 字符。
+- [x] OpenAI-compatible Adapter 以默认关闭的显式能力开关发送 key；关闭时不改变第三方 Provider 请求。
+- [x] Provider cached/write tokens 被归一化，Model Gateway 记录 cached tokens、write tokens、hit ratio 和 TTFT。
+- [x] cache key 和旁路指标不参与 Model Call 幂等摘要；只有 Provider usage 可证明 cache 命中。
+- [x] Skill prompt 使用可配置 bytes/保守估算 tokens 双门禁，超限返回专用错误且不截断或记录正文。
+
+### 生产验收与 Redis 终局
+
+- [x] operations summary API 支持 tenant 隔离的 1～720 小时 count/sum/avg/min/max/p50/p95/p99。
+- [x] 真实 PostgreSQL outbox + Kafka 测试覆盖 1/2/4 独立副本 fan-out，每副本只应用一次 revision。
+- [x] Runbook 定义 cache miss、prompt reject、cache hit ratio、TTFT 回归和滚动冷启动 canary 门禁。
+- [x] ADR-004 记录当前基准未触发 Redis；未来 Redis L2 必须由新生产证据和独立 ADR/Issue 启动。
+
+### 验证与交付
+
+- [x] 单元测试覆盖 key 稳定性/tenant 隔离、能力降级、usage 解析、指标聚合和 prompt fail-closed。
+- [x] Ruff、Mypy、import-linter、Compose、基准、定向集成与完整 Pytest 通过。
+- [x] Git 暂存范围审查、intentional commit 与 push 完成；Issue #74 关闭。

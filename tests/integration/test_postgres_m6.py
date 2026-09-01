@@ -69,12 +69,23 @@ def test_postgres_observability_alert_retention_and_operations() -> None:
                 metadata={"authorization": "Bearer must-redact"},
             )
             await service.metric("delivery.dlq.count", 1, context=context)
+            await service.metric("model.ttft.seconds", 0.1, context=context)
+            await service.metric("model.ttft.seconds", 0.3, context=context)
             records = await store.session_records(tenant_id, session_id)
             assert len(records["spans"]) == len(records["audits"]) == len(records["alerts"]) == 1
             serialized = repr(records)
             assert "must-redact" not in serialized
             summary = await operations.failure_queue_summary(tenant_id)
             assert summary.projection_poison == summary.delivery_dlq == 0
+            metric_summaries = await store.metric_summary(
+                tenant_id, window_hours=24
+            )
+            ttft = next(
+                item for item in metric_summaries if item.name == "model.ttft.seconds"
+            )
+            assert ttft.count == 2
+            assert ttft.p50 == pytest.approx(0.2)
+            assert ttft.p95 == pytest.approx(0.29)
 
             connection = await asyncpg.connect(DATABASE_URL)
             try:

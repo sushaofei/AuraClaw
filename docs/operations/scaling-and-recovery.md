@@ -85,6 +85,12 @@ registration lease 内仍活跃时，新进程注册会 fail closed。因此显�
   `model.ttft.seconds`。cache miss 持续出现在同一 run 的第二轮以后时，检查容量/TTL、Runtime 重启和
   run 终止清理；prompt bytes 或估算 tokens 异常增长时先限制 active Skill 集，而不是扩大 cache。
   指标只含数值与 tenant/session/run 关联字段，不得添加 Skill 正文或摘要片段。
+  Prompt 总量由 `AURACLAW_RUNTIME_SKILL_PROMPT_MAX_BYTES` 和
+  `AURACLAW_RUNTIME_SKILL_PROMPT_MAX_ESTIMATED_TOKENS` 双门禁控制；`skill_prompt_budget_exceeded` 应先
+  减少 active Skill 或拆分 Skill/reference，只有核对目标模型 context window 后才允许调高。
+  对确认支持 `prompt_cache_key` 的 Provider 才开启 `AURACLAW_MODEL_PROMPT_CACHE_KEY_ENABLED`，并观察
+  `model.prompt_cache.cached_input_tokens`、`model.prompt_cache.write_input_tokens` 和
+  `model.prompt_cache.hit_ratio`；第三方 Provider 返回 400 unknown field 时关闭开关即可降级，不改 Runtime。
   Publication Reliability 每轮只领取 `AURACLAW_SKILL_RELIABILITY_MAX_CONCURRENT` 条 Outbox，按 tenant
   合并 rebuild、跨 tenant 并行，并以 `AURACLAW_SKILL_RELIABILITY_CLAIM_TTL_SECONDS` 续租；complete/fail
   影响零行视为 owner 丢失，不把旧 worker 的结果冒充成功。

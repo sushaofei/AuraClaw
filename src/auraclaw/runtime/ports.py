@@ -40,6 +40,7 @@ class ModelRequest:
     policy: ModelPolicy = field(default_factory=ModelPolicy)
     max_output_tokens: int = 8192
     runtime_metrics: dict[str, float] = field(default_factory=dict)
+    prompt_cache_key: str | None = None
 
 
 @dataclass(frozen=True)

@@ -226,6 +226,7 @@ def get_model_gateway() -> ModelClient:
         name=settings.model_provider,
         timeout_seconds=settings.model_timeout_seconds,
         thinking_enabled=settings.model_thinking_enabled,
+        prompt_cache_key_enabled=settings.model_prompt_cache_key_enabled,
     )
     return ModelGateway(
         (adapter,),
