@@ -109,7 +109,11 @@ class InMemoryEventStore:
         return False
 
     async def has_active_skill_reference(
-        self, tenant_id: str, publisher: str, name: str
+        self,
+        tenant_id: str,
+        publisher: str,
+        name: str,
+        package_digest: str | None = None,
     ) -> bool:
         active_runs: set[tuple[str, str]] = set()
         terminal_runs: set[tuple[str, str]] = set()
@@ -131,14 +135,21 @@ class InMemoryEventStore:
                 for item in binding.get("resolved_skills", ())
                 if isinstance(item, dict)
             ))
-            if any(
-                reference.get("publisher") == publisher
-                and (
-                    reference.get("skill_name") == name
-                    or reference.get("name") == name
+            if package_digest is not None:
+                matches = any(
+                    reference.get("package_digest") == package_digest
+                    for reference in references
                 )
-                for reference in references
-            ):
+            else:
+                matches = any(
+                    reference.get("publisher") == publisher
+                    and (
+                        reference.get("skill_name") == name
+                        or reference.get("name") == name
+                    )
+                    for reference in references
+                )
+            if matches:
                 active_runs.add(run_key)
         return bool(active_runs - terminal_runs)
 

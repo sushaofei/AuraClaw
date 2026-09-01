@@ -271,6 +271,25 @@ def test_artifact_multipart_scan_restart_and_gc() -> None:
             assert skill_ready is not None
             skill_ready_key = skill_ready.object_key
             assert skill_ready.skill_bound_digest == f"sha256:{skill_checksum}"
+            skill_delete = ArtifactDeleteRequest(
+                context=hands_skill_context,
+                artifact_id=skill_upload.artifact_id,
+                version=1,
+                actor_id="integration-admin",
+                reason_code="operator_purge",
+                policy_decision_id="integration-decision",
+                purpose="skill_package_purge",
+            )
+            with pytest.raises(ArtifactAccessError, match="retained"):
+                await service.delete(skill_delete)
+            await connection.execute(
+                """UPDATE artifact.metadata SET legal_hold=false
+                   WHERE tenant_id=$1 AND artifact_id=$2 AND version=1""",
+                tenant_id,
+                skill_upload.artifact_id,
+            )
+            assert (await service.delete(skill_delete)).status == "deleted"
+            skill_ready_key = None
 
             orphan_content = b"unpublished-skill"
             orphan_checksum = hashlib.sha256(orphan_content).hexdigest()

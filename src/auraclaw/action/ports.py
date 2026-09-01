@@ -246,6 +246,7 @@ class SkillBindingReferenceReader(Protocol):
         publisher: str,
         name: str,
         correlation_id: str,
+        package_digest: str | None = None,
     ) -> bool: ...
 
 

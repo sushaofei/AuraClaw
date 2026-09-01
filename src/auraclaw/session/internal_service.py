@@ -125,6 +125,7 @@ class SessionInternalService:
                 request.context.tenant_id,
                 request.publisher,
                 request.name,
+                request.package_digest,
             )
         )
 

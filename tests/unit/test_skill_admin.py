@@ -426,6 +426,7 @@ def test_task_api_service_exposes_skill_admin_routes() -> None:
     assert "/v1/admin/skill-publications/{publisher}/{name}/versions/{version}" in paths
     assert "/v1/admin/skill-publications/{publisher}/{name}/versions/{version}:revoke" in paths
     assert "/v1/admin/skill-publications/{publisher}/{name}/versions/{version}:restore" in paths
+    assert "/v1/admin/skill-packages/{publisher}/{name}/versions/{version}:purge" in paths
     assert "/v1/admin/skill-publications" in paths
     assert "/v1/admin/skill-sources" in paths
     assert "/v1/admin/skill-sources/{source_id}" in paths

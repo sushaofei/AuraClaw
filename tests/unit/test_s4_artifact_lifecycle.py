@@ -95,11 +95,17 @@ class _RecoveryRepository:
         self, tenant_id: str, artifact_id: str, version: int, **_kwargs: object
     ):
         del tenant_id, artifact_id, version
+        ignore_retention = bool(_kwargs.get("ignore_retention", False))
         if (
             self.deleted
             or self.pending.legal_hold
-            or self.pending.retention_until is None
-            or self.pending.retention_until > datetime.now(UTC)
+            or (
+                not ignore_retention
+                and (
+                    self.pending.retention_until is None
+                    or self.pending.retention_until > datetime.now(UTC)
+                )
+            )
         ):
             return None
         self.delete_claimed = True
@@ -627,13 +633,64 @@ async def test_ready_artifact_delete_enforces_retention_and_is_idempotent() -> N
     )
     with pytest.raises(ArtifactAccessError, match="retained"):
         await service.delete(request)
-    repository.pending = replace(
-        pending, retention_until=datetime.now(UTC) - timedelta(seconds=1)
+    first = await service.delete(
+        request.model_copy(update={"purpose": "skill_package_purge"})
     )
-    first = await service.delete(request)
-    second = await service.delete(request)
+    second = await service.delete(
+        request.model_copy(update={"purpose": "skill_package_purge"})
+    )
     assert first.status == second.status == "deleted"
     assert verifier.deleted == ["tenant/artifact/object"]
+
+
+@pytest.mark.asyncio
+async def test_skill_package_delete_never_overrides_legal_hold() -> None:
+    pending = PendingUpload(
+        tenant_id="tenant-s4",
+        artifact_id="artifact-held-s4",
+        upload_id="upload-held-s4",
+        object_key="tenant/artifact/held",
+        root_session_id="skill-registry",
+        session_id="skill-registry",
+        name="skill.pkg",
+        media_type="application/vnd.auraclaw.skill-package+json",
+        expected_size=6,
+        expected_checksum="checksum",
+        classification="internal",
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        retention_until=datetime.now(UTC) + timedelta(days=1),
+        legal_hold=True,
+    )
+    repository = _RecoveryRepository(pending)
+    service = ArtifactInternalService(
+        SeaweedFSS3Presigner(
+            "http://seaweed.test:8333",
+            access_key="access",
+            secret_key="secret",
+            bucket="artifacts",
+            region="us-east-1",
+        ),
+        repository=repository,  # type: ignore[arg-type]
+        object_verifier=_DeleteVerifier(),  # type: ignore[arg-type]
+        policy=_AllowPolicy(),
+    )
+    request = ArtifactDeleteRequest(
+        context=InternalRequestContext(
+            tenant_id="tenant-s4",
+            service_identity=ServiceIdentity.ACTION_HANDS,
+            request_id="delete-held-s4",
+            correlation_id="delete-held-s4",
+            causation_id="delete-held-s4",
+        ),
+        artifact_id=pending.artifact_id,
+        version=1,
+        actor_id="admin-s4",
+        reason_code="skill_package_purge",
+        policy_decision_id="decision-s4",
+        purpose="skill_package_purge",
+    )
+    with pytest.raises(ArtifactAccessError, match="retained"):
+        await service.delete(request)
 
 
 @pytest.mark.asyncio

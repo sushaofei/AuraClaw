@@ -121,6 +121,7 @@ class ArtifactMetadataRepository(Protocol):
         version: int,
         *,
         claim_ttl: timedelta = timedelta(seconds=30),
+        ignore_retention: bool = False,
     ) -> PendingUpload | None: ...
 
     async def is_deleted(
@@ -719,6 +720,7 @@ class ArtifactInternalService:
             request.artifact_id,
             request.version,
             claim_ttl=self._claim_ttl,
+            ignore_retention=request.purpose == "skill_package_purge",
         )
         if pending is None:
             if await self._repository.is_deleted(

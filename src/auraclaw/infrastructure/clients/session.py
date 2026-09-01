@@ -203,7 +203,11 @@ class RemoteSessionEventStore:
         return response.referenced
 
     async def has_active_skill_reference(
-        self, tenant_id: str, publisher: str, name: str
+        self,
+        tenant_id: str,
+        publisher: str,
+        name: str,
+        package_digest: str | None = None,
     ) -> bool:
         if self._identity is not ServiceIdentity.ACTION_HANDS:
             self._unsupported("has_active_skill_reference")
@@ -220,6 +224,7 @@ class RemoteSessionEventStore:
                 ),
                 publisher=publisher,
                 name=name,
+                package_digest=package_digest,
             ),
             SkillActiveBindingReferenceResponse,
         )
@@ -387,6 +392,7 @@ class RemoteSkillBindingReferenceReader:
         publisher: str,
         name: str,
         correlation_id: str,
+        package_digest: str | None = None,
     ) -> bool:
         request_id = f"skill-active-binding-reference:{publisher}:{name}"
         response = await self._contract.call(
@@ -401,6 +407,7 @@ class RemoteSkillBindingReferenceReader:
                 ),
                 publisher=publisher,
                 name=name,
+                package_digest=package_digest,
             ),
             SkillActiveBindingReferenceResponse,
         )

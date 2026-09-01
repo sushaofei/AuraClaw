@@ -151,6 +151,7 @@ class SkillActiveBindingReferenceRequest(ContractModel):
     context: InternalRequestContext
     publisher: str = Field(min_length=1, max_length=128)
     name: str = Field(min_length=1, max_length=256)
+    package_digest: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
 
 
 class SkillActiveBindingReferenceResponse(ContractModel):
@@ -616,6 +617,7 @@ class ArtifactDeleteRequest(ContractModel):
     actor_id: str = Field(min_length=1, max_length=256)
     reason_code: str = Field(min_length=1, max_length=128)
     policy_decision_id: str = Field(min_length=1, max_length=256)
+    purpose: Literal["retention_expired", "skill_package_purge"] = "retention_expired"
 
 
 class ArtifactDeleteResponse(ContractModel):

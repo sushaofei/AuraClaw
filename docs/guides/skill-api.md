@@ -374,10 +374,12 @@ X-Reason-Code: source-restored
 POST /v1/admin/skill-packages/{publisher}/{name}/versions/{version}:purge
 Idempotency-Key: <uuid>
 X-Expected-Revision: <current retention revision>
-X-Reason-Code: retention-expired
+X-Reason-Code: operator-purge
 ```
 
-接口返回 `202 Accepted`。只有 retention 到期、没有 legal hold 且没有引用时才能清理；AuraClaw 会执行权威校验。客户端不得直接删除 OBS 对象。
+接口返回 `202 Accepted`。只有 Publication 已 revoke、Installation 已 uninstalled、没有 legal hold 且没有活动
+binding 时才能清理；历史终态 binding 和 `retention_until` 不阻止 Purge。AuraClaw 会在 Canonical Event Store
+按待删 Package digest 执行活动引用权威校验，客户端不得直接删除 OBS 对象。
 
 ## 10. Admission 审计与指标
 
