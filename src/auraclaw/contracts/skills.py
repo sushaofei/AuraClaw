@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from datetime import datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import Field, field_validator, model_validator
 
@@ -305,6 +305,28 @@ class SkillRequirement(ContractModel):
     )
 
 
+class SkillWorkflowEntrypoint(ContractModel):
+    api_version: Literal["skills.auraclaw.io/v1alpha1"] = (
+        "skills.auraclaw.io/v1alpha1"
+    )
+    entrypoint: str = Field(
+        min_length=1,
+        max_length=512,
+        pattern=r"^scripts/(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.workflow\.json$",
+    )
+
+
+class SkillReferenceRequirement(ContractModel):
+    path: str = Field(
+        min_length=1,
+        max_length=512,
+        pattern=r"^references/(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+$",
+    )
+    media_type: Literal["application/json", "text/markdown"]
+    max_bytes: int = Field(default=64 * 1024, ge=1, le=1024 * 1024)
+    preload: bool = False
+
+
 class SkillManifest(ContractModel):
     name: str = Field(min_length=1, max_length=256, pattern=_SKILL_NAME)
     version: str = Field(pattern=_SEMVER)
@@ -316,6 +338,8 @@ class SkillManifest(ContractModel):
     required_tools: tuple[SkillToolRequirement, ...] = ()
     required_resources: tuple[SkillResourceRequirement, ...] = ()
     required_skills: tuple[SkillRequirement, ...] = ()
+    workflow: SkillWorkflowEntrypoint | None = None
+    required_references: tuple[SkillReferenceRequirement, ...] = ()
     allowed_roles: tuple[str, ...] = ("coordinator", "worker")
     data_classification: str = "internal"
     risk_level: str = "medium"
@@ -366,12 +390,15 @@ class SkillManifest(ContractModel):
         tool_names = [item.name for item in self.required_tools]
         resource_uris = [item.uri_template for item in self.required_resources]
         skill_names = [(item.publisher, item.name) for item in self.required_skills]
+        reference_paths = [item.path for item in self.required_references]
         if len(tool_names) != len(set(tool_names)):
             raise ValueError("Skill Tool dependencies must be unique")
         if len(resource_uris) != len(set(resource_uris)):
             raise ValueError("Skill Resource dependencies must be unique")
         if len(skill_names) != len(set(skill_names)):
             raise ValueError("Skill dependencies must be unique")
+        if len(reference_paths) != len(set(reference_paths)):
+            raise ValueError("Skill reference dependencies must be unique")
         if any(item.name == self.name for item in self.required_skills):
             raise ValueError("Skill cannot depend directly on itself")
         if not self.allowed_roles or any(not role for role in self.allowed_roles):
@@ -698,6 +725,7 @@ class ResolvedSkillTool(ContractModel):
     canonical_name: str
     version: str
     schema_digest: str
+    expected_side_effect: Literal["read", "write"] = "write"
 
 
 class ResolvedSkillResource(ContractModel):
@@ -716,6 +744,13 @@ class ResolvedSkillDependency(ContractModel):
     artifact_ref: ArtifactRef
 
 
+class ResolvedSkillWorkflow(ContractModel):
+    api_version: Literal["skills.auraclaw.io/v1alpha1"]
+    entrypoint: str
+    workflow_digest: str = Field(pattern=_DIGEST)
+    reference_paths: tuple[str, ...] = ()
+
+
 class SkillBinding(ContractModel):
     skill_name: str
     skill_version: str
@@ -725,6 +760,7 @@ class SkillBinding(ContractModel):
     resolved_tools: tuple[ResolvedSkillTool, ...] = ()
     resolved_resources: tuple[ResolvedSkillResource, ...] = ()
     resolved_skills: tuple[ResolvedSkillDependency, ...] = ()
+    resolved_workflow: ResolvedSkillWorkflow | None = None
     policy_version: str
     policy_decision_id: str | None = None
     max_steps: int = Field(ge=1, le=1000)

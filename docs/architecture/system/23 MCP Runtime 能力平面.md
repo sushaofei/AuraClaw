@@ -208,6 +208,7 @@ skill package
 ├── manifest.json             必需，机器可读
 ├── SKILL.md                  必需，完整执行说明
 ├── references/*              可选，按需加载
+├── scripts/*.workflow.json   可选，声明式受管能力工作流
 ├── assets/*                  可选，模板与静态资源
 └── tests/*                   可选，准入与健康探针
 ```
@@ -245,10 +246,11 @@ MCP Resource URI 约定：
 skill://<publisher>/<name>/<version>/manifest
 skill://<publisher>/<name>/<version>/SKILL.md
 skill://<publisher>/<name>/<version>/references/<path>
+skill://<publisher>/<name>/<version>/scripts/<path>
 skill://<publisher>/<name>/<version>/assets/<path>
 ```
 
-Skill 包内的 `manifest`、`SKILL.md`、`references/` 和 `assets/` 只能通过上述
+Skill 包内的 `manifest`、`SKILL.md`、`references/`、`scripts/` 和 `assets/` 只能通过上述
 `skill://` URI 读取；不得把仓库目录或已移除的内建 Provider 写成 `repo://` 依赖。
 `repo://`、`artifact://` 等 URI 仅用于有当前 Resource Registry 条目或活跃 MCP Connector
 明确提供的外部 Resource。Catalog 中存在一行记录本身不构成可读性证明。
@@ -257,7 +259,13 @@ Skill 包内的 `manifest`、`SKILL.md`、`references/` 和 `assets/` 只能通�
 
 1. 发现：名称、描述、适用条件、风险和版本，进入候选上下文。
 2. 解析：Manifest、依赖和约束，由 Skill Resolver 加载。
-3. 执行：只加载当前步骤需要的 `SKILL.md` 章节、reference 或 asset。
+3. 执行：只加载当前步骤需要的 `SKILL.md` 章节、reference、Workflow 或 asset。
+
+声明式 Workflow 由固定 binding 驱动，只能调用 Manifest 已声明、Resolver 已固定的 Tool/Resource。步骤调用
+仍经 Runtime Port、Hands、Policy/Approval、Invocation Store 和 Managed Connector；Workflow 不包含 endpoint、
+Header、credential 或 MCP 协议字段。逻辑步骤使用 activation、workflow digest 和 step id 生成稳定 invocation
+与 idempotency key，审批续跑和故障恢复不得换 id 重复副作用。包内 Python、Shell、JavaScript、Wasm 和任意
+可执行载荷继续禁止，完整决策见 ADR-005。
 
 技能激活不是远端副作用调用。Runtime 生成稳定绑定：
 
@@ -310,8 +318,8 @@ publisher/name/version/digest 必须继续可解释。普通停用只影响新�
 非 active 状态隐式决定。
 
 发布准入可以读取完整包以验证所有文件 digest 和签名；Runtime 的渐进加载仅表示按当前步骤注入
-`SKILL.md`、reference 或 asset。包内 `tests/` 首期只允许平台定义的声明式测试向量，禁止执行任意
-Python、Shell、二进制或其他代码。
+`SKILL.md`、reference、Workflow 或 asset。包内 `tests/` 首期只允许平台定义的声明式测试向量，禁止执行任意
+Python、Shell、二进制或其他代码。`scripts/*.workflow.json` 是平台解释和验证的声明式数据，不属于任意代码执行。
 
 所有添加入口收敛到同一应用命令，并携带 tenant、command id、expected version、actor、correlation
 和 causation context。生产跨信任域使用 Publisher Registry 与非对称签名；现有 HMAC 只作为平台

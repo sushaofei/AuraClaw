@@ -2878,3 +2878,31 @@ Provider prompt caching 和生产基线。
 - [x] 单元测试覆盖 key 稳定性/tenant 隔离、能力降级、usage 解析、指标聚合和 prompt fail-closed。
 - [x] Ruff、Mypy、import-linter、Compose、基准、定向集成与完整 Pytest 通过。
 - [x] Git 暂存范围审查、intentional commit 与 push 完成；Issue #74 关闭。
+
+## 阶段 Skill 声明式 Workflow（Issue #75）
+
+状态：已完成。为 Skill 增加 `scripts/*.workflow.json` 与显式 reference 依赖，以固定 binding、稳定调用标识和
+Hands 治理执行 Tool/Resource；任意代码执行继续禁止。
+
+### 契约与发布准入
+
+- [x] Manifest 增加可选 workflow entrypoint 和 required references，旧包保持兼容。
+- [x] 包结构只允许 `scripts/*.workflow.json`；Python/Shell/JS/Wasm、二进制和 executable magic 继续拒绝。
+- [x] 编译校验 apiVersion/kind、步骤唯一性、依赖子集、selector、reference、预算、timeout 和稳定 digest。
+- [x] CLI、Admin Upload、Artifact 与 MCP Source 复用统一 SkillPackage 准入，无宽松旁路。
+
+### Runtime、恢复与安全
+
+- [x] Resolver 固定 workflow digest、Tool/Resource 版本和 schema/content digest。
+- [x] 生产 capability loop 自动执行顺序 Tool/Resource Workflow，不依赖未接线的测试 Runner。
+- [x] 步骤按 activation/workflow/step 生成稳定 invocation/idempotency key，重试和审批续跑复用标识。
+- [x] reference 按显式路径和 package digest 加载；model preload 受现有 prompt bytes/token 门禁。
+- [x] Runtime 不导入 MCP/Connector、不直连网络、不读取 credential、不覆盖可信身份。
+- [x] Workflow 状态和输出有界，未知版本/operation/selector、digest mismatch 和越权能力 fail closed。
+
+### 验证与交付
+
+- [x] 单元测试覆盖准入、越权、selector、reference、稳定 id、Resource、逐步 checkpoint、审批续跑和生产 controller 集成。
+- [x] Ruff、Mypy、import-linter、定向与完整 Pytest 通过。
+- [x] ADR、架构、authoring、实施与 stage gate 文档同步。
+- [ ] Git 暂存范围审查、intentional commit 与 push 完成；Issue #75 关闭。

@@ -39,12 +39,14 @@ from auraclaw.contracts.skills import (
     ResolvedSkillDependency,
     ResolvedSkillResource,
     ResolvedSkillTool,
+    ResolvedSkillWorkflow,
     SkillBinding,
     SkillManifest,
     SkillPublicationStatus,
     SkillRevocationAction,
 )
 from auraclaw.contracts.tools import PolicyDecision
+from auraclaw.domain.skill_workflows import compile_skill_workflow
 
 _VERSION_CLAUSE = re.compile(
     r"^(>=|<=|>|<|==|=)?(0|[1-9]\d*)"
@@ -645,6 +647,32 @@ class SkillPackageRegistry:
         except KeyError as exc:
             raise NotFoundError(f"Skill package part not found: {path}") from exc
 
+    def resolve_workflow(
+        self,
+        tenant_id: str,
+        *,
+        publisher: str,
+        name: str,
+        version: str,
+        package_digest: str,
+    ) -> ResolvedSkillWorkflow | None:
+        key = (tenant_id, publisher, name, version)
+        package = self._packages.get(key)
+        publication = self._publications.get(key)
+        if package is None or publication is None:
+            raise NotFoundError("Skill package not found")
+        if publication.package_digest != package_digest:
+            raise VersionConflictError("Skill package digest does not match the binding")
+        compiled = compile_skill_workflow(package.manifest, package.files)
+        if compiled is None:
+            return None
+        return ResolvedSkillWorkflow(
+            api_version=compiled.document.api_version,
+            entrypoint=compiled.entrypoint,
+            workflow_digest=compiled.digest,
+            reference_paths=compiled.reference_paths,
+        )
+
 
 class SkillResolver:
     def __init__(
@@ -824,6 +852,13 @@ class SkillResolver:
             resolved_tools=resolved_tools,
             resolved_resources=resolved_resources,
             resolved_skills=resolved_skills,
+            resolved_workflow=self._registry.resolve_workflow(
+                tenant_id,
+                publisher=manifest.publisher,
+                name=manifest.name,
+                version=manifest.version,
+                package_digest=publication.package_digest,
+            ),
             policy_version=policy_version,
             policy_decision_id=policy_decision_id,
             max_steps=manifest.max_steps,
@@ -949,7 +984,8 @@ def _validate_package(
         if normalized_path != path:
             raise SchemaValidationError(f"Skill package path is not canonical: {path}")
         if normalized_path not in {"manifest.json", "SKILL.md"} and (
-            PurePosixPath(normalized_path).parts[0] not in {"references", "assets", "tests"}
+            PurePosixPath(normalized_path).parts[0]
+            not in {"references", "assets", "scripts", "tests"}
         ):
             raise SchemaValidationError(
                 f"Skill package path is outside allowed directories: {path}"
@@ -970,6 +1006,27 @@ def _validate_package(
     parsed = SkillPackage.from_files(files)
     if parsed.manifest != package.manifest:
         raise SchemaValidationError("Skill manifest does not match manifest.json")
+    for requirement in parsed.manifest.required_references:
+        reference_content = files.get(requirement.path)
+        if reference_content is None:
+            raise SchemaValidationError(
+                f"Required Skill reference is missing: {requirement.path}"
+            )
+        if len(reference_content) > requirement.max_bytes:
+            raise SchemaValidationError(
+                f"Skill reference exceeds its maximum size: {requirement.path}"
+            )
+        if requirement.media_type == "application/json":
+            try:
+                json.loads(reference_content)
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise SchemaValidationError(
+                    f"Skill reference is not valid JSON: {requirement.path}"
+                ) from exc
+    for path in files:
+        if path.startswith("scripts/") and not path.endswith(".workflow.json"):
+            raise SchemaValidationError("Skill scripts may only contain Workflow JSON")
+    compile_skill_workflow(parsed.manifest, files)
     return parsed
 
 
@@ -1038,12 +1095,22 @@ def skill_capability_descriptor(
                 "applies_when": list(manifest.applies_when),
                 "not_when": list(manifest.not_when),
                 "input_schema": manifest.input_schema,
+                "output_schema": manifest.output_schema,
                 "required_skills": [
                     requirement.model_dump(mode="json") for requirement in manifest.required_skills
                 ],
                 "allowed_roles": list(manifest.allowed_roles),
                 "max_steps": manifest.max_steps,
                 "timeout_seconds": manifest.timeout_seconds,
+                "workflow": (
+                    manifest.workflow.model_dump(mode="json")
+                    if manifest.workflow is not None
+                    else None
+                ),
+                "required_references": [
+                    item.model_dump(mode="json")
+                    for item in manifest.required_references
+                ],
             }
         },
     )
@@ -1142,6 +1209,9 @@ def _resolve_tool(
         canonical_name=selected.canonical_name,
         version=selected.version,
         schema_digest=selected.content_digest,
+        expected_side_effect=(
+            "read" if selected.permission == "read-only" else "write"
+        ),
     )
 
 

@@ -7,6 +7,7 @@ import json
 import re
 import time
 from collections import OrderedDict
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote
@@ -17,6 +18,10 @@ from auraclaw.contracts.events import NewEvent
 from auraclaw.contracts.skills import SkillActivation
 from auraclaw.control.ports import RuntimeAssignment
 from auraclaw.runtime.ports import CapabilityClient, ToolCall
+from auraclaw.runtime.skill_workflow import (
+    RuntimeSkillWorkflowExecutor,
+    WorkflowStepProgress,
+)
 
 CAPABILITY_SEARCH = "auraclaw.capabilities.search"
 CAPABILITY_LOAD = "auraclaw.capabilities.load"
@@ -31,6 +36,9 @@ class CapabilityExecution:
     result: dict[str, Any]
     state: dict[str, Any]
     events: tuple[NewEvent, ...] = ()
+
+
+CapabilityProgressCallback = Callable[[dict[str, Any]], Awaitable[None]]
 
 
 class CapabilityAdmissionError(RuntimeError):
@@ -71,6 +79,7 @@ class RuntimeCapabilityController:
         ):
             raise ValueError("Runtime Skill content and prompt limits must be positive")
         self._client = client
+        self._workflow_executor = RuntimeSkillWorkflowExecutor(client)
         self._max_candidates = max_candidates
         self._max_loaded = max_loaded
         self._max_searches = max_searches
@@ -92,6 +101,7 @@ class RuntimeCapabilityController:
         self._trusted_message_metrics: dict[
             tuple[str, str, str], dict[str, float]
         ] = {}
+        self._workflow_metrics: dict[tuple[str, str, str], dict[str, float]] = {}
 
     @staticmethod
     def empty_state() -> dict[str, Any]:
@@ -345,7 +355,8 @@ class RuntimeCapabilityController:
         state: dict[str, Any],
     ) -> tuple[dict[str, Any], ...]:
         messages: list[dict[str, Any]] = []
-        pending = self._active_skill_identities(state)
+        active_identities = self._active_skill_identities(state)
+        pending = self._active_skill_prompt_parts(state)
         if not pending:
             self._trusted_message_metrics[self._run_key(assignment)] = {
                 "skill.runtime.active.count": 0.0,
@@ -363,24 +374,25 @@ class RuntimeCapabilityController:
             *(
                 self._load_skill_text(
                     assignment,
-                    publisher=identity[0],
-                    name=identity[1],
-                    version=identity[2],
-                    package_digest=identity[3],
-                    path="SKILL.md",
+                    publisher=item[0],
+                    name=item[1],
+                    version=item[2],
+                    package_digest=item[3],
+                    path=item[4],
                 )
-                for identity in pending
+                for item in pending
             )
         )
         cache_hits = 0
         contents: list[str] = []
-        for identity, (text, cache_hit) in zip(pending, loaded, strict=True):
+        for item, (text, cache_hit) in zip(pending, loaded, strict=True):
             cache_hits += int(cache_hit)
             if text:
+                identity = item[:4]
                 content = (
                     "Activated signed AuraClaw Skill "
                     f"{identity[0]}/{identity[1]}@{identity[2]} "
-                    f"(digest {identity[3]}):\n{text}"
+                    f"(digest {identity[3]}, part {item[4]}):\n{text}"
                 )
                 contents.append(content)
         prompt_bytes = sum(len(content.encode()) for content in contents)
@@ -390,7 +402,7 @@ class RuntimeCapabilityController:
             or estimated_tokens > self._skill_prompt_max_estimated_tokens
         )
         self._trusted_message_metrics[self._run_key(assignment)] = {
-            "skill.runtime.active.count": float(len(pending)),
+            "skill.runtime.active.count": float(len(active_identities)),
             "skill.runtime.prompt.bytes": float(prompt_bytes),
             "skill.runtime.prompt.estimated_tokens": float(estimated_tokens),
             "skill.runtime.content_cache.hit.count": float(cache_hits),
@@ -415,7 +427,11 @@ class RuntimeCapabilityController:
     def trusted_message_metrics(
         self, assignment: RuntimeAssignment
     ) -> dict[str, float]:
-        return dict(self._trusted_message_metrics.get(self._run_key(assignment), {}))
+        key = self._run_key(assignment)
+        return {
+            **self._trusted_message_metrics.get(key, {}),
+            **self._workflow_metrics.get(key, {}),
+        }
 
     def prompt_cache_key(
         self, assignment: RuntimeAssignment, state: dict[str, Any]
@@ -445,6 +461,7 @@ class RuntimeCapabilityController:
                 task.cancel()
             self._remove_run_entries_locked(run_prefix)
             self._trusted_message_metrics.pop(run_prefix, None)
+            self._workflow_metrics.pop(run_prefix, None)
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
             async with self._skill_content_lock:
@@ -585,11 +602,37 @@ class RuntimeCapabilityController:
                     identities.append(identity)
         return identities
 
+    @classmethod
+    def _active_skill_prompt_parts(
+        cls,
+        state: dict[str, Any],
+    ) -> list[tuple[str, str, str, str, str]]:
+        parts = [(*identity, "SKILL.md") for identity in cls._active_skill_identities(state)]
+        emitted = set(parts)
+        for item in state.get("active_skills", ()):
+            if not isinstance(item, dict) or not isinstance(item.get("binding"), dict):
+                continue
+            binding = item["binding"]
+            identity = (
+                str(binding["publisher"]),
+                str(binding["skill_name"]),
+                str(binding["skill_version"]),
+                str(binding["package_digest"]),
+            )
+            for path in item.get("model_reference_paths", ()):
+                candidate = (*identity, str(path))
+                if candidate not in emitted:
+                    emitted.add(candidate)
+                    parts.append(candidate)
+        return parts
+
     async def execute(
         self,
         assignment: RuntimeAssignment,
         call: ToolCall,
         state: dict[str, Any],
+        *,
+        progress: CapabilityProgressCallback | None = None,
     ) -> CapabilityExecution:
         current = copy.deepcopy(state)
         if call.name == CAPABILITY_SEARCH:
@@ -665,7 +708,12 @@ class RuntimeCapabilityController:
             return CapabilityExecution(result=result, state=current)
 
         if call.name == SKILL_ACTIVATE:
-            return await self._activate_skill(assignment, call, current)
+            return await self._activate_skill(
+                assignment,
+                call,
+                current,
+                progress=progress,
+            )
 
         if call.name == RESOURCE_READ:
             return await self._read_resource(assignment, call, current)
@@ -712,6 +760,8 @@ class RuntimeCapabilityController:
             activation = item.get("activation")
             if not isinstance(activation, dict):
                 continue
+            if item.get("workflow_status") == "completed":
+                continue
             events.append(
                 NewEvent(
                     type="skill.completed",
@@ -735,6 +785,8 @@ class RuntimeCapabilityController:
         assignment: RuntimeAssignment,
         call: ToolCall,
         state: dict[str, Any],
+        *,
+        progress: CapabilityProgressCallback | None,
     ) -> CapabilityExecution:
         capability_id = str(call.arguments.get("capability_id", ""))
         loaded = dict(state.get("loaded", {})).get(capability_id)
@@ -755,97 +807,295 @@ class RuntimeCapabilityController:
             )
         inputs = dict(call.arguments.get("inputs", {}))
         _validate_object(inputs, dict(contract.get("input_schema", {})))
+        input_digest = f"sha256:{_digest(inputs)}"
         active = [item for item in state.get("active_skills", ()) if isinstance(item, dict)]
-        binding = await self._client.resolve_skill(
-            assignment,
-            name=str(contract["name"]),
-            version=str(contract["version"]),
-            publisher=str(contract["publisher"]),
-            active_skill_names=tuple(
-                str(item["binding"]["skill_name"])
+        existing = next(
+            (
+                item
                 for item in active
-                if isinstance(item.get("binding"), dict)
+                if isinstance(item.get("activation"), dict)
+                and item["activation"].get("activation_key") == call.tool_invocation_id
             ),
+            None,
         )
-        dependency_ids = [
-            *(item.capability_id for item in binding.resolved_tools),
-            *(item.capability_id for item in binding.resolved_resources),
-            *(item.capability_id for item in binding.resolved_skills),
-        ]
-        if dependency_ids:
-            missing: list[str] = []
-            for batch_index, start in enumerate(range(0, len(dependency_ids), 8)):
-                batch = dependency_ids[start : start + 8]
-                dependency_invocation_id = (
-                    f"dep_{_digest({'activation': call.tool_invocation_id})[:24]}_{batch_index}"
-                )
-                dependency_result = await self._client.execute(
-                    assignment,
-                    ToolCall(
-                        tool_invocation_id=dependency_invocation_id,
-                        name=CAPABILITY_LOAD,
-                        version="1",
-                        arguments={"capability_ids": batch},
-                        expected_side_effect="read",
-                        idempotency_key=dependency_invocation_id,
-                    ),
-                )
-                dependency_payload = _result_content(dependency_result)
-                hydrated = self._merge_loaded(
-                    state,
-                    dependency_payload.get("capabilities", ()),
-                    allowed_ids=set(batch),
-                )
-                state["loaded"] = hydrated
-                missing.extend(sorted(set(batch).difference(hydrated)))
-            if missing:
+        events: list[NewEvent] = []
+        if existing is not None:
+            activation = SkillActivation.model_validate(existing["activation"])
+            if activation.input_digest != input_digest:
                 return CapabilityExecution(
                     result={
                         "status": "denied",
-                        "error_code": "skill_dependency_load_failed",
-                        "summary": (
-                            "Skill dependencies could not be loaded within the "
-                            "Runtime capability budget."
-                        ),
-                        "missing_capability_ids": missing,
+                        "error_code": "skill_activation_input_mismatch",
                     },
                     state=state,
                 )
-        activation_key = call.tool_invocation_id
-        activation = SkillActivation(
-            skill_activation_id=_activation_id(assignment, activation_key),
-            activation_key=activation_key,
-            binding=binding,
-            input_digest=f"sha256:{_digest(inputs)}",
-        )
-        state["active_skills"] = [
-            *active,
-            {
+            binding = activation.binding
+            dependency_ids = [
+                *(item.capability_id for item in binding.resolved_tools),
+                *(item.capability_id for item in binding.resolved_resources),
+                *(item.capability_id for item in binding.resolved_skills),
+            ]
+            if existing.get("workflow_status") == "completed":
+                return CapabilityExecution(
+                    result={
+                        "status": "completed",
+                        "skill_activation_id": activation.skill_activation_id,
+                        "workflow_output": dict(existing.get("workflow_output", {})),
+                    },
+                    state=state,
+                )
+        else:
+            binding = await self._client.resolve_skill(
+                assignment,
+                name=str(contract["name"]),
+                version=str(contract["version"]),
+                publisher=str(contract["publisher"]),
+                active_skill_names=tuple(
+                    str(item["binding"]["skill_name"])
+                    for item in active
+                    if isinstance(item.get("binding"), dict)
+                ),
+            )
+            dependency_ids = [
+                *(item.capability_id for item in binding.resolved_tools),
+                *(item.capability_id for item in binding.resolved_resources),
+                *(item.capability_id for item in binding.resolved_skills),
+            ]
+            if dependency_ids:
+                missing = await self._load_skill_dependencies(
+                    assignment,
+                    state,
+                    dependency_ids,
+                    activation_call_id=call.tool_invocation_id,
+                )
+                if missing:
+                    return CapabilityExecution(
+                        result={
+                            "status": "denied",
+                            "error_code": "skill_dependency_load_failed",
+                            "missing_capability_ids": missing,
+                        },
+                        state=state,
+                    )
+            activation = SkillActivation(
+                skill_activation_id=_activation_id(assignment, call.tool_invocation_id),
+                activation_key=call.tool_invocation_id,
+                binding=binding,
+                input_digest=input_digest,
+            )
+            existing = {
                 "activation": activation.model_dump(mode="json"),
                 "binding": binding.model_dump(mode="json"),
+                "model_reference_paths": [
+                    str(item["path"])
+                    for item in contract.get("required_references", ())
+                    if isinstance(item, dict) and item.get("preload") is True
+                ],
+            }
+            active.append(existing)
+            state["active_skills"] = active
+            events.append(
+                NewEvent(
+                    type="skill.activated",
+                    payload={
+                        "skill_activation_id": activation.skill_activation_id,
+                        "activation_key": activation.activation_key,
+                        "skill_name": binding.skill_name,
+                        "skill_version": binding.skill_version,
+                        "package_digest": binding.package_digest,
+                        "policy_version": binding.policy_version,
+                        "policy_decision_id": binding.policy_decision_id,
+                        "workflow_digest": (
+                            binding.resolved_workflow.workflow_digest
+                            if binding.resolved_workflow is not None
+                            else None
+                        ),
+                        "activation": activation.model_dump(mode="json"),
+                    },
+                )
+            )
+
+        if binding.resolved_workflow is None:
+            return CapabilityExecution(
+                result={
+                    "status": "activated",
+                    "skill_activation_id": activation.skill_activation_id,
+                    "skill_name": binding.skill_name,
+                    "skill_version": binding.skill_version,
+                    "loaded_dependency_ids": dependency_ids,
+                },
+                state=state,
+                events=tuple(events),
+            )
+
+        assert existing is not None
+        async def checkpoint_workflow(step: WorkflowStepProgress) -> None:
+            assert existing is not None
+            existing["workflow_state"] = step.state
+            existing["workflow_next_step_index"] = step.next_step_index
+            existing["workflow_completed_steps"] = list(step.completed_steps)
+            if progress is not None:
+                await progress(state)
+
+        workflow_result = await self._workflow_executor.execute(
+            assignment,
+            activation,
+            inputs=inputs,
+            loaded_capabilities={
+                key: value
+                for key, value in dict(state.get("loaded", {})).items()
+                if isinstance(value, dict)
             },
-        ]
-        payload = {
-            "skill_activation_id": activation.skill_activation_id,
-            "activation_key": activation.activation_key,
-            "skill_name": binding.skill_name,
-            "skill_version": binding.skill_version,
-            "package_digest": binding.package_digest,
-            "policy_version": binding.policy_version,
-            "policy_decision_id": binding.policy_decision_id,
-            "activation": activation.model_dump(mode="json"),
-        }
+            approval_id=call.approval_id,
+            approval_step_id=(
+                str(existing.get("workflow_pending_step"))
+                if existing.get("workflow_pending_step")
+                else None
+            ),
+            resume_state=(
+                dict(existing.get("workflow_state", {}))
+                if isinstance(existing.get("workflow_state"), dict)
+                else None
+            ),
+            start_step_index=int(existing.get("workflow_next_step_index", 0)),
+            on_progress=checkpoint_workflow,
+        )
+        metrics = self._workflow_metrics.setdefault(self._run_key(assignment), {})
+        metrics["skill.workflow.activation.count"] = (
+            metrics.get("skill.workflow.activation.count", 0.0) + 1.0
+        )
+        metrics["skill.workflow.step.count"] = float(
+            len(workflow_result.completed_steps)
+        )
+        metrics[f"skill.workflow.result.{workflow_result.status}.count"] = (
+            metrics.get(
+                f"skill.workflow.result.{workflow_result.status}.count",
+                0.0,
+            )
+            + 1.0
+        )
+        existing["workflow_status"] = workflow_result.status
+        existing["workflow_completed_steps"] = list(workflow_result.completed_steps)
+        if workflow_result.status == "waiting_for_approval":
+            existing["workflow_pending_step"] = workflow_result.pending_step_id
+            existing["workflow_pending_invocation_id"] = (
+                workflow_result.pending_invocation_id
+            )
+            return CapabilityExecution(
+                result={
+                    "status": "denied",
+                    "error_code": "approval_required",
+                    "approval_id": workflow_result.approval_id,
+                    "metadata": {
+                        "approval_request": workflow_result.approval_request or {}
+                    },
+                    "skill_activation_id": activation.skill_activation_id,
+                    "workflow_step_id": workflow_result.pending_step_id,
+                },
+                state=state,
+                events=tuple(events),
+            )
+        existing.pop("workflow_pending_step", None)
+        existing.pop("workflow_pending_invocation_id", None)
+        if workflow_result.status == "failed":
+            events.append(
+                NewEvent(
+                    type="skill.failed",
+                    payload={
+                        "skill_activation_id": activation.skill_activation_id,
+                        "skill_name": binding.skill_name,
+                        "package_digest": binding.package_digest,
+                        "workflow_digest": binding.resolved_workflow.workflow_digest,
+                        "error": workflow_result.error_code,
+                        "steps_completed": len(workflow_result.completed_steps),
+                    },
+                )
+            )
+            return CapabilityExecution(
+                result={
+                    "status": "error",
+                    "error_code": workflow_result.error_code,
+                    "skill_activation_id": activation.skill_activation_id,
+                },
+                state=state,
+                events=tuple(events),
+            )
+        _validate_object(
+            workflow_result.output,
+            dict(contract.get("output_schema", {})),
+        )
+        existing["workflow_output"] = workflow_result.output
+        existing.pop("workflow_state", None)
+        existing.pop("workflow_next_step_index", None)
+        events.append(
+            NewEvent(
+                type="skill.completed",
+                payload={
+                    "skill_activation_id": activation.skill_activation_id,
+                    "activation_key": activation.activation_key,
+                    "skill_name": binding.skill_name,
+                    "skill_version": binding.skill_version,
+                    "package_digest": binding.package_digest,
+                    "policy_version": binding.policy_version,
+                    "policy_decision_id": binding.policy_decision_id,
+                    "workflow_digest": binding.resolved_workflow.workflow_digest,
+                    "output_summary": json.dumps(
+                        workflow_result.output,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )[:4096],
+                    "artifact_refs": [],
+                    "steps_completed": len(workflow_result.completed_steps),
+                },
+            )
+        )
         return CapabilityExecution(
             result={
-                "status": "activated",
+                "status": "completed",
                 "skill_activation_id": activation.skill_activation_id,
                 "skill_name": binding.skill_name,
                 "skill_version": binding.skill_version,
-                "loaded_dependency_ids": dependency_ids,
+                "workflow_output": workflow_result.output,
+                "completed_steps": list(workflow_result.completed_steps),
             },
             state=state,
-            events=(NewEvent(type="skill.activated", payload=payload),),
+            events=tuple(events),
         )
+
+    async def _load_skill_dependencies(
+        self,
+        assignment: RuntimeAssignment,
+        state: dict[str, Any],
+        dependency_ids: list[str],
+        *,
+        activation_call_id: str,
+    ) -> list[str]:
+        missing: list[str] = []
+        for batch_index, start in enumerate(range(0, len(dependency_ids), 8)):
+            batch = dependency_ids[start : start + 8]
+            invocation_id = (
+                f"dep_{_digest({'activation': activation_call_id})[:24]}_{batch_index}"
+            )
+            result = await self._client.execute(
+                assignment,
+                ToolCall(
+                    tool_invocation_id=invocation_id,
+                    name=CAPABILITY_LOAD,
+                    version="1",
+                    arguments={"capability_ids": batch},
+                    expected_side_effect="read",
+                    idempotency_key=invocation_id,
+                ),
+            )
+            payload = _result_content(result)
+            hydrated = self._merge_loaded(
+                state,
+                payload.get("capabilities", ()),
+                allowed_ids=set(batch),
+            )
+            state["loaded"] = hydrated
+            missing.extend(sorted(set(batch).difference(hydrated)))
+        return missing
 
     def _merge_loaded(
         self,

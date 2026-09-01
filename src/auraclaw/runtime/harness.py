@@ -321,6 +321,7 @@ class AgentHarness:
                 in {
                     "capability.model_completed",
                     "capability.call_completed",
+                    "capability.workflow_running",
                 }
                 and int(state.get("turn_index", -1)) == turn_index
                 and isinstance(state.get("response"), dict)
@@ -546,10 +547,29 @@ class AgentHarness:
                             raise CollaborationValidationError(
                                 f"unsupported Runtime tool: {call.name}"
                             )
+                        async def checkpoint_capability_progress(
+                            capability_progress: dict[str, Any],
+                            current_state: dict[str, Any] = state,
+                            current_call: ToolCall = call,
+                            current_call_index: int = call_index,
+                        ) -> None:
+                            progress_state = {
+                                **current_state,
+                                "capability_state": capability_progress,
+                                "tool_invocation_id": current_call.tool_invocation_id,
+                                "call_index": current_call_index,
+                            }
+                            await self._save_checkpoint(
+                                assignment,
+                                "capability.workflow_running",
+                                progress_state,
+                            )
+
                         execution = await self._capability_controller.execute(
                             assignment,
                             call,
                             dict(state.get("capability_state", {})),
+                            progress=checkpoint_capability_progress,
                         )
                         result = execution.result
                         capability_state = execution.state
@@ -582,6 +602,9 @@ class AgentHarness:
                     )
                     await self._inject(InjectionPoint.AFTER_TOOL)
 
+                for side_event in side_events:
+                    await self._append_capability_event(assignment, side_event)
+
                 if result.get("error_code") == "approval_required":
                     await self._record_approval_wait(
                         assignment,
@@ -597,8 +620,6 @@ class AgentHarness:
                     )
                     return
 
-                for side_event in side_events:
-                    await self._append_capability_event(assignment, side_event)
                 events = await self._session.load(assignment)
                 await self._append_once(
                     assignment,
