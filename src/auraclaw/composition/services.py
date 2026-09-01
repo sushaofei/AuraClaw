@@ -990,6 +990,7 @@ def _readiness(name: str, settings: Settings) -> tuple[bool, dict[str, str]]:
             ServiceIdentity.POLICY,
             ServiceIdentity.DELIVERY_WORKER,
             ServiceIdentity.STREAMING_GATEWAY,
+            ServiceIdentity.ACTION_HANDS,
         )
         identity_ready = _has_workload_tokens(settings, required_identities)
         dependencies["workload_identities"] = "ready" if identity_ready else "missing"

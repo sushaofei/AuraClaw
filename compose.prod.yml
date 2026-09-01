@@ -142,6 +142,7 @@ services:
       AURACLAW_POLICY_WORKLOAD_TOKEN_FILE: /run/secrets/policy_workload_token
       AURACLAW_DELIVERY_WORKLOAD_TOKEN_FILE: /run/secrets/delivery_workload_token
       AURACLAW_STREAMING_GATEWAY_WORKLOAD_TOKEN_FILE: /run/secrets/streaming_gateway_workload_token
+      AURACLAW_ACTION_HANDS_WORKLOAD_TOKEN_FILE: /run/secrets/action_hands_workload_token
     secrets:
       - database_url
       - lease_signing_key
@@ -152,6 +153,7 @@ services:
       - policy_workload_token
       - delivery_workload_token
       - streaming_gateway_workload_token
+      - action_hands_workload_token
     command: ["session", "run", "--host", "0.0.0.0", "--port", "8001"]
     expose: ["8001"]
     healthcheck: *healthcheck

@@ -121,6 +121,11 @@ def test_production_compose_mounts_least_privilege_secrets() -> None:
         "model_api_key" not in secret_sources(service)
         for service in APPLICATION_SERVICES - {"model-gateway"}
     )
+    assert "action_hands_workload_token" in secret_sources("session")
+    assert (
+        services["session"]["environment"]["AURACLAW_ACTION_HANDS_WORKLOAD_TOKEN_FILE"]
+        == "/run/secrets/action_hands_workload_token"
+    )
     assert "vault_token" in secret_sources("credential-proxy")
     assert all(
         "vault_token" not in secret_sources(service)

@@ -2927,3 +2927,13 @@ active-reference barrier，并简化 AuraX 卸载入口。
 - [x] 架构、Skill API、authoring 指南和阶段门禁同步。
 - [x] Ruff、Mypy、import-linter、定向与完整 Pytest（538 passed、3 skipped）通过。
 - [x] Git 暂存范围审查、intentional commit 与 push 完成；Issue #76 可关闭。
+
+## 阶段 Skill Purge 内部认证发布修正（Issue #76）
+
+状态：已完成。补齐 Session 对 Action Hands 权威 active-binding 查询的 workload identity。
+
+- [x] `compose.test.yml` 与 `compose.prod.yml` 为 Session 挂载 Action Hands workload token。
+- [x] Session readiness 将 Action Hands 纳入必需调用方身份，缺失时 fail closed。
+- [x] 生产 Compose 最小权限 Secret 测试覆盖 Session 的 Action Hands token 挂载。
+- [x] AuraX 对网关隐藏的 403 显示安全且准确的治理失败提示。
+- [x] Ruff、Mypy、import-linter、完整 Pytest（539 passed、3 skipped）以及 AuraX 单测（47 passed）、E2E（9 passed）和生产构建通过。
