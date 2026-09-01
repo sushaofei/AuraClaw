@@ -2957,3 +2957,23 @@ active-reference barrier，并简化 AuraX 卸载入口。
 - [x] 内存与 PostgreSQL 测试覆盖同版本重发，签名回归覆盖旧包验签。
 - [x] Ruff、Mypy、import-linter、完整 Pytest（541 passed、3 skipped）、Compose、release gate 与迁移回滚测试通过。
 - [x] Git 暂存范围审查、intentional commit、push 和测试环境发布完成。
+
+## 阶段 Skill 策略角色与 Resolver 错误语义修正（Issue #78）
+
+状态：完成。实现、质量门禁、提交与推送均已收口。
+
+### 角色与安全边界
+
+- [x] 使用单一共享映射规范化 `root -> coordinator`、`repair -> worker`，Reviewer 与未知角色不扩大权限。
+- [x] Manifest、Policy attributes 和递归 Skill 依赖统一使用有效 Skill 角色，并保留原始 Assignment 角色。
+- [x] Action Hands 以签名 Lease 的角色约束 Resolver 参数，调用方不能覆盖受信角色。
+- [x] 旧 Skill Manifest 无需加入结构角色、重签或重新发布。
+
+### Outcome、观测与测试
+
+- [x] Runtime Resolver Port 返回 typed `success | denied | error` outcome，稳定错误码和安全 summary 不丢失。
+- [x] Policy deny 返回结构化 Capability 结果；只有无效成功 binding 使用 `skill_resolver_invalid_response` fail closed。
+- [x] 低基数指标覆盖 resolve 总量、结果、角色别名和无效响应，不记录 Skill 输入或 tenant 原文。
+- [x] 单元与内进程集成测试覆盖 Root、Repair、Reviewer、角色伪造、递归依赖、deny 透传和无效 binding。
+- [x] Ruff、Mypy、import-linter、定向与完整 Pytest 通过。
+- [x] Git 暂存范围审查、intentional commit 与 push 完成；Issue #78 可关闭。

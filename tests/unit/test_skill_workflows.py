@@ -32,7 +32,7 @@ from auraclaw.runtime.capability_controller import (
     SKILL_ACTIVATE,
     RuntimeCapabilityController,
 )
-from auraclaw.runtime.ports import ToolCall
+from auraclaw.runtime.ports import SkillResolutionOutcome, ToolCall
 from auraclaw.runtime.skill_workflow import RuntimeSkillWorkflowExecutor, WorkflowStepProgress
 
 _KEY = b"workflow-test-signing-key"
@@ -58,9 +58,7 @@ def _workflow() -> dict[str, Any]:
     return {
         "apiVersion": "skills.auraclaw.io/v1alpha1",
         "kind": "Workflow",
-        "references": [
-            {"id": "mapping", "path": "references/mapping.json", "required": True}
-        ],
+        "references": [{"id": "mapping", "path": "references/mapping.json", "required": True}],
         "steps": [
             {
                 "id": "lookup",
@@ -259,9 +257,11 @@ class _Client:
         self.resource_uris.append(uri)
         return [{"text": "policy"}]
 
-    async def resolve_skill(self, assignment: RuntimeAssignment, **kwargs: Any) -> SkillBinding:
+    async def resolve_skill(
+        self, assignment: RuntimeAssignment, **kwargs: Any
+    ) -> SkillResolutionOutcome:
         del assignment, kwargs
-        return self.binding
+        return SkillResolutionOutcome(status="success", binding=self.binding)
 
 
 def test_workflow_executor_uses_stable_invocation_and_pinned_version() -> None:
@@ -445,9 +445,7 @@ def test_workflow_approval_resume_reuses_nested_invocation_id() -> None:
         )
         waiting = await controller.execute(_assignment(), original, state)
         assert waiting.result["error_code"] == "approval_required"
-        assert waiting.result["metadata"]["approval_request"]["approval_id"] == (
-            "approval-1"
-        )
+        assert waiting.result["metadata"]["approval_request"]["approval_id"] == ("approval-1")
         resumed = await controller.execute(
             _assignment(),
             ToolCall(**{**original.__dict__, "approval_id": "approval-1"}),

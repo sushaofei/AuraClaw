@@ -9,9 +9,9 @@ from auraclaw.contracts.hands import (
     HandsResourceDescriptor,
     HandsToolCall,
 )
-from auraclaw.contracts.skills import SkillBinding
+from auraclaw.contracts.skills import SkillBinding, effective_skill_role
 from auraclaw.control.ports import RuntimeAssignment
-from auraclaw.runtime.ports import HandsClient, ToolCall
+from auraclaw.runtime.ports import HandsClient, SkillResolutionOutcome, ToolCall
 
 _SKILL_RESOLVE_TOOL_NAME = "auraclaw.skills.resolve"
 
@@ -54,9 +54,7 @@ class HandsRuntimeAdapter:
             if cursor is None:
                 return items
 
-    async def list_resource_templates(
-        self, assignment: RuntimeAssignment
-    ) -> list[dict[str, Any]]:
+    async def list_resource_templates(self, assignment: RuntimeAssignment) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
         cursor: str | None = None
         while True:
@@ -91,9 +89,7 @@ class HandsRuntimeAdapter:
         *,
         arguments: dict[str, str] | None = None,
     ) -> dict[str, Any]:
-        result = await self._client.get_prompt(
-            assignment, name, arguments=arguments
-        )
+        result = await self._client.get_prompt(assignment, name, arguments=arguments)
         return result.model_dump(mode="json")
 
     async def load_skill_manifest(
@@ -143,35 +139,53 @@ class HandsRuntimeAdapter:
         version: str = "*",
         publisher: str | None = None,
         active_skill_names: tuple[str, ...] = (),
-    ) -> SkillBinding:
+    ) -> SkillResolutionOutcome:
         result = await self.execute(
             assignment,
             ToolCall(
-                tool_invocation_id=(
-                    f"resolve_{assignment.run_id}_{name.replace('.', '_')}"
-                ),
+                tool_invocation_id=(f"resolve_{assignment.run_id}_{name.replace('.', '_')}"),
                 name=_SKILL_RESOLVE_TOOL_NAME,
                 version="1",
                 arguments={
                     "name": name,
                     "version": version,
                     **({"publisher": publisher} if publisher is not None else {}),
-                    "role": assignment.role,
+                    "role": effective_skill_role(assignment.role),
                     "policy_version": "runtime",
                     "active_skill_names": list(active_skill_names),
                 },
             ),
         )
+        status = str(result.get("status", "error"))
+        summary = str(result.get("summary", ""))
+        error_code = result.get("error_code")
+        safe_error_code = str(error_code) if isinstance(error_code, str) else None
+        if status != "success":
+            return SkillResolutionOutcome(
+                status="denied" if status == "denied" else "error",
+                error_code=safe_error_code or "skill_resolver_failed",
+                summary=summary or "Skill resolution failed.",
+            )
         content = result.get("content")
         payload = dict(content) if isinstance(content, dict) else result
         binding = payload.get("binding")
         if not isinstance(binding, dict):
-            raise AuraClawError("Skill resolver did not return a binding")
-        return SkillBinding.model_validate(binding)
+            return SkillResolutionOutcome(
+                status="error",
+                error_code="skill_resolver_invalid_response",
+                summary="Skill resolver returned an invalid success response.",
+            )
+        try:
+            validated = SkillBinding.model_validate(binding)
+        except ValueError:
+            return SkillResolutionOutcome(
+                status="error",
+                error_code="skill_resolver_invalid_response",
+                summary="Skill resolver returned an invalid success response.",
+            )
+        return SkillResolutionOutcome(status="success", binding=validated)
 
-    async def execute(
-        self, assignment: RuntimeAssignment, call: ToolCall
-    ) -> dict[str, Any]:
+    async def execute(self, assignment: RuntimeAssignment, call: ToolCall) -> dict[str, Any]:
         result = await self._client.call_tool(assignment, tool_call_to_hands(call))
         return result.as_dict()
 

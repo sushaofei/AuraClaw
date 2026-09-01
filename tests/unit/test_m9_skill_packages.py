@@ -172,9 +172,7 @@ def _dependency_package(
         signature=f"hmac-sha256:{'0' * 64}",
     )
     files = {"SKILL.md": f"# {name}".encode()}
-    manifest = unsigned.model_copy(
-        update={"signature": verifier.sign(unsigned, files)}
-    )
+    manifest = unsigned.model_copy(update={"signature": verifier.sign(unsigned, files)})
     return SkillPackage(
         manifest=manifest,
         files={
@@ -356,7 +354,7 @@ def test_skill_resolver_pins_highest_compatible_dependencies() -> None:
             tenant_id="tenant-a",
             name="release.prepare",
             version=">=1.4,<2",
-            role="worker",
+            role="repair",
             policy_version="policy-42",
             subject="runtime-1",
             correlation_id="run-1",
@@ -368,9 +366,10 @@ def test_skill_resolver_pins_highest_compatible_dependencies() -> None:
         assert binding.resolved_resources[0].capability_id == "cap-resource"
         assert binding.policy_version == "policy-43"
         assert binding.policy_decision_id == "skill-policy-1"
-        assert skill_policy.attributes["active_skill_names"] == [
-            "audit.prepare"
-        ]
+        assert skill_policy.attributes["active_skill_names"] == ["audit.prepare"]
+        assert skill_policy.attributes["role"] == "worker"
+        assert skill_policy.attributes["assignment_role"] == "repair"
+        assert skill_policy.attributes["effective_skill_role"] == "worker"
 
         denied_package = _package(verifier, version="2.0.0")
         denied_manifest = denied_package.manifest.model_copy(
@@ -400,7 +399,7 @@ def test_skill_resolver_pins_highest_compatible_dependencies() -> None:
                 tenant_id="tenant-a",
                 name="release.prepare",
                 version="2.0.0",
-                role="worker",
+                role="reviewer",
                 policy_version="policy-42",
             )
 
@@ -417,9 +416,7 @@ def test_skill_resolver_flattens_child_skills_and_rejects_cycles() -> None:
         child = _dependency_package(
             verifier,
             name="data.validate",
-            required_tools=(
-                SkillToolRequirement(name="data.scope.profile", version="1.0.0"),
-            ),
+            required_tools=(SkillToolRequirement(name="data.scope.profile", version="1.0.0"),),
         )
         parent = _dependency_package(
             verifier,
@@ -460,15 +457,11 @@ def test_skill_resolver_flattens_child_skills_and_rejects_cycles() -> None:
         binding = await SkillResolver(registry, store).resolve(
             tenant_id="tenant-a",
             name="scenario.analyze",
-            role="worker",
+            role="repair",
             policy_version="policy-1",
         )
-        assert [item.skill_name for item in binding.resolved_skills] == [
-            "data.validate"
-        ]
-        assert [item.canonical_name for item in binding.resolved_tools] == [
-            "data.scope.profile"
-        ]
+        assert [item.skill_name for item in binding.resolved_skills] == ["data.validate"]
+        assert [item.canonical_name for item in binding.resolved_tools] == ["data.scope.profile"]
 
         cycle_a = _dependency_package(
             verifier,

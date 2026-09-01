@@ -240,6 +240,19 @@ Manifest 最小字段：
 }
 ```
 
+`allowed_roles` 使用 Skill 策略语义角色，而不是 Session 拓扑角色。Runtime 和 Action Hands
+通过同一个稳定映射把受信 Assignment 角色规范化：`root -> coordinator`、`repair -> worker`；
+`coordinator`、`worker`、`reviewer` 保持原值，未知角色由 Manifest/Policy fail closed。
+原始 Assignment 角色来自签名 Lease，Resolver 调用参数不能覆盖；审计与 Policy attributes 同时
+保留原始角色和规范化后的有效 Skill 角色。Skill 作者不得为了兼容 Root/Repair 把结构角色复制到
+Manifest，也不能借由 Skill 内容声明更高角色。滚动升级期间 Hands 可接受调用参数携带相同的
+原始角色或规范化角色，但最终授权始终以签名 Lease 派生的有效角色为准。
+
+Resolver 返回显式的 `success | denied | error` outcome。`denied` 和可预期 `error` 保留稳定
+`error_code` 与安全 summary，作为结构化 Capability 结果反馈模型；只有 `success` 响应缺少或损坏
+`binding` 才以 `skill_resolver_invalid_response` fail closed。策略拒绝不得被改写为通用的
+`Skill resolver did not return a binding` 或无来源的 Run 级异常。
+
 MCP Resource URI 约定：
 
 ```text

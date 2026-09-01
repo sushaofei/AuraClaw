@@ -30,6 +30,14 @@ class ModelPolicy:
 
 
 @dataclass(frozen=True)
+class SkillResolutionOutcome:
+    status: Literal["success", "denied", "error"]
+    binding: SkillBinding | None = None
+    error_code: str | None = None
+    summary: str = ""
+
+
+@dataclass(frozen=True)
 class ModelRequest:
     model_call_id: str
     tenant_id: str
@@ -115,9 +123,7 @@ class SessionClient(Protocol):
 class RuntimeControlClient(Protocol):
     async def assert_fencing(self, resource_id: str, fencing_token: int) -> None: ...
 
-    async def is_cancelled(
-        self, tenant_id: str, session_id: str, run_id: str
-    ) -> bool: ...
+    async def is_cancelled(self, tenant_id: str, session_id: str, run_id: str) -> bool: ...
 
     async def save_checkpoint(self, checkpoint: RuntimeCheckpoint) -> None: ...
 
@@ -145,9 +151,7 @@ class CredentialResolver(Protocol):
 
 
 class ToolClient(Protocol):
-    async def execute(
-        self, assignment: RuntimeAssignment, call: ToolCall
-    ) -> dict[str, Any]: ...
+    async def execute(self, assignment: RuntimeAssignment, call: ToolCall) -> dict[str, Any]: ...
 
 
 class HandsClient(Protocol):
@@ -213,13 +217,9 @@ class HandsClient(Protocol):
 
 
 class CapabilityClient(ToolClient, Protocol):
-    async def list_tools(
-        self, assignment: RuntimeAssignment
-    ) -> list[dict[str, Any]]: ...
+    async def list_tools(self, assignment: RuntimeAssignment) -> list[dict[str, Any]]: ...
 
-    async def list_resources(
-        self, assignment: RuntimeAssignment
-    ) -> list[dict[str, Any]]: ...
+    async def list_resources(self, assignment: RuntimeAssignment) -> list[dict[str, Any]]: ...
 
     async def list_resource_templates(
         self, assignment: RuntimeAssignment
@@ -231,9 +231,7 @@ class CapabilityClient(ToolClient, Protocol):
         uri: str,
     ) -> list[dict[str, Any]]: ...
 
-    async def list_prompts(
-        self, assignment: RuntimeAssignment
-    ) -> list[dict[str, Any]]: ...
+    async def list_prompts(self, assignment: RuntimeAssignment) -> list[dict[str, Any]]: ...
 
     async def get_prompt(
         self,
@@ -270,7 +268,7 @@ class CapabilityClient(ToolClient, Protocol):
         version: str = "*",
         publisher: str | None = None,
         active_skill_names: tuple[str, ...] = (),
-    ) -> SkillBinding: ...
+    ) -> SkillResolutionOutcome: ...
 
 
 class CollaborationClient(Protocol):
@@ -294,6 +292,7 @@ class SkillBindingResolver(Protocol):
         publisher: str | None = None,
         role: str,
         policy_version: str,
+        assignment_role: str | None = None,
         subject: str = "agent-runtime",
         correlation_id: str = "skill.resolve",
         active_skill_names: tuple[str, ...] = (),

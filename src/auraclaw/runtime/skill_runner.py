@@ -15,7 +15,7 @@ from auraclaw.contracts.errors import (
     RuntimeCancelledError,
 )
 from auraclaw.contracts.events import NewEvent
-from auraclaw.contracts.skills import SkillActivation
+from auraclaw.contracts.skills import SkillActivation, effective_skill_role
 from auraclaw.control.ports import RuntimeAssignment, RuntimeCheckpoint
 from auraclaw.runtime.clients import assignment_resource_id
 from auraclaw.runtime.ports import (
@@ -110,8 +110,9 @@ class SkillRunner:
             name=name,
             version=version,
             publisher=publisher,
-            role=assignment.role,
+            role=effective_skill_role(assignment.role),
             policy_version=self._policy_version,
+            assignment_role=assignment.role,
             subject=assignment.runtime_id,
             correlation_id=assignment.run_id,
             active_skill_names=tuple(

@@ -35,13 +35,15 @@ from auraclaw.contracts.capabilities import (
     CapabilityTrustLevel,
     McpServerDefinition,
 )
-from auraclaw.contracts.errors import NotFoundError
+from auraclaw.contracts.errors import AuthorizationError, NotFoundError
 from auraclaw.contracts.events import NewEvent
+from auraclaw.contracts.hands import HandsToolResult
 from auraclaw.contracts.skills import SkillBinding, SkillManifest
 from auraclaw.contracts.tools import (
     ArtifactRef,
     RiskLevel,
     ToolCapability,
+    ToolInvocation,
     ToolPermission,
 )
 from auraclaw.control.ports import (
@@ -60,7 +62,12 @@ from auraclaw.runtime.capability_controller import (
 )
 from auraclaw.runtime.hands_adapter import HandsRuntimeAdapter
 from auraclaw.runtime.harness import AgentHarness, InjectionPoint
-from auraclaw.runtime.ports import ModelRequest, ModelResponse, ToolCall
+from auraclaw.runtime.ports import (
+    ModelRequest,
+    ModelResponse,
+    SkillResolutionOutcome,
+    ToolCall,
+)
 
 
 class _Control:
@@ -155,6 +162,17 @@ class _BusinessHands:
     async def execute(self, invocation: Any, capability: Any) -> dict[str, Any]:
         del capability
         return {"number": invocation.arguments["number"], "state": "open"}
+
+
+class _ResolveHands:
+    def __init__(self, result: HandsToolResult) -> None:
+        self.result = result
+        self.call: Any = None
+
+    async def call_tool(self, assignment: RuntimeAssignment, call: Any) -> HandsToolResult:
+        del assignment
+        self.call = call
+        return self.result
 
 
 class _ScriptedModel:
@@ -256,23 +274,26 @@ class _Capabilities:
         version: str = "*",
         publisher: str | None = None,
         active_skill_names: tuple[str, ...] = (),
-    ) -> SkillBinding:
+    ) -> SkillResolutionOutcome:
         del assignment, active_skill_names
-        return SkillBinding(
-            skill_name=name,
-            skill_version=version,
-            publisher=publisher or "platform",
-            package_digest=f"sha256:{'a' * 64}",
-            artifact_ref=ArtifactRef(
-                artifact_id="skill-artifact",
-                version=1,
-                content_hash=f"sha256:{'b' * 64}",
-                media_type="application/json",
-                size=1,
+        return SkillResolutionOutcome(
+            status="success",
+            binding=SkillBinding(
+                skill_name=name,
+                skill_version=version,
+                publisher=publisher or "platform",
+                package_digest=f"sha256:{'a' * 64}",
+                artifact_ref=ArtifactRef(
+                    artifact_id="skill-artifact",
+                    version=1,
+                    content_hash=f"sha256:{'b' * 64}",
+                    media_type="application/json",
+                    size=1,
+                ),
+                policy_version="policy-1",
+                max_steps=8,
+                timeout_seconds=60,
             ),
-            policy_version="policy-1",
-            max_steps=8,
-            timeout_seconds=60,
         )
 
     async def load_skill_part(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
@@ -334,9 +355,7 @@ class _MissingResourceCapabilities(_ResourceCapabilities):
 
 
 class _PartialResourceCapabilities(_ResourceCapabilities):
-    async def read_resource(
-        self, assignment: RuntimeAssignment, uri: str
-    ) -> list[dict[str, Any]]:
+    async def read_resource(self, assignment: RuntimeAssignment, uri: str) -> list[dict[str, Any]]:
         del assignment
         if uri.endswith("missing"):
             raise NotFoundError("Resource not found")
@@ -356,7 +375,7 @@ class _PartialResourceCapabilities(_ResourceCapabilities):
         ]
 
 
-def _assignment() -> RuntimeAssignment:
+def _assignment(*, role: str = "worker") -> RuntimeAssignment:
     return RuntimeAssignment(
         tenant_id="tenant-a",
         root_session_id="root-a",
@@ -365,10 +384,173 @@ def _assignment() -> RuntimeAssignment:
         runtime_id="runtime-a",
         lease_id="lease-a",
         fencing_token=1,
-        role="worker",
+        role=role,
         resource_profile={},
         budget=RuntimeBudget(max_steps=12, max_output_tokens=100),
     )
+
+
+def test_hands_runtime_adapter_preserves_resolver_denial_and_normalizes_root_role() -> None:
+    async def scenario() -> None:
+        hands = _ResolveHands(
+            HandsToolResult(
+                status="denied",
+                summary="Runtime role is not allowed to activate Skill",
+                error_code="policy_denied",
+            )
+        )
+        outcome = await HandsRuntimeAdapter(hands).resolve_skill(  # type: ignore[arg-type]
+            _assignment(role="root"),
+            name="release.prepare",
+            version="1.4.0",
+            publisher="platform",
+        )
+
+        assert hands.call.arguments["role"] == "coordinator"
+        assert outcome.status == "denied"
+        assert outcome.error_code == "policy_denied"
+        assert outcome.summary == "Runtime role is not allowed to activate Skill"
+
+    asyncio.run(scenario())
+
+
+def test_hands_runtime_adapter_rejects_invalid_success_binding() -> None:
+    async def scenario() -> None:
+        hands = _ResolveHands(HandsToolResult(status="success", content={}, summary="resolved"))
+        outcome = await HandsRuntimeAdapter(hands).resolve_skill(  # type: ignore[arg-type]
+            _assignment(),
+            name="release.prepare",
+        )
+
+        assert outcome.status == "error"
+        assert outcome.error_code == "skill_resolver_invalid_response"
+
+    asyncio.run(scenario())
+
+
+def test_skill_resolve_executor_rejects_role_override_against_trusted_assignment() -> None:
+    executor = SkillResolveExecutor(SimpleNamespace())  # type: ignore[arg-type]
+    invocation = ToolInvocation(
+        tool_invocation_id="resolve-role-spoof",
+        tenant_id="tenant-a",
+        root_session_id="root-a",
+        session_id="session-a",
+        run_id="run-a",
+        tool_name="auraclaw.skills.resolve",
+        tool_version="1",
+        arguments={"name": "release.prepare", "role": "worker"},
+        expected_side_effect="read",
+        idempotency_key="resolve-role-spoof",
+        deadline=None,
+        fencing_token=1,
+        actor_id="runtime-a",
+        actor_role="root",
+    )
+
+    with pytest.raises(AuthorizationError):
+        asyncio.run(executor.execute(invocation, skill_resolve_tool()))
+
+
+def test_skill_resolve_executor_uses_trusted_assignment_role_and_effective_role() -> None:
+    class RecordingResolver:
+        def __init__(self) -> None:
+            self.arguments: dict[str, Any] = {}
+
+        async def resolve(self, **arguments: Any) -> SkillBinding:
+            self.arguments = arguments
+            return SkillBinding(
+                skill_name="release.prepare",
+                skill_version="1.4.0",
+                publisher="platform",
+                package_digest=f"sha256:{'a' * 64}",
+                artifact_ref=ArtifactRef(
+                    artifact_id="skill-artifact",
+                    version=1,
+                    content_hash=f"sha256:{'b' * 64}",
+                    media_type="application/json",
+                    size=1,
+                ),
+                policy_version="policy-1",
+                max_steps=8,
+                timeout_seconds=60,
+            )
+
+    async def scenario() -> None:
+        resolver = RecordingResolver()
+        invocation = ToolInvocation(
+            tool_invocation_id="resolve-trusted-root",
+            tenant_id="tenant-a",
+            root_session_id="root-a",
+            session_id="session-a",
+            run_id="run-a",
+            tool_name="auraclaw.skills.resolve",
+            tool_version="1",
+            arguments={"name": "release.prepare", "role": "root"},
+            expected_side_effect="read",
+            idempotency_key="resolve-trusted-root",
+            deadline=None,
+            fencing_token=1,
+            actor_id="runtime-a",
+            actor_role="root",
+        )
+
+        result = await SkillResolveExecutor(resolver).execute(  # type: ignore[arg-type]
+            invocation, skill_resolve_tool()
+        )
+
+        assert "binding" in result
+        assert resolver.arguments["role"] == "coordinator"
+        assert resolver.arguments["assignment_role"] == "root"
+
+    asyncio.run(scenario())
+
+
+def test_capability_controller_returns_resolver_denial_as_structured_result() -> None:
+    class DeniedCapabilities(_Capabilities):
+        async def resolve_skill(
+            self, assignment: RuntimeAssignment, **kwargs: Any
+        ) -> SkillResolutionOutcome:
+            del assignment, kwargs
+            return SkillResolutionOutcome(
+                status="denied",
+                error_code="policy_denied",
+                summary="Skill activation is not allowed.",
+            )
+
+    async def scenario() -> None:
+        controller = RuntimeCapabilityController(DeniedCapabilities(kind="skill"))
+        loaded = await controller.execute(
+            _assignment(role="root"),
+            ToolCall(
+                tool_invocation_id="load-denied-skill",
+                name="auraclaw.capabilities.load",
+                arguments={"capability_ids": ["cap-one"]},
+            ),
+            controller.empty_state(),
+        )
+        activated = await controller.execute(
+            _assignment(role="root"),
+            ToolCall(
+                tool_invocation_id="activate-denied-skill",
+                name="auraclaw.skills.activate",
+                arguments={"capability_id": "cap-one", "inputs": {}},
+            ),
+            loaded.state,
+        )
+
+        assert activated.result == {
+            "status": "denied",
+            "error_code": "policy_denied",
+            "summary": "Skill activation is not allowed.",
+        }
+        assert activated.events == ()
+        assert controller.trusted_message_metrics(_assignment(role="root")) == {
+            "skill.resolve.count": 1.0,
+            "skill.resolve.result.denied.count": 1.0,
+            "skill.resolve.role_alias.count": 1.0,
+        }
+
+    asyncio.run(scenario())
 
 
 def test_required_capabilities_preload_before_model_selection() -> None:
@@ -377,25 +559,18 @@ def test_required_capabilities_preload_before_model_selection() -> None:
         controller = RuntimeCapabilityController(capabilities)
         assignment = _assignment()
         assignment.resource_profile = {
-            "required_capabilities": [
-                {"capability_id": "cap-one", "version": "1.0.0"}
-            ]
+            "required_capabilities": [{"capability_id": "cap-one", "version": "1.0.0"}]
         }
-        state = await controller.preload_required(
-            assignment, controller.empty_state()
-        )
+        state = await controller.preload_required(assignment, controller.empty_state())
         assert capabilities.calls == ["auraclaw.capabilities.load"]
         assert state["required_capabilities_preloaded"] is True
         assert "cap-one" in state["loaded"]
         assert any(
-            item["function"]["name"] == "github.issue.get"
-            for item in controller.model_tools(state)
+            item["function"]["name"] == "github.issue.get" for item in controller.model_tools(state)
         )
 
         assignment.resource_profile = {
-            "required_capabilities": [
-                {"capability_id": "cap-one", "version": "2.0.0"}
-            ]
+            "required_capabilities": [{"capability_id": "cap-one", "version": "2.0.0"}]
         }
         with pytest.raises(CapabilityAdmissionError, match="version_mismatch"):
             await controller.preload_required(assignment, controller.empty_state())
@@ -986,8 +1161,9 @@ def test_real_mcp_skill_search_load_resolve_and_instruction_activation() -> None
             )
         )
         controller = RuntimeCapabilityController(client)
+        assignment = _assignment(role="root")
         searched = await controller.execute(
-            _assignment(),
+            assignment,
             ToolCall(
                 tool_invocation_id="search-skill-real",
                 name="auraclaw.capabilities.search",
@@ -997,7 +1173,7 @@ def test_real_mcp_skill_search_load_resolve_and_instruction_activation() -> None
         )
         capability_id = next(iter(searched.state["candidates"]))
         loaded = await controller.execute(
-            _assignment(),
+            assignment,
             ToolCall(
                 tool_invocation_id="load-skill-real",
                 name="auraclaw.capabilities.load",
@@ -1006,7 +1182,7 @@ def test_real_mcp_skill_search_load_resolve_and_instruction_activation() -> None
             searched.state,
         )
         activated = await controller.execute(
-            _assignment(),
+            assignment,
             ToolCall(
                 tool_invocation_id="activate-skill-real",
                 name="auraclaw.skills.activate",
@@ -1017,7 +1193,7 @@ def test_real_mcp_skill_search_load_resolve_and_instruction_activation() -> None
 
         assert activated.result["status"] == "activated"
         assert activated.events[0].type == "skill.activated"
-        messages = await controller.trusted_messages(_assignment(), activated.state)
+        messages = await controller.trusted_messages(assignment, activated.state)
         assert "signed release checklist" in messages[0]["content"]
 
     asyncio.run(scenario())
