@@ -315,6 +315,16 @@ class InMemoryTaskProjection:
                 lineage={"review": payload},
             )
         elif event.type == "run.failed":
+            failure = payload.get("error")
+            if isinstance(failure, dict):
+                error = dict(failure)
+            elif failure is None:
+                error = {}
+            else:
+                error = {"message": str(failure)}
+            error_code = payload.get("error_code")
+            if isinstance(error_code, str) and error_code:
+                error.setdefault("code", error_code)
             view.update(
                 status=(
                     SessionStatus.READY.value
@@ -323,7 +333,7 @@ class InMemoryTaskProjection:
                 ),
                 run_status=RunStatus.FAILED.value,
                 current_stage="failed",
-                error=payload.get("error"),
+                error=error or None,
             )
         elif event.type == "run.cancelled":
             view.update(

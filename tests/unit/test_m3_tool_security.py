@@ -177,6 +177,46 @@ def test_tool_gateway_surfaces_controlled_boundary_reason() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize(
+    ("error", "expected_status", "expected_code"),
+    [
+        (NotFoundError("Skill Tool dependency is unavailable"), "error", "not_found"),
+        (
+            SchemaValidationError("Capability version is invalid"),
+            "error",
+            "tool_schema_invalid",
+        ),
+    ],
+)
+def test_tool_gateway_preserves_controlled_adapter_errors(
+    error: Exception, expected_status: str, expected_code: str
+) -> None:
+    class FailingHands:
+        async def execute(
+            self, invocation: ToolInvocation, capability: ToolCapability
+        ) -> object:
+            del invocation, capability
+            raise error
+
+    async def scenario() -> None:
+        gateway = ToolGateway(
+            registry=ToolRegistry((_capability(ToolPermission.READ_ONLY),)),
+            policy=PolicyEngine(),
+            approvals=InMemoryApprovalProjection(),
+            hands=FailingHands(),
+            artifacts=ArtifactStore(
+                InMemoryObjectStorage(), signing_key=b"controlled-error-key"
+            ),
+        )
+        result = await gateway.execute(_invocation())
+        assert result.status.value == expected_status
+        assert result.error_code == expected_code
+        assert result.summary == str(error)
+        assert result.side_effect_status == "not_started"
+
+    asyncio.run(scenario())
+
+
 def test_tool_gateway_rejects_invalid_tenant_capacity() -> None:
     with pytest.raises(ValueError, match="tenant tool capacity"):
         ToolGateway(

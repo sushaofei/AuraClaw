@@ -294,6 +294,160 @@ def test_resource_gateway_routes_catalog_resource_to_live_connector() -> None:
     asyncio.run(scenario())
 
 
+def test_catalog_hides_skills_when_dependency_server_is_quarantined() -> None:
+    async def scenario() -> None:
+        store = InMemoryCapabilityCatalogStore()
+        catalog = CapabilityCatalog(store)
+        tool_server = McpServerDefinition(
+            server_id="tool-server",
+            tenant_id="tenant-a",
+            title="Tool server",
+            endpoint="https://tools.example/mcp",
+            trust_level=CapabilityTrustLevel.TENANT_VERIFIED,
+            status=CapabilityStatus.ACTIVE,
+            enabled=True,
+        )
+        skill_server = McpServerDefinition(
+            server_id="skill-registry",
+            tenant_id="tenant-a",
+            title="Skill registry",
+            endpoint="https://skills.example/mcp",
+            trust_level=CapabilityTrustLevel.TENANT_VERIFIED,
+            status=CapabilityStatus.ACTIVE,
+            enabled=True,
+        )
+        await catalog.register_server(tool_server)
+        await catalog.register_server(skill_server)
+        tool = CapabilityDescriptor(
+            capability_id="cap-price-tool",
+            kind=CapabilityKind.TOOL,
+            server_id=tool_server.server_id,
+            canonical_name="price.insight.get",
+            version="2.1.0",
+            content_digest=f"sha256:{'b' * 64}",
+            title="Price insight",
+            tenant_id="tenant-a",
+            trust_level=CapabilityTrustLevel.TENANT_VERIFIED,
+            permission="read-only",
+            risk_level="low",
+            status=CapabilityStatus.ACTIVE,
+            updated_at=datetime.now(UTC),
+        )
+        resource = CapabilityDescriptor(
+            capability_id="cap-price-resource",
+            kind=CapabilityKind.RESOURCE_TEMPLATE,
+            server_id=tool_server.server_id,
+            canonical_name="price.insight.evidence",
+            version="1.0.0",
+            content_digest=f"sha256:{'d' * 64}",
+            title="Price evidence",
+            tenant_id="tenant-a",
+            trust_level=CapabilityTrustLevel.TENANT_VERIFIED,
+            permission="read-only",
+            risk_level="low",
+            status=CapabilityStatus.ACTIVE,
+            updated_at=datetime.now(UTC),
+            metadata={"uri_template": "repo://price/{record_id}"},
+        )
+        skill = CapabilityDescriptor(
+            capability_id="cap-price-skill",
+            kind=CapabilityKind.SKILL,
+            server_id=skill_server.server_id,
+            canonical_name="price-insight-deviation",
+            version="1.0.0",
+            content_digest=f"sha256:{'c' * 64}",
+            title="Price insight deviation",
+            tenant_id="tenant-a",
+            trust_level=CapabilityTrustLevel.TENANT_VERIFIED,
+            permission="read-only",
+            risk_level="low",
+            status=CapabilityStatus.ACTIVE,
+            updated_at=datetime.now(UTC),
+            metadata={
+                "model_contract": {
+                    "publisher": "platform",
+                    "required_tools": [
+                        {"name": "price.insight.get", "version": ">=2,<3"}
+                    ],
+                    "required_resources": [
+                        {"uri_template": "repo://price/{record_id}"}
+                    ],
+                    "required_skills": [],
+                }
+            },
+        )
+        parent_skill = skill.model_copy(
+            update={
+                "capability_id": "cap-price-report-skill",
+                "canonical_name": "price-report",
+                "title": "Price report",
+                "metadata": {
+                    "model_contract": {
+                        "publisher": "platform",
+                        "required_tools": [],
+                        "required_resources": [],
+                        "required_skills": [
+                            {
+                                "name": "price-insight-deviation",
+                                "version": "1.0.0",
+                                "publisher": "platform",
+                            }
+                        ],
+                    }
+                },
+            }
+        )
+        await catalog.replace_server_capabilities(
+            tool_server.server_id, (tool, resource)
+        )
+        await catalog.replace_server_capabilities(
+            skill_server.server_id, (skill, parent_skill)
+        )
+        gateway = ManagedResourceGateway(
+            HandsResourceRegistry(),
+            artifacts=_artifacts(),
+            catalog_store=store,
+        )
+        catalog.set_availability(gateway)
+
+        assert len(
+            await catalog.search(
+                tenant_id="tenant-a",
+                kinds=(CapabilityKind.SKILL,),
+            )
+        ) == 2
+
+        health = await store.record_catalog_sync(
+            tool_server.server_id,
+            succeeded=False,
+            attempted_at=datetime.now(UTC),
+            safe_error_code="capability_schema_drift",
+            quarantine_after_failures=1,
+        )
+
+        assert health.quarantined is True
+        assert await catalog.search(
+            tenant_id="tenant-a",
+            kinds=(CapabilityKind.SKILL,),
+        ) == ()
+
+        await store.record_catalog_sync(
+            tool_server.server_id,
+            succeeded=True,
+            attempted_at=datetime.now(UTC),
+            safe_error_code=None,
+            quarantine_after_failures=1,
+        )
+        assert len(
+            await catalog.search(
+                tenant_id="tenant-a",
+                kinds=(CapabilityKind.SKILL,),
+            )
+        ) == 2
+
+    asyncio.run(scenario())
+
+
 def test_resource_gateway_artifactizes_large_content_and_denies_secrets() -> None:
     async def scenario() -> None:
         large_uri = "memory://docs/large"

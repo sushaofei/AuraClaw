@@ -2977,3 +2977,29 @@ active-reference barrier，并简化 AuraX 卸载入口。
 - [x] 单元与内进程集成测试覆盖 Root、Repair、Reviewer、角色伪造、递归依赖、deny 透传和无效 binding。
 - [x] Ruff、Mypy、import-linter、定向与完整 Pytest 通过。
 - [x] Git 暂存范围审查、intentional commit 与 push 完成；Issue #78 可关闭。
+
+## 阶段 Skill 激活故障语义与恢复权限收敛（Issue #79）
+
+状态：进行中。生产诊断确认 Skill 合约可加载，但 Resolver 依赖不可用被折叠为通用 adapter 错误，
+随后无效 Child 权限恢复请求会终止整个 Run。
+
+### Runtime 与 Hands
+
+- [x] Tool Gateway 对受控 AuraClaw 异常保留稳定错误码、安全 summary 和未开始副作用状态。
+- [x] 未分类 adapter 异常记录异常类型及调用关联字段，不记录参数、包正文或 Secret。
+- [x] Child 权限超过 Root grant 时返回结构化 denied 结果，不让授权异常穿透为 Run 失败。
+- [x] Coordinator Tool schema 将 Child 权限候选约束为 Root grant 的精确值；无授权时要求省略。
+- [x] Skill Descriptor 声明 Tool、Resource 与子 Skill 依赖；依赖的 MCP Catalog quarantined/stale、缺失或版本不兼容时，从对话可激活候选中移除，并在恢复后自动重新可见。
+- [ ] MCP Schema Drift 恢复后，价格洞察只读工具的 permission/risk 元数据与服务端契约一致。
+
+### 产品、测试与交付
+
+- [x] 单元测试覆盖 Resolver 依赖 NotFound/Schema 错误透传、权限 schema 和 Child 越权降级。
+- [x] Harness 多轮回归覆盖 Child 越权后继续生成解释并以 run.completed 收口。
+- [x] `run.failed` 投影保留安全错误码和 summary；AuraX 按当前 Run 独立显示失败卡片，并明确旧 transcript 仅为会话历史。
+- [x] AuraX 显示独立的 Catalog publication 状态、generation、stale 与 sync error，避免聚合 Runtime `active` 掩盖 quarantined Catalog；`reconcile` 文案明确为“同步目录”。
+- [x] Ruff、Mypy、import-linter 与完整 Pytest 通过。
+- [x] AuraX SDK（47 tests）、TypeScript、lint 与桌面 E2E（11 tests）通过。
+- [ ] Compose 与测试环境 Skill 激活回归通过。
+- [x] GitHub Issue #79 记录脱敏故障链、修复方案与验收标准。
+- [ ] Intentional commit、push 和测试环境回归完成。

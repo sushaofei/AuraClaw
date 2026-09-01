@@ -18,6 +18,7 @@ from auraclaw.action.skill_packages import (
     SkillPackage,
     SkillPackageRegistry,
     SkillResolver,
+    skill_capability_descriptor,
     skill_signing_payload,
 )
 from auraclaw.action.tool_gateway import ToolRegistry
@@ -193,8 +194,17 @@ def test_skill_package_publish_is_signed_immutable_and_progressively_loadable() 
         )
         package = _package(verifier)
         publication = await registry.publish("tenant-a", package)
+        model_contract = skill_capability_descriptor(publication).metadata[
+            "model_contract"
+        ]
 
         assert publication.package_digest.startswith("sha256:")
+        assert model_contract["required_tools"] == [
+            {"name": "github.pull_request.get", "version": ">=2,<3"}
+        ]
+        assert model_contract["required_resources"] == [
+            {"uri_template": "repo://{repo}/release-policy"}
+        ]
         assert publication.artifact_ref.media_type == (
             "application/vnd.auraclaw.skill-package+json"
         )
