@@ -2990,6 +2990,7 @@ active-reference barrier，并简化 AuraX 卸载入口。
 - [x] Child 权限超过 Root grant 时返回结构化 denied 结果，不让授权异常穿透为 Run 失败。
 - [x] Coordinator Tool schema 将 Child 权限候选约束为 Root grant 的精确值；无授权时要求省略。
 - [x] Skill Descriptor 声明 Tool、Resource 与子 Skill 依赖；依赖的 MCP Catalog quarantined/stale、缺失或版本不兼容时，从对话可激活候选中移除，并在恢复后自动重新可见。
+- [x] Admin Skill Catalog 使用同一依赖健康判断，`/v1/admin/skills` 对不可解析依赖返回 `dependencies_unavailable`，避免 AuraX 选择器误报 available。
 - [ ] MCP Schema Drift 恢复后，价格洞察只读工具的 permission/risk 元数据与服务端契约一致。
 
 ### 产品、测试与交付

@@ -1019,6 +1019,153 @@ def version_satisfies(version: str, constraint: str) -> bool:
     return True
 
 
+class SkillDependencyAvailability:
+    """Evaluate declared Skill dependencies against the healthy Catalog view."""
+
+    def __init__(self, catalog_store: CapabilityCatalogStore | None) -> None:
+        self._catalog_store = catalog_store
+
+    async def is_available(
+        self, tenant_id: str, capability: CapabilityDescriptor
+    ) -> bool:
+        contract = capability.metadata.get("model_contract")
+        if not isinstance(contract, Mapping):
+            return True
+        dependency_fields = (
+            "required_tools",
+            "required_resources",
+            "required_skills",
+        )
+        if not any(contract.get(field) for field in dependency_fields):
+            return True
+        if self._catalog_store is None:
+            return False
+        candidates = await self._catalog_store.list_capabilities(tenant_id)
+        return self._contract_dependencies_available(
+            contract,
+            candidates,
+            visiting=frozenset({capability.capability_id}),
+        )
+
+    def _contract_dependencies_available(
+        self,
+        contract: Mapping[str, object],
+        candidates: tuple[CapabilityDescriptor, ...],
+        *,
+        visiting: frozenset[str],
+    ) -> bool:
+        if not self._requirements_available(
+            contract.get("required_tools"),
+            candidates,
+            kinds=frozenset({CapabilityKind.TOOL}),
+            identity_key="name",
+        ):
+            return False
+        if not self._requirements_available(
+            contract.get("required_resources"),
+            candidates,
+            kinds=frozenset(
+                {CapabilityKind.RESOURCE, CapabilityKind.RESOURCE_TEMPLATE}
+            ),
+            identity_key="uri_template",
+        ):
+            return False
+
+        required_skills = contract.get("required_skills")
+        if not isinstance(required_skills, list):
+            return not required_skills
+        for requirement in required_skills:
+            if not isinstance(requirement, Mapping):
+                return False
+            name = requirement.get("name")
+            constraint = requirement.get("version", "*")
+            publisher = requirement.get("publisher")
+            if not isinstance(name, str) or not isinstance(constraint, str):
+                return False
+            matches = tuple(
+                candidate
+                for candidate in candidates
+                if candidate.kind is CapabilityKind.SKILL
+                and candidate.canonical_name == name
+                and self._version_matches(candidate.version, constraint)
+                and self._publisher_matches(candidate, publisher)
+            )
+            if not matches:
+                return False
+            dependency_available = False
+            for match in matches:
+                if match.capability_id in visiting:
+                    continue
+                dependency_contract = match.metadata.get("model_contract")
+                if not isinstance(dependency_contract, Mapping) or (
+                    self._contract_dependencies_available(
+                        dependency_contract,
+                        candidates,
+                        visiting=visiting | {match.capability_id},
+                    )
+                ):
+                    dependency_available = True
+                    break
+            if not dependency_available:
+                return False
+        return True
+
+    def _requirements_available(
+        self,
+        raw_requirements: object,
+        candidates: tuple[CapabilityDescriptor, ...],
+        *,
+        kinds: frozenset[CapabilityKind],
+        identity_key: str,
+    ) -> bool:
+        if not isinstance(raw_requirements, list):
+            return not raw_requirements
+        for requirement in raw_requirements:
+            if not isinstance(requirement, Mapping):
+                return False
+            identity = requirement.get(identity_key)
+            constraint = requirement.get("version", "*")
+            if not isinstance(identity, str) or not isinstance(constraint, str):
+                return False
+            if not any(
+                candidate.kind in kinds
+                and self._dependency_identity(candidate, identity_key) == identity
+                and self._version_matches(candidate.version, constraint)
+                for candidate in candidates
+            ):
+                return False
+        return True
+
+    @staticmethod
+    def _dependency_identity(
+        capability: CapabilityDescriptor,
+        identity_key: str,
+    ) -> object:
+        if identity_key == "name":
+            return capability.canonical_name
+        uri_template = capability.metadata.get("uri_template")
+        if isinstance(uri_template, str):
+            return uri_template
+        return capability.canonical_name
+
+    @staticmethod
+    def _publisher_matches(
+        capability: CapabilityDescriptor,
+        publisher: object,
+    ) -> bool:
+        if publisher is None:
+            return True
+        contract = capability.metadata.get("model_contract")
+        return isinstance(contract, Mapping) and contract.get("publisher") == publisher
+
+    @staticmethod
+    def _version_matches(version: str, constraint: str) -> bool:
+        try:
+            return version_satisfies(version, constraint)
+        except SchemaValidationError:
+            return False
+
+
 def _validate_package(
     package: SkillPackage,
     max_package_bytes: int,
