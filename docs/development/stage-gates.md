@@ -2905,4 +2905,4 @@ Hands 治理执行 Tool/Resource；任意代码执行继续禁止。
 - [x] 单元测试覆盖准入、越权、selector、reference、稳定 id、Resource、逐步 checkpoint、审批续跑和生产 controller 集成。
 - [x] Ruff、Mypy、import-linter、定向与完整 Pytest 通过。
 - [x] ADR、架构、authoring、实施与 stage gate 文档同步。
-- [ ] Git 暂存范围审查、intentional commit 与 push 完成；Issue #75 关闭。
+- [x] Git 暂存范围审查、intentional commit 与 push 完成；Issue #75 关闭。
