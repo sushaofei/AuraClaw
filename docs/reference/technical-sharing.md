@@ -697,6 +697,7 @@ skill package
 ├── manifest.json
 ├── SKILL.md
 ├── references/
+├── scripts/*.workflow.json
 ├── assets/
 └── tests/
 ```

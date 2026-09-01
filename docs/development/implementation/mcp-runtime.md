@@ -128,13 +128,17 @@ Checkpoint 和 Session 状态机仍是长调用恢复边界。
 
 ## 4. Skill 生命周期
 
-Skill 包必须包含 `manifest.json` 和 `SKILL.md`，可包含 `references/`、`assets/` 和 `tests/`。
+Skill 包必须包含 `manifest.json` 和 `SKILL.md`，可包含 `references/`、`scripts/*.workflow.json`、`assets/` 和 `tests/`。
 发布会校验 canonical path、UTF-8、文件数、总大小、Manifest、版本约束和发布者签名，然后把
 不可变包写入 Artifact。相同 publisher/name/version 不允许替换内容。
 
 Resolver 固定 package digest、Tool schema digest、Resource digest、Policy version/decision 和
 版本。Runner 只把稳定证据写入 `skill.activated/completed/failed/cancelled`；当前步骤游标与
 完成步数写入 Control Checkpoint。进程死亡后从游标继续，不重新解析依赖。
+
+含 Workflow 的包在发布阶段完成 schema、依赖、selector、reference、步骤预算、timeout 和稳定 digest 校验。
+Runtime 只执行固定 binding 中的 entrypoint/digest；每个步骤通过 CapabilityClient/Hands 调用，使用稳定
+invocation/idempotency key。Workflow 不执行 Python/Shell/JS/Wasm，不直连 MCP，不读取 credential。
 
 ## 5. 迁移、发布与回滚
 

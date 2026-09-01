@@ -77,16 +77,75 @@ example-skill/
 ├── manifest.json
 ├── SKILL.md
 ├── references/
+├── scripts/
+│   └── main.workflow.json
 ├── assets/
 └── tests/
     └── basic.json
 ```
 
-根目录只允许 `manifest.json`、`SKILL.md`、`references/`、`assets/` 和 `tests/`。路径必须是规范相对路径，不得包含绝对路径、`.`、`..`、反斜杠或符号链接。
+根目录只允许 `manifest.json`、`SKILL.md`、`references/`、`scripts/`、`assets/` 和 `tests/`。路径必须是规范相对路径，不得包含绝对路径、`.`、`..`、反斜杠或符号链接。`scripts/` 只允许 `*.workflow.json` 声明式工作流；Python、Shell、JavaScript、Wasm、二进制和可执行文件仍被拒绝。
 
-本地打包限制为最多 512 个文件、文件内容合计不超过 16 MiB；AuraClaw 代理上传请求体上限为 24 MiB。包内不得包含脚本、可执行文件、私钥、令牌、Secret 赋值或指令劫持内容。
+本地打包限制为最多 512 个文件、文件内容合计不超过 16 MiB；AuraClaw 代理上传请求体上限为 24 MiB。包内不得包含任意代码脚本、可执行文件、私钥、令牌、Secret 赋值或指令劫持内容。
 
-### 3.1 manifest.json
+### 3.1 声明式 Workflow
+
+需要确定性编排 Tool/Resource 时，在 Manifest 中声明：
+
+```json
+{
+  "workflow": {
+    "api_version": "skills.auraclaw.io/v1alpha1",
+    "entrypoint": "scripts/main.workflow.json"
+  },
+  "required_references": [
+    {
+      "path": "references/mapping.json",
+      "media_type": "application/json",
+      "max_bytes": 65536,
+      "preload": false
+    }
+  ]
+}
+```
+
+Workflow 首版只支持顺序 `tool.call` 和 `resource.read`。参数值必须使用 `{"literal": ...}` 或
+`{"from": "$input..."}` / `$state...` / `$references...` 结构化 selector；不支持模板代码、函数、循环或
+动态网络请求。调用的 capability 必须同时出现在 Manifest 的 `required_tools` 或 `required_resources`。
+
+```json
+{
+  "apiVersion": "skills.auraclaw.io/v1alpha1",
+  "kind": "Workflow",
+  "references": [
+    {"id": "mapping", "path": "references/mapping.json", "required": true}
+  ],
+  "steps": [
+    {
+      "id": "lookup",
+      "operation": "tool.call",
+      "capability": "inventory.lookup",
+      "arguments": {
+        "sku": {"from": "$input.sku"},
+        "region": {"from": "$references.mapping.region"}
+      },
+      "result": "item",
+      "timeout_seconds": 20,
+      "retry": {
+        "max_attempts": 2,
+        "strategy": "exponential",
+        "retry_on": ["timeout", "unavailable"]
+      }
+    }
+  ],
+  "outputs": {"item": {"from": "$state.item"}}
+}
+```
+
+`preload=true` 只用于模型确实需要看到的 reference，并计入 Runtime prompt bytes/token 门禁。Executor 使用的
+JSON reference 由 Workflow 显式列出并按固定 package digest 加载；不要把整个 `references/` 目录预加载。
+
+### 3.2 manifest.json
 
 下面是一个外部 Publisher 的起始示例。首次签名前可以省略 `signature` 和 `signature_key_id`，`skills sign` 会原子写入这两个字段：
 
@@ -156,7 +215,7 @@ example-skill/
 
 发布前应以 `skills validate` 的实际结果为准；版本约束必须使用当前实现支持的语法，推荐使用明确的比较条件而不是依赖非必要的简写。
 
-### 3.2 SKILL.md
+### 3.3 SKILL.md
 
 `SKILL.md` 是模型可读取的 Skill 指令正文。建议至少包含：
 
@@ -170,7 +229,7 @@ example-skill/
 
 指令必须与 manifest 声明一致。不要在正文中嵌入凭证、环境配置或要求绕过系统策略的内容。
 
-### 3.3 声明式测试
+### 3.4 声明式测试
 
 `tests/` 只接受 `.json` 测试向量，不执行包内代码。单个用例只支持 `name`、`input` 和可选的 `expected_output`：
 
