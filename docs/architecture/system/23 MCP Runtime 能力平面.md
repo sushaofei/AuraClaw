@@ -489,6 +489,25 @@ publisher/name/version 和稳定 error code，不保存异常正文；同一快�
 包级失败，该轮就持久化为 `complete_snapshot=false` 并禁止缺失项退役，避免坏包或短暂读取错误误撤销旧版本。
 发布完成后触发 tenant 重建，周期重建负责修复短暂 Artifact/Catalog 故障。
 
+Skill 内容加载采用 digest 固定的分层恢复模型。PostgreSQL lifecycle 仍是 Publication、Installation、
+Retention 与撤销状态的事实源，Artifact Service/S3 仍是包字节事实源；Hands Registry 和内容缓存只是
+可丢弃投影。每个 Hands 副本持有按 `(tenant_id, package_digest)` 隔离、容量和 TTL 有界的 L1 cache，
+相同 digest 的并发冷加载由进程内 single-flight 合并。重建先复用 Registry 中 digest 一致且已验证的
+不可变包，只有冷副本、缓存淘汰或新 digest 才下载 Artifact；状态变化仍重新读取 lifecycle 并重新验证
+Publisher trust，缓存命中不替换治理检查。
+
+Runtime 解析 Skill 或读取 `skill://` Resource 命中未预热副本时，Hands 先对该 tenant 执行增量重建并
+重试本地 Registry，不能因为负载均衡到冷副本而直接随机失败。tenant rebuild 以 generation-aware
+single-flight 串行发布本地投影：并发到达的新请求推进 generation，旧轮次完成后必须再收敛一次，不能
+把较新的 rebuild 请求吞掉。新副本仍须在启动 snapshot 完成后才 ready，周期对账只承担漏事件和故障
+恢复，不再为未变化 digest 每分钟重复下载包。
+
+本阶段不引入 Redis。不可变 digest、进程内 L1、权威 read-through 和现有 PostgreSQL/Kafka 恢复边界
+足以保证正确性；Redis 不得成为 Skill 内容、状态、授权或失效事实源。只有多副本冷启动基准证明每副本
+每 digest 一次下载仍不可接受时，才通过 ADR 评估可选 L2，并要求 Redis 故障时安全回退到
+L1 + Artifact。跨副本低延迟预热的后续广播必须让每个 Hands 副本收到 lifecycle revision；普通共享
+consumer group 只投递给一个副本，不能用作本地缓存广播语义。
+
 管理动作必须区分租户意图和全局安全状态：
 
 - `disable`：Installation `active -> disabled`，停止新发现/新绑定；

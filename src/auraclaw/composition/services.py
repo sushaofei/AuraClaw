@@ -56,6 +56,7 @@ from auraclaw.action.ports import (
 )
 from auraclaw.action.resource_gateway import ManagedResourceGateway
 from auraclaw.action.skill_admission_maintenance import SkillAdmissionMaintenanceWorker
+from auraclaw.action.skill_content_cache import SkillPackageContentCache
 from auraclaw.action.skill_internal_service import SkillPublicationInternalService
 from auraclaw.action.skill_lifecycle import (
     InMemorySkillLifecycleStore,
@@ -1504,12 +1505,21 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         artifact_lifecycle=skill_artifacts,
         publisher_trust=publisher_trust,
     )
+    skill_content_cache = SkillPackageContentCache(
+        artifact_reader,
+        max_bytes=settings.skill_content_cache_max_bytes,
+        max_entries=settings.skill_content_cache_max_entries,
+        ttl_seconds=settings.skill_content_cache_ttl_seconds,
+        metric_writer=hands_metric_store,
+    )
     skill_rebuilder = SkillStateRebuilder(
         lifecycle=skill_lifecycle,
         artifacts=artifact_reader,
         registry=skill_registry,
         catalog=capability_catalog,
         publisher_trust=publisher_trust,
+        content_cache=skill_content_cache,
+        metric_writer=hands_metric_store,
     )
     skill_reliability = SkillPublicationReliabilityWorker(
         lifecycle=skill_lifecycle,
@@ -1546,12 +1556,14 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         metric_writer=hands_metric_store,
         catalog_store=capability_catalog_store,
         connectors=capability_connectors,
+        miss_loader=lambda tenant_id, _uri: skill_rebuilder.rebuild_tenant(tenant_id),
     )
     capability_catalog.set_availability(resource_gateway)
     skill_resolver = SkillResolver(
         skill_registry,
         capability_catalog_store,
         policy if isinstance(policy, RemotePolicyClient) else None,
+        reload_tenant=skill_rebuilder.rebuild_tenant,
     )
     registry = ToolRegistry(
         (
@@ -1879,6 +1891,7 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
                         projector=skill_rebuilder,
                     ),
                     artifacts=artifact_reader,
+                    package_cache=skill_content_cache,
                 )
             ),
             workload_identities=_configured_identities(settings, (ServiceIdentity.TASK_API,)),

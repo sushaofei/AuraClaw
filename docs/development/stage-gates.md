@@ -2772,3 +2772,31 @@ ready Skill Artifact 建立带 fencing 的物理回收流程；不把成功命�
 - [x] 单元测试覆盖 orphaned backing、远端 Provider 路由、read-time not-found 与独立失败恢复。
 - [x] PostgreSQL migration roundtrip/数据清理、Ruff、Mypy、import-linter 与完整 Pytest 通过。
 - [x] Git 暂存范围审查、intentional commit 与 push 完成；Issue #73 关闭。
+
+## 阶段 Skill 增量加载与冷副本回源（Issue #74 / L1 子阶段）
+
+状态：L1 cache、增量重建、管理详情复用、冷副本 read-through、测试和文档完成；Issue #74 保持 open，
+后续子阶段继续完成跨副本 lifecycle 广播、性能基准和 Runtime prompt 优化。
+
+### 内容缓存与增量重建
+
+- [x] 新增按 `(tenant_id, package_digest)` 隔离的有界 L1 cache，容量、条目数和 TTL 可配置。
+- [x] 相同 digest 的并发冷加载由 async single-flight 合并，失败/取消后 load ownership 可回收。
+- [x] 管理详情与 Skill rebuild 共享已解析包；digest mismatch fail closed，不按名称/版本回退。
+- [x] 周期 rebuild 优先复用 Registry 中相同 digest 的已验证不可变包，未变化内容不再重复下载 Artifact。
+- [x] lifecycle prune 会移除不再可加载的 tenant digest；缓存仍不替代 Publication/Installation/Retention/Trust 检查。
+
+### 多副本可用性与并发
+
+- [x] Runtime Skill resolve 在本地候选缺失时触发 tenant 增量重建并重试。
+- [x] `skill://` Resource read 在本地 backing 缺失时触发相同 read-through，冷副本不直接随机失败。
+- [x] tenant rebuild 使用 generation-aware single-flight；并发新请求不会被较慢旧轮次吞掉。
+- [x] Redis 明确不进入本子阶段；PostgreSQL lifecycle 和 Artifact 继续是权威来源。
+- [x] 架构与 Runbook 固定后续 Kafka 广播必须送达每个 Hands 副本，普通共享 consumer group 不满足要求。
+
+### 观测、验证与交付
+
+- [x] 指标覆盖 package download count/bytes/latency、cache hit/miss/eviction/resident bytes、single-flight waiter、rebuild duration/scanned/reused。
+- [x] 单元测试覆盖 100 并发冷加载一次下载、连续 10 个周期不重复下载、cache prune、管理详情热命中、冷 resolve/read 回源。
+- [x] Ruff、Mypy、import-linter、Compose、定向与完整 Pytest 通过。
+- [x] Git 暂存范围审查、intentional commit 与 push 完成；Issue #74 保持 open。

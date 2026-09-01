@@ -1,18 +1,22 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import time
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Protocol
 
 from auraclaw.action.capability_catalog import CapabilityCatalog
 from auraclaw.action.ports import ArtifactContentReader
+from auraclaw.action.skill_content_cache import SkillPackageContentCache
 from auraclaw.action.skill_lifecycle import SkillLifecycleStore
 from auraclaw.action.skill_packages import (
     SkillPackage,
     SkillPackageRegistry,
     skill_capability_descriptor,
     skill_package_digest,
-    skill_package_from_archive,
     version_satisfies,
 )
 from auraclaw.action.skill_publishers import SkillPublisherTrustService
@@ -21,6 +25,7 @@ from auraclaw.contracts.capabilities import (
     CapabilityTrustLevel,
     McpServerDefinition,
 )
+from auraclaw.contracts.observability import MetricPoint
 from auraclaw.contracts.skills import (
     PublishedSkill,
     SkillInstallationRecord,
@@ -31,6 +36,10 @@ from auraclaw.contracts.skills import (
 )
 
 _SKILL_MEDIA_TYPE = "application/vnd.auraclaw.skill-package+json"
+
+
+class MetricWriter(Protocol):
+    async def write_metric(self, metric: MetricPoint) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -50,12 +59,24 @@ class SkillStateRebuilder:
         registry: SkillPackageRegistry,
         catalog: CapabilityCatalog,
         publisher_trust: SkillPublisherTrustService | None = None,
+        content_cache: SkillPackageContentCache | None = None,
+        metric_writer: MetricWriter | None = None,
     ) -> None:
         self._lifecycle = lifecycle
         self._artifacts = artifacts
         self._registry = registry
         self._catalog = catalog
         self._publisher_trust = publisher_trust
+        self._content_cache = content_cache or SkillPackageContentCache(
+            artifacts, metric_writer=metric_writer
+        )
+        self._metric_writer = metric_writer
+        self._tenant_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+        self._rebuild_tasks: dict[
+            str, asyncio.Task[tuple[int, tuple[str, ...]]]
+        ] = {}
+        self._requested_generations: dict[str, int] = {}
+        self._rebuild_state_lock = asyncio.Lock()
 
     async def rebuild_all(self) -> SkillRebuildResult:
         tenants = await self._lifecycle.list_tenants()
@@ -73,6 +94,48 @@ class SkillStateRebuilder:
         )
 
     async def rebuild_tenant(self, tenant_id: str) -> tuple[int, tuple[str, ...]]:
+        async with self._rebuild_state_lock:
+            self._requested_generations[tenant_id] = (
+                self._requested_generations.get(tenant_id, 0) + 1
+            )
+            task = self._rebuild_tasks.get(tenant_id)
+            if task is None:
+                task = asyncio.create_task(self._run_tenant_rebuild(tenant_id))
+                self._rebuild_tasks[tenant_id] = task
+        return await asyncio.shield(task)
+
+    async def _run_tenant_rebuild(
+        self, tenant_id: str
+    ) -> tuple[int, tuple[str, ...]]:
+        try:
+            while True:
+                async with self._rebuild_state_lock:
+                    generation = self._requested_generations[tenant_id]
+                started = time.monotonic()
+                async with self._tenant_locks[tenant_id]:
+                    result = await self._rebuild_tenant_locked(tenant_id)
+                await self._emit(
+                    "skill.rebuild.duration.seconds",
+                    time.monotonic() - started,
+                    tenant_id,
+                )
+                async with self._rebuild_state_lock:
+                    if self._requested_generations.get(tenant_id) == generation:
+                        current = asyncio.current_task()
+                        if self._rebuild_tasks.get(tenant_id) is current:
+                            self._rebuild_tasks.pop(tenant_id, None)
+                            self._requested_generations.pop(tenant_id, None)
+                        return result
+        finally:
+            async with self._rebuild_state_lock:
+                current = asyncio.current_task()
+                if self._rebuild_tasks.get(tenant_id) is current:
+                    self._rebuild_tasks.pop(tenant_id, None)
+                    self._requested_generations.pop(tenant_id, None)
+
+    async def _rebuild_tenant_locked(
+        self, tenant_id: str
+    ) -> tuple[int, tuple[str, ...]]:
         installations = {
             (item.publisher, item.name): item
             for item in await self._lifecycle.list_installations(tenant_id)
@@ -81,7 +144,10 @@ class SkillStateRebuilder:
         entries: list[tuple[SkillPackage, PublishedSkill]] = []
         discoverable: set[tuple[str, str, str]] = set()
         failures: list[str] = []
-        for record in await self._lifecycle.list_publications(tenant_id):
+        records = await self._lifecycle.list_publications(tenant_id)
+        scanned = 0
+        reused = 0
+        for record in records:
             if record.status not in {
                 SkillPublicationStatus.ACTIVE,
                 SkillPublicationStatus.RESTORING,
@@ -91,6 +157,7 @@ class SkillStateRebuilder:
                 and record.revocation_action is SkillRevocationAction.CONTINUE
             ):
                 continue
+            scanned += 1
             package_record = await self._lifecycle.get_package(
                 tenant_id, record.publisher, record.name, record.version
             )
@@ -104,13 +171,23 @@ class SkillStateRebuilder:
                 failures.append("artifact_media_type_invalid")
                 continue
             try:
-                content = await self._artifacts.read(
-                    tenant_id=tenant_id,
-                    artifact_ref=package_record.artifact_ref,
-                    actor_id="action-hands-skill-rebuilder",
-                    correlation_id=f"skill-rebuild:{tenant_id}",
+                package = self._registry.cached_package(
+                    tenant_id,
+                    record.publisher,
+                    record.name,
+                    record.version,
+                    record.package_digest,
                 )
-                package = skill_package_from_archive(content)
+                if package is None:
+                    package = await self._content_cache.load(
+                        tenant_id=tenant_id,
+                        package_digest=record.package_digest,
+                        artifact_ref=package_record.artifact_ref,
+                        actor_id="action-hands-skill-rebuilder",
+                        correlation_id=f"skill-rebuild:{tenant_id}",
+                    )
+                else:
+                    reused += 1
                 if package.manifest.signature.startswith("ed25519:"):
                     if self._publisher_trust is None:
                         raise ValueError("publisher registry unavailable")
@@ -168,7 +245,35 @@ class SkillStateRebuilder:
                 in discoverable
             ),
         )
+        await self._content_cache.prune_tenant(
+            tenant_id,
+            retained_digests=frozenset(
+                publication.package_digest for _package, publication in entries
+            ),
+        )
+        await self._emit("skill.rebuild.packages.scanned", float(scanned), tenant_id)
+        await self._emit("skill.rebuild.packages.reused", float(reused), tenant_id)
         return len(entries), tuple(failures)
+
+    async def _emit(
+        self, name: str, value: float, tenant_id: str | None = None
+    ) -> None:
+        if self._metric_writer is None:
+            return
+        try:
+            await asyncio.wait_for(
+                self._metric_writer.write_metric(
+                    MetricPoint(
+                        name=name,
+                        value=value,
+                        observed_at=datetime.now(UTC),
+                        tenant_id=tenant_id,
+                    )
+                ),
+                timeout=0.1,
+            )
+        except Exception:
+            return
 
 
 def _installation_allows(
