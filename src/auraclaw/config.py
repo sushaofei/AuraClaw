@@ -425,6 +425,15 @@ class Settings(BaseSettings):
     skill_content_cache_ttl_seconds: float = Field(
         default=3600.0, ge=60.0, le=86_400.0
     )
+    runtime_skill_content_cache_max_bytes: int = Field(
+        default=16 * 1024 * 1024, ge=1024, le=1024 * 1024 * 1024
+    )
+    runtime_skill_content_cache_max_entries: int = Field(
+        default=1024, ge=1, le=100_000
+    )
+    runtime_skill_content_cache_ttl_seconds: float = Field(
+        default=900.0, ge=60.0, le=86_400.0
+    )
     skill_transaction_retry_attempts: int = Field(default=3, ge=1, le=10)
     skill_transaction_retry_base_delay_seconds: float = Field(
         default=0.01, ge=0.0, le=1.0

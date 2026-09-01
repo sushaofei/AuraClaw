@@ -378,6 +378,7 @@ class ModelGenerateRequest(ContractModel):
     context: InternalRequestContext
     model_call_id: str
     run_id: str
+    session_id: str | None = None
     messages: tuple[dict[str, Any], ...]
     tools: tuple[dict[str, Any], ...] = ()
     capability: str = "general"
@@ -385,6 +386,7 @@ class ModelGenerateRequest(ContractModel):
     allowed_providers: tuple[str, ...] = ()
     data_classification: str = "internal"
     max_output_tokens: int = Field(default=8192, gt=0)
+    runtime_metrics: dict[str, float] = Field(default_factory=dict, max_length=16)
 
 
 class ModelGenerateResponse(ContractModel):

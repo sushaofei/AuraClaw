@@ -106,6 +106,7 @@ class RemoteModelClient:
             ),
             model_call_id=request.model_call_id,
             run_id=request.run_id,
+            session_id=request.session_id,
             messages=request.messages,
             tools=request.tools,
             capability=request.policy.capability,
@@ -113,6 +114,7 @@ class RemoteModelClient:
             allowed_providers=request.policy.allowed_providers,
             data_classification=request.policy.data_classification,
             max_output_tokens=request.max_output_tokens,
+            runtime_metrics=request.runtime_metrics,
         )
 
     async def _consume_stream(

@@ -70,12 +70,21 @@ registration lease 内仍活跃时，新进程注册会 fail closed。因此显�
   多副本 lifecycle 加速使用 `AURACLAW_KAFKA_SKILL_LIFECYCLE_TOPIC`（默认
   `managed-agent.skill-lifecycle`）。PostgreSQL `hands.skill_lifecycle_broadcast_outbox` 只保存 tenant、单调
   revision、change type、snapshot digest 和 origin replica，不保存 Skill 正文。relay publish 失败会保留
-  outbox；观察 pending 数、`skill.lifecycle.signal.applied.count`、`skill.lifecycle.signal.stale.count` 和
-  `skill.trusted_messages.latency.seconds`。每个 Hands 进程必须有唯一 replica id，从而生成独立 consumer group；
+  outbox；观察 pending 数、`skill.lifecycle.signal.applied.count` 和 `skill.lifecycle.signal.stale.count`。
+  每个 Hands 进程必须有唯一 replica id，从而生成独立 consumer group；
   同一 group 被多个副本共享会退化为竞争消费。Kafka 不可用时不要清除 outbox，Hands 依靠启动 snapshot、
   read-through 和周期 reconciliation 运行，并定期恢复 consumer。恢复后重复/乱序消息由 tenant revision fence
   丢弃。决策和 Redis 退出条件见
   [ADR-004](../architecture/decisions/ADR-004-skill-cache-and-replica-convergence.md)。
+  Agent Runtime 使用 `AURACLAW_RUNTIME_SKILL_CONTENT_CACHE_MAX_BYTES`、
+  `AURACLAW_RUNTIME_SKILL_CONTENT_CACHE_MAX_ENTRIES` 和
+  `AURACLAW_RUNTIME_SKILL_CONTENT_CACHE_TTL_SECONDS` 控制 run 级 `SKILL.md` cache。监控
+  `skill.runtime.active.count`、`skill.runtime.prompt.bytes`、
+  `skill.runtime.prompt.estimated_tokens`、`skill.runtime.content_cache.hit.count`、
+  `skill.runtime.content_cache.miss.count`、`skill.runtime.trusted_messages.latency.seconds` 与
+  `model.ttft.seconds`。cache miss 持续出现在同一 run 的第二轮以后时，检查容量/TTL、Runtime 重启和
+  run 终止清理；prompt bytes 或估算 tokens 异常增长时先限制 active Skill 集，而不是扩大 cache。
+  指标只含数值与 tenant/session/run 关联字段，不得添加 Skill 正文或摘要片段。
   Publication Reliability 每轮只领取 `AURACLAW_SKILL_RELIABILITY_MAX_CONCURRENT` 条 Outbox，按 tenant
   合并 rebuild、跨 tenant 并行，并以 `AURACLAW_SKILL_RELIABILITY_CLAIM_TTL_SECONDS` 续租；complete/fail
   影响零行视为 owner 丢失，不把旧 worker 的结果冒充成功。

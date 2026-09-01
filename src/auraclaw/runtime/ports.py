@@ -35,9 +35,11 @@ class ModelRequest:
     tenant_id: str
     run_id: str
     messages: tuple[dict[str, Any], ...]
+    session_id: str | None = None
     tools: tuple[dict[str, Any], ...] = ()
     policy: ModelPolicy = field(default_factory=ModelPolicy)
     max_output_tokens: int = 8192
+    runtime_metrics: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
