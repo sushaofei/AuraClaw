@@ -43,7 +43,12 @@ class RuntimeCollaborationController:
 
     def model_tools(self, assignment: RuntimeAssignment) -> tuple[dict[str, Any], ...]:
         if assignment.role in {"root", "coordinator"}:
-            return self._coordinator_tools()
+            return self._coordinator_tools(
+                tuple(
+                    str(item)
+                    for item in assignment.resource_profile.get("tool_permissions", ())
+                )
+            )
         if assignment.role in {"worker", "repair"}:
             return (self._publish_result_tool(),)
         if assignment.role == "reviewer":
@@ -129,7 +134,16 @@ class RuntimeCollaborationController:
         self._authorize_tool(assignment.role, call.name)
         arguments = dict(call.arguments)
         if call.name == CREATE_CHILD:
-            self._validate_child_permissions(assignment, arguments)
+            try:
+                self._validate_child_permissions(assignment, arguments)
+            except AuthorizationError as exc:
+                return CollaborationExecution(
+                    result={
+                        "status": "denied",
+                        "error_code": exc.code,
+                        "summary": exc.message,
+                    }
+                )
         result = await self._client.execute(
             assignment,
             operation=operation,
@@ -224,8 +238,20 @@ class RuntimeCollaborationController:
         }
 
     @classmethod
-    def _coordinator_tools(cls) -> tuple[dict[str, Any], ...]:
+    def _coordinator_tools(
+        cls, child_tool_permissions: tuple[str, ...]
+    ) -> tuple[dict[str, Any], ...]:
         object_schema = {"type": "object", "additionalProperties": False}
+        permission_schema: dict[str, Any] = {
+            "type": "array",
+            "description": (
+                "Optional exact tool permission grants for the Child. Omit this field when "
+                "the Root has no matching grant; never use generic labels such as read-only."
+            ),
+            "items": {"type": "string", "enum": sorted(set(child_tool_permissions))},
+            "uniqueItems": True,
+            "maxItems": len(set(child_tool_permissions)),
+        }
         child_spec_schema = {
             "type": "object",
             "properties": {
@@ -255,10 +281,11 @@ class RuntimeCollaborationController:
                     "type": "array",
                     "items": {"type": "string"},
                 },
-                "tool_permissions": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                },
+                **(
+                    {"tool_permissions": permission_schema}
+                    if child_tool_permissions
+                    else {}
+                ),
                 "budget": {"type": "number", "exclusiveMinimum": 0},
                 "runtime_budget": {
                     "type": "object",

@@ -1143,6 +1143,13 @@ def skill_capability_descriptor(
                 "required_skills": [
                     requirement.model_dump(mode="json") for requirement in manifest.required_skills
                 ],
+                "required_tools": [
+                    requirement.model_dump(mode="json") for requirement in manifest.required_tools
+                ],
+                "required_resources": [
+                    requirement.model_dump(mode="json")
+                    for requirement in manifest.required_resources
+                ],
                 "allowed_roles": list(manifest.allowed_roles),
                 "max_steps": manifest.max_steps,
                 "timeout_seconds": manifest.timeout_seconds,

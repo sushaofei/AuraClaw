@@ -78,6 +78,64 @@ def test_snapshot_restores_session_and_projection_rebuild_is_deterministic() -> 
     asyncio.run(scenario())
 
 
+def test_failed_run_projection_preserves_safe_error_code_and_summary() -> None:
+    async def scenario() -> None:
+        projection = InMemoryTaskProjection()
+        base = dict(
+            tenant_id="tenant-1",
+            root_session_id="ses-1",
+            session_id="ses-1",
+            run_id="run-1",
+            occurred_at=utc_now(),
+            actor=Actor(type="runtime", id="runtime-1"),
+            correlation_id="corr-1",
+            causation_id="cmd-1",
+            visibility=Visibility.USER,
+            schema_version=1,
+        )
+        await projection.project(
+            [
+                CanonicalEvent(
+                    event_id="evt-1",
+                    aggregate_version=1,
+                    type="session.created",
+                    payload={"goal": "activate skill", "role": "root"},
+                    **base,
+                ),
+                CanonicalEvent(
+                    event_id="evt-2",
+                    aggregate_version=2,
+                    type="run.requested",
+                    payload={"run_id": "run-1"},
+                    **base,
+                ),
+                CanonicalEvent(
+                    event_id="evt-3",
+                    aggregate_version=3,
+                    type="run.failed",
+                    payload={
+                        "run_id": "run-1",
+                        "error": "Skill dependency is unavailable",
+                        "error_code": "not_found",
+                    },
+                    **base,
+                ),
+            ]
+        )
+
+        task = await projection.get_task("tenant-1", "ses-1")
+
+        assert task is not None
+        assert task["status"] == "ready"
+        assert task["run_status"] == "failed"
+        assert task["error"] == {
+            "code": "not_found",
+            "message": "Skill dependency is unavailable",
+        }
+
+    asyncio.run(scenario())
+
+
 def test_event_and_outbox_are_committed_together() -> None:
     async def scenario() -> None:
         store = InMemoryEventStore()

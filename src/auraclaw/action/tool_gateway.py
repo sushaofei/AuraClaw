@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import logging
 import secrets
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -23,6 +24,7 @@ from auraclaw.action.ports import (
 )
 from auraclaw.contracts.errors import (
     ApprovalValidationError,
+    AuraClawError,
     CredentialAccessError,
     PolicyDeniedError,
     SandboxViolationError,
@@ -41,6 +43,8 @@ from auraclaw.contracts.tools import (
     ToolResultStatus,
 )
 from auraclaw.domain.approval import ApprovalAggregate, action_digest
+
+logger = logging.getLogger(__name__)
 
 
 class ApprovalReader(Protocol):
@@ -924,7 +928,27 @@ class ToolGateway:
                 error_code=exc.code,
                 side_effect_status="not_started",
             )
-        except Exception:
+        except AuraClawError as exc:
+            return ToolResult(
+                status=(
+                    ToolResultStatus.DENIED
+                    if exc.status_code in {401, 403}
+                    else ToolResultStatus.ERROR
+                ),
+                summary=exc.message or "tool execution failed",
+                error_code=exc.code,
+                side_effect_status="not_started",
+            )
+        except Exception as exc:
+            logger.exception(
+                "Tool adapter failed without a controlled error "
+                "exception_type=%s tenant_id=%s session_id=%s run_id=%s tool_name=%s",
+                type(exc).__name__,
+                invocation.tenant_id,
+                invocation.session_id,
+                invocation.run_id,
+                invocation.tool_name,
+            )
             return ToolResult(
                 status=ToolResultStatus.ERROR,
                 summary="tool adapter failed",

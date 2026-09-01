@@ -138,7 +138,9 @@ class _CollaborationClient:
         raise AssertionError(operation)
 
 
-def _assignment(role: str = "root") -> RuntimeAssignment:
+def _assignment(
+    role: str = "root", *, tool_permissions: tuple[str, ...] = ()
+) -> RuntimeAssignment:
     return RuntimeAssignment(
         tenant_id="tenant-m13",
         root_session_id="root",
@@ -148,7 +150,7 @@ def _assignment(role: str = "root") -> RuntimeAssignment:
         lease_id="lease-m13",
         fencing_token=1,
         role=role,
-        resource_profile={},
+        resource_profile={"tool_permissions": list(tool_permissions)},
     )
 
 
@@ -291,3 +293,97 @@ def test_collaboration_tools_are_role_scoped_and_freeze_owner_operations() -> No
     }
     assert "owner" not in spec_schema["properties"]
     assert "tenant_id" not in spec_schema["properties"]
+    assert "tool_permissions" not in spec_schema["properties"]
+
+
+def test_child_tool_permissions_are_bounded_by_root_grant() -> None:
+    controller = RuntimeCollaborationController(_CollaborationClient())
+    tools = controller.model_tools(
+        _assignment(tool_permissions=("price.read", "evidence.read"))
+    )
+    create_schema = next(
+        tool["function"]["parameters"]
+        for tool in tools
+        if tool["function"]["name"] == CREATE_CHILD
+    )
+    permission_schema = create_schema["properties"]["spec"]["properties"][
+        "tool_permissions"
+    ]
+    assert permission_schema["items"]["enum"] == ["evidence.read", "price.read"]
+    assert permission_schema["maxItems"] == 2
+
+
+def test_child_permission_escalation_returns_denied_without_calling_client() -> None:
+    async def scenario() -> None:
+        client = _CollaborationClient()
+        controller = RuntimeCollaborationController(client)
+        result = await controller.execute(
+            _assignment(tool_permissions=("price.read",)),
+            ToolCall(
+                tool_invocation_id="create-denied",
+                name=CREATE_CHILD,
+                arguments={
+                    "spec": {
+                        "task_key": "denied-child",
+                        "role": "worker",
+                        "goal": "do work",
+                        "output_contract": {"required_fields": ["summary"]},
+                        "tool_permissions": ["read-only"],
+                    }
+                },
+            ),
+        )
+        assert result.result == {
+            "status": "denied",
+            "error_code": "authorization_denied",
+            "summary": "Child tool permissions exceed the Root grant",
+        }
+        assert client.children == []
+
+    asyncio.run(scenario())
+
+
+def test_child_permission_escalation_is_recoverable_in_agent_loop() -> None:
+    async def scenario() -> None:
+        control = _Control()
+        session = _Session("delegate safely")
+        client = _CollaborationClient()
+        model = _Model(
+            [
+                _response(
+                    ToolCall(
+                        tool_invocation_id="create-denied",
+                        name=CREATE_CHILD,
+                        arguments={
+                            "spec": {
+                                "task_key": "denied-child",
+                                "role": "worker",
+                                "goal": "do work",
+                                "output_contract": {"required_fields": ["summary"]},
+                                "tool_permissions": ["read-only"],
+                            }
+                        },
+                    )
+                ),
+                _response(output="The requested Child grant is unavailable."),
+            ]
+        )
+        harness = AgentHarness(
+            control_store=control,  # type: ignore[arg-type]
+            session=session,  # type: ignore[arg-type]
+            model=model,
+            tools=IdempotentToolClient(),
+            runtime_events=_RuntimeEvents(),
+            collaboration_controller=RuntimeCollaborationController(client),
+        )
+        await harness.execute(_assignment(tool_permissions=("price.read",)))
+        assert control.outcome == "completed"
+        assert client.children == []
+        completed_call = next(
+            event for event in session.events if event.type == "tool.call.completed"
+        )
+        assert completed_call.payload["result"]["error_code"] == "authorization_denied"
+        assert any(event.type == "run.completed" for event in session.events)
+        assert not any(event.type == "run.failed" for event in session.events)
+
+    asyncio.run(scenario())
