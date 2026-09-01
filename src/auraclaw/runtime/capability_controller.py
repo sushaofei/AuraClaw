@@ -15,7 +15,7 @@ from urllib.parse import quote
 from auraclaw.contracts.capabilities import RequiredCapabilityRef
 from auraclaw.contracts.errors import NotFoundError, SkillPromptBudgetExceededError
 from auraclaw.contracts.events import NewEvent
-from auraclaw.contracts.skills import SkillActivation
+from auraclaw.contracts.skills import SkillActivation, effective_skill_role
 from auraclaw.control.ports import RuntimeAssignment
 from auraclaw.runtime.ports import CapabilityClient, ToolCall
 from auraclaw.runtime.skill_workflow import (
@@ -93,14 +93,10 @@ class RuntimeCapabilityController:
         self._skill_content_cache: OrderedDict[
             tuple[str, str, str, str, str], _RunSkillContentEntry
         ] = OrderedDict()
-        self._skill_content_loads: dict[
-            tuple[str, str, str, str, str], asyncio.Task[str]
-        ] = {}
+        self._skill_content_loads: dict[tuple[str, str, str, str, str], asyncio.Task[str]] = {}
         self._skill_content_cache_bytes = 0
         self._skill_content_lock = asyncio.Lock()
-        self._trusted_message_metrics: dict[
-            tuple[str, str, str], dict[str, float]
-        ] = {}
+        self._trusted_message_metrics: dict[tuple[str, str, str], dict[str, float]] = {}
         self._workflow_metrics: dict[tuple[str, str, str], dict[str, float]] = {}
 
     @staticmethod
@@ -267,8 +263,7 @@ class RuntimeCapabilityController:
         omitted = [item for item in ids if item not in current["loaded"]]
         if omitted:
             raise CapabilityAdmissionError(
-                "required capability admission failed: runtime load limit for "
-                + ", ".join(omitted)
+                "required capability admission failed: runtime load limit for " + ", ".join(omitted)
             )
         current["required_capabilities_preloaded"] = True
         return current
@@ -407,9 +402,7 @@ class RuntimeCapabilityController:
             "skill.runtime.prompt.estimated_tokens": float(estimated_tokens),
             "skill.runtime.content_cache.hit.count": float(cache_hits),
             "skill.runtime.content_cache.miss.count": float(len(pending) - cache_hits),
-            "skill.runtime.trusted_messages.latency.seconds": (
-                time.monotonic() - started
-            ),
+            "skill.runtime.trusted_messages.latency.seconds": (time.monotonic() - started),
             "skill.runtime.prompt.rejected.count": float(rejected),
         }
         if rejected:
@@ -424,18 +417,14 @@ class RuntimeCapabilityController:
         messages.extend({"role": "system", "content": content} for content in contents)
         return tuple(messages)
 
-    def trusted_message_metrics(
-        self, assignment: RuntimeAssignment
-    ) -> dict[str, float]:
+    def trusted_message_metrics(self, assignment: RuntimeAssignment) -> dict[str, float]:
         key = self._run_key(assignment)
         return {
             **self._trusted_message_metrics.get(key, {}),
             **self._workflow_metrics.get(key, {}),
         }
 
-    def prompt_cache_key(
-        self, assignment: RuntimeAssignment, state: dict[str, Any]
-    ) -> str | None:
+    def prompt_cache_key(self, assignment: RuntimeAssignment, state: dict[str, Any]) -> str | None:
         identities = self._active_skill_identities(state)
         if not identities:
             return None
@@ -453,9 +442,7 @@ class RuntimeCapabilityController:
         run_prefix = self._run_key(assignment)
         async with self._skill_content_lock:
             tasks = [
-                task
-                for key, task in self._skill_content_loads.items()
-                if key[:3] == run_prefix
+                task for key, task in self._skill_content_loads.items() if key[:3] == run_prefix
             ]
             for task in tasks:
                 task.cancel()
@@ -534,22 +521,15 @@ class RuntimeCapabilityController:
                     self._skill_content_cache[key] = _RunSkillContentEntry(
                         text=text,
                         size=size,
-                        expires_at=(
-                            time.monotonic()
-                            + self._skill_content_cache_ttl_seconds
-                        ),
+                        expires_at=(time.monotonic() + self._skill_content_cache_ttl_seconds),
                     )
                     self._skill_content_cache.move_to_end(key)
                     self._skill_content_cache_bytes += size
                     while self._skill_content_cache and (
-                        len(self._skill_content_cache)
-                        > self._skill_content_cache_max_entries
-                        or self._skill_content_cache_bytes
-                        > self._skill_content_cache_max_bytes
+                        len(self._skill_content_cache) > self._skill_content_cache_max_entries
+                        or self._skill_content_cache_bytes > self._skill_content_cache_max_bytes
                     ):
-                        _evicted_key, evicted = (
-                            self._skill_content_cache.popitem(last=False)
-                        )
+                        _evicted_key, evicted = self._skill_content_cache.popitem(last=False)
                         self._skill_content_cache_bytes -= evicted.size
             return text
         finally:
@@ -845,7 +825,7 @@ class RuntimeCapabilityController:
                     state=state,
                 )
         else:
-            binding = await self._client.resolve_skill(
+            resolution = await self._client.resolve_skill(
                 assignment,
                 name=str(contract["name"]),
                 version=str(contract["version"]),
@@ -856,6 +836,30 @@ class RuntimeCapabilityController:
                     if isinstance(item.get("binding"), dict)
                 ),
             )
+            resolve_metrics = self._workflow_metrics.setdefault(self._run_key(assignment), {})
+            resolve_metrics["skill.resolve.count"] = (
+                resolve_metrics.get("skill.resolve.count", 0.0) + 1.0
+            )
+            result_metric = f"skill.resolve.result.{resolution.status}.count"
+            resolve_metrics[result_metric] = resolve_metrics.get(result_metric, 0.0) + 1.0
+            if effective_skill_role(assignment.role) != assignment.role:
+                resolve_metrics["skill.resolve.role_alias.count"] = (
+                    resolve_metrics.get("skill.resolve.role_alias.count", 0.0) + 1.0
+                )
+            if resolution.error_code == "skill_resolver_invalid_response":
+                resolve_metrics["skill.resolve.invalid_response.count"] = (
+                    resolve_metrics.get("skill.resolve.invalid_response.count", 0.0) + 1.0
+                )
+            if resolution.status != "success" or resolution.binding is None:
+                return CapabilityExecution(
+                    result={
+                        "status": resolution.status,
+                        "error_code": (resolution.error_code or "skill_resolver_failed"),
+                        "summary": resolution.summary,
+                    },
+                    state=state,
+                )
+            binding = resolution.binding
             dependency_ids = [
                 *(item.capability_id for item in binding.resolved_tools),
                 *(item.capability_id for item in binding.resolved_resources),
@@ -929,6 +933,7 @@ class RuntimeCapabilityController:
             )
 
         assert existing is not None
+
         async def checkpoint_workflow(step: WorkflowStepProgress) -> None:
             assert existing is not None
             existing["workflow_state"] = step.state
@@ -964,9 +969,7 @@ class RuntimeCapabilityController:
         metrics["skill.workflow.activation.count"] = (
             metrics.get("skill.workflow.activation.count", 0.0) + 1.0
         )
-        metrics["skill.workflow.step.count"] = float(
-            len(workflow_result.completed_steps)
-        )
+        metrics["skill.workflow.step.count"] = float(len(workflow_result.completed_steps))
         metrics[f"skill.workflow.result.{workflow_result.status}.count"] = (
             metrics.get(
                 f"skill.workflow.result.{workflow_result.status}.count",
@@ -978,17 +981,13 @@ class RuntimeCapabilityController:
         existing["workflow_completed_steps"] = list(workflow_result.completed_steps)
         if workflow_result.status == "waiting_for_approval":
             existing["workflow_pending_step"] = workflow_result.pending_step_id
-            existing["workflow_pending_invocation_id"] = (
-                workflow_result.pending_invocation_id
-            )
+            existing["workflow_pending_invocation_id"] = workflow_result.pending_invocation_id
             return CapabilityExecution(
                 result={
                     "status": "denied",
                     "error_code": "approval_required",
                     "approval_id": workflow_result.approval_id,
-                    "metadata": {
-                        "approval_request": workflow_result.approval_request or {}
-                    },
+                    "metadata": {"approval_request": workflow_result.approval_request or {}},
                     "skill_activation_id": activation.skill_activation_id,
                     "workflow_step_id": workflow_result.pending_step_id,
                 },
@@ -1073,9 +1072,7 @@ class RuntimeCapabilityController:
         missing: list[str] = []
         for batch_index, start in enumerate(range(0, len(dependency_ids), 8)):
             batch = dependency_ids[start : start + 8]
-            invocation_id = (
-                f"dep_{_digest({'activation': activation_call_id})[:24]}_{batch_index}"
-            )
+            invocation_id = f"dep_{_digest({'activation': activation_call_id})[:24]}_{batch_index}"
             result = await self._client.execute(
                 assignment,
                 ToolCall(

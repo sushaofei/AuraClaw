@@ -131,9 +131,7 @@ class HandsGateway:
         deadline = _optional_utc(trusted.deadline)
         if call.deadline is not None:
             requested = _as_utc(call.deadline)
-            deadline = (
-                min(deadline, requested) if deadline is not None else requested
-            )
+            deadline = min(deadline, requested) if deadline is not None else requested
         invocation = ToolInvocation(
             tool_invocation_id=call.tool_invocation_id,
             tenant_id=trusted.tenant_id,
@@ -151,6 +149,9 @@ class HandsGateway:
             approval_id=call.approval_id,
             credential_ref=call.credential_ref,
             user_id=trusted.user_id,
+            actor_role=(
+                trusted.lease_assertion.role if trusted.lease_assertion is not None else None
+            ),
         )
         result = await self._gateway.execute(invocation)
         return _tool_result(result)
@@ -158,17 +159,13 @@ class HandsGateway:
     async def cancel_invocation(
         self, trusted: HandsTrustedContext, tool_invocation_id: str
     ) -> HandsCancelResponse:
-        cancelled = await self._gateway.cancel(
-            tool_invocation_id, tenant_id=trusted.tenant_id
-        )
+        cancelled = await self._gateway.cancel(tool_invocation_id, tenant_id=trusted.tenant_id)
         return HandsCancelResponse(cancelled=cancelled)
 
     async def get_invocation_status(
         self, trusted: HandsTrustedContext, tool_invocation_id: str
     ) -> HandsInvocationStatusResponse:
-        status = await self._gateway.get_authoritative_status(
-            trusted.tenant_id, tool_invocation_id
-        )
+        status = await self._gateway.get_authoritative_status(trusted.tenant_id, tool_invocation_id)
         if status is None:
             return HandsInvocationStatusResponse(found=False)
         state, side_effect, error_code, cancel_requested = status

@@ -44,6 +44,7 @@ from auraclaw.contracts.skills import (
     SkillManifest,
     SkillPublicationStatus,
     SkillRevocationAction,
+    effective_skill_role,
 )
 from auraclaw.contracts.tools import PolicyDecision
 from auraclaw.domain.skill_workflows import compile_skill_workflow
@@ -421,18 +422,14 @@ class SkillPackageRegistry:
                 self._resources.register_resource(resource)
         return publication
 
-    def forget_package(
-        self, tenant_id: str, publisher: str, name: str, version: str
-    ) -> None:
+    def forget_package(self, tenant_id: str, publisher: str, name: str, version: str) -> None:
         key = (tenant_id, publisher, name, version)
         package = self._packages.pop(key, None)
         publication = self._publications.pop(key, None)
         self._discoverable.discard(key)
         if package is None or publication is None or self._resources is None:
             return
-        for resource in _package_resources(
-            tenant_id, package, publication.package_digest
-        ):
+        for resource in _package_resources(tenant_id, package, publication.package_digest):
             if resource.descriptor.uri is not None:
                 self._resources.unregister_resource(resource.descriptor.uri)
 
@@ -631,11 +628,7 @@ class SkillPackageRegistry:
         key = (tenant_id, publisher, name, version)
         package = self._packages.get(key)
         publication = self._publications.get(key)
-        if (
-            package is None
-            or publication is None
-            or publication.package_digest != package_digest
-        ):
+        if package is None or publication is None or publication.package_digest != package_digest:
             return None
         return package
 
@@ -720,11 +713,14 @@ class SkillResolver:
         publisher: str | None = None,
         role: str,
         policy_version: str,
+        assignment_role: str | None = None,
         subject: str = "agent-runtime",
         correlation_id: str = "skill.resolve",
         active_skill_names: tuple[str, ...] = (),
         _dependency_path: tuple[str, ...] = (),
     ) -> SkillBinding:
+        original_assignment_role = assignment_role or role
+        policy_role = effective_skill_role(original_assignment_role)
         publication = next(
             (
                 candidate
@@ -738,9 +734,7 @@ class SkillResolver:
             publication = next(
                 (
                     candidate
-                    for candidate in self._registry.candidates(
-                        tenant_id, name, publisher=publisher
-                    )
+                    for candidate in self._registry.candidates(tenant_id, name, publisher=publisher)
                     if version_satisfies(candidate.manifest.version, version)
                 ),
                 None,
@@ -751,7 +745,7 @@ class SkillResolver:
         if manifest.name in _dependency_path:
             path = " -> ".join((*_dependency_path, manifest.name))
             raise SchemaValidationError(f"Skill dependency cycle detected: {path}")
-        if role not in manifest.allowed_roles:
+        if policy_role not in manifest.allowed_roles:
             raise PolicyDeniedError("Runtime role is not allowed to activate Skill")
         capabilities = tuple(
             capability
@@ -773,7 +767,8 @@ class SkillResolver:
                     name=requirement.name,
                     version=requirement.version,
                     publisher=requirement.publisher,
-                    role=role,
+                    role=policy_role,
+                    assignment_role=original_assignment_role,
                     policy_version=policy_version,
                     subject=subject,
                     correlation_id=correlation_id,
@@ -857,7 +852,9 @@ class SkillResolver:
                         for item in manifest.required_skills
                     ],
                     "risk_level": manifest.risk_level,
-                    "role": role,
+                    "role": policy_role,
+                    "assignment_role": original_assignment_role,
+                    "effective_skill_role": policy_role,
                 },
             )
             if evaluation.decision not in {
@@ -924,9 +921,7 @@ def _skill_signing_payload(package: SkillPackage, *, legacy: bool) -> bytes:
     ).encode()
 
 
-def _verify_ed25519_signature(
-    key: Ed25519PublicKey, signature: bytes, payload: bytes
-) -> bool:
+def _verify_ed25519_signature(key: Ed25519PublicKey, signature: bytes, payload: bytes) -> bool:
     try:
         key.verify(signature, payload)
     except InvalidSignature:
@@ -1060,9 +1055,7 @@ def _validate_package(
     for requirement in parsed.manifest.required_references:
         reference_content = files.get(requirement.path)
         if reference_content is None:
-            raise SchemaValidationError(
-                f"Required Skill reference is missing: {requirement.path}"
-            )
+            raise SchemaValidationError(f"Required Skill reference is missing: {requirement.path}")
         if len(reference_content) > requirement.max_bytes:
             raise SchemaValidationError(
                 f"Skill reference exceeds its maximum size: {requirement.path}"
@@ -1159,8 +1152,7 @@ def skill_capability_descriptor(
                     else None
                 ),
                 "required_references": [
-                    item.model_dump(mode="json")
-                    for item in manifest.required_references
+                    item.model_dump(mode="json") for item in manifest.required_references
                 ],
             }
         },
@@ -1260,9 +1252,7 @@ def _resolve_tool(
         canonical_name=selected.canonical_name,
         version=selected.version,
         schema_digest=selected.content_digest,
-        expected_side_effect=(
-            "read" if selected.permission == "read-only" else "write"
-        ),
+        expected_side_effect=("read" if selected.permission == "read-only" else "write"),
     )
 
 

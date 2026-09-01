@@ -88,6 +88,7 @@ class ToolInvocation:
     approval_id: str | None = None
     credential_ref: str | None = None
     user_id: str | None = None
+    actor_role: str | None = None
 
 
 @dataclass(frozen=True)

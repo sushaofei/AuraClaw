@@ -14,6 +14,16 @@ _SKILL_NAME = r"^[a-z0-9]+(?:[._-][a-z0-9]+)*$"
 _SEMVER = r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?$"
 _DIGEST = r"^sha256:[0-9a-f]{64}$"
 
+_SKILL_POLICY_ROLE_ALIASES = {
+    "root": "coordinator",
+    "repair": "worker",
+}
+
+
+def effective_skill_role(assignment_role: str) -> str:
+    """Map structural Assignment roles to the semantic roles used by Skill policy."""
+    return _SKILL_POLICY_ROLE_ALIASES.get(assignment_role, assignment_role)
+
 
 class SkillPublicationStatus(StrEnum):
     STAGED = "staged"
@@ -306,9 +316,7 @@ class SkillRequirement(ContractModel):
 
 
 class SkillWorkflowEntrypoint(ContractModel):
-    api_version: Literal["skills.auraclaw.io/v1alpha1"] = (
-        "skills.auraclaw.io/v1alpha1"
-    )
+    api_version: Literal["skills.auraclaw.io/v1alpha1"] = "skills.auraclaw.io/v1alpha1"
     entrypoint: str = Field(
         min_length=1,
         max_length=512,

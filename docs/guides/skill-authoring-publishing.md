@@ -194,6 +194,9 @@ JSON reference 由 Workflow 显式列出并按固定 package digest 加载；不
 - `publisher` 必须与签名命令及租户 Publisher Registry 中的身份一致。
 - `input_schema` 和 `output_schema` 必须是 `type: object` 的 JSON Schema。
 - `max_steps` 范围为 1–1000，`timeout_seconds` 范围为 1–86400。
+- `allowed_roles` 只声明 `coordinator`、`worker`、`reviewer` 等 Skill 策略语义角色；平台会把
+  Root Session 的 `root` 映射为 `coordinator`、把修复节点的 `repair` 映射为 `worker`。不要把
+  `root`/`repair` 复制进 Manifest，Skill 内容也不能覆盖受信 Assignment/Lease 角色。
 - Skill 依赖版本可使用 `*` 或逗号分隔的比较条件，例如 `>=1.2.0,<2.0.0`。
 - 不允许重复依赖或直接依赖自身。
 
