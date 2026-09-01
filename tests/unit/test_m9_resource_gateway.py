@@ -2,15 +2,27 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 
+from auraclaw.action.capability_catalog import (
+    CapabilityCatalog,
+    InMemoryCapabilityCatalogStore,
+)
 from auraclaw.action.mcp_primitives import (
     HandsResourceRegistry,
     RegisteredResource,
 )
 from auraclaw.action.ports import PolicyEvaluation
 from auraclaw.action.resource_gateway import ManagedResourceGateway
+from auraclaw.contracts.capabilities import (
+    CapabilityDescriptor,
+    CapabilityKind,
+    CapabilityStatus,
+    CapabilityTrustLevel,
+    McpServerDefinition,
+)
 from auraclaw.contracts.errors import PolicyDeniedError
 from auraclaw.contracts.hands import (
     HandsResourceContent,
@@ -43,6 +55,22 @@ class _PermissionPolicy:
             ),
             decision_id="decision-read-only",
             policy_version="m9-v2",
+        )
+
+
+class _RemoteResourceConnector:
+    connector_id = "mcp:remote"
+
+    def __init__(self) -> None:
+        self.reads: list[str] = []
+
+    async def read_resource(
+        self, trusted: HandsTrustedContext, uri: str
+    ) -> tuple[HandsResourceContent, ...]:
+        del trusted
+        self.reads.append(uri)
+        return (
+            HandsResourceContent(uri=uri, mime_type="text/plain", text="remote"),
         )
 
 
@@ -155,6 +183,69 @@ def test_resource_read_does_not_require_approval() -> None:
 
         assert contents[0].text == "safe context"
         assert contents[0].policy_decision_id == "decision-read-only"
+
+    asyncio.run(scenario())
+
+
+def test_resource_gateway_routes_catalog_resource_to_live_connector() -> None:
+    async def scenario() -> None:
+        uri = "repo://remote/docs/release"
+        store = InMemoryCapabilityCatalogStore()
+        catalog = CapabilityCatalog(store)
+        server = McpServerDefinition(
+            server_id="remote",
+            tenant_id="tenant-a",
+            title="Remote",
+            endpoint="https://remote.example/mcp",
+            trust_level=CapabilityTrustLevel.TENANT_VERIFIED,
+            status=CapabilityStatus.ACTIVE,
+            enabled=True,
+        )
+        await catalog.register_server(server)
+        descriptor = CapabilityDescriptor(
+            capability_id="cap-remote-resource",
+            kind=CapabilityKind.RESOURCE,
+            server_id=server.server_id,
+            canonical_name="remote.resource.release",
+            version="1.0.0",
+            content_digest=f"sha256:{'a' * 64}",
+            title="release",
+            tenant_id="tenant-a",
+            trust_level=CapabilityTrustLevel.TENANT_VERIFIED,
+            permission="read-only",
+            risk_level="low",
+            status=CapabilityStatus.ACTIVE,
+            source_revision="v1",
+            updated_at=datetime.now(UTC),
+            metadata={
+                "source_type": "mcp",
+                "source": HandsResourceDescriptor(
+                    uri=uri,
+                    name="release",
+                    mime_type="text/plain",
+                    source_revision="v1",
+                ).model_dump(mode="json"),
+            },
+        )
+        await catalog.replace_server_capabilities(server.server_id, (descriptor,))
+        connector = _RemoteResourceConnector()
+        connectors: dict[str, Any] = {server.server_id: connector}
+        gateway = ManagedResourceGateway(
+            HandsResourceRegistry(),
+            artifacts=_artifacts(),
+            catalog_store=store,
+            connectors=connectors,
+        )
+
+        assert await gateway.is_available("tenant-a", descriptor) is True
+        contents = await gateway.read(_trusted(), uri)
+        assert contents[0].text == "remote"
+        assert connector.reads == [uri]
+
+        connectors.clear()
+        assert await gateway.is_available("tenant-a", descriptor) is False
+        with pytest.raises(KeyError):
+            await gateway.read(_trusted(), uri)
 
     asyncio.run(scenario())
 

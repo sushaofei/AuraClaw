@@ -7,19 +7,30 @@ import hashlib
 import json
 import re
 import time
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Protocol
+from typing import Protocol
 from urllib.parse import urlsplit
 
 from auraclaw.action.mcp_primitives import HandsResourceRegistry
-from auraclaw.action.ports import ArtifactWriter, ResourcePolicyEvaluator
+from auraclaw.action.ports import (
+    ArtifactWriter,
+    CapabilityCatalogStore,
+    CapabilityConnector,
+    ResourcePolicyEvaluator,
+)
+from auraclaw.contracts.capabilities import CapabilityDescriptor, CapabilityKind
 from auraclaw.contracts.errors import (
     PolicyDeniedError,
     ResourceBusyError,
     SchemaValidationError,
 )
-from auraclaw.contracts.hands import HandsResourceContent, HandsTrustedContext
+from auraclaw.contracts.hands import (
+    HandsResourceContent,
+    HandsResourceDescriptor,
+    HandsTrustedContext,
+)
 from auraclaw.contracts.observability import MetricPoint
 from auraclaw.contracts.tools import PolicyDecision
 
@@ -66,6 +77,12 @@ class _CacheEntry:
     contents: tuple[HandsResourceContent, ...]
 
 
+@dataclass(frozen=True)
+class _ResolvedResource:
+    descriptor: HandsResourceDescriptor
+    load: Callable[[], Awaitable[tuple[HandsResourceContent, ...]]]
+
+
 class ManagedResourceGateway:
     def __init__(
         self,
@@ -90,6 +107,8 @@ class ManagedResourceGateway:
         max_queued: int = 128,
         queue_timeout_seconds: float = 5.0,
         metric_writer: MetricWriter | None = None,
+        catalog_store: CapabilityCatalogStore | None = None,
+        connectors: Mapping[str, CapabilityConnector] | None = None,
     ) -> None:
         if max_inline_bytes < 1 or max_resource_bytes < max_inline_bytes:
             raise ValueError("Resource size limits are invalid")
@@ -119,6 +138,34 @@ class ManagedResourceGateway:
         self._queued = 0
         self._inflight = 0
         self._metric_writer = metric_writer
+        self._catalog_store = catalog_store
+        self._connectors = connectors if connectors is not None else {}
+
+    async def is_available(
+        self, tenant_id: str, capability: CapabilityDescriptor
+    ) -> bool:
+        if capability.kind not in {
+            CapabilityKind.RESOURCE,
+            CapabilityKind.RESOURCE_TEMPLATE,
+        }:
+            return True
+        source = capability.metadata.get("source", {})
+        if not isinstance(source, dict):
+            return False
+        uri = source.get("uri")
+        available = (
+            isinstance(uri, str)
+            and self._registry.has_resource(tenant_id, uri)
+        ) or capability.server_id in self._connectors
+        if not available:
+            await self._emit(
+                "capability.catalog.backing_missing",
+                1.0,
+                tenant_id,
+                server_id=capability.server_id,
+                kind=capability.kind.value,
+            )
+        return available
 
     async def read(
         self,
@@ -128,7 +175,7 @@ class ManagedResourceGateway:
         parsed = urlsplit(uri)
         if not parsed.scheme or parsed.scheme not in self._allowed_schemes:
             raise PolicyDeniedError("Resource URI scheme is not allowed")
-        resource = self._registry.get_resource(trusted_context.tenant_id, uri)
+        resource = await self._resolve_resource(trusted_context, uri)
         source_revision = (
             None
             if resource.descriptor.source_revision is None
@@ -186,6 +233,50 @@ class ManagedResourceGateway:
         assert load is not None
         return await asyncio.shield(load)
 
+    async def _resolve_resource(
+        self,
+        trusted: HandsTrustedContext,
+        uri: str,
+    ) -> _ResolvedResource:
+        try:
+            registered = self._registry.get_resource(trusted.tenant_id, uri)
+
+            async def load_local() -> tuple[HandsResourceContent, ...]:
+                return registered.contents
+
+            return _ResolvedResource(registered.descriptor, load_local)
+        except KeyError:
+            pass
+        if self._catalog_store is not None:
+            capabilities = await self._catalog_store.list_capabilities(trusted.tenant_id)
+            for capability in capabilities:
+                if capability.kind not in {
+                    CapabilityKind.RESOURCE,
+                    CapabilityKind.RESOURCE_TEMPLATE,
+                }:
+                    continue
+                connector = self._connectors.get(capability.server_id)
+                descriptor = _resource_descriptor(capability)
+                if connector is None or descriptor is None or not _matches_uri(
+                    descriptor, uri
+                ):
+                    continue
+                selected_connector = connector
+
+                async def load_remote(
+                    connector: CapabilityConnector = selected_connector,
+                ) -> tuple[HandsResourceContent, ...]:
+                    return await connector.read_resource(trusted, uri)
+
+                return _ResolvedResource(descriptor, load_remote)
+        await self._emit(
+            "resource.read.not_found",
+            1.0,
+            trusted.tenant_id,
+            scheme=urlsplit(uri).scheme,
+        )
+        raise KeyError(f"Resource not found: {uri}")
+
     async def invalidate(self, uri: str, *, tenant_id: str | None = None) -> int:
         async with self._state_lock:
             affected_tenants = {
@@ -211,7 +302,7 @@ class ManagedResourceGateway:
         self,
         trusted: HandsTrustedContext,
         uri: str,
-        resource: Any,
+        resource: _ResolvedResource,
         cache_key: tuple[str, str, str, str, str | None],
         generation: int,
     ) -> tuple[HandsResourceContent, ...]:
@@ -265,7 +356,7 @@ class ManagedResourceGateway:
                         source_revision=resource.descriptor.source_revision,
                         policy_decision_id=policy_decision_id,
                     )
-                    for content in resource.contents
+                    for content in await resource.load()
                 ]
             )
             async with self._state_lock:
@@ -461,6 +552,28 @@ def _media_type_allowed(media_type: str, allowed: tuple[str, ...]) -> bool:
         or (candidate.lower() == "application/json" and structured_json)
         for candidate in allowed
     )
+
+
+def _resource_descriptor(
+    capability: CapabilityDescriptor,
+) -> HandsResourceDescriptor | None:
+    source = capability.metadata.get("source")
+    if not isinstance(source, dict):
+        return None
+    try:
+        return HandsResourceDescriptor.model_validate(source)
+    except ValueError:
+        return None
+
+
+def _matches_uri(descriptor: HandsResourceDescriptor, uri: str) -> bool:
+    if descriptor.uri == uri:
+        return True
+    if descriptor.uri_template is None:
+        return False
+    escaped = re.escape(descriptor.uri_template)
+    pattern = re.sub(r"\\\{[A-Za-z0-9_.-]+\\\}", r"[^/]+", escaped)
+    return re.fullmatch(pattern, uri) is not None
 
 
 def _resource_name(uri: str) -> str:

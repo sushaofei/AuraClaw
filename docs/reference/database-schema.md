@@ -74,6 +74,7 @@ uv run auraclaw migrate up
 | `0037` | Skill Source priority、Publication 多来源引用与 Source 管理命令审计账本 |
 | `0038` | Skill Installation draining/force 策略证据、drainer 索引与安装命令幂等账本 |
 | `0039` | Publisher 永久撤销、Publisher/key 批量 Runtime Policy 证据与约束 |
+| `0053` | 清理已移除 Resource Provider 与非 active generation Catalog 残留 |
 
 PostgreSQL / Kingbase 序列保留 `0017` 版本号空位，后续迁移继续按既有编号递增。
 不要为了填补编号而重命名已经发布的迁移。

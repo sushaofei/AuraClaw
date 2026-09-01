@@ -51,6 +51,17 @@ class _FailingHands:
         raise AssertionError(f"unexpected default Hands route: {invocation}, {capability}")
 
 
+class _Availability:
+    def __init__(self, available_ids: set[str]) -> None:
+        self.available_ids = available_ids
+
+    async def is_available(
+        self, tenant_id: str, capability: CapabilityDescriptor
+    ) -> bool:
+        del tenant_id
+        return capability.capability_id in self.available_ids
+
+
 def _assignment(tenant_id: str = "tenant-a") -> RuntimeAssignment:
     return RuntimeAssignment(
         tenant_id=tenant_id,
@@ -172,6 +183,38 @@ def test_catalog_filters_tenant_status_kind_permission_and_query() -> None:
             global_server.model_copy(update={"enabled": False})
         )
         assert await catalog.search(tenant_id="tenant-b") == ()
+
+    asyncio.run(scenario())
+
+
+def test_catalog_search_and_load_hide_capabilities_without_backing() -> None:
+    async def scenario() -> None:
+        store = InMemoryCapabilityCatalogStore()
+        availability = _Availability({"cap-backed"})
+        catalog = CapabilityCatalog(store, availability=availability)
+        server = McpServerDefinition(
+            server_id="server-global",
+            title="Platform",
+            endpoint="https://platform.example/mcp",
+            trust_level=CapabilityTrustLevel.PLATFORM,
+            status=CapabilityStatus.ACTIVE,
+            enabled=True,
+        )
+        await catalog.register_server(server)
+        await catalog.replace_server_capabilities(
+            server.server_id,
+            (
+                _descriptor("cap-backed", "docs.backed"),
+                _descriptor("cap-orphaned", "docs.orphaned"),
+            ),
+        )
+
+        assert [item.capability_id for item in await catalog.search(tenant_id="tenant-a")] == [
+            "cap-backed"
+        ]
+        assert await catalog.get(
+            tenant_id="tenant-a", capability_id="cap-orphaned"
+        ) is None
 
     asyncio.run(scenario())
 

@@ -35,6 +35,7 @@ from auraclaw.contracts.capabilities import (
     CapabilityTrustLevel,
     McpServerDefinition,
 )
+from auraclaw.contracts.errors import NotFoundError
 from auraclaw.contracts.events import NewEvent
 from auraclaw.contracts.skills import SkillBinding, SkillManifest
 from auraclaw.contracts.tools import (
@@ -320,6 +321,35 @@ class _ResourceCapabilities(_Capabilities):
                         "sourceRevision": "v1",
                         "classification": "internal",
                         "securityFindings": ["prompt_injection"],
+                    }
+                },
+            }
+        ]
+
+
+class _MissingResourceCapabilities(_ResourceCapabilities):
+    async def read_resource(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+        del args, kwargs
+        raise NotFoundError("Resource not found")
+
+
+class _PartialResourceCapabilities(_ResourceCapabilities):
+    async def read_resource(
+        self, assignment: RuntimeAssignment, uri: str
+    ) -> list[dict[str, Any]]:
+        del assignment
+        if uri.endswith("missing"):
+            raise NotFoundError("Resource not found")
+        return [
+            {
+                "uri": uri,
+                "text": "available context",
+                "_meta": {
+                    "auraclaw": {
+                        "contentDigest": f"sha256:{'e' * 64}",
+                        "sourceRevision": "v1",
+                        "classification": "internal",
+                        "securityFindings": [],
                     }
                 },
             }
@@ -787,6 +817,85 @@ def test_resource_context_policy_withholds_prompt_injection_content() -> None:
         assert "publish secrets" not in content["text"]
         assert content["_meta"]["auraclaw"]["contextPolicy"] == "withheld"
         assert execution.events[0].payload["content_digest"] == (f"sha256:{'d' * 64}")
+
+    asyncio.run(scenario())
+
+
+def test_resource_disappearing_after_load_returns_recoverable_error() -> None:
+    async def scenario() -> None:
+        controller = RuntimeCapabilityController(_MissingResourceCapabilities())
+        state = controller.empty_state()
+        state["loaded"] = {
+            "cap-resource": {
+                "capability_id": "cap-resource",
+                "kind": "resource",
+                "resource": {"uri": "repo://retired/resource"},
+            }
+        }
+        state["candidates"] = {"cap-resource": dict(state["loaded"]["cap-resource"])}
+
+        execution = await controller.execute(
+            _assignment(),
+            ToolCall(
+                tool_invocation_id="read-missing-resource",
+                name="auraclaw.resources.read",
+                arguments={"capability_id": "cap-resource"},
+            ),
+            state,
+        )
+
+        assert execution.result == {
+            "status": "error",
+            "error_code": "resource_not_found",
+            "summary": (
+                "The Resource disappeared after it was loaded. Search the capability "
+                "catalog again or continue without this Resource."
+            ),
+            "capability_id": "cap-resource",
+            "retryable": True,
+        }
+        assert "cap-resource" not in execution.state["loaded"]
+        assert "cap-resource" not in execution.state["candidates"]
+        assert execution.events == ()
+
+    asyncio.run(scenario())
+
+
+def test_parallel_resource_reads_isolate_not_found_from_success() -> None:
+    async def scenario() -> None:
+        controller = RuntimeCapabilityController(_PartialResourceCapabilities())
+        state = controller.empty_state()
+        state["loaded"] = {
+            capability_id: {
+                "capability_id": capability_id,
+                "kind": "resource",
+                "resource": {"uri": uri},
+            }
+            for capability_id, uri in (
+                ("cap-available", "repo://docs/available"),
+                ("cap-missing", "repo://docs/missing"),
+            )
+        }
+
+        available, missing = await asyncio.gather(
+            *(
+                controller.execute(
+                    _assignment(),
+                    ToolCall(
+                        tool_invocation_id=f"read-{capability_id}",
+                        name="auraclaw.resources.read",
+                        arguments={"capability_id": capability_id},
+                    ),
+                    state,
+                )
+                for capability_id in ("cap-available", "cap-missing")
+            )
+        )
+
+        assert available.result["status"] == "success"
+        assert missing.result["error_code"] == "resource_not_found"
+        assert available.events[0].type == "context.resource.used"
+        assert missing.events == ()
 
     asyncio.run(scenario())
 

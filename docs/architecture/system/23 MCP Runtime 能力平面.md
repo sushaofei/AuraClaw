@@ -248,6 +248,11 @@ skill://<publisher>/<name>/<version>/references/<path>
 skill://<publisher>/<name>/<version>/assets/<path>
 ```
 
+Skill 包内的 `manifest`、`SKILL.md`、`references/` 和 `assets/` 只能通过上述
+`skill://` URI 读取；不得把仓库目录或已移除的内建 Provider 写成 `repo://` 依赖。
+`repo://`、`artifact://` 等 URI 仅用于有当前 Resource Registry 条目或活跃 MCP Connector
+明确提供的外部 Resource。Catalog 中存在一行记录本身不构成可读性证明。
+
 渐进式披露分三层：
 
 1. 发现：名称、描述、适用条件、风险和版本，进入候选上下文。
@@ -561,6 +566,13 @@ last-known-good generation。Hands 副本启动时即使远端暂不可达，也
 Tool Router。schema/content digest 在未 bump version 时发生变化会把本轮标记为 degraded/stale 并保留
 旧 generation。disabled/retired 是 desired governance 状态，仍立即阻止新任务发现。
 
+Capability search/load 还必须核对当前 Action Hands 副本的 backing：进程内 Resource 需要 tenant
+可见的 Registry 条目，远端 Resource 需要当前已装载的 Connector，Capability generation 必须等于
+Server 的 active generation。缺少任一条件的记录不进入候选；升级迁移 `0053` 清除已移除的
+`auraclaw-price-insight` Provider 及非 active generation 残留。Resource 在 load 后、read 前消失属于
+可恢复竞态，Runtime 返回结构化 `resource_not_found`、撤销该候选并允许模型重新搜索或降级继续，
+不得直接使 Run 失败。
+
 每轮 snapshot 在远程读取前先取得 per-server PostgreSQL reconcile lease 与单调 fencing token；提交时同时
 CAS `config_revision`、previous catalog generation、owner/token/expiry。相同 config revision 与 snapshot
 digest 的重复提交是 generation 不变的幂等 no-op；旧 owner、旧 config 或旧 previous generation 返回
@@ -837,6 +849,7 @@ tool_call_latency / denied / approval_required / side_effect_unknown
 mcp_protocol_error / schema_validation_failure
 mcp_task_age / task_poll_failure
 capability_binding_stale / revoked_inflight
+capability.catalog.backing_missing / resource.read.not_found
 ```
 
 Trace 至少关联：

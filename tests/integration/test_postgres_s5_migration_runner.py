@@ -58,6 +58,37 @@ def test_migration_runner_is_locked_idempotent_and_detects_drift(tmp_path: Path)
         connection = await asyncpg.connect(database_url)
         try:
             await connection.execute(
+                """INSERT INTO hands.downstream_mcp_server
+                   (server_id,title,endpoint,enabled,status,active_catalog_generation)
+                   VALUES ('auraclaw-price-insight','retired provider',
+                           'https://retired.invalid/mcp',true,'active',1),
+                          ('stale-generation-test','stale generation',
+                           'https://stale.invalid/mcp',true,'active',2)"""
+            )
+            await connection.execute(
+                """INSERT INTO hands.capability_catalog
+                   (capability_id,kind,server_id,canonical_name,version,
+                    content_digest,title,trust_level,status,catalog_generation)
+                   VALUES ('cap-stale-generation','resource','stale-generation-test',
+                           'stale.resource','1.0.0','sha256:stale','stale resource',
+                           'external_untrusted','active',1)"""
+            )
+            await connection.execute(
+                (migration_dir / "0053_resource_catalog_backing_consistency.sql").read_text()
+            )
+            assert not await connection.fetchval(
+                """SELECT EXISTS(SELECT 1 FROM hands.downstream_mcp_server
+                   WHERE server_id='auraclaw-price-insight')"""
+            )
+            assert not await connection.fetchval(
+                """SELECT EXISTS(SELECT 1 FROM hands.capability_catalog
+                   WHERE capability_id='cap-stale-generation')"""
+            )
+            await connection.execute(
+                """DELETE FROM hands.downstream_mcp_server
+                   WHERE server_id='stale-generation-test'"""
+            )
+            await connection.execute(
                 (
                     migration_dir
                     / "0041_capability_catalog_consistency.down.sql"

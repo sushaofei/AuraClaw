@@ -97,6 +97,10 @@ class HandsResourceRegistry:
             raise KeyError(f"Resource not found: {uri}")
         return resource
 
+    def has_resource(self, tenant_id: str, uri: str) -> bool:
+        resource = self._resources.get(uri)
+        return resource is not None and _visible_to(resource.tenant_ids, tenant_id)
+
 
 class HandsPromptRegistry:
     def __init__(self, prompts: Sequence[RegisteredPrompt] = ()) -> None:
