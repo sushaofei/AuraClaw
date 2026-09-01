@@ -37,6 +37,7 @@ from auraclaw.contracts.internal import ArtifactFinalizeResponse
 from auraclaw.contracts.skills import (
     PublishSkillCommand,
     SkillManifest,
+    SkillPackageRetentionStatus,
     SkillResourceRequirement,
     SkillSourceDesiredState,
     SkillSourceKind,
@@ -403,6 +404,35 @@ def test_skill_admin_manages_installation_and_revocation_separately() -> None:
         )
         assert publication_state.status_code == 200
         assert publication_state.json()["publication"]["revision"] == 2
+
+        package = asyncio.run(
+            management.get_package("tenant-1", "platform", "release.prepare", "1.4.0")
+        )
+        purged_at = datetime.now(UTC)
+        asyncio.run(
+            lifecycle.update_package_retention(
+                package.model_copy(
+                    update={
+                        "retention_status": SkillPackageRetentionStatus.PURGED,
+                        "retention_revision": package.retention_revision + 1,
+                        "retention_updated_at": purged_at,
+                        "purged_at": purged_at,
+                    }
+                ),
+                expected_revision=package.retention_revision,
+            )
+        )
+        purged_catalog = client.get("/v1/admin/skills", headers=headers)
+        assert purged_catalog.status_code == 200
+        assert purged_catalog.json()["items"] == []
+        purged_management = client.get(
+            "/v1/admin/skills/platform/release.prepare/management", headers=headers
+        )
+        assert purged_management.status_code == 200
+        assert (
+            purged_management.json()["versions"][0]["package"]["retention_status"]
+            == "purged"
+        )
 
 
 def test_task_api_service_exposes_skill_admin_routes() -> None:

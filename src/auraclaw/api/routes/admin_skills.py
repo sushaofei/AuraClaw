@@ -38,6 +38,7 @@ from auraclaw.contracts.skills import (
     SkillInstallationOperation,
     SkillInstallationRecord,
     SkillPackageRecord,
+    SkillPackageRetentionStatus,
     SkillPublicationRecord,
     SkillPublisherKeyRecord,
     SkillPublisherRecord,
@@ -429,6 +430,7 @@ def create_skill_admin_router(
         packages = {
             (item.manifest.publisher, item.manifest.name, item.manifest.version): item
             for item in package_records
+            if item.retention_status is not SkillPackageRetentionStatus.PURGED
         }
         publication_records = {
             (item.publisher, item.name, item.version): item
