@@ -62,6 +62,12 @@ from auraclaw.action.skill_lifecycle import (
     InMemorySkillLifecycleStore,
     SkillLifecycleStore,
 )
+from auraclaw.action.skill_lifecycle_events import (
+    BroadcastingSkillStateProjector,
+    SkillLifecycleSignalApplier,
+    SkillLifecycleSignalRelay,
+    SkillTenantRebuilder,
+)
 from auraclaw.action.skill_management import (
     InProcessSkillStateProjector,
     SkillManagementService,
@@ -187,6 +193,10 @@ from auraclaw.infrastructure.delivery import (
 from auraclaw.infrastructure.delivery.remote_sinks import CredentialProxyWebhookSink
 from auraclaw.infrastructure.delivery.sinks import ParentSessionResultSink
 from auraclaw.infrastructure.hands.local import LocalHandsService
+from auraclaw.infrastructure.kafka.skill_lifecycle_events import (
+    KafkaSkillLifecycleSignalConsumer,
+    KafkaSkillLifecycleSignalPublisher,
+)
 from auraclaw.infrastructure.observability.stores import PostgresObservabilityStore
 from auraclaw.infrastructure.persistence.memory_control_store import (
     InMemoryControlStateStore,
@@ -224,6 +234,9 @@ from auraclaw.infrastructure.persistence.postgres_policy_store import (
 )
 from auraclaw.infrastructure.persistence.postgres_skill_lifecycle import (
     PostgresSkillLifecycleStore,
+)
+from auraclaw.infrastructure.persistence.postgres_skill_lifecycle_events import (
+    PostgresSkillLifecycleSignalStore,
 )
 from auraclaw.infrastructure.persistence.postgres_skill_publishers import (
     PostgresSkillPublisherStore,
@@ -1521,10 +1534,53 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         content_cache=skill_content_cache,
         metric_writer=hands_metric_store,
     )
+    skill_state_projector: SkillTenantRebuilder = skill_rebuilder
+    skill_signal_consumer: KafkaSkillLifecycleSignalConsumer | None = None
+    skill_signal_relay: SkillLifecycleSignalRelay | None = None
+    if settings.sql_storage_enabled and settings.kafka_enabled:
+        replica_id = (
+            settings.skill_lifecycle_replica_id
+            or f"{os.getenv('HOSTNAME') or socket.gethostname()}-{os.getpid()}"
+        )
+        skill_signal_store = PostgresSkillLifecycleSignalStore(
+            settings.resolved_database_url
+        )
+        skill_signal_publisher = KafkaSkillLifecycleSignalPublisher(
+            settings.kafka_bootstrap_servers,
+            topic=settings.kafka_skill_lifecycle_topic,
+        )
+        skill_signal_consumer = KafkaSkillLifecycleSignalConsumer(
+            settings.kafka_bootstrap_servers,
+            topic=settings.kafka_skill_lifecycle_topic,
+            replica_id=replica_id,
+            target=SkillLifecycleSignalApplier(
+                rebuilder=skill_rebuilder,
+                metric_writer=hands_metric_store,
+            ),
+        )
+        skill_state_projector = BroadcastingSkillStateProjector(
+            rebuilder=skill_rebuilder,
+            signals=skill_signal_store,
+            replica_id=replica_id,
+        )
+        skill_signal_relay = SkillLifecycleSignalRelay(
+            signals=skill_signal_store,
+            publisher=skill_signal_publisher,
+            owner=f"{replica_id}-skill-lifecycle-relay-{secrets.token_hex(4)}",
+            claim_ttl=timedelta(
+                seconds=settings.skill_reliability_claim_ttl_seconds
+            ),
+        )
+        app.state.closeables = (
+            skill_signal_consumer,
+            skill_signal_publisher,
+            skill_signal_store,
+            *app.state.closeables,
+        )
     skill_reliability = SkillPublicationReliabilityWorker(
         lifecycle=skill_lifecycle,
         artifacts=skill_artifacts,
-        rebuilder=skill_rebuilder,
+        rebuilder=skill_state_projector,
         owner=f"action-hands-{secrets.token_hex(8)}",
         max_concurrent=settings.skill_reliability_max_concurrent,
         claim_ttl=timedelta(
@@ -1539,7 +1595,7 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
     )
     skill_management = SkillManagementService(
         lifecycle=skill_lifecycle,
-        projector=skill_rebuilder,
+        projector=skill_state_projector,
         artifacts=artifact_reader,
         binding_references=skill_binding_references,
         retired_activator=skill_publication,
@@ -1575,6 +1631,15 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
     )
 
     async def initialize_registry() -> None:
+        if skill_signal_consumer is not None:
+            try:
+                await skill_signal_consumer.start()
+            except Exception as exc:
+                logger.warning(
+                    "Skill lifecycle Kafka consumer is unavailable; "
+                    "continuing with PostgreSQL reconciliation (error=%s)",
+                    type(exc).__name__,
+                )
         if tool_registry_store is not None:
             await tool_registry_store.load_into(registry)
         if credential_proxy is not None and isinstance(policy, RemotePolicyClient):
@@ -1747,6 +1812,34 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
             reconcile_skill_reliability,
         )
     )
+    if skill_signal_relay is not None:
+        signal_relay = skill_signal_relay
+
+        async def relay_skill_lifecycle_signals() -> int:
+            return await signal_relay.run_once()
+
+        periodic_jobs.append(
+            (
+                "skill-lifecycle-broadcast",
+                min(1.0, settings.mcp_reconcile_interval_seconds),
+                relay_skill_lifecycle_signals,
+            )
+        )
+    if skill_signal_consumer is not None:
+        signal_consumer = skill_signal_consumer
+
+        async def ensure_skill_lifecycle_consumer() -> int:
+            if not signal_consumer.ready:
+                await signal_consumer.start()
+            return 0
+
+        periodic_jobs.append(
+            (
+                "skill-lifecycle-consumer",
+                min(5.0, settings.mcp_reconcile_interval_seconds),
+                ensure_skill_lifecycle_consumer,
+            )
+        )
     if credential_proxy is not None and isinstance(policy, RemotePolicyClient):
         reconciler = CapabilityCatalogReconciler(
             catalog=capability_catalog,
@@ -1766,7 +1859,7 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
             connectors=app.state.capability_connectors,
             lifecycle=skill_lifecycle,
             publication=skill_publication,
-            rebuilder=skill_rebuilder,
+            rebuilder=skill_state_projector,
             snapshot_provider=reconciler.snapshot_for,
             max_concurrent=settings.mcp_reconcile_max_concurrent,
             max_concurrent_per_tenant=settings.mcp_reconcile_max_concurrent_per_tenant,
@@ -1882,13 +1975,13 @@ def _hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
                 SkillPublicationInternalService(
                     skill_publication,
                     management=skill_management,
-                    rebuilder=skill_rebuilder,
+                    rebuilder=skill_state_projector,
                     publishers=skill_publishers,
                     admissions=skill_lifecycle,
                     sources=SkillSourceService(
                         skill_lifecycle,
                         synchronizer=getattr(app.state, "skill_reconciler", None),
-                        projector=skill_rebuilder,
+                        projector=skill_state_projector,
                     ),
                     artifacts=artifact_reader,
                     package_cache=skill_content_cache,

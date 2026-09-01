@@ -77,6 +77,10 @@ class SkillStateRebuilder:
         ] = {}
         self._requested_generations: dict[str, int] = {}
         self._rebuild_state_lock = asyncio.Lock()
+        self._snapshot_digests: dict[str, str] = {}
+
+    def snapshot_digest(self, tenant_id: str) -> str | None:
+        return self._snapshot_digests.get(tenant_id)
 
     async def rebuild_all(self) -> SkillRebuildResult:
         tenants = await self._lifecycle.list_tenants()
@@ -136,15 +140,29 @@ class SkillStateRebuilder:
     async def _rebuild_tenant_locked(
         self, tenant_id: str
     ) -> tuple[int, tuple[str, ...]]:
+        installation_records = await self._lifecycle.list_installations(tenant_id)
         installations = {
             (item.publisher, item.name): item
-            for item in await self._lifecycle.list_installations(tenant_id)
+            for item in installation_records
             if item.status is SkillInstallationStatus.ACTIVE
         }
         entries: list[tuple[SkillPackage, PublishedSkill]] = []
         discoverable: set[tuple[str, str, str]] = set()
         failures: list[str] = []
         records = await self._lifecycle.list_publications(tenant_id)
+        snapshot_parts: list[tuple[str, ...]] = [
+            (
+                "installation",
+                item.publisher,
+                item.name,
+                item.status.value,
+                str(item.revision),
+                item.pinned_package_digest or "",
+            )
+            for item in sorted(
+                installation_records, key=lambda value: (value.publisher, value.name)
+            )
+        ]
         scanned = 0
         reused = 0
         for record in records:
@@ -167,6 +185,19 @@ class SkillStateRebuilder:
             ):
                 failures.append("package_record_unavailable")
                 continue
+            snapshot_parts.append(
+                (
+                    "publication",
+                    record.publisher,
+                    record.name,
+                    record.version,
+                    record.status.value,
+                    str(record.revision),
+                    record.package_digest,
+                    package_record.retention_status.value,
+                    str(package_record.retention_revision),
+                )
+            )
             if package_record.artifact_ref.media_type != _SKILL_MEDIA_TYPE:
                 failures.append("artifact_media_type_invalid")
                 continue
@@ -253,6 +284,10 @@ class SkillStateRebuilder:
         )
         await self._emit("skill.rebuild.packages.scanned", float(scanned), tenant_id)
         await self._emit("skill.rebuild.packages.reused", float(reused), tenant_id)
+        encoded_snapshot = repr(sorted(snapshot_parts)).encode()
+        self._snapshot_digests[tenant_id] = (
+            f"sha256:{hashlib.sha256(encoded_snapshot).hexdigest()}"
+        )
         return len(entries), tuple(failures)
 
     async def _emit(

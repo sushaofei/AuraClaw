@@ -8,7 +8,7 @@ from typing import Protocol
 
 from auraclaw.action.ports import SkillArtifactLifecycle, SkillArtifactOrphan
 from auraclaw.action.skill_lifecycle import SkillLifecycleStore, SkillOutboxRecord
-from auraclaw.action.skill_rebuild import SkillStateRebuilder
+from auraclaw.action.skill_lifecycle_events import SkillTenantRebuilder
 from auraclaw.contracts.observability import MetricPoint
 from auraclaw.contracts.tools import ArtifactRef
 
@@ -32,7 +32,7 @@ class SkillPublicationReliabilityWorker:
         *,
         lifecycle: SkillLifecycleStore,
         artifacts: SkillArtifactLifecycle,
-        rebuilder: SkillStateRebuilder,
+        rebuilder: SkillTenantRebuilder,
         owner: str,
         max_concurrent: int = 8,
         claim_ttl: timedelta = timedelta(seconds=30),

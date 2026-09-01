@@ -67,6 +67,15 @@ registration lease 内仍活跃时，新进程注册会 fail closed。因此显�
   Runtime resolve 或 `skill://` read 在冷副本 miss 时会触发 tenant 增量重建后重试。该 read-through 是
   可用性兜底，不替代启动 readiness：新 Hands 副本只有完成初始 lifecycle snapshot 后才能接流量。
   Redis 当前不是依赖；未来可选 L2 必须经 ADR、容量基准和机密数据评审，且故障时回退到 Artifact。
+  多副本 lifecycle 加速使用 `AURACLAW_KAFKA_SKILL_LIFECYCLE_TOPIC`（默认
+  `managed-agent.skill-lifecycle`）。PostgreSQL `hands.skill_lifecycle_broadcast_outbox` 只保存 tenant、单调
+  revision、change type、snapshot digest 和 origin replica，不保存 Skill 正文。relay publish 失败会保留
+  outbox；观察 pending 数、`skill.lifecycle.signal.applied.count`、`skill.lifecycle.signal.stale.count` 和
+  `skill.trusted_messages.latency.seconds`。每个 Hands 进程必须有唯一 replica id，从而生成独立 consumer group；
+  同一 group 被多个副本共享会退化为竞争消费。Kafka 不可用时不要清除 outbox，Hands 依靠启动 snapshot、
+  read-through 和周期 reconciliation 运行，并定期恢复 consumer。恢复后重复/乱序消息由 tenant revision fence
+  丢弃。决策和 Redis 退出条件见
+  [ADR-004](../architecture/decisions/ADR-004-skill-cache-and-replica-convergence.md)。
   Publication Reliability 每轮只领取 `AURACLAW_SKILL_RELIABILITY_MAX_CONCURRENT` 条 Outbox，按 tenant
   合并 rebuild、跨 tenant 并行，并以 `AURACLAW_SKILL_RELIABILITY_CLAIM_TTL_SECONDS` 续租；complete/fail
   影响零行视为 owner 丢失，不把旧 worker 的结果冒充成功。

@@ -2776,7 +2776,7 @@ ready Skill Artifact 建立带 fencing 的物理回收流程；不把成功命�
 ## 阶段 Skill 增量加载与冷副本回源（Issue #74 / L1 子阶段）
 
 状态：L1 cache、增量重建、管理详情复用、冷副本 read-through、测试和文档完成；Issue #74 保持 open，
-后续子阶段继续完成跨副本 lifecycle 广播、性能基准和 Runtime prompt 优化。
+跨副本广播已在后续子阶段完成，剩余性能基准和 Runtime prompt 优化。
 
 ### 内容缓存与增量重建
 
@@ -2798,5 +2798,31 @@ ready Skill Artifact 建立带 fencing 的物理回收流程；不把成功命�
 
 - [x] 指标覆盖 package download count/bytes/latency、cache hit/miss/eviction/resident bytes、single-flight waiter、rebuild duration/scanned/reused。
 - [x] 单元测试覆盖 100 并发冷加载一次下载、连续 10 个周期不重复下载、cache prune、管理详情热命中、冷 resolve/read 回源。
+- [x] Ruff、Mypy、import-linter、Compose、定向与完整 Pytest 通过。
+- [x] Git 暂存范围审查、intentional commit 与 push 完成；Issue #74 保持 open。
+
+## 阶段 Skill 多副本 lifecycle 广播（Issue #74 / Broadcast 子阶段）
+
+状态：PostgreSQL broadcast outbox、Kafka 每副本消费、revision fencing、故障降级、测试和 ADR 完成；
+Issue #74 保持 open，后续继续性能基准和 Runtime prompt 热路径优化。
+
+### 可靠传播与 fencing
+
+- [x] `0054` 正反迁移增加每租户单调 revision 和独立 broadcast outbox，事件不携带 Skill 正文。
+- [x] relay 使用 lease/`SKIP LOCKED` 竞争领取并安全重试；重复 publish 由 tenant revision fence 幂等消除。
+- [x] Kafka 以 tenant 为 key，每个 Hands 副本使用独立 consumer group，不与其他副本竞争本地失效消息。
+- [x] consumer 只消费 identity/revision/change type/snapshot digest，并回读 PostgreSQL 执行增量 rebuild。
+- [x] publication、installation、revoke、restore、retire、purge、source 和 publisher trust 的现有 projector 路径统一接入广播 projector。
+
+### 故障、恢复与决策
+
+- [x] producer 故障保留 outbox；consumer 故障不阻止 PostgreSQL snapshot/read-through/reconciliation，并周期重连。
+- [x] 重复与乱序 revision 被拒绝；origin replica 也权威回读以覆盖跨副本 mutation 竞态，新副本启动仍先完成 snapshot。
+- [x] ADR-004 冻结“不引入 Redis”、每副本 Kafka group、可选 L2 decision gate 和回滚方式。
+- [x] 单元测试覆盖多副本 fan-out、revision 乱序、publish 重试和 group 唯一性。
+- [x] PostgreSQL 测试覆盖 revision 单调、双 relay 竞争领取和 migration roundtrip。
+
+### 验证与交付
+
 - [x] Ruff、Mypy、import-linter、Compose、定向与完整 Pytest 通过。
 - [x] Git 暂存范围审查、intentional commit 与 push 完成；Issue #74 保持 open。

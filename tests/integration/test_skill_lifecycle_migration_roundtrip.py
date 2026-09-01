@@ -66,10 +66,13 @@ UP = "\n".join(
         (ROOT / "migrations/0037_skill_publication_sources.sql").read_text(),
         (ROOT / "migrations/0038_skill_installation_draining.sql").read_text(),
         (ROOT / "migrations/0039_skill_publisher_runtime_revocation.sql").read_text(),
+        (ROOT / "migrations/0050_batch_worker_lease_safety.sql").read_text(),
+        (ROOT / "migrations/0054_skill_lifecycle_broadcast_outbox.sql").read_text(),
     )
 )
 DOWN = "\n".join(
     (
+        (ROOT / "migrations/0054_skill_lifecycle_broadcast_outbox.down.sql").read_text(),
         (ROOT / "migrations/0039_skill_publisher_runtime_revocation.down.sql").read_text(),
         (ROOT / "migrations/0038_skill_installation_draining.down.sql").read_text(),
         (ROOT / "migrations/0037_skill_publication_sources.down.sql").read_text(),
@@ -135,6 +138,8 @@ def test_skill_lifecycle_migration_roundtrip_in_isolated_postgres() -> None:
                 "skill_publisher",
                 "skill_publisher_key",
                 "skill_publisher_command",
+                "skill_lifecycle_revision",
+                "skill_lifecycle_broadcast_outbox",
             ):
                 assert await connection.fetchval(
                     "SELECT to_regclass($1) IS NOT NULL", f"hands.{relation}"

@@ -54,6 +54,9 @@ from auraclaw.infrastructure.persistence.postgres_common import asyncpg_url
 from auraclaw.infrastructure.persistence.postgres_skill_lifecycle import (
     PostgresSkillLifecycleStore,
 )
+from auraclaw.infrastructure.persistence.postgres_skill_lifecycle_events import (
+    PostgresSkillLifecycleSignalStore,
+)
 from auraclaw.internal.http import create_contract_app
 from auraclaw.internal.routes import skill_publication_routes
 
@@ -77,6 +80,7 @@ MIGRATION = "\n".join(
         (ROOT / "migrations/0037_skill_publication_sources.sql").read_text(),
         (ROOT / "migrations/0038_skill_installation_draining.sql").read_text(),
         (ROOT / "migrations/0050_batch_worker_lease_safety.sql").read_text(),
+        (ROOT / "migrations/0054_skill_lifecycle_broadcast_outbox.sql").read_text(),
     )
 )
 pytestmark = pytest.mark.skipif(DATABASE_URL is None, reason="PostgreSQL test URL not configured")
@@ -260,6 +264,62 @@ async def _ensure_skill_lifecycle_schema(connection: asyncpg.Connection) -> None
     )
     if not current:
         await connection.execute(MIGRATION)
+    elif not await connection.fetchval(
+        "SELECT to_regclass('hands.skill_lifecycle_broadcast_outbox') IS NOT NULL"
+    ):
+        await connection.execute(
+            (ROOT / "migrations/0054_skill_lifecycle_broadcast_outbox.sql").read_text()
+        )
+
+
+def test_postgres_skill_lifecycle_broadcast_outbox_is_monotonic_and_claimed_once() -> None:
+    async def scenario() -> None:
+        assert DATABASE_URL is not None
+        connection = await asyncpg.connect(DATABASE_URL)
+        await _ensure_skill_lifecycle_schema(connection)
+        tenant_id = f"tenant-signal-{uuid4().hex}"
+        store_a = PostgresSkillLifecycleSignalStore(DATABASE_URL)
+        store_b = PostgresSkillLifecycleSignalStore(DATABASE_URL)
+        try:
+            first = await store_a.enqueue(
+                tenant_id=tenant_id,
+                change_type="skill.lifecycle.snapshot_changed",
+                snapshot_digest="sha256:a",
+                origin_replica="hands-a",
+            )
+            second = await store_b.enqueue(
+                tenant_id=tenant_id,
+                change_type="skill.lifecycle.snapshot_changed",
+                snapshot_digest="sha256:b",
+                origin_replica="hands-b",
+            )
+            assert (first.revision, second.revision) == (1, 2)
+
+            claimed_a = await store_a.claim(
+                owner="relay-a", limit=10, claim_ttl=timedelta(seconds=30)
+            )
+            assert [record.signal.revision for record in claimed_a] == [1, 2]
+            assert await store_b.claim(
+                owner="relay-b", limit=10, claim_ttl=timedelta(seconds=30)
+            ) == ()
+            for record in claimed_a:
+                assert await store_a.complete(
+                    outbox_id=record.outbox_id, owner="relay-a"
+                )
+        finally:
+            await store_a.close()
+            await store_b.close()
+            await connection.execute(
+                "DELETE FROM hands.skill_lifecycle_broadcast_outbox WHERE tenant_id=$1",
+                tenant_id,
+            )
+            await connection.execute(
+                "DELETE FROM hands.skill_lifecycle_revision WHERE tenant_id=$1",
+                tenant_id,
+            )
+            await connection.close()
+
+    asyncio.run(scenario())
 
 
 def test_postgres_skill_lifecycle_is_persistent_and_tenant_scoped() -> None:
