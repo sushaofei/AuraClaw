@@ -19,7 +19,7 @@ Docker Compose 不提供 Kubernetes HPA、PDB 或 NetworkPolicy。本方案以�
   `postgresql+asyncpg://` DSN；`deploy/postgres/roles.sql` 为可选硬化参考；
 - `.host.env` 保存 `KINGBASE_HOST/PORT/USER/PWD`，运行
   `scripts/sync_kingbase_env.py` 后再物化 Compose Secret；
-- Compose `migrate` 使用 `/app/migrations`，当前目标 `0041`；
+- Compose `migrate` 使用 `/app/migrations`，当前目标 `0054`；
 - Kafka/Replay Router、华为 OBS、Vault 和模型出口可从 `auraclaw-platform` 网络访问；
 - 部署机存在被 `.gitignore` 排除的 `.env.prod`，从 `.env.prod.example` 复制后填真实密钥；
 - Secret 不写入 Compose、镜像、命令参数或日志。
@@ -61,11 +61,11 @@ docker compose --env-file .env.prod \
 
 docker compose --env-file .env.prod \
   -f compose.prod.yml run --rm migrate migrate up \
-  --target 0041 --directory /app/migrations
+  --target 0054 --directory /app/migrations
 ```
 
 迁移进程只挂载 migration admin DSN。KingBase 使用 PostgreSQL advisory lock 防止并发迁移，
-checksum ledger 阻止已执行文件漂移；重复运行是幂等的。当前 `0001`–`0041`
+checksum ledger 阻止已执行文件漂移；重复运行是幂等的。当前 `0001`–`0054`
 均为 expand 迁移。滚动窗口内不得删除 N-1 仍读取的列、事件字段或内部 API；contract 迁移
 只能在旧版本实例归零且兼容窗口结束后，以后续显式迁移执行。
 
@@ -76,7 +76,7 @@ Secret 生成目录必须与 `.env.prod` 的 `AURACLAW_SECRET_DIR` 一致；目�
 ```bash
 docker compose --env-file .env.prod -f compose.prod.yml \
   --profile migrate run --rm migrate migrate baseline \
-  --target 0041 --confirm-existing-schema --directory /app/migrations
+  --target 0054 --confirm-existing-schema --directory /app/migrations
 ```
 
 全新库、未知来源库、部分迁移库或 checksum 不一致时禁止 baseline。

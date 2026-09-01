@@ -130,7 +130,7 @@ docker compose --env-file .env.prod \
 
 docker compose --env-file .env.prod \
   -f compose.prod.yml --profile migrate run --rm migrate \
-  migrate up --target 0041 --directory /app/migrations
+  migrate up --target 0054 --directory /app/migrations
 ```
 
 规则：只做 expand 迁移；发布窗口内不删 N-1 仍依赖的列/事件字段。
@@ -234,7 +234,7 @@ uv run python scripts/materialize_compose_secrets.py \
 uv run python scripts/compose_preflight.py --env-file .env.prod
 docker compose --env-file .env.prod -f compose.prod.yml \
   --profile migrate run --rm migrate migrate up \
-  --target 0041 --directory /app/migrations
+  --target 0054 --directory /app/migrations
 docker compose --env-file .env.prod -f compose.prod.yml \
   up -d --wait --remove-orphans
 curl --fail http://127.0.0.1:8080/health/ready
