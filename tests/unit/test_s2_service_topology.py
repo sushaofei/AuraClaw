@@ -12,6 +12,7 @@ from auraclaw.composition.api import create_app
 from auraclaw.composition.cli import _serve_topology, build_parser, main
 from auraclaw.composition.services import (
     SERVICE_BY_COMMAND,
+    _readiness,
     _seed_managed_connector_credentials,
     create_service_app,
     service_spec,
@@ -186,6 +187,32 @@ def test_production_readiness_fails_when_hard_dependencies_are_missing() -> None
             serialized = json.dumps(response.json())
             assert "secret" not in serialized.lower()
             assert "api_key" not in serialized.lower()
+
+
+def test_session_readiness_requires_action_hands_identity() -> None:
+    values = {
+        "deployment_profile": "production",
+        "storage_backend": "postgres",
+        "database_url": "postgresql://test:test@postgres.test/test",
+        "lease_signing_key": "session-readiness-signing-key-00000001",
+        "task_api_workload_token": "task-token",
+        "projection_workload_token": "projection-token",
+        "orchestrator_workload_token": "orchestrator-token",
+        "runtime_workload_token": "runtime-token",
+        "policy_workload_token": "policy-token",
+        "delivery_workload_token": "delivery-token",
+        "streaming_gateway_workload_token": "streaming-token",
+    }
+    ready, dependencies = _readiness("session", _settings(**values))
+    assert not ready
+    assert dependencies["workload_identities"] == "missing"
+
+    ready, dependencies = _readiness(
+        "session",
+        _settings(**values, action_hands_workload_token="hands-token"),
+    )
+    assert ready
+    assert dependencies["workload_identities"] == "ready"
 
 
 @pytest.mark.parametrize("command", ["session", "orchestrator", "hands"])
