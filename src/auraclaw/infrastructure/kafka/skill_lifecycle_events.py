@@ -66,14 +66,9 @@ class KafkaSkillLifecycleSignalConsumer:
         target: SkillLifecycleSignalApplier,
     ) -> None:
         self._group_id = skill_lifecycle_group_id(replica_id)
-        self._consumer = AIOKafkaConsumer(
-            topic,
-            bootstrap_servers=bootstrap_servers,
-            group_id=self._group_id,
-            enable_auto_commit=False,
-            auto_offset_reset="latest",
-            request_timeout_ms=10_000,
-        )
+        self._bootstrap_servers = bootstrap_servers
+        self._topic = topic
+        self._consumer: AIOKafkaConsumer | None = None
         self._target = target
         self._task: asyncio.Task[None] | None = None
 
@@ -82,21 +77,38 @@ class KafkaSkillLifecycleSignalConsumer:
         return self._group_id
 
     async def start(self) -> None:
-        if self._task is not None:
+        if self._task is not None and not self._task.done():
             return
-        await self._consumer.start()
+        if self._consumer is not None:
+            await self._consumer.stop()
+        consumer = AIOKafkaConsumer(
+            self._topic,
+            bootstrap_servers=self._bootstrap_servers,
+            group_id=self._group_id,
+            enable_auto_commit=False,
+            auto_offset_reset="latest",
+            request_timeout_ms=10_000,
+        )
+        try:
+            await consumer.start()
+        except Exception:
+            await consumer.stop()
+            raise
+        self._consumer = consumer
         self._task = asyncio.create_task(
             self._run(), name=f"{self._group_id}-consumer"
         )
 
     async def _run(self) -> None:
         logger = logging.getLogger(__name__)
+        consumer = self._consumer
+        assert consumer is not None
         try:
-            async for message in self._consumer:
+            async for message in consumer:
                 try:
                     data = json.loads(message.value.decode())
                     await self._target.apply(_signal_from_dict(dict(data)))
-                    await self._consumer.commit()
+                    await consumer.commit()
                 except asyncio.CancelledError:
                     raise
                 except Exception:
@@ -105,7 +117,7 @@ class KafkaSkillLifecycleSignalConsumer:
                         getattr(message, "partition", None),
                         getattr(message, "offset", None),
                     )
-                    self._consumer.seek(
+                    consumer.seek(
                         TopicPartition(message.topic, message.partition),
                         message.offset,
                     )
@@ -121,7 +133,9 @@ class KafkaSkillLifecycleSignalConsumer:
             with suppress(asyncio.CancelledError):
                 await self._task
             self._task = None
-        await self._consumer.stop()
+        if self._consumer is not None:
+            await self._consumer.stop()
+            self._consumer = None
 
     @property
     def ready(self) -> bool:

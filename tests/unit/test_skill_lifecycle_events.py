@@ -11,6 +11,7 @@ from auraclaw.action.skill_lifecycle_events import (
     SkillLifecycleSignalRelay,
 )
 from auraclaw.infrastructure.kafka.skill_lifecycle_events import (
+    KafkaSkillLifecycleSignalConsumer,
     skill_lifecycle_group_id,
 )
 
@@ -139,3 +140,15 @@ def test_each_replica_uses_a_distinct_kafka_consumer_group() -> None:
     assert skill_lifecycle_group_id("hands/a") == (
         "action-hands-skill-lifecycle-hands-a"
     )
+
+
+def test_kafka_consumer_can_be_composed_without_a_running_event_loop() -> None:
+    consumer = KafkaSkillLifecycleSignalConsumer(
+        "kafka.example:9092",
+        topic="skill-lifecycle",
+        replica_id="hands-a",
+        target=SkillLifecycleSignalApplier(rebuilder=_Rebuilder()),
+    )
+
+    assert consumer.group_id == "action-hands-skill-lifecycle-hands-a"
+    assert consumer.ready is False
