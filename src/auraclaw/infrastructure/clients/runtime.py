@@ -682,6 +682,41 @@ class RemoteRuntimeControlClient:
             ),
             AssignmentDispositionResponse,
         )
+
+    async def suspend_with_checkpoint(
+        self,
+        task_id: str,
+        checkpoint: RuntimeCheckpoint,
+        reason: str,
+    ) -> None:
+        entry = next(
+            (
+                assignment
+                for known_task_id, assignment in self._assignments.values()
+                if known_task_id == task_id
+            ),
+            None,
+        )
+        if entry is None:
+            raise RuntimeError("Runtime does not own this task")
+        await self._contract.call(
+            "/internal/v1/control/assignments/disposition",
+            AssignmentDispositionRequest(
+                context=_context(entry.tenant_id, f"suspend:{task_id}", entry.run_id),
+                task_id=task_id,
+                runtime_id=entry.runtime_id,
+                lease_id=entry.lease_id,
+                fencing_token=entry.fencing_token,
+                disposition="suspend",
+                outcome=reason,
+                execution_claim_token=entry.execution_claim_token or "",
+                checkpoint_state=CheckpointState(
+                    phase=checkpoint.phase,
+                    harness_state=dict(checkpoint.state),
+                ),
+            ),
+            AssignmentDispositionResponse,
+        )
         for key, (known_task_id, _) in list(self._assignments.items()):
             if known_task_id == task_id:
                 self._assignments.pop(key, None)

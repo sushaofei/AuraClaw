@@ -100,6 +100,13 @@ class _Control:
         del task_id
         self.suspended_reason = reason
 
+    async def suspend_with_checkpoint(
+        self, task_id: str, checkpoint: RuntimeCheckpoint, reason: str
+    ) -> None:
+        del task_id
+        self.checkpoint = checkpoint
+        self.suspended_reason = reason
+
 
 class _Session:
     def __init__(self, goal: str) -> None:

@@ -302,9 +302,22 @@ class ControlInternalService:
             request.fencing_token,
         )
         if request.disposition == "suspend":
-            await self._store.suspend_assignment(
-                request.task_id, request.outcome or "waiting_children"
-            )
+            reason = request.outcome or "waiting_children"
+            if request.checkpoint_state is None:
+                await self._store.suspend_assignment(request.task_id, reason)
+            else:
+                checkpoint = RuntimeCheckpoint(
+                    tenant_id=assignment.tenant_id,
+                    session_id=assignment.session_id,
+                    run_id=assignment.run_id,
+                    fencing_token=assignment.fencing_token,
+                    phase=request.checkpoint_state.phase,
+                    state=dict(request.checkpoint_state.harness_state),
+                    updated_at=datetime.now(UTC),
+                )
+                await self._store.suspend_with_checkpoint(
+                    request.task_id, checkpoint, reason
+                )
         elif (
             request.disposition == "ack"
             and request.outcome == "waiting_for_human"

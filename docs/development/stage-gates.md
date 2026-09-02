@@ -3004,3 +3004,23 @@ active-reference barrier，并简化 AuraX 卸载入口。
 - [ ] Compose 与测试环境 Skill 激活回归通过。
 - [x] GitHub Issue #79 记录脱敏故障链、修复方案与验收标准。
 - [x] AuraClaw/AuraX intentional commit、push、测试环境发布及 quarantined 降级语义回归完成。
+
+## 阶段 Child 目标、Output Contract 与等待恢复（Issue #80）
+
+状态：完成。Worker 输入、Child 合约边界与 Coordinator 等待状态已收敛为可恢复协议。
+
+### Runtime 与协作协议
+
+- [x] Worker trusted context 注入权威 Child goal、Output Contract、Tool permissions 与 input refs。
+- [x] `create_child` schema 与 Runtime 校验只允许 `publish_result` 可表达的字段；非法合约返回可恢复 denied 结果。
+- [x] 空 wait set 无法进入 `waiting_children`；checkpoint 与 assignment suspend 由 Control Store 原子提交。
+- [x] completed、failed、cancelled Child 均触发 Root 唤醒，Root 自身进入终态时清理等待 assignment。
+- [x] checkpoint 缺失 wait set 时，仅在已有 Child 全部终态后安全重建；存在 active Child 时 fail closed。
+- [x] 周期补偿扫描覆盖已消费 outbox 的等待 Root，并记录 missing/recovered wait set 结构化日志。
+
+### 一致性、测试与交付
+
+- [x] 补偿只读取 Canonical Events 并重排 Control assignment，不修改或伪造 Canonical Child Result。
+- [x] 单元测试覆盖 Worker 首轮上下文、非法 required fields、重启后继续等待、failed/cancelled 唤醒、缺失 wait set 与取消收敛。
+- [x] 内存与 PostgreSQL Control Store 实现相同的原子 checkpoint/suspend 和 waiting assignment 扫描语义。
+- [x] Ruff、Mypy、import-linter、定向与完整 Pytest 通过；共享测试环境 PostgreSQL 用例因并发消费者争用保留为隔离环境门禁。

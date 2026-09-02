@@ -135,6 +135,13 @@ class RuntimeControlClient(Protocol):
 
     async def suspend_assignment(self, task_id: str, reason: str) -> None: ...
 
+    async def suspend_with_checkpoint(
+        self,
+        task_id: str,
+        checkpoint: RuntimeCheckpoint,
+        reason: str,
+    ) -> None: ...
+
 
 class ModelClient(Protocol):
     async def generate(self, request: ModelRequest) -> ModelResponse: ...

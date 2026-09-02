@@ -338,6 +338,7 @@ class AssignmentDispositionRequest(ContractModel):
     disposition: Literal["ack", "finish", "fail", "suspend"]
     outcome: str | None = None
     execution_claim_token: str | None = None
+    checkpoint_state: CheckpointState | None = None
 
 
 class AssignmentRenewRequest(ContractModel):
