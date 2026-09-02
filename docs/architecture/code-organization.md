@@ -49,7 +49,10 @@ infrastructure -> implements stable ports
 
 ## 生产进程映射
 
-`auraclaw serve` 在本地启动与生产同构的 12 进程拓扑；生产入口由 `composition/services.py` 统一装配。
+`auraclaw serve` 在本地启动与生产同构的 12 进程拓扑。`composition/services.py`
+只保留服务规格、公共生命周期和薄分发入口；12 个生产对象图分别由
+`composition/builders/` 下的独立 builder 装配。builder 之间不互相依赖，development 与
+production 复用同一 builder，仅由 Settings/provider 选择不同 adapter。
 
 | CLI | 服务 | 主归属代码 |
 |---|---|---|
@@ -76,4 +79,3 @@ infrastructure -> implements stable ports
 2. 本页的包/进程映射；
 3. 受影响的系统架构或 ADR；
 4. [开发阶段校验清单](../development/stage-gates.md)。
-

@@ -3051,3 +3051,32 @@ active-reference barrier，并简化 AuraX 卸载入口。
 - [x] 单测覆盖截断恢复成功、预算耗尽专用错误、未知/拒绝 finish reason、终态 reserve、参数纠错、重复错误有界终止、Artifact 合约拒绝与 canonical result ref。
 - [x] 现有 checkpoint/tool-call 幂等回归继续覆盖 model 后、tool 前与 tool 后恢复；Canonical Events 仍为唯一结果事实源。
 - [x] Ruff、Mypy、import-linter、定向与完整 Pytest 通过。
+
+## 阶段 R2.1：Composition 按服务独立装配（Issue #83）
+
+状态：完成。12 个生产对象图已拆分为独立 builder，集中式旧实现已删除。
+
+### 范围、非目标与回滚
+
+- [x] 保持 12 个生产进程、CLI、配置、HTTP/Internal API、Canonical Event 与唯一写入权不变。
+- [x] 本阶段只调整 composition 对象图与生命周期入口，不修改 Runtime 循环、Skill 业务规则或数据库 schema。
+- [x] 回滚为整体恢复原集中式装配提交；本阶段无数据迁移或数据降级步骤。
+
+### 装配与生命周期
+
+- [x] 12 个生产服务均由 `composition/builders/` 下独立、可定位的 builder 装配。
+- [x] builder 之间无依赖；development/production 共用 builder，由 Settings/provider 选择 adapter。
+- [x] `services.py` 收敛为服务规格、公共生命周期、安全/provider 辅助与薄分发 facade。
+- [x] 已删除迁移完成后的 9 组旧对象图实现，不保留双实现或临时兼容路径。
+- [x] 公共 lifespan 继续统一处理初始化、worker 唤醒、部分启动失败清理与逆序关闭。
+- [x] worker post-tick wait 与缺失内部 token 的隔离 fallback 保持原行为。
+
+### 测试、文档与交付
+
+- [x] 12 服务入口、health/readiness、worker 停止、信任边界、Hands/MCP 与唤醒行为回归通过。
+- [x] builder 模块完整性、无跨 builder 依赖及集中式旧实现不存在由自动化测试约束。
+- [x] 完整 Pytest 通过（571 passed，3 skipped）；仅保留既有第三方弃用与异步资源 warning。
+- [x] `uv run ruff check .`、`uv run mypy src/auraclaw` 与 `uv run lint-imports` 通过。
+- [x] 代码组织文档已同步，数据库迁移不适用，删除范围经源码/入口/测试检查确认。
+- [x] 暂存范围排除 `.vscode/launch.json`、`docs/tmp/`、Secret、缓存和虚拟环境。
+- [x] 以一个 intentional commit 提交并 push 当前分支到 `origin`，同步关闭 Issue #83。
