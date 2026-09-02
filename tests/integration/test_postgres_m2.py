@@ -216,6 +216,13 @@ def test_postgres_control_claim_lease_fencing_checkpoint_and_capacity() -> None:
             assert replacement.fencing_token > lease.fencing_token
             with pytest.raises(FencingTokenError):
                 await store_a.assert_fencing(resource_id, lease.fencing_token)
+            await store_a.suspend_assignment(task_id, "waiting_children")
+            assert await store_b.list_waiting_assignments(limit=0) == ()
+            waiting = await store_b.list_waiting_assignments(limit=10)
+            assert len(waiting) == 1
+            assert waiting[0].session_id == assignment.session_id
+            assert waiting[0].run_id == assignment.run_id
+            assert await store_b.wake_assignment(task_id)
         finally:
             await store_a.close()
             await store_b.close()

@@ -19,6 +19,11 @@ class ReviewDecision(StrEnum):
     REJECTED = "rejected"
 
 
+PUBLISHABLE_CHILD_RESULT_FIELDS = frozenset(
+    {"summary", "result_ref", "artifact_refs", "evidence_refs", "limitations"}
+)
+
+
 @dataclass(frozen=True)
 class CollaborationLimits:
     max_depth: int = 4
@@ -39,6 +44,15 @@ class OutputContract:
     required_fields: tuple[str, ...] = ("summary", "result_ref")
     require_artifacts: bool = False
     require_evidence: bool = False
+
+    def __post_init__(self) -> None:
+        unsupported = sorted(
+            set(self.required_fields) - PUBLISHABLE_CHILD_RESULT_FIELDS
+        )
+        if unsupported:
+            raise ValueError(
+                "unsupported Child Result fields: " + ", ".join(unsupported)
+            )
 
     def as_dict(self) -> dict[str, Any]:
         return {

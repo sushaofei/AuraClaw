@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Sequence
 from dataclasses import replace
 from datetime import timedelta
@@ -77,11 +78,16 @@ class RunnableFeedConsumer:
         *,
         worker_id: str,
         wait_seconds: float = 0,
+        waiting_recovery_interval: timedelta = timedelta(seconds=5),
     ) -> None:
         self._source = source
         self._store = store
         self._worker_id = worker_id
         self._wait_seconds = max(0.0, wait_seconds)
+        self._waiting_recovery_interval = max(
+            0.0, waiting_recovery_interval.total_seconds()
+        )
+        self._next_waiting_recovery_at = 0.0
         self._ack_tasks: set[asyncio.Task[None]] = set()
 
     async def run_once(self, *, limit: int = 100) -> int:
@@ -95,6 +101,17 @@ class RunnableFeedConsumer:
         enqueued = 0
         for record in records:
             try:
+                if (
+                    record.event.type in {"run.completed", "run.failed", "run.cancelled"}
+                    and record.event.run_id is not None
+                ):
+                    await self._store.finish_assignment(
+                        (
+                            f"{record.event.tenant_id}:{record.event.session_id}:"
+                            f"{record.event.run_id}"
+                        ),
+                        record.event.type.removeprefix("run."),
+                    )
                 item = self._derive_from_record(record)
                 if item is None:
                     events = await self._source.load(
@@ -155,7 +172,29 @@ class RunnableFeedConsumer:
                     "nack",
                     str(exc),
                 )
+        now = time.monotonic()
+        if now >= self._next_waiting_recovery_at:
+            self._next_waiting_recovery_at = now + self._waiting_recovery_interval
+            enqueued += await self._recover_waiting_coordinators()
         return enqueued
+
+    async def _recover_waiting_coordinators(self, *, limit: int = 100) -> int:
+        recovered = 0
+        for assignment in await self._store.list_waiting_assignments(limit=limit):
+            root_events = await self._source.load_root(
+                assignment.tenant_id,
+                assignment.root_session_id,
+                event_types=tuple(COLLABORATION_EVENTS),
+            )
+            if not root_events:
+                continue
+            graph = CollaborationAggregate.from_events(
+                assignment.tenant_id,
+                assignment.root_session_id,
+                root_events,
+            )
+            recovered += int(await self._wake_waiting_coordinator(graph))
+        return recovered
 
     def _schedule_ack(self, record: ClaimedOutboxRecord) -> None:
         async def _ack() -> None:
@@ -336,7 +375,8 @@ class RunnableFeedConsumer:
         self, graph: CollaborationAggregate
     ) -> bool:
         root = graph.nodes.get(graph.root_session_id)
-        if root is None or root.run_id is None:
+        terminal = {"completed", "failed", "cancelled"}
+        if root is None or root.run_id is None or root.status in terminal:
             return False
         checkpoint = await self._store.load_checkpoint(
             graph.tenant_id, graph.root_session_id, root.run_id
@@ -350,8 +390,25 @@ class RunnableFeedConsumer:
             str(item) for item in checkpoint.state.get("waiting_child_ids", ())
         )
         if not waiting:
-            return False
-        terminal = {"completed", "failed", "cancelled"}
+            children = tuple(
+                node
+                for node in graph.nodes.values()
+                if node.parent_session_id is not None
+            )
+            active = tuple(node for node in children if node.status not in terminal)
+            if not children or active:
+                logger.warning(
+                    "collaboration.wait_set_missing root=%s active_children=%s",
+                    graph.root_session_id,
+                    [node.session_id for node in active],
+                )
+                return False
+            waiting = tuple(node.session_id for node in children)
+            logger.warning(
+                "collaboration.wait_set_recovered root=%s terminal_children=%s",
+                graph.root_session_id,
+                list(waiting),
+            )
         if not all(
             child_id in graph.nodes and graph.nodes[child_id].status in terminal
             for child_id in waiting

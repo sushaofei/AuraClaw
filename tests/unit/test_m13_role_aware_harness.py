@@ -55,6 +55,13 @@ class _Control:
         del task_id
         self.suspended = reason
 
+    async def suspend_with_checkpoint(
+        self, task_id: str, checkpoint: RuntimeCheckpoint, reason: str
+    ) -> None:
+        del task_id
+        self.checkpoint = checkpoint
+        self.suspended = reason
+
 
 class _Session:
     def __init__(self, goal: str) -> None:
@@ -263,6 +270,97 @@ def test_worker_without_publish_result_fails_closed() -> None:
     asyncio.run(scenario())
 
 
+def test_worker_model_receives_authoritative_child_goal_and_contract() -> None:
+    async def scenario() -> None:
+        control = _Control()
+        session = _Session("unused root goal")
+        session.events = [
+            SimpleNamespace(
+                type="child.created",
+                payload={
+                    "goal": "create price deviation test cases",
+                    "output_contract": {
+                        "required_fields": ["summary", "result_ref"],
+                        "require_artifacts": True,
+                    },
+                    "input_refs": ["skill://price-insight-deviation"],
+                    "tool_permissions": ["price.read"],
+                },
+                run_id="run-m13",
+                occurred_at=datetime.now(UTC),
+            )
+        ]
+        model = _Model([_response(output="forgot to publish")])
+        harness = AgentHarness(
+            control_store=control,  # type: ignore[arg-type]
+            session=session,  # type: ignore[arg-type]
+            model=model,
+            tools=IdempotentToolClient(),
+            runtime_events=_RuntimeEvents(),
+            collaboration_controller=RuntimeCollaborationController(
+                _CollaborationClient()
+            ),
+        )
+        with pytest.raises(CollaborationValidationError, match="not published"):
+            await harness.execute(_assignment("worker"))
+        user_messages = [
+            message["content"]
+            for message in model.requests[0].messages
+            if message["role"] == "user"
+        ]
+        assert len(user_messages) == 1
+        assert "create price deviation test cases" in user_messages[0]
+        assert '"require_artifacts":true' in user_messages[0]
+        assert '"tool_permissions":["price.read"]' in user_messages[0]
+
+    asyncio.run(scenario())
+
+
+def test_reprovisioned_waiting_coordinator_does_not_poll_model_again() -> None:
+    async def scenario() -> None:
+        control = _Control()
+        control.checkpoint = RuntimeCheckpoint(
+            tenant_id="tenant-m13",
+            session_id="root",
+            run_id="run-m13",
+            fencing_token=1,
+            phase="agent.waiting_children",
+            state={
+                "turn_index": 5,
+                "steps_used": 5,
+                "sequence": 20,
+                "usage": {},
+                "capability_state": {},
+                "call_index": 0,
+                "call_signatures": {},
+                "waiting_child_ids": ["child-one"],
+            },
+            updated_at=datetime.now(UTC),
+        )
+        collaboration = _CollaborationClient()
+        collaboration.children = [
+            {"session_id": "child-one", "status": "running"}
+        ]
+        model = _Model([_response(output="must not be called")])
+        harness = AgentHarness(
+            control_store=control,  # type: ignore[arg-type]
+            session=_Session("root goal"),  # type: ignore[arg-type]
+            model=model,
+            tools=IdempotentToolClient(),
+            runtime_events=_RuntimeEvents(),
+            collaboration_controller=RuntimeCollaborationController(collaboration),
+        )
+
+        await harness.execute(_assignment())
+
+        assert model.requests == []
+        assert control.suspended == "waiting_children"
+        assert control.checkpoint is not None
+        assert control.checkpoint.state["waiting_child_ids"] == ["child-one"]
+
+    asyncio.run(scenario())
+
+
 def test_collaboration_tools_are_role_scoped_and_freeze_owner_operations() -> None:
     controller = RuntimeCollaborationController(_CollaborationClient())
 
@@ -337,6 +435,37 @@ def test_child_permission_escalation_returns_denied_without_calling_client() -> 
             "status": "denied",
             "error_code": "authorization_denied",
             "summary": "Child tool permissions exceed the Root grant",
+        }
+        assert client.children == []
+
+    asyncio.run(scenario())
+
+
+def test_unsupported_child_result_contract_is_rejected_before_creation() -> None:
+    async def scenario() -> None:
+        client = _CollaborationClient()
+        controller = RuntimeCollaborationController(client)
+        result = await controller.execute(
+            _assignment(),
+            ToolCall(
+                tool_invocation_id="create-invalid-contract",
+                name=CREATE_CHILD,
+                arguments={
+                    "spec": {
+                        "task_key": "invalid-contract-child",
+                        "role": "worker",
+                        "goal": "create a document",
+                        "output_contract": {
+                            "required_fields": ["test_document"]
+                        },
+                    }
+                },
+            ),
+        )
+        assert result.result == {
+            "status": "denied",
+            "error_code": "collaboration_invalid",
+            "summary": "unsupported Child Result fields: test_document",
         }
         assert client.children == []
 

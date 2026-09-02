@@ -8,7 +8,7 @@ from auraclaw.contracts.collaboration import (
     OutputContract,
 )
 from auraclaw.contracts.commands import CommandContext
-from auraclaw.contracts.events import Actor
+from auraclaw.contracts.events import Actor, NewEvent
 from auraclaw.control.ports import (
     AGENT_RUNTIME_POOL,
     RunnableItem,
@@ -217,5 +217,228 @@ def test_child_completion_requeues_newly_runnable_dependency() -> None:
         await asyncio.sleep(0)
         after_second = await control.claim("orchestrator-after-second", limit=10)
         assert root_id in {claim.item.session_id for claim in after_second}
+
+    asyncio.run(scenario())
+
+
+def test_failed_child_recovers_root_with_missing_checkpoint_wait_set() -> None:
+    async def scenario() -> None:
+        store = InMemoryEventStore()
+        task_projection = InMemoryTaskProjection()
+        collaboration_projection = InMemoryCollaborationProjection()
+        relay = OutboxRelay(
+            store,
+            CompositeProjection(task_projection, collaboration_projection),
+        )
+        tasks = TaskService(
+            event_store=store,
+            relay=relay,
+            reader=task_projection,
+            admission=AllowAllAdmissionController(),
+        )
+        collaboration = CollaborationService(event_store=store, relay=relay)
+        control = InMemoryControlStateStore()
+        feed = RunnableFeedConsumer(
+            store,
+            control,
+            worker_id="orchestrator-recovery",
+            waiting_recovery_interval=timedelta(0),
+        )
+        root_response = await tasks.create_task(
+            goal="recover a failed Child",
+            context=CommandContext(
+                command_id="create-recovery-root",
+                tenant_id="tenant-m13",
+                actor=Actor(type="user", id="user-m13"),
+                correlation_id="corr-recovery",
+                expected_version=0,
+                operation="create_task",
+            ),
+        )
+        root_id = str(root_response["session_id"])
+        root_run_id = str(root_response["run_id"])
+        child_response = await collaboration.create_child(
+            root_session_id=root_id,
+            parent_session_id=root_id,
+            spec=ChildSpec(
+                task_key="failing-child",
+                role=CollaborationRole.WORKER,
+                goal="fail safely",
+                output_contract=OutputContract(),
+            ),
+            context=CommandContext(
+                command_id="create-failing-child",
+                tenant_id="tenant-m13",
+                actor=Actor(type="coordinator", id="coordinator-m13"),
+                correlation_id="corr-recovery",
+                expected_version=0,
+                operation="collaboration.create_child",
+            ),
+        )
+        child_id = str(child_response["session_id"])
+        child_events = await store.load("tenant-m13", child_id)
+        child_run_id = next(
+            str(event.payload["run_id"])
+            for event in child_events
+            if event.type == "run.requested"
+        )
+
+        await feed.run_once(limit=100)
+        await asyncio.sleep(0)
+        claims = await control.claim("orchestrator-recovery-claim", limit=10)
+        root_claim = next(item for item in claims if item.item.session_id == root_id)
+        lease = await control.acquire_lease(
+            f"session:tenant-m13:{root_id}",
+            "orchestrator-recovery-claim",
+            ttl=timedelta(seconds=30),
+        )
+        assert lease is not None
+        assignment = RuntimeAssignment(
+            tenant_id="tenant-m13",
+            root_session_id=root_id,
+            session_id=root_id,
+            run_id=root_run_id,
+            runtime_id="runtime-shared",
+            lease_id=lease.lease_id,
+            fencing_token=lease.fencing_token,
+            role="root",
+            resource_profile={},
+            lease_expires_at=lease.expires_at,
+        )
+        assert await control.assign(
+            root_claim.item.task_id,
+            assignment,
+            claim_token=root_claim.claim_token,
+        )
+        await control.save_checkpoint(
+            RuntimeCheckpoint(
+                tenant_id="tenant-m13",
+                session_id=root_id,
+                run_id=root_run_id,
+                fencing_token=lease.fencing_token,
+                phase="agent.waiting_children",
+                state={},
+                updated_at=datetime.now(UTC),
+            )
+        )
+        await control.suspend_assignment(root_claim.item.task_id, "waiting_children")
+
+        child_events = await store.load("tenant-m13", child_id)
+        await store.append(
+            root_session_id=root_id,
+            session_id=child_id,
+            run_id=child_run_id,
+            context=CommandContext(
+                command_id="fail-child",
+                tenant_id="tenant-m13",
+                actor=Actor(type="runtime", id="runtime-shared"),
+                correlation_id="corr-recovery",
+                expected_version=len(child_events),
+                operation="runtime.run.failed",
+            ),
+            events=[
+                NewEvent(
+                    type="run.failed",
+                    payload={"run_id": child_run_id, "error_code": "test_failure"},
+                )
+            ],
+            command_result={"status": "failed"},
+        )
+        await feed.run_once(limit=100)
+        await asyncio.sleep(0)
+        recovered = await control.claim("orchestrator-after-failure", limit=10)
+        assert root_id in {item.item.session_id for item in recovered}
+
+    asyncio.run(scenario())
+
+
+def test_cancelled_root_clears_waiting_assignment_without_requeue() -> None:
+    async def scenario() -> None:
+        store = InMemoryEventStore()
+        task_projection = InMemoryTaskProjection()
+        relay = OutboxRelay(store, task_projection)
+        tasks = TaskService(
+            event_store=store,
+            relay=relay,
+            reader=task_projection,
+            admission=AllowAllAdmissionController(),
+        )
+        control = InMemoryControlStateStore()
+        feed = RunnableFeedConsumer(
+            store,
+            control,
+            worker_id="orchestrator-cancel-cleanup",
+            waiting_recovery_interval=timedelta(0),
+        )
+        created = await tasks.create_task(
+            goal="cancel a waiting coordinator",
+            context=CommandContext(
+                command_id="create-cancel-root",
+                tenant_id="tenant-m13",
+                actor=Actor(type="user", id="user-m13"),
+                correlation_id="corr-cancel",
+                expected_version=0,
+                operation="create_task",
+            ),
+        )
+        root_id = str(created["session_id"])
+        run_id = str(created["run_id"])
+        task_id = f"tenant-m13:{root_id}:{run_id}"
+        await feed.run_once(limit=100)
+        await asyncio.sleep(0)
+        claim = (await control.claim("orchestrator-cancel-claim", limit=1))[0]
+        lease = await control.acquire_lease(
+            f"session:tenant-m13:{root_id}",
+            "orchestrator-cancel-claim",
+            ttl=timedelta(seconds=30),
+        )
+        assert lease is not None
+        assignment = RuntimeAssignment(
+            tenant_id="tenant-m13",
+            root_session_id=root_id,
+            session_id=root_id,
+            run_id=run_id,
+            runtime_id="runtime-shared",
+            lease_id=lease.lease_id,
+            fencing_token=lease.fencing_token,
+            role="root",
+            resource_profile={},
+            lease_expires_at=lease.expires_at,
+        )
+        assert await control.assign(
+            task_id,
+            assignment,
+            claim_token=claim.claim_token,
+        )
+        await control.save_checkpoint(
+            RuntimeCheckpoint(
+                tenant_id="tenant-m13",
+                session_id=root_id,
+                run_id=run_id,
+                fencing_token=lease.fencing_token,
+                phase="agent.waiting_children",
+                state={"waiting_child_ids": ["missing-child"]},
+                updated_at=datetime.now(UTC),
+            )
+        )
+        await control.suspend_assignment(task_id, "waiting_children")
+        await tasks.cancel_task(
+            session_id=root_id,
+            reason="test cancellation cleanup",
+            context=await _context(
+                store,
+                root_id,
+                command_id="cancel-waiting-root",
+                actor_type="user",
+                actor_id="user-m13",
+                operation="cancel_task",
+            ),
+        )
+
+        await feed.run_once(limit=100)
+        await asyncio.sleep(0)
+        assert await control.list_waiting_assignments() == ()
+        claims = await control.claim("orchestrator-after-cancel", limit=10)
+        assert root_id not in {item.item.session_id for item in claims}
 
     asyncio.run(scenario())

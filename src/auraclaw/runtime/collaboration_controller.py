@@ -4,6 +4,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+from auraclaw.contracts.collaboration import PUBLISHABLE_CHILD_RESULT_FIELDS
 from auraclaw.contracts.errors import AuthorizationError, CollaborationValidationError
 from auraclaw.control.ports import RuntimeAssignment
 from auraclaw.runtime.ports import CollaborationClient, ToolCall
@@ -135,8 +136,8 @@ class RuntimeCollaborationController:
         arguments = dict(call.arguments)
         if call.name == CREATE_CHILD:
             try:
-                self._validate_child_permissions(assignment, arguments)
-            except AuthorizationError as exc:
+                self._validate_child_request(assignment, arguments)
+            except (AuthorizationError, CollaborationValidationError) as exc:
                 return CollaborationExecution(
                     result={
                         "status": "denied",
@@ -205,7 +206,7 @@ class RuntimeCollaborationController:
         raise AuthorizationError(f"role={role} cannot call {name}")
 
     @staticmethod
-    def _validate_child_permissions(
+    def _validate_child_request(
         assignment: RuntimeAssignment, arguments: dict[str, Any]
     ) -> None:
         spec = arguments.get("spec")
@@ -218,6 +219,23 @@ class RuntimeCollaborationController:
         }
         if not requested.issubset(allowed):
             raise AuthorizationError("Child tool permissions exceed the Root grant")
+        output_contract = spec.get("output_contract")
+        if not isinstance(output_contract, dict):
+            raise CollaborationValidationError(
+                "create_child output_contract must be an object"
+            )
+        required = output_contract.get("required_fields", ())
+        if not isinstance(required, (list, tuple)):
+            raise CollaborationValidationError(
+                "output_contract required_fields must be an array"
+            )
+        unsupported = sorted(
+            {str(item) for item in required} - PUBLISHABLE_CHILD_RESULT_FIELDS
+        )
+        if unsupported:
+            raise CollaborationValidationError(
+                "unsupported Child Result fields: " + ", ".join(unsupported)
+            )
 
     @staticmethod
     def _strings(value: dict[str, Any], key: str) -> tuple[str, ...]:
@@ -271,8 +289,14 @@ class RuntimeCollaborationController:
                         "version": {"type": "string"},
                         "required_fields": {
                             "type": "array",
-                            "items": {"type": "string"},
+                            "items": {
+                                "type": "string",
+                                "enum": sorted(PUBLISHABLE_CHILD_RESULT_FIELDS),
+                            },
+                            "uniqueItems": True,
                         },
+                        "require_artifacts": {"type": "boolean"},
+                        "require_evidence": {"type": "boolean"},
                     },
                     "required": ["required_fields"],
                     "additionalProperties": False,

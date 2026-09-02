@@ -616,6 +616,62 @@ class PostgresControlStateStore(_LazyPool):
             raise ValueError(f"unsupported assignment suspension: {reason}")
         await self.finish_assignment(task_id, reason)
 
+    async def suspend_with_checkpoint(
+        self,
+        task_id: str,
+        checkpoint: RuntimeCheckpoint,
+        reason: str,
+    ) -> None:
+        if reason not in {"waiting_children", "waiting_for_human"}:
+            raise ValueError(f"unsupported assignment suspension: {reason}")
+        pool = await self.pool()
+        resource_id = f"session:{checkpoint.tenant_id}:{checkpoint.session_id}"
+        async with pool.acquire() as connection, connection.transaction():
+            saved = await connection.fetchval(
+                """
+                INSERT INTO control.runtime_checkpoint
+                  (tenant_id,session_id,run_id,fencing_token,phase,state,updated_at)
+                SELECT $1,$2,$3,$4,$5,$6::jsonb,$7
+                WHERE EXISTS(SELECT 1 FROM control.runtime_lease
+                  WHERE resource_id=$8 AND fencing_token=$4 AND expires_at > now())
+                  AND EXISTS(SELECT 1 FROM control.assignment
+                    WHERE task_id=$9 AND tenant_id=$1 AND session_id=$2 AND run_id=$3
+                      AND fencing_token=$4 FOR UPDATE)
+                ON CONFLICT (tenant_id,session_id,run_id) DO UPDATE SET
+                  fencing_token=EXCLUDED.fencing_token, phase=EXCLUDED.phase,
+                  state=EXCLUDED.state, updated_at=EXCLUDED.updated_at
+                WHERE control.runtime_checkpoint.fencing_token <= EXCLUDED.fencing_token
+                RETURNING run_id
+                """,
+                checkpoint.tenant_id,
+                checkpoint.session_id,
+                checkpoint.run_id,
+                checkpoint.fencing_token,
+                checkpoint.phase,
+                _json(checkpoint.state),
+                checkpoint.updated_at,
+                resource_id,
+                task_id,
+            )
+            if saved is None:
+                raise FencingTokenError(
+                    "checkpoint suspension rejected for stale Runtime"
+                )
+            await connection.execute(
+                """UPDATE control.assignment
+                SET assignment_status=$2, completed_at=now() WHERE task_id=$1""",
+                task_id,
+                reason,
+            )
+            await connection.execute(
+                "UPDATE control.runnable_item SET status='acked' WHERE task_id=$1",
+                task_id,
+            )
+            await connection.execute(
+                "DELETE FROM control.runtime_lease WHERE resource_id=$1",
+                resource_id,
+            )
+
     async def wake_assignment(self, task_id: str) -> bool:
         pool = await self.pool()
         async with pool.acquire() as connection, connection.transaction():
@@ -636,6 +692,23 @@ class PostgresControlStateStore(_LazyPool):
                 task_id,
             )
             return updated is not None
+
+    async def list_waiting_assignments(
+        self, *, limit: int = 100
+    ) -> tuple[RuntimeAssignment, ...]:
+        pool = await self.pool()
+        task_ids = await pool.fetch(
+            """SELECT task_id FROM control.assignment
+               WHERE assignment_status='waiting_children'
+               ORDER BY completed_at, task_id LIMIT $1""",
+            max(0, limit),
+        )
+        assignments: list[RuntimeAssignment] = []
+        for row in task_ids:
+            assignment = await self.get_assignment(str(row["task_id"]))
+            if assignment is not None:
+                assignments.append(assignment)
+        return tuple(assignments)
 
     async def register_runtime(self, instance: RuntimeInstance) -> None:
         pool = await self.pool()

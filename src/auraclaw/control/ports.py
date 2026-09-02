@@ -176,7 +176,18 @@ class ControlStateStore(Protocol):
 
     async def suspend_assignment(self, task_id: str, reason: str) -> None: ...
 
+    async def suspend_with_checkpoint(
+        self,
+        task_id: str,
+        checkpoint: RuntimeCheckpoint,
+        reason: str,
+    ) -> None: ...
+
     async def wake_assignment(self, task_id: str) -> bool: ...
+
+    async def list_waiting_assignments(
+        self, *, limit: int = 100
+    ) -> tuple[RuntimeAssignment, ...]: ...
 
     async def register_runtime(self, instance: RuntimeInstance) -> None: ...
 

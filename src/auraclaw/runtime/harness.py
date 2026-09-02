@@ -308,6 +308,32 @@ class AgentHarness:
                     self._task_id(assignment), "waiting_for_human"
                 )
                 return
+        if (
+            checkpoint is not None
+            and checkpoint.phase in {
+                "agent.waiting_children",
+                "collaboration.waiting_children",
+            }
+            and self._collaboration_controller is not None
+        ):
+            waiting = tuple(
+                str(item)
+                for item in state.get("waiting_child_ids", ())
+                if item
+            )
+            _, active_children = await self._collaboration_controller.child_state(
+                assignment
+            )
+            still_waiting = tuple(
+                child_id for child_id in waiting if child_id in set(active_children)
+            )
+            if still_waiting:
+                await self._suspend_for_children(
+                    assignment,
+                    state,
+                    still_waiting,
+                )
+                return
         turn_events = events
         while int(state.get("steps_used", 0)) < assignment.budget.max_steps:
             await self._guard(assignment)
@@ -642,9 +668,8 @@ class AgentHarness:
                     }
                     waiting_state.pop("response", None)
                     waiting_state.pop("result", None)
-                    await self._save_checkpoint(assignment, "agent.waiting_children", waiting_state)
-                    await self._control.suspend_assignment(
-                        self._task_id(assignment), "waiting_children"
+                    await self._suspend_for_children(
+                        assignment, waiting_state, waiting_child_ids
                     )
                     return
                 if terminal:
@@ -696,9 +721,8 @@ class AgentHarness:
                     }
                     waiting_state.pop("response", None)
                     waiting_state.pop("result", None)
-                    await self._save_checkpoint(assignment, "agent.waiting_children", waiting_state)
-                    await self._control.suspend_assignment(
-                        self._task_id(assignment), "waiting_children"
+                    await self._suspend_for_children(
+                        assignment, waiting_state, active_children
                     )
                     return
                 if all_children and assignment.role in {"root", "coordinator"}:
@@ -1237,6 +1261,52 @@ class AgentHarness:
             )
         )
 
+    async def _suspend_for_children(
+        self,
+        assignment: RuntimeAssignment,
+        state: dict[str, Any],
+        child_session_ids: tuple[str, ...],
+    ) -> None:
+        waiting = tuple(dict.fromkeys(str(item) for item in child_session_ids if item))
+        if not waiting:
+            raise CollaborationValidationError(
+                "waiting_children requires a non-empty persisted Child wait set"
+            )
+        waiting_state = {**state, "waiting_child_ids": list(waiting)}
+        checkpoint = RuntimeCheckpoint(
+            tenant_id=assignment.tenant_id,
+            session_id=assignment.session_id,
+            run_id=assignment.run_id,
+            fencing_token=assignment.fencing_token,
+            phase="agent.waiting_children",
+            state=waiting_state,
+            updated_at=datetime.now(UTC),
+        )
+        await self._control.suspend_with_checkpoint(
+            self._task_id(assignment), checkpoint, "waiting_children"
+        )
+        persisted = await self._control.load_checkpoint(
+            assignment.tenant_id,
+            assignment.session_id,
+            assignment.run_id,
+        )
+        persisted_waiting = (
+            tuple(
+                str(item)
+                for item in persisted.state.get("waiting_child_ids", ())
+            )
+            if persisted is not None
+            else ()
+        )
+        if (
+            persisted is None
+            or persisted.phase != "agent.waiting_children"
+            or persisted_waiting != waiting
+        ):
+            raise CollaborationValidationError(
+                "waiting_children checkpoint did not preserve the Child wait set"
+            )
+
     async def _inject(self, point: InjectionPoint) -> None:
         if self._failure_injector is None:
             return
@@ -1397,6 +1467,27 @@ class AgentHarness:
         for event in events:
             if event.type == "session.created":
                 messages.append({"role": "user", "content": event.payload.get("goal", "")})
+            elif event.type == "child.created":
+                child_context = {
+                    "goal": event.payload.get("goal", ""),
+                    "output_contract": event.payload.get("output_contract", {}),
+                    "input_refs": event.payload.get("input_refs", []),
+                    "tool_permissions": event.payload.get("tool_permissions", []),
+                }
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "Authoritative Child assignment:\n"
+                            + json.dumps(
+                                child_context,
+                                ensure_ascii=False,
+                                sort_keys=True,
+                                separators=(",", ":"),
+                            )
+                        ),
+                    }
+                )
             elif event.type == "user.message.appended":
                 messages.append({"role": "user", "content": event.payload.get("message", "")})
             elif event.type == "model.output.completed":
@@ -1411,6 +1502,27 @@ class AgentHarness:
         for event in events:
             if event.type == "session.created":
                 messages.append({"role": "user", "content": event.payload.get("goal", "")})
+            elif event.type == "child.created":
+                child_context = {
+                    "goal": event.payload.get("goal", ""),
+                    "output_contract": event.payload.get("output_contract", {}),
+                    "input_refs": event.payload.get("input_refs", []),
+                    "tool_permissions": event.payload.get("tool_permissions", []),
+                }
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "Authoritative Child assignment:\n"
+                            + json.dumps(
+                                child_context,
+                                ensure_ascii=False,
+                                sort_keys=True,
+                                separators=(",", ":"),
+                            )
+                        ),
+                    }
+                )
             elif event.type == "user.message.appended":
                 messages.append(
                     {

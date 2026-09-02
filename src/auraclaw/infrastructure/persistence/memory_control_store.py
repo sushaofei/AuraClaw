@@ -404,6 +404,39 @@ class InMemoryControlStateStore:
             raise ValueError(f"unsupported assignment suspension: {reason}")
         await self.finish_assignment(task_id, reason)
 
+    async def suspend_with_checkpoint(
+        self,
+        task_id: str,
+        checkpoint: RuntimeCheckpoint,
+        reason: str,
+    ) -> None:
+        if reason not in {"waiting_children", "waiting_for_human"}:
+            raise ValueError(f"unsupported assignment suspension: {reason}")
+        async with self._lock:
+            entry = self._assignments.get(task_id)
+            resource_id = f"session:{checkpoint.tenant_id}:{checkpoint.session_id}"
+            lease = self._leases.get(resource_id)
+            if (
+                entry is None
+                or entry[0].run_id != checkpoint.run_id
+                or lease is None
+                or lease.expires_at <= _now()
+                or lease.fencing_token != checkpoint.fencing_token
+            ):
+                raise FencingTokenError("checkpoint suspension rejected for stale Runtime")
+            key = (checkpoint.tenant_id, checkpoint.session_id, checkpoint.run_id)
+            previous = self._checkpoints.get(key)
+            if previous is not None and previous.fencing_token > checkpoint.fencing_token:
+                raise FencingTokenError("checkpoint suspension rejected for stale Runtime")
+            self._checkpoints[key] = checkpoint
+            assignment = entry[0]
+            self._assignments[task_id] = (assignment, reason)
+            self._assignment_started_at.pop(task_id, None)
+            del self._leases[resource_id]
+            queued = self._queue.get(task_id)
+            if queued is not None:
+                self._queue[task_id] = (queued[0], "acked", queued[2])
+
     async def wake_assignment(self, task_id: str) -> bool:
         async with self._lock:
             entry = self._assignments.get(task_id)
@@ -417,6 +450,16 @@ class InMemoryControlStateStore:
             self._queue[task_id] = (queued[0], "queued", None)
             self._queue_claims.pop(task_id, None)
             return True
+
+    async def list_waiting_assignments(
+        self, *, limit: int = 100
+    ) -> tuple[RuntimeAssignment, ...]:
+        async with self._lock:
+            return tuple(
+                assignment
+                for assignment, status in self._assignments.values()
+                if status == "waiting_children"
+            )[: max(0, limit)]
 
     async def register_runtime(self, instance: RuntimeInstance) -> None:
         async with self._lock:
