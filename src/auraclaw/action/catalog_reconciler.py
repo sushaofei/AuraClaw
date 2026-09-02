@@ -575,6 +575,7 @@ def _normalize_tools(
                     trust_remote_tool_annotations=trust_remote_tool_annotations,
                 ),
                 risk_level=_remote_tool_risk_level(
+                    server,
                     tool,
                     trust_remote_tool_annotations=trust_remote_tool_annotations,
                 ),
@@ -586,10 +587,14 @@ def _normalize_tools(
 
 
 def _remote_tool_risk_level(
+    server: McpServerDefinition,
     tool: HandsToolDescriptor,
     *,
     trust_remote_tool_annotations: bool,
 ) -> str:
+    override = _remote_tool_policy_override(server, tool.name, "risk_level")
+    if override in {"low", "medium", "high", "critical"}:
+        return override
     if trust_remote_tool_annotations:
         return tool.risk_level or "high"
     return "high"
@@ -601,6 +606,9 @@ def _remote_tool_permission(
     *,
     trust_remote_tool_annotations: bool,
 ) -> str:
+    override = _remote_tool_policy_override(server, tool.name, "permission")
+    if override in {"read-only", "write-with-approval", "sandbox-only"}:
+        return override
     if not tool.read_only:
         return "write-with-approval"
     if trust_remote_tool_annotations:
@@ -611,6 +619,21 @@ def _remote_tool_permission(
     }:
         return "read-only"
     return "write-with-approval"
+
+
+def _remote_tool_policy_override(
+    server: McpServerDefinition,
+    tool_name: str,
+    field: str,
+) -> str | None:
+    overrides = server.metadata.get("tool_policy_overrides")
+    if not isinstance(overrides, dict):
+        return None
+    configured = overrides.get(tool_name)
+    if not isinstance(configured, dict):
+        return None
+    value = configured.get(field)
+    return str(value) if isinstance(value, str) else None
 
 
 def _normalize_resources(

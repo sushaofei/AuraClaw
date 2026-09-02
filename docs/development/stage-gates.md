@@ -2980,8 +2980,8 @@ active-reference barrier，并简化 AuraX 卸载入口。
 
 ## 阶段 Skill 激活故障语义与恢复权限收敛（Issue #79）
 
-状态：进行中。生产诊断确认 Skill 合约可加载，但 Resolver 依赖不可用被折叠为通用 adapter 错误，
-随后无效 Child 权限恢复请求会终止整个 Run。
+状态：完成。生产诊断确认 Skill 合约可加载，但 Resolver 依赖不可用被折叠为通用 adapter 错误，
+随后无效 Child 权限恢复请求会终止整个 Run；故障语义、恢复权限和遗留 MCP 元数据治理均已收敛。
 
 ### Runtime 与 Hands
 
@@ -2991,7 +2991,7 @@ active-reference barrier，并简化 AuraX 卸载入口。
 - [x] Coordinator Tool schema 将 Child 权限候选约束为 Root grant 的精确值；无授权时要求省略。
 - [x] Skill Descriptor 声明 Tool、Resource 与子 Skill 依赖；依赖的 MCP Catalog quarantined/stale、缺失或版本不兼容时，从对话可激活候选中移除，并在恢复后自动重新可见。
 - [x] Admin Skill Catalog 使用同一依赖健康判断，`/v1/admin/skills` 对不可解析依赖返回 `dependencies_unavailable`，避免 AuraX 选择器误报 available。
-- [ ] MCP Schema Drift 恢复后，价格洞察只读工具的 permission/risk 元数据与服务端契约一致。
+- [x] MCP Schema Drift 恢复后，价格洞察只读工具的 permission/risk 元数据与服务端契约一致。
 
 ### 产品、测试与交付
 
@@ -3001,7 +3001,7 @@ active-reference barrier，并简化 AuraX 卸载入口。
 - [x] AuraX 显示独立的 Catalog publication 状态、generation、stale 与 sync error，避免聚合 Runtime `active` 掩盖 quarantined Catalog；`reconcile` 文案明确为“同步目录”。
 - [x] Ruff、Mypy、import-linter 与完整 Pytest 通过。
 - [x] AuraX SDK（47 tests）、TypeScript、lint 与桌面 E2E（11 tests）通过。
-- [ ] Compose 与测试环境 Skill 激活回归通过。
+- [x] Compose 与测试环境 Skill 激活回归通过。
 - [x] GitHub Issue #79 记录脱敏故障链、修复方案与验收标准。
 - [x] AuraClaw/AuraX intentional commit、push、测试环境发布及 quarantined 降级语义回归完成。
 
