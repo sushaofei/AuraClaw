@@ -1,0 +1,104 @@
+from __future__ import annotations
+
+import hashlib
+import json
+from typing import Any
+
+from auraclaw.contracts.events import NewEvent
+from auraclaw.contracts.state import Visibility
+from auraclaw.control.ports import RuntimeAssignment
+from auraclaw.runtime.execution_guard import RuntimeExecutionGuard
+from auraclaw.runtime.ports import SessionClient
+
+
+class CanonicalEventCommitter:
+    """Own append-once semantics for Runtime writes to Canonical Session Events."""
+
+    _APPROVAL_TERMINAL_TYPES = frozenset(
+        {
+            "approval.approved",
+            "approval.rejected",
+            "approval.expired",
+            "approval.cancelled",
+            "human.response.recorded",
+        }
+    )
+
+    def __init__(self, session: SessionClient, guard: RuntimeExecutionGuard) -> None:
+        self._session = session
+        self._guard = guard
+
+    async def append_once(
+        self,
+        assignment: RuntimeAssignment,
+        existing: list[Any],
+        event_type: str,
+        payload: dict[str, Any],
+        *,
+        identity: str,
+        visibility: Visibility = Visibility.INTERNAL,
+    ) -> None:
+        if event_type == "approval.requested":
+            if self.approval_request_is_pending(existing, identity):
+                return
+        elif any(
+            event.type == event_type
+            and (
+                event.payload.get("run_id") == identity
+                or event.payload.get("model_call_id") == identity
+                or event.payload.get("tool_invocation_id") == identity
+                or event.payload.get("approval_id") == identity
+            )
+            for event in existing
+        ):
+            return
+        await self._guard.check(assignment)
+        appended = await self._session.append(
+            assignment,
+            [NewEvent(type=event_type, payload=payload, visibility=visibility)],
+            command_id=f"runtime:{event_type}:{assignment.run_id}:{identity}",
+            operation=f"runtime.{event_type}",
+            expected_version=len(existing),
+        )
+        if appended:
+            existing.extend(appended)
+        else:
+            refreshed = await self._session.load(assignment)
+            existing.clear()
+            existing.extend(refreshed)
+
+    async def append_capability_event(
+        self, assignment: RuntimeAssignment, event: NewEvent
+    ) -> None:
+        if event.payload.get("skill_activation_id"):
+            identity = str(event.payload["skill_activation_id"])
+        else:
+            identity = hashlib.sha256(
+                json.dumps(
+                    event.payload,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    default=str,
+                ).encode()
+            ).hexdigest()[:24]
+        await self._guard.check(assignment)
+        await self._session.append(
+            assignment,
+            [event],
+            command_id=f"runtime:{event.type}:{identity}",
+            operation=f"runtime.{event.type}",
+        )
+
+    @classmethod
+    def approval_request_is_pending(
+        cls, existing: list[Any], approval_id: str
+    ) -> bool:
+        open_request = False
+        for event in existing:
+            if str(event.payload.get("approval_id", "")) != approval_id:
+                continue
+            if event.type == "approval.requested":
+                open_request = True
+            elif event.type in cls._APPROVAL_TERMINAL_TYPES:
+                open_request = False
+        return open_request

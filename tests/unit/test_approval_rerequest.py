@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 
 from auraclaw.contracts.events import Actor, CanonicalEvent
 from auraclaw.contracts.state import Visibility
-from auraclaw.runtime.harness import AgentHarness
+from auraclaw.runtime.event_committer import CanonicalEventCommitter
 
 
 def _event(
@@ -39,7 +39,7 @@ def test_approval_request_is_pending_until_terminal_decision() -> None:
             run_id="run-1",
         )
     ]
-    assert AgentHarness._approval_request_is_pending(existing, "apr_1") is True
+    assert CanonicalEventCommitter.approval_request_is_pending(existing, "apr_1") is True
 
     existing.append(
         _event(
@@ -49,7 +49,7 @@ def test_approval_request_is_pending_until_terminal_decision() -> None:
             run_id="run-1",
         )
     )
-    assert AgentHarness._approval_request_is_pending(existing, "apr_1") is False
+    assert CanonicalEventCommitter.approval_request_is_pending(existing, "apr_1") is False
 
 
 def test_approval_request_is_pending_allows_same_id_after_rejection() -> None:
@@ -73,4 +73,4 @@ def test_approval_request_is_pending_allows_same_id_after_rejection() -> None:
             run_id="run-2",
         ),
     ]
-    assert AgentHarness._approval_request_is_pending(existing, "apr_1") is True
+    assert CanonicalEventCommitter.approval_request_is_pending(existing, "apr_1") is True

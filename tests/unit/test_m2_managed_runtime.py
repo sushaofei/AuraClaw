@@ -237,6 +237,24 @@ def test_runtime_recovers_at_all_required_failure_injection_points(
         assert event_types.count("tool.call.requested") == 1
         assert event_types.count("tool.call.completed") == 1
         assert event_types.count("run.completed") == 1
+        golden_types = {
+            "run.scheduled",
+            "run.started",
+            "model.input.prepared",
+            "model.output.completed",
+            "tool.call.requested",
+            "tool.call.completed",
+            "run.completed",
+        }
+        assert [item for item in event_types if item in golden_types] == [
+            "run.scheduled",
+            "run.started",
+            "model.input.prepared",
+            "model.output.completed",
+            "tool.call.requested",
+            "tool.call.completed",
+            "run.completed",
+        ]
         assert provider.calls == 1
         assert tool_delegate.calls == 1
         serialized_events = repr([event.as_dict() for event in events])

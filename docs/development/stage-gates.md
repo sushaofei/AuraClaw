@@ -3080,3 +3080,37 @@ active-reference barrier，并简化 AuraX 卸载入口。
 - [x] 代码组织文档已同步，数据库迁移不适用，删除范围经源码/入口/测试检查确认。
 - [x] 暂存范围排除 `.vscode/launch.json`、`docs/tmp/`、Secret、缓存和虚拟环境。
 - [x] 以一个 intentional commit 提交并 push 当前分支到 `origin`，同步关闭 Issue #83。
+
+## 阶段 R2.2：Agent Runtime 显式可恢复状态机（Issue #84）
+
+状态：完成。Runtime 执行已收敛为显式可恢复状态机与薄 Harness facade。
+
+### 范围、非目标与回滚
+
+- [x] 保持 Runtime 对外端口、Canonical Event、checkpoint 持久值、角色行为和故障恢复语义不变。
+- [x] 不修改模型策略、Tool API、协作算法、数据库/Event schema 或 12 进程拓扑。
+- [x] 回滚为整体恢复本阶段结构提交；不涉及数据迁移或 checkpoint 降级。
+
+### 状态机与职责边界
+
+- [x] `RuntimePhase` 集中枚举 checkpoint phase，并显式定义合法后继状态和终态。
+- [x] fencing、cancel 与 deadline guard 收敛到 `RuntimeExecutionGuard`，继续在外部副作用前后 fail closed。
+- [x] 模型流与工具调用分别由 `ModelRoundExecutor`、`ToolRoundExecutor` 执行，并返回明确结果类型。
+- [x] Canonical Event append-once、checkpoint 保存与 assignment suspend 分别集中到提交组件。
+- [x] `AgentHarness` 收敛为 20 行稳定 facade；状态推进由 `RuntimeExecutionEngine` 单路径实现。
+- [x] 已删除迁移后的旧 guard、model/tool round、append-once 与 checkpoint 私有实现。
+
+### 等价、恢复与性能
+
+- [x] Coordinator/Worker/Reviewer、基础执行、审批、工具、截断与 Child 等既有回归保持通过。
+- [x] 模型前后、工具前后四个故障注入点均恢复到相同规范化业务事件轨迹。
+- [x] 四个故障点均验证模型、Tool 和 Canonical Event append-once，外部 Tool 副作用只执行一次。
+- [x] 状态图、非法 phase、guard 顺序、薄 facade 及模型/工具回合具有独立自动化测试。
+- [x] TTFT 热路径没有新增 I/O 或 await；既有流式首 token/模型 TTFT 测试通过。
+
+### 质量与交付
+
+- [x] 完整 Pytest（575 passed，3 skipped）、Ruff、Mypy 与 10 条 import-linter 合同通过。
+- [x] Runtime 架构文档已同步；数据库和 Event migration 不适用。
+- [x] 暂存范围排除 `.vscode/launch.json`、`docs/tmp/`、Secret、缓存和虚拟环境。
+- [x] 以一个 intentional commit 提交并 push 当前分支到 `origin`，同步关闭 Issue #84。

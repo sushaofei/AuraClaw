@@ -20,7 +20,11 @@ Specialist Runtime
 | 模块 | 功能 |
 |---|---|
 | Role Loader | 加载 Coordinator、Worker、Reviewer 等角色契约 |
-| Harness | Agent Loop、停止条件和工具结果处理 |
+| Harness | 稳定执行 facade；保持 composition 和 worker 的调用入口不变 |
+| Execution Engine | 选择并推进一个合法状态转换，协调角色、能力与协作流程 |
+| Execution State | 集中定义 checkpoint phase 与合法后继状态 |
+| Execution Guard | 在模型、工具和持久化副作用边界统一检查 fencing、cancel 与 deadline |
+| Model / Tool Round | 使用明确结果类型执行或恢复单个模型/工具回合 |
 | Context Builder | 从 Session、Artifact 和 Retrieval 构建当前上下文 |
 | Model Client | 通过 Model Gateway 发起模型调用和接收增量 |
 | Tool Client | 发现工具、发起调用、关联结果和取消 |
@@ -32,19 +36,21 @@ Specialist Runtime
 | Budget Controller | Token、时间、步骤和成本预算 |
 | Cancellation Handler | 响应取消、Deadline、Lease 丢失 |
 
-## 运行循环
+## 可恢复状态机
 
 ```text
-获取 Lease / Fencing Token
- -> 读取 Session + Projection + Artifact
- -> 构建 Context
- -> 调用 Model Gateway
- -> 解析输出或 Tool Call
- -> Tool Gateway 执行
- -> 追加 Canonical Event
- -> 发布 Runtime Event
- -> 完成、等待、继续或交接
+读取 Canonical Events + durable checkpoint
+ -> 检查 Lease / Fencing / Budget / Cancel / Deadline
+ -> 从显式 RuntimePhase 图选择一个合法转换
+ -> 执行一个 Model Round、Tool Round 或 Commit Action
+ -> append-once Canonical Event 并持久化 checkpoint
+ -> 继续、等待审批/Child、完成或交接
 ```
+
+`runtime/harness.py` 只提供稳定 `AgentHarness` facade。状态推进位于
+`runtime/execution_engine.py`；phase 图、guard、模型/工具回合、Canonical Event 提交和
+checkpoint/suspend 分别位于独立模块，可以单独测试。`RuntimePhase` 是 `str` 枚举，因此已有
+checkpoint 的持久化值与跨版本恢复格式不变。
 
 ## 状态外置
 
@@ -71,6 +77,8 @@ Tool/Resource 依赖和 Policy 版本；Catalog 更新不得在同一 Run 内静
 - Tool Call 携带稳定 `tool_invocation_id`。
 - Runtime 失去 Lease 后立即停止写入和外部副作用。
 - 恢复后由 Harness 根据 Session 判断语义重试，不由 Orchestrator盲目重放工具调用。
+- Canonical Event append-once 与 checkpoint/suspend 由独立提交边界负责；checkpoint 不替代事实事件。
+- 模型前后、工具前后崩溃恢复必须产生相同的规范化业务事件轨迹，且外部 Tool 副作用最多一次。
 
 ## Runtime 事件
 
