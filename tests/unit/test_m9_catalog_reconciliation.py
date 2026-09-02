@@ -895,3 +895,68 @@ def test_remote_tool_permission_follows_trust_boundary() -> None:
         )
         == "write-with-approval"
     )
+
+
+def test_admin_controlled_tool_policy_override_corrects_legacy_mcp_metadata() -> None:
+    from auraclaw.action.catalog_reconciler import (
+        _remote_tool_permission,
+        _remote_tool_risk_level,
+    )
+    from auraclaw.contracts.hands import HandsToolDescriptor
+
+    tool = HandsToolDescriptor(
+        name="price_insight.dataset.profile",
+        version="1.0.0",
+        description="Legacy server omits MCP read-only annotations",
+    )
+    server = _server().model_copy(
+        update={
+            "allowed_tool_prefixes": ("price_insight.",),
+            "trust_level": CapabilityTrustLevel.EXTERNAL_UNTRUSTED,
+            "metadata": {
+                "tool_policy_overrides": {
+                    "price_insight.dataset.profile": {
+                        "permission": "read-only",
+                        "risk_level": "low",
+                    }
+                }
+            },
+        }
+    )
+
+    assert (
+        _remote_tool_permission(
+            server,
+            tool,
+            trust_remote_tool_annotations=False,
+        )
+        == "read-only"
+    )
+    assert (
+        _remote_tool_risk_level(
+            server,
+            tool,
+            trust_remote_tool_annotations=False,
+        )
+        == "low"
+    )
+
+    similarly_named_tool = tool.model_copy(
+        update={"name": "price_insight.dataset.profile_v2"}
+    )
+    assert (
+        _remote_tool_permission(
+            server,
+            similarly_named_tool,
+            trust_remote_tool_annotations=False,
+        )
+        == "write-with-approval"
+    )
+    assert (
+        _remote_tool_risk_level(
+            server,
+            similarly_named_tool,
+            trust_remote_tool_annotations=False,
+        )
+        == "high"
+    )
