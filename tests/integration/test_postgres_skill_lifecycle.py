@@ -8,33 +8,13 @@ from pathlib import Path
 from uuid import uuid4
 
 import asyncpg
-import httpx
 import pytest
-from fastapi import FastAPI
 from tests.skill_lifecycle_contract import assert_skill_lifecycle_core_contract
 
-from auraclaw.action.skill_internal_service import SkillPublicationInternalService
 from auraclaw.action.skill_lifecycle import (
-    SkillAdmissionAuditRecord,
     SkillPublishCommit,
-    SkillRestoreCommit,
-    SkillSourceConfigCommit,
-    SkillSourcePackageIdentity,
-    SkillSourceSnapshotCommit,
 )
-from auraclaw.action.skill_management import SkillManagementService
-from auraclaw.action.skill_packages import (
-    HmacSkillSignatureVerifier,
-    SkillPackage,
-    SkillPackageRegistry,
-    skill_package_archive,
-    skill_package_digest,
-)
-from auraclaw.action.skill_publication import SkillPublicationService
-from auraclaw.api.routes.admin_skills import create_skill_admin_router
 from auraclaw.config import get_settings
-from auraclaw.contracts.errors import VersionConflictError
-from auraclaw.contracts.internal import ServiceIdentity
 from auraclaw.contracts.skills import (
     SkillInstallationRecord,
     SkillInstallationStatus,
@@ -44,14 +24,8 @@ from auraclaw.contracts.skills import (
     SkillPublicationRecord,
     SkillPublicationStatus,
     SkillRevocationAction,
-    SkillSourceDesiredState,
-    SkillSourceKind,
-    SkillSourceRecord,
-    SkillSourceSyncState,
 )
 from auraclaw.contracts.tools import ArtifactRef
-from auraclaw.infrastructure.clients.skill_publication import RemoteSkillPublicationClient
-from auraclaw.infrastructure.identity.verifier import DevelopmentHeaderIdentityVerifier
 from auraclaw.infrastructure.persistence.postgres_common import asyncpg_url
 from auraclaw.infrastructure.persistence.postgres_skill_lifecycle import (
     PostgresSkillLifecycleStore,
@@ -59,8 +33,6 @@ from auraclaw.infrastructure.persistence.postgres_skill_lifecycle import (
 from auraclaw.infrastructure.persistence.postgres_skill_lifecycle_events import (
     PostgresSkillLifecycleSignalStore,
 )
-from auraclaw.internal.http import create_contract_app
-from auraclaw.internal.routes import skill_publication_routes
 
 SETTINGS = get_settings()
 DATABASE_URL = asyncpg_url(SETTINGS.resolved_database_url) if SETTINGS.postgres_enabled else None
@@ -84,6 +56,7 @@ MIGRATION = "\n".join(
         (ROOT / "migrations/0050_batch_worker_lease_safety.sql").read_text(),
         (ROOT / "migrations/0054_skill_lifecycle_broadcast_outbox.sql").read_text(),
         (ROOT / "migrations/0055_skill_package_republish.sql").read_text(),
+        (ROOT / "migrations/0056_remove_skill_sources.sql").read_text(),
     )
 )
 pytestmark = pytest.mark.skipif(DATABASE_URL is None, reason="PostgreSQL test URL not configured")
@@ -109,138 +82,6 @@ def test_postgres_store_satisfies_shared_lifecycle_contract() -> None:
                 "skill_installation",
                 "skill_publication",
                 "skill_package",
-            ):
-                await connection.execute(
-                    f"DELETE FROM hands.{table} WHERE tenant_id=$1", tenant_id
-                )
-            await connection.close()
-
-    asyncio.run(scenario())
-
-
-def test_source_config_uses_canonical_publication_lock_order() -> None:
-    async def scenario() -> None:
-        assert DATABASE_URL is not None
-        connection = await asyncpg.connect(DATABASE_URL)
-        await _ensure_skill_lifecycle_schema(connection)
-        suffix = uuid4().hex
-        tenant_id = f"tenant-lock-order-{suffix}"
-        store_a = PostgresSkillLifecycleStore(DATABASE_URL)
-        store_b = PostgresSkillLifecycleStore(DATABASE_URL)
-        now = datetime.now(UTC)
-        sources = tuple(
-            SkillSourceRecord(
-                source_id=f"sks_{label}_{suffix}",
-                tenant_id=tenant_id,
-                kind=SkillSourceKind.MCP,
-                desired_state=SkillSourceDesiredState.ENABLED,
-                publisher_allowlist=("platform",),
-                revision=1,
-                created_by="test",
-                updated_by="test",
-                created_at=now,
-                updated_at=now,
-                priority=priority,
-            )
-            for label, priority in (("a", 20), ("b", 10))
-        )
-        try:
-            for source in sources:
-                await store_a.put_source(source, expected_revision=0)
-            for index, name in enumerate(("alpha", "omega"), start=1):
-                package = SkillPackageRecord(
-                    tenant_id=tenant_id,
-                    manifest=SkillManifest(
-                        name=name,
-                        version="1.0.0",
-                        description=name,
-                        publisher="platform",
-                        signature="hmac-sha256:test",
-                    ),
-                    package_digest=f"sha256:{str(index) * 64}",
-                    artifact_ref=ArtifactRef(
-                        artifact_id=f"art-{name}-{suffix}",
-                        version=1,
-                        content_hash=str(index) * 64,
-                        media_type="application/octet-stream",
-                        size=1,
-                    ),
-                    retention_until=now + timedelta(days=90),
-                    retention_updated_by="test",
-                    retention_updated_at=now,
-                    created_at=now,
-                )
-                await store_a.put_package(package)
-                await store_a.put_publication(
-                    SkillPublicationRecord(
-                        publication_id=f"skp_{name}_{suffix}",
-                        tenant_id=tenant_id,
-                        publisher="platform",
-                        name=name,
-                        version="1.0.0",
-                        package_digest=package.package_digest,
-                        status=SkillPublicationStatus.ACTIVE,
-                        source_id=sources[0].source_id,
-                        revision=1,
-                        created_by="test",
-                        updated_by="test",
-                        created_at=now,
-                        updated_at=now,
-                    ),
-                    expected_revision=0,
-                )
-                source_order = sources if name == "alpha" else tuple(reversed(sources))
-                for source in source_order:
-                    await connection.execute(
-                        """INSERT INTO hands.skill_publication_source
-                        (tenant_id,publisher,name,version,source_id,available,
-                         first_seen_at,last_seen_at)
-                        VALUES ($1,'platform',$2,'1.0.0',$3,true,$4,$4)""",
-                        tenant_id,
-                        name,
-                        source.source_id,
-                        now,
-                    )
-
-            def retirement(source: SkillSourceRecord, label: str) -> SkillSourceConfigCommit:
-                return SkillSourceConfigCommit(
-                    command_id=f"retire-{label}-{suffix}",
-                    request_digest=f"sha256:{label * 64}",
-                    operation="retire",
-                    actor_id="test",
-                    correlation_id=f"corr-{label}-{suffix}",
-                    causation_id=f"retire-{label}-{suffix}",
-                    reason_code="lock_order_test",
-                    expected_revision=1,
-                    source=source.model_copy(
-                        update={
-                            "desired_state": SkillSourceDesiredState.RETIRED,
-                            "revision": 2,
-                            "updated_at": datetime.now(UTC),
-                        }
-                    ),
-                    occurred_at=datetime.now(UTC),
-                )
-
-            results = await asyncio.wait_for(
-                asyncio.gather(
-                    store_a.commit_source_config(retirement(sources[0], "a")),
-                    store_b.commit_source_config(retirement(sources[1], "b")),
-                ),
-                timeout=10,
-            )
-            assert {result.desired_state for result in results} == {
-                SkillSourceDesiredState.RETIRED
-            }
-        finally:
-            await store_a.close()
-            await store_b.close()
-            for table in (
-                "skill_source_command",
-                "skill_publication_source",
-                "skill_publication",
-                "skill_package",
-                "skill_source",
             ):
                 await connection.execute(
                     f"DELETE FROM hands.{table} WHERE tenant_id=$1", tenant_id
@@ -331,7 +172,6 @@ def test_postgres_republish_replaces_purged_coordinate_and_archives_tombstone() 
         await _ensure_skill_lifecycle_schema(connection)
         suffix = uuid4().hex
         tenant_id = f"tenant-republish-{suffix}"
-        source_id = f"sks_republish_{suffix}"
         store = PostgresSkillLifecycleStore(DATABASE_URL)
         now = datetime.now(UTC)
         old_digest = f"sha256:{'a' * 64}"
@@ -370,7 +210,6 @@ def test_postgres_republish_replaces_purged_coordinate_and_archives_tombstone() 
             version="1.0.0",
             package_digest=old_digest,
             status=SkillPublicationStatus.REVOKED,
-            source_id=source_id,
             revision=2,
             created_by="publisher",
             updated_by="purger",
@@ -400,20 +239,6 @@ def test_postgres_republish_replaces_purged_coordinate_and_archives_tombstone() 
             uninstall_policy_decision_id=f"purge-{suffix}",
         )
         try:
-            await store.put_source(
-                SkillSourceRecord(
-                    source_id=source_id,
-                    tenant_id=tenant_id,
-                    kind=SkillSourceKind.MCP,
-                    desired_state=SkillSourceDesiredState.ENABLED,
-                    publisher_allowlist=("platform",),
-                    created_by="test",
-                    updated_by="test",
-                    created_at=now,
-                    updated_at=now,
-                ),
-                expected_revision=0,
-            )
             await store.put_package(old_package)
             await store.put_publication(
                 old_publication.model_copy(
@@ -487,7 +312,6 @@ def test_postgres_republish_replaces_purged_coordinate_and_archives_tombstone() 
                     "version_constraint": "=1.0.0",
                     "pinned_package_digest": new_digest,
                     "status": SkillInstallationStatus.ACTIVE,
-                    "source_id": source_id,
                     "revision": 4,
                     "updated_by": "publisher",
                     "updated_at": now + timedelta(seconds=1),
@@ -502,7 +326,6 @@ def test_postgres_republish_replaces_purged_coordinate_and_archives_tombstone() 
                     command_id=f"republish-{suffix}",
                     request_digest=new_digest,
                     actor_id="publisher",
-                    source_id=source_id,
                     correlation_id=f"corr-{suffix}",
                     causation_id=f"republish-{suffix}",
                     expected_publication_revision=2,
@@ -525,12 +348,10 @@ def test_postgres_republish_replaces_purged_coordinate_and_archives_tombstone() 
             for table in (
                 "skill_outbox",
                 "skill_command",
-                "skill_publication_source",
                 "skill_installation",
                 "skill_publication",
                 "skill_package_tombstone",
                 "skill_package",
-                "skill_source",
             ):
                 await connection.execute(
                     f"DELETE FROM hands.{table} WHERE tenant_id=$1", tenant_id
@@ -584,657 +405,6 @@ def test_postgres_skill_lifecycle_broadcast_outbox_is_monotonic_and_claimed_once
             await connection.execute(
                 "DELETE FROM hands.skill_lifecycle_revision WHERE tenant_id=$1",
                 tenant_id,
-            )
-            await connection.close()
-
-    asyncio.run(scenario())
-
-
-def test_postgres_skill_lifecycle_is_persistent_and_tenant_scoped() -> None:
-    async def scenario() -> None:
-        assert DATABASE_URL is not None
-        connection = await asyncpg.connect(DATABASE_URL)
-        await _ensure_skill_lifecycle_schema(connection)
-        suffix = uuid4().hex
-        tenant_id = f"tenant-skill-{suffix}"
-        manifest = SkillManifest(
-            name="release.prepare",
-            version="1.0.0",
-            description="Prepare release",
-            publisher="platform",
-            signature="hmac-sha256:abc",
-        )
-        archive_package = SkillPackage(
-            manifest=manifest,
-            files={
-                "manifest.json": manifest.model_dump_json().encode(),
-                "SKILL.md": b"# PostgreSQL Skill\n",
-            },
-        )
-        archive = skill_package_archive(archive_package)
-        digest = skill_package_digest(archive_package)
-        artifacts = _SharedSkillArtifacts()
-        artifact_id = f"art-{suffix}"
-        artifacts.contents[artifact_id] = archive
-        store_a = PostgresSkillLifecycleStore(DATABASE_URL)
-        store_b = PostgresSkillLifecycleStore(DATABASE_URL)
-        now = datetime.now(UTC)
-        try:
-            admission = SkillAdmissionAuditRecord(
-                admission_id=f"skad_{suffix}",
-                tenant_id=tenant_id,
-                command_id=f"admission-{suffix}",
-                operation="publish_artifact",
-                actor_id="integration-test",
-                source_id="sks_admin_upload",
-                correlation_id=f"corr-{suffix}",
-                causation_id=f"cause-{suffix}",
-                publisher=None,
-                name=None,
-                version=None,
-                package_digest=digest,
-                artifact_id=f"art-{suffix}",
-                outcome="quarantined",
-                stage="content_scan",
-                safe_error_code="skill_content_prompt_injection",
-                duration_ms=7,
-                occurred_at=now,
-                content_policy_version="skill-content-v1",
-            )
-            await store_a.record_admission(admission)
-            assert await store_b.list_admissions(tenant_id) == (admission,)
-            assert await store_b.list_admissions(
-                tenant_id,
-                outcome="quarantined",
-                stage="content_scan",
-                content_policy_version="skill-content-v1",
-            ) == (admission,)
-            assert await store_b.list_admissions(tenant_id, outcome="accepted") == ()
-            metrics = await store_b.admission_metrics(tenant_id)
-            assert len(metrics) == 1
-            assert metrics[0].outcome == "quarantined"
-            assert metrics[0].content_policy_version == "skill-content-v1"
-            assert metrics[0].count == 1
-            assert metrics[0].average_duration_ms == 7
-            old_admission = replace(
-                admission,
-                admission_id=f"skad_old_{suffix}",
-                command_id=f"admission-old-{suffix}",
-                occurred_at=now - timedelta(days=100),
-            )
-            await store_a.record_admission(old_admission)
-            first_page = await store_b.page_admissions(tenant_id, limit=1)
-            assert first_page.admissions == (admission,)
-            assert first_page.next_cursor is not None
-            second_page = await store_b.page_admissions(
-                tenant_id, cursor=first_page.next_cursor, limit=1
-            )
-            assert second_page.admissions == (old_admission,)
-            assert second_page.next_cursor is None
-            recent_metrics = await store_b.admission_metrics(
-                tenant_id, since=now - timedelta(days=1)
-            )
-            assert recent_metrics[0].count == 1
-            assert await store_a.delete_admissions_before(now - timedelta(days=90), limit=1) == 1
-            assert await store_b.list_admissions(tenant_id) == (admission,)
-            assert await store_b.list_admissions(f"other-{tenant_id}") == ()
-            package = SkillPackageRecord(
-                tenant_id=tenant_id,
-                manifest=manifest,
-                package_digest=digest,
-                artifact_ref=ArtifactRef(
-                    artifact_id=artifact_id,
-                    version=1,
-                    content_hash=hashlib.sha256(archive).hexdigest(),
-                    media_type="application/vnd.auraclaw.skill-package+json",
-                    size=len(archive),
-                ),
-                retention_until=now + timedelta(days=90),
-                retention_updated_by="integration-test",
-                retention_updated_at=now,
-                created_at=now,
-            )
-            await store_a.put_package(package)
-            publication = SkillPublicationRecord(
-                publication_id=f"skp_{suffix}",
-                tenant_id=tenant_id,
-                publisher="platform",
-                name="release.prepare",
-                version="1.0.0",
-                package_digest=digest,
-                status=SkillPublicationStatus.ACTIVE,
-                revision=1,
-                created_by="integration-test",
-                updated_by="integration-test",
-                created_at=now,
-                updated_at=now,
-            )
-            await store_a.put_publication(publication, expected_revision=0)
-            installation = SkillInstallationRecord(
-                installation_id=f"ski_{suffix}",
-                tenant_id=tenant_id,
-                publisher="platform",
-                name="release.prepare",
-                status=SkillInstallationStatus.ACTIVE,
-                revision=1,
-                created_by="integration-test",
-                updated_by="integration-test",
-                created_at=now,
-                updated_at=now,
-            )
-            await store_a.put_installation(installation, expected_revision=0)
-            source = SkillSourceRecord(
-                source_id=f"sks_source-{suffix}",
-                tenant_id=tenant_id,
-                kind=SkillSourceKind.MCP,
-                desired_state=SkillSourceDesiredState.ENABLED,
-                publisher_allowlist=("platform",),
-                credential_ref=f"vault/{suffix}#mcp",
-                config_metadata={"server_id": f"server-{suffix}"},
-                revision=1,
-                created_by="integration-test",
-                updated_by="integration-test",
-                created_at=now,
-                updated_at=now,
-            )
-            await store_a.put_source(source, expected_revision=0)
-            first_lease = await store_a.claim_source_lease(
-                tenant_id=tenant_id,
-                source_id=source.source_id,
-                owner="hands-a",
-                ttl=timedelta(minutes=1),
-            )
-            assert first_lease is not None and first_lease.fencing_token == 1
-            assert (
-                await store_b.claim_source_lease(
-                    tenant_id=tenant_id,
-                    source_id=source.source_id,
-                    owner="hands-b",
-                    ttl=timedelta(minutes=1),
-                )
-                is None
-            )
-            await connection.execute(
-                """UPDATE hands.skill_source_lease SET expires_at=now()
-                WHERE tenant_id=$1 AND source_id=$2""",
-                tenant_id,
-                source.source_id,
-            )
-            second_lease = await store_b.claim_source_lease(
-                tenant_id=tenant_id,
-                source_id=source.source_id,
-                owner="hands-b",
-                ttl=timedelta(minutes=1),
-            )
-            assert second_lease is not None and second_lease.fencing_token == 2
-            with pytest.raises(VersionConflictError, match="revision conflict"):
-                await store_a.put_source(
-                    source.model_copy(update={"kind": SkillSourceKind.GIT, "revision": 2}),
-                    expected_revision=1,
-                )
-            sync_state = SkillSourceSyncState(
-                source_id=source.source_id,
-                tenant_id=tenant_id,
-                generation=1,
-                cursor="cursor-1",
-                complete_snapshot=True,
-                last_success_at=now,
-                last_attempt_at=now,
-            )
-            await store_a.put_sync_state(sync_state)
-
-            assert (
-                await store_b.get_package(tenant_id, "platform", "release.prepare", "1.0.0")
-                == package
-            )
-            assert (
-                await store_b.get_installation(tenant_id, "platform", "release.prepare")
-                == installation
-            )
-            assert await store_b.list_installations(tenant_id) == (installation,)
-            assert tenant_id in await store_b.list_tenants()
-            assert await store_b.list_publications(f"other-{tenant_id}") == ()
-            assert await store_b.get_source(tenant_id, source.source_id) == source
-            assert await store_b.get_sync_state(tenant_id, source.source_id) == sync_state
-
-            restarted_store = PostgresSkillLifecycleStore(DATABASE_URL)
-            hands_registry = SkillPackageRegistry(
-                artifacts=artifacts,
-                signature_verifier=HmacSkillSignatureVerifier(
-                    {"platform": b"postgres-skill-test-key"}
-                ),
-            )
-            hands_publication = SkillPublicationService(
-                registry=hands_registry,
-                lifecycle=restarted_store,
-                artifacts=artifacts,
-            )
-            hands_management = SkillManagementService(
-                lifecycle=restarted_store,
-                projector=_NoOpSkillProjector(),
-            )
-            hands_contract = create_contract_app(
-                "postgres-skill-admin-test",
-                skill_publication_routes(
-                    SkillPublicationInternalService(
-                        hands_publication,
-                        management=hands_management,
-                        admissions=restarted_store,
-                        artifacts=artifacts,
-                    )
-                ),
-                workload_identities={"task-token": ServiceIdentity.TASK_API},
-            )
-            hands_app = FastAPI()
-            hands_app.mount("/internal/v1/skill-publications", hands_contract)
-            remote = RemoteSkillPublicationClient(
-                "http://hands",
-                bearer_token="task-token",
-                transport=httpx.ASGITransport(app=hands_app),
-            )
-            task_registry = SkillPackageRegistry(
-                artifacts=artifacts,
-                signature_verifier=HmacSkillSignatureVerifier(
-                    {"platform": b"postgres-skill-test-key"}
-                ),
-            )
-            task_app = FastAPI()
-            task_app.state.identity_verifier = DevelopmentHeaderIdentityVerifier()
-            task_app.include_router(
-                create_skill_admin_router(
-                    task_registry,
-                    management_service=remote,
-                    content_reader=remote,
-                )
-            )
-            try:
-                async with httpx.AsyncClient(
-                    base_url="http://task-api",
-                    transport=httpx.ASGITransport(app=task_app),
-                    headers={"X-Tenant-ID": tenant_id, "X-Actor-ID": "admin"},
-                ) as task_client:
-                    listed = await task_client.get("/v1/admin/skills")
-                    assert listed.status_code == 200
-                    assert listed.json()["skills"] == listed.json()["items"]
-                    assert listed.json()["items"][0]["version"] == "1.0.0"
-                    detail = await task_client.get(
-                        "/v1/admin/skills/platform/release.prepare"
-                    )
-                    assert detail.status_code == 200
-                    assert detail.json()["skill_markdown"] == "# PostgreSQL Skill\n"
-                    version = await task_client.get(
-                        "/v1/admin/skills/platform/release.prepare/versions/1.0.0"
-                    )
-                    assert version.status_code == 200
-                    assert version.json()["package_digest"] == digest
-                assert task_registry.list_publications(tenant_id) == ()
-                assert await remote.list_packages(f"other-{tenant_id}") == ()
-            finally:
-                await remote.aclose()
-                await restarted_store.close()
-
-            transactional_package = package.model_copy(
-                update={
-                    "manifest": package.manifest.model_copy(update={"version": "2.0.0"}),
-                    "package_digest": f"sha256:{'b' * 64}",
-                    "artifact_ref": ArtifactRef(
-                        artifact_id=f"art-transaction-{suffix}",
-                        version=1,
-                        content_hash="b" * 64,
-                        media_type="application/vnd.auraclaw.skill-package+json",
-                        size=200,
-                    ),
-                }
-            )
-            transactional_publication = publication.model_copy(
-                update={
-                    "publication_id": f"skp_transaction_{suffix}",
-                    "version": "2.0.0",
-                    "package_digest": transactional_package.package_digest,
-                    "status": SkillPublicationStatus.STAGED,
-                    "source_id": source.source_id,
-                }
-            )
-            publish_commit = SkillPublishCommit(
-                command_id=f"publish-transaction-{suffix}",
-                request_digest=f"sha256:{'c' * 64}",
-                actor_id="integration-test",
-                source_id=source.source_id,
-                correlation_id=f"correlation-{suffix}",
-                causation_id=f"publish-transaction-{suffix}",
-                expected_publication_revision=0,
-                package=transactional_package,
-                publication=transactional_publication,
-                installation=None,
-                occurred_at=now,
-                source_lease=second_lease,
-            )
-            with pytest.raises(VersionConflictError, match="lease is stale"):
-                await store_a.commit_publish(
-                    publish_commit.__class__(
-                        **{
-                            **publish_commit.__dict__,
-                            "source_lease": first_lease,
-                        }
-                    )
-                )
-            committed = await store_a.commit_publish(publish_commit)
-            replayed = await store_b.commit_publish(publish_commit)
-            assert committed.publication == replayed.publication
-            assert replayed.replayed
-            with pytest.raises(VersionConflictError, match="command id was reused"):
-                await store_b.commit_publish(
-                    publish_commit.__class__(
-                        **{
-                            **publish_commit.__dict__,
-                            "request_digest": f"sha256:{'d' * 64}",
-                        }
-                    )
-                )
-            outbox = await store_a.claim_outbox(owner="integration-a")
-            assert len(outbox) == 1
-            assert outbox[0].payload["package_digest"] == (transactional_package.package_digest)
-            assert await store_b.claim_outbox(owner="integration-b") == ()
-            await store_a.complete_outbox(outbox_id=outbox[0].outbox_id, owner="integration-a")
-            await store_a.commit_source_snapshot(
-                SkillSourceSnapshotCommit(
-                    state=sync_state.model_copy(
-                        update={
-                            "generation": second_lease.fencing_token,
-                            "cursor": "snapshot-observed",
-                        }
-                    ),
-                    lease=second_lease,
-                    observed=(SkillSourcePackageIdentity("platform", "release.prepare", "2.0.0"),),
-                    missing_snapshot_threshold=2,
-                    actor_id="action-hands-skill-reconciler",
-                    command_prefix=f"source-retire:{source.source_id}",
-                    correlation_id=f"reconcile-{suffix}",
-                    causation_id=f"snapshot-observed-{suffix}",
-                    occurred_at=datetime.now(UTC),
-                )
-            )
-            await store_a.release_source_lease(second_lease)
-            third_lease = await store_b.claim_source_lease(
-                tenant_id=tenant_id,
-                source_id=source.source_id,
-                owner="hands-b",
-                ttl=timedelta(minutes=1),
-            )
-            assert third_lease is not None
-            first_missing_result = await store_b.commit_source_snapshot(
-                SkillSourceSnapshotCommit(
-                    state=sync_state.model_copy(
-                        update={
-                            "generation": third_lease.fencing_token,
-                            "cursor": "snapshot-missing-1",
-                            "last_success_at": datetime.now(UTC),
-                            "last_attempt_at": datetime.now(UTC),
-                        }
-                    ),
-                    lease=third_lease,
-                    observed=(),
-                    missing_snapshot_threshold=2,
-                    actor_id="action-hands-skill-reconciler",
-                    command_prefix=f"source-retire:{source.source_id}",
-                    correlation_id=f"reconcile-{suffix}",
-                    causation_id=f"snapshot-missing-1-{suffix}",
-                    occurred_at=datetime.now(UTC),
-                )
-            )
-            assert first_missing_result.retired == ()
-            with pytest.raises(VersionConflictError, match="snapshot generation must advance"):
-                await store_a.commit_source_snapshot(
-                    SkillSourceSnapshotCommit(
-                        state=sync_state.model_copy(
-                            update={
-                                "generation": third_lease.fencing_token,
-                                "cursor": "snapshot-missing-1-replay",
-                                "last_success_at": datetime.now(UTC),
-                                "last_attempt_at": datetime.now(UTC),
-                            }
-                        ),
-                        lease=third_lease,
-                        observed=(),
-                        missing_snapshot_threshold=2,
-                        actor_id="action-hands-skill-reconciler",
-                        command_prefix=f"source-retire:{source.source_id}",
-                        correlation_id=f"reconcile-{suffix}",
-                        causation_id=f"snapshot-missing-1-replay-{suffix}",
-                        occurred_at=datetime.now(UTC),
-                    )
-                )
-            await store_b.release_source_lease(third_lease)
-            fourth_lease = await store_a.claim_source_lease(
-                tenant_id=tenant_id,
-                source_id=source.source_id,
-                owner="hands-a",
-                ttl=timedelta(minutes=1),
-            )
-            assert fourth_lease is not None
-            retired_result = await store_a.commit_source_snapshot(
-                SkillSourceSnapshotCommit(
-                    state=sync_state.model_copy(
-                        update={
-                            "generation": fourth_lease.fencing_token,
-                            "cursor": "snapshot-missing-2",
-                            "last_success_at": datetime.now(UTC),
-                            "last_attempt_at": datetime.now(UTC),
-                        }
-                    ),
-                    lease=fourth_lease,
-                    observed=(),
-                    missing_snapshot_threshold=2,
-                    actor_id="action-hands-skill-reconciler",
-                    command_prefix=f"source-retire:{source.source_id}",
-                    correlation_id=f"reconcile-{suffix}",
-                    causation_id=f"snapshot-missing-2-{suffix}",
-                    occurred_at=datetime.now(UTC),
-                )
-            )
-            assert len(retired_result.retired) == 1
-            assert retired_result.retired[0].reason_code == ("source_missing_confirmed")
-            audit_count = await connection.fetchval(
-                """SELECT count(*) FROM hands.skill_source_retirement_command
-                WHERE tenant_id=$1 AND source_id=$2""",
-                tenant_id,
-                source.source_id,
-            )
-            assert audit_count == 1
-
-            retired = retired_result.retired[0]
-            restore = SkillRestoreCommit(
-                command_id=f"restore-{suffix}",
-                request_digest=f"sha256:{'f' * 64}",
-                actor_id="reviewer-test",
-                reason_code="source_inventory_reviewed",
-                correlation_id=f"restore-correlation-{suffix}",
-                causation_id=f"restore-causation-{suffix}",
-                expected_revision=retired.revision,
-                publication=retired.model_copy(
-                    update={
-                        "status": SkillPublicationStatus.RESTORING,
-                        "revision": retired.revision + 1,
-                        "updated_by": "reviewer-test",
-                        "updated_at": datetime.now(UTC),
-                        "reason_code": "source_inventory_reviewed",
-                    }
-                ),
-                occurred_at=datetime.now(UTC),
-            )
-            restoring = await store_a.commit_restore(restore)
-            assert restoring.status is SkillPublicationStatus.RESTORING
-            assert restoring.revision == retired.revision + 1
-            assert await store_b.commit_restore(restore) == restoring
-            with pytest.raises(VersionConflictError, match="command id was reused"):
-                await store_b.commit_restore(
-                    restore.__class__(
-                        **{
-                            **restore.__dict__,
-                            "request_digest": f"sha256:{'0' * 64}",
-                        }
-                    )
-                )
-            restore_audit = await connection.fetchrow(
-                """SELECT actor_id, previous_revision, restoring_revision
-                FROM hands.skill_publication_restore_command
-                WHERE tenant_id=$1 AND command_id=$2""",
-                tenant_id,
-                restore.command_id,
-            )
-            assert restore_audit is not None
-            assert restore_audit["actor_id"] == "reviewer-test"
-            assert restore_audit["previous_revision"] == retired.revision
-            assert restore_audit["restoring_revision"] == restoring.revision
-
-            rollback_package = transactional_package.model_copy(
-                update={
-                    "manifest": transactional_package.manifest.model_copy(
-                        update={"version": "3.0.0"}
-                    ),
-                    "package_digest": f"sha256:{'e' * 64}",
-                    "artifact_ref": ArtifactRef(
-                        artifact_id=f"art-rollback-{suffix}",
-                        version=1,
-                        content_hash="e" * 64,
-                        media_type="application/vnd.auraclaw.skill-package+json",
-                        size=300,
-                    ),
-                }
-            )
-            with pytest.raises(VersionConflictError, match="revision"):
-                await store_a.commit_publish(
-                    publish_commit.__class__(
-                        **{
-                            **publish_commit.__dict__,
-                            "command_id": f"publish-rollback-{suffix}",
-                            "request_digest": f"sha256:{'f' * 64}",
-                            "expected_publication_revision": 1,
-                            "package": rollback_package,
-                            "publication": transactional_publication.model_copy(
-                                update={
-                                    "publication_id": f"skp_rollback_{suffix}",
-                                    "version": "3.0.0",
-                                    "package_digest": rollback_package.package_digest,
-                                    "revision": 2,
-                                }
-                            ),
-                            "source_lease": fourth_lease,
-                        }
-                    )
-                )
-            assert (
-                await store_b.get_package(tenant_id, "platform", "release.prepare", "3.0.0") is None
-            )
-
-            revoked = await store_b.put_publication(
-                publication.model_copy(
-                    update={
-                        "status": SkillPublicationStatus.REVOKED,
-                        "revision": 2,
-                        "updated_by": "security-test",
-                        "updated_at": datetime.now(UTC),
-                        "reason_code": "publisher_key_compromised",
-                        "revocation_action": SkillRevocationAction.PAUSE,
-                        "revocation_policy_version": "skill-revocation-v1",
-                        "revocation_policy_decision_id": "policy-decision-1",
-                    }
-                ),
-                expected_revision=1,
-            )
-            assert revoked.updated_by == "security-test"
-            assert revoked.status is SkillPublicationStatus.REVOKED
-            assert revoked.revocation_action is SkillRevocationAction.PAUSE
-            assert revoked.revocation_policy_decision_id == "policy-decision-1"
-
-            retained = await store_b.update_package_retention(
-                package.model_copy(
-                    update={
-                        "retention_until": now + timedelta(days=180),
-                        "legal_hold": True,
-                        "retention_revision": 2,
-                        "retention_updated_by": "legal-test",
-                        "retention_updated_at": datetime.now(UTC),
-                    }
-                ),
-                expected_revision=1,
-            )
-            assert retained.legal_hold
-            assert retained.retention_revision == 2
-            with pytest.raises(VersionConflictError, match="retention revision"):
-                await store_b.update_package_retention(
-                    retained,
-                    expected_revision=1,
-                )
-
-            disabled = await store_b.put_installation(
-                installation.model_copy(
-                    update={
-                        "status": SkillInstallationStatus.DISABLED,
-                        "revision": 2,
-                        "updated_by": "admin-test",
-                        "updated_at": datetime.now(UTC),
-                        "reason_code": "tenant_disabled",
-                    }
-                ),
-                expected_revision=1,
-            )
-            assert disabled.updated_by == "admin-test"
-
-            with pytest.raises(VersionConflictError, match="revision conflict"):
-                await store_b.put_installation(
-                    installation,
-                    expected_revision=0,
-                )
-        finally:
-            await store_a.close()
-            await store_b.close()
-            await connection.execute(
-                "DELETE FROM hands.skill_admission_audit WHERE tenant_id=$1", tenant_id
-            )
-            await connection.execute("DELETE FROM hands.skill_outbox WHERE tenant_id=$1", tenant_id)
-            await connection.execute(
-                "DELETE FROM hands.skill_command WHERE tenant_id=$1", tenant_id
-            )
-            await connection.execute(
-                "DELETE FROM hands.skill_publication_restore_command WHERE tenant_id=$1",
-                tenant_id,
-            )
-            await connection.execute(
-                "DELETE FROM hands.skill_source_retirement_command WHERE tenant_id=$1",
-                tenant_id,
-            )
-            await connection.execute(
-                "DELETE FROM hands.skill_source_command WHERE tenant_id=$1", tenant_id
-            )
-            await connection.execute(
-                "DELETE FROM hands.skill_publication_source WHERE tenant_id=$1",
-                tenant_id,
-            )
-            await connection.execute(
-                "DELETE FROM hands.skill_source_inventory WHERE tenant_id=$1",
-                tenant_id,
-            )
-            await connection.execute(
-                "DELETE FROM hands.skill_source_sync_state WHERE tenant_id=$1",
-                tenant_id,
-            )
-            await connection.execute(
-                "DELETE FROM hands.skill_source_lease WHERE tenant_id=$1", tenant_id
-            )
-            await connection.execute(
-                "DELETE FROM hands.skill_installation_command WHERE tenant_id=$1",
-                tenant_id,
-            )
-            await connection.execute(
-                "DELETE FROM hands.skill_installation WHERE tenant_id=$1", tenant_id
-            )
-            await connection.execute(
-                "DELETE FROM hands.skill_publication WHERE tenant_id=$1", tenant_id
-            )
-            await connection.execute("DELETE FROM hands.skill_source WHERE tenant_id=$1", tenant_id)
-            await connection.execute(
-                "DELETE FROM hands.skill_package WHERE tenant_id=$1", tenant_id
             )
             await connection.close()
 

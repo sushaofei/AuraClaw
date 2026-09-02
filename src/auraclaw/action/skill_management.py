@@ -311,8 +311,6 @@ class SkillManagementService:
             return restoring
         if restoring.status is not SkillPublicationStatus.RESTORING:
             raise VersionConflictError("Skill publication restore is incomplete")
-        if restoring.source_id is None:
-            raise PolicyDeniedError("Skill publication has no governed Source")
         package = await self.get_package(
             command.tenant_id,
             command.publisher,
@@ -324,7 +322,6 @@ class SkillManagementService:
             PublishSkillCommand(
                 tenant_id=command.tenant_id,
                 actor_id=command.actor_id,
-                source_id=restoring.source_id,
                 activate=True,
                 command_id=activation_command_id,
                 expected_revision=restoring.revision,

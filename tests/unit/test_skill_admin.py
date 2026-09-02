@@ -21,7 +21,6 @@ from auraclaw.action.skill_packages import (
     skill_package_digest,
 )
 from auraclaw.action.skill_publication import SkillPublicationService
-from auraclaw.action.skill_sources import SkillSourceService
 from auraclaw.api.routes.admin_skills import create_skill_admin_router
 from auraclaw.composition.api import create_app
 from auraclaw.composition.providers import (
@@ -40,9 +39,6 @@ from auraclaw.contracts.skills import (
     SkillManifest,
     SkillPackageRetentionStatus,
     SkillResourceRequirement,
-    SkillSourceDesiredState,
-    SkillSourceKind,
-    SkillSourceRecord,
     SkillToolRequirement,
 )
 from auraclaw.contracts.tools import ArtifactRef
@@ -86,23 +82,9 @@ def test_skill_admission_queries_are_tenant_scoped_filterable_and_aggregated() -
     app = create_app(profile="task-api")
     registry = services._skill_registry_service(get_settings())
     lifecycle = InMemorySkillLifecycleStore()
-    now = datetime.now(UTC)
     publication_service = SkillPublicationService(
         registry=registry,
         lifecycle=lifecycle,
-        bootstrap_sources=(
-            SkillSourceRecord(
-                source_id="sks_admin_upload",
-                tenant_id="tenant-1",
-                kind=SkillSourceKind.ADMIN_UPLOAD,
-                desired_state=SkillSourceDesiredState.ENABLED,
-                publisher_allowlist=("platform",),
-                created_by="system",
-                updated_by="system",
-                created_at=now,
-                updated_at=now,
-            ),
-        ),
     )
     app.include_router(
         create_skill_admin_router(
@@ -118,7 +100,6 @@ def test_skill_admission_queries_are_tenant_scoped_filterable_and_aggregated() -
         command = PublishSkillCommand(
             tenant_id="tenant-1",
             actor_id="admin-1",
-            source_id="sks_admin_upload",
             command_id="publish-observable-1",
             correlation_id="corr-observable-1",
             causation_id="publish-observable-1",
@@ -227,23 +208,9 @@ def test_skill_admin_manages_installation_and_revocation_separately() -> None:
     app = create_app(profile="task-api")
     registry = services._skill_registry_service(get_settings())
     lifecycle = InMemorySkillLifecycleStore()
-    now = datetime.now(UTC)
     publication_service = SkillPublicationService(
         registry=registry,
         lifecycle=lifecycle,
-        bootstrap_sources=(
-            SkillSourceRecord(
-                source_id="sks_admin_upload",
-                tenant_id="tenant-1",
-                kind=SkillSourceKind.ADMIN_UPLOAD,
-                desired_state=SkillSourceDesiredState.ENABLED,
-                publisher_allowlist=("platform",),
-                created_by="system",
-                updated_by="system",
-                created_at=now,
-                updated_at=now,
-            ),
-        ),
     )
     management = SkillManagementService(
         lifecycle=lifecycle,
@@ -266,7 +233,6 @@ def test_skill_admin_manages_installation_and_revocation_separately() -> None:
             PublishSkillCommand(
                 tenant_id="tenant-1",
                 actor_id="admin-1",
-                source_id="sks_admin_upload",
                 command_id="publish-1",
                 correlation_id="corr-1",
                 causation_id="publish-1",
@@ -296,7 +262,7 @@ def test_skill_admin_manages_installation_and_revocation_separately() -> None:
             "/v1/admin/skill-installations?status=active", headers=headers
         )
         assert installations.status_code == 200, installations.text
-        assert installations.json()["installations"][0]["source_id"] == "sks_admin_upload"
+        assert installations.json()["installations"][0]["status"] == "active"
 
         publications = client.get(
             "/v1/admin/skill-publications?publisher=platform", headers=headers
@@ -478,9 +444,7 @@ def test_task_api_service_exposes_skill_admin_routes() -> None:
     assert "/v1/admin/skill-publications/{publisher}/{name}/versions/{version}:restore" in paths
     assert "/v1/admin/skill-packages/{publisher}/{name}/versions/{version}:purge" in paths
     assert "/v1/admin/skill-publications" in paths
-    assert "/v1/admin/skill-sources" in paths
-    assert "/v1/admin/skill-sources/{source_id}" in paths
-    assert "/v1/admin/skill-sources/{source_id}:sync" in paths
+    assert "/v1/admin/skill-sources" not in paths
     assert "/v1/admin/skill-publishers/{publisher}/status:revoke" in paths
     assert "/v1/admin/skill-package-uploads" in paths
     assert "/v1/admin/skill-package-uploads/{artifact_id}:finalize" not in paths
@@ -536,102 +500,13 @@ def test_skill_package_upload_is_proxied_and_integrity_checked() -> None:
         assert mismatch.status_code == 422
 
 
-def test_skill_source_admin_api_manages_and_synchronizes_sources() -> None:
-    class Synchronizer:
-        async def reconcile_source(self, tenant_id: str, source_id: str) -> object:
-            return {"tenant_id": tenant_id, "source_id": source_id, "published": 0}
-
-    app = create_app(profile="task-api")
-    lifecycle = InMemorySkillLifecycleStore()
-    source_service = SkillSourceService(
-        lifecycle,
-        synchronizer=Synchronizer(),
-    )
-    app.include_router(
-        create_skill_admin_router(
-            services._skill_registry_service(get_settings()),
-            source_service=source_service,
-        )
-    )
-    identity_headers = {"X-Tenant-ID": "tenant-1", "X-Actor-ID": "admin-1"}
-    source_body = {
-        "source_id": "sks_mcp_primary",
-        "kind": "mcp",
-        "desired_state": "enabled",
-        "publisher_allowlist": ["platform"],
-        "credential_ref": "vault/tenant-1/mcp-primary",
-        "config_metadata": {"server_id": "primary"},
-        "priority": 20,
-    }
-
-    with TestClient(app) as client:
-        created = client.post(
-            "/v1/admin/skill-sources",
-            headers={**identity_headers, "Idempotency-Key": "source-create-1"},
-            json=source_body,
-        )
-        assert created.status_code == 201, created.text
-        assert created.json()["source"]["priority"] == 20
-
-        listed = client.get("/v1/admin/skill-sources", headers=identity_headers)
-        assert listed.status_code == 200
-        assert [item["source_id"] for item in listed.json()["sources"]] == [
-            "sks_mcp_primary"
-        ]
-
-        synchronized = client.post(
-            "/v1/admin/skill-sources/sks_mcp_primary:sync",
-            headers=identity_headers,
-        )
-        assert synchronized.status_code == 202, synchronized.text
-        assert synchronized.json()["sync"]["source_id"] == "sks_mcp_primary"
-
-        updated = client.patch(
-            "/v1/admin/skill-sources/sks_mcp_primary",
-            headers={
-                **identity_headers,
-                "Idempotency-Key": "source-update-1",
-                "X-Expected-Revision": "1",
-            },
-            json={**source_body, "priority": 30},
-        )
-        assert updated.status_code == 200, updated.text
-        assert updated.json()["source"]["revision"] == 2
-
-        retired = client.delete(
-            "/v1/admin/skill-sources/sks_mcp_primary",
-            headers={
-                **identity_headers,
-                "Idempotency-Key": "source-retire-1",
-                "X-Expected-Revision": "2",
-                "X-Reason-Code": "source_decommissioned",
-            },
-        )
-        assert retired.status_code == 202, retired.text
-        assert retired.json()["source"]["desired_state"] == "retired"
-
-
 def test_skill_admin_publishes_base64_package_through_application_service() -> None:
     app = create_app(profile="task-api")
     registry = services._skill_registry_service(get_settings())
-    now = datetime.now(UTC)
     lifecycle = InMemorySkillLifecycleStore()
     publication_service = SkillPublicationService(
         registry=registry,
         lifecycle=lifecycle,
-        bootstrap_sources=(
-            SkillSourceRecord(
-                source_id="sks_admin_upload",
-                tenant_id="tenant-1",
-                kind=SkillSourceKind.ADMIN_UPLOAD,
-                desired_state=SkillSourceDesiredState.ENABLED,
-                publisher_allowlist=("platform",),
-                created_by="system",
-                updated_by="system",
-                created_at=now,
-                updated_at=now,
-            ),
-        ),
     )
     app.include_router(
         create_skill_admin_router(
@@ -641,7 +516,6 @@ def test_skill_admin_publishes_base64_package_through_application_service() -> N
     )
     package = _package()
     payload = {
-        "source_id": "sks_admin_upload",
         "activate": True,
         "files": {
             path: base64.b64encode(content).decode() for path, content in package.files.items()
@@ -680,25 +554,11 @@ def test_skill_admin_publishes_staged_artifact_through_same_admission_service() 
 
     app = create_app(profile="task-api")
     registry = services._skill_registry_service(get_settings())
-    now = datetime.now(UTC)
     lifecycle = InMemorySkillLifecycleStore()
     publication_service = SkillPublicationService(
         registry=registry,
         lifecycle=lifecycle,
         artifacts=ArtifactReader(),
-        bootstrap_sources=(
-            SkillSourceRecord(
-                source_id="sks_admin_upload",
-                tenant_id="tenant-1",
-                kind=SkillSourceKind.ADMIN_UPLOAD,
-                desired_state=SkillSourceDesiredState.ENABLED,
-                publisher_allowlist=("platform",),
-                created_by="system",
-                updated_by="system",
-                created_at=now,
-                updated_at=now,
-            ),
-        ),
     )
     app.include_router(create_skill_admin_router(registry, publication_service=publication_service))
     with TestClient(app) as client:
@@ -711,7 +571,6 @@ def test_skill_admin_publishes_staged_artifact_through_same_admission_service() 
                 "X-Expected-Revision": "0",
             },
             json={
-                "source_id": "sks_admin_upload",
                 "activate": True,
                 "artifact_ref": artifact_ref.as_dict(),
                 "expected_digest": digest,

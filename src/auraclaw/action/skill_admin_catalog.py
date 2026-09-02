@@ -38,7 +38,6 @@ class SkillCatalogQuery:
     risk_level: str | None = None
     publication_status: str | None = None
     installation_status: str | None = None
-    source_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,13 +107,6 @@ class SkillAdminCatalogQueryService:
                 installation is None
                 or installation.status.value != query.installation_status
             ):
-                continue
-            effective_source_id = (
-                installation.source_id
-                if installation is not None
-                else publication_state.source_id
-            )
-            if query.source_id and effective_source_id != query.source_id:
                 continue
             haystack = " ".join(
                 (manifest.publisher, manifest.name, manifest.description)

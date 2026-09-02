@@ -686,7 +686,6 @@ class ArtifactSkillOrphanResolveResponse(ContractModel):
 class SkillPublishInternalRequest(ContractModel):
     context: InternalRequestContext
     actor_id: str = Field(min_length=1, max_length=256)
-    source_id: str = Field(min_length=1, max_length=128)
     activate: bool = True
     command_id: str = Field(min_length=1, max_length=256)
     expected_revision: int = Field(default=0, ge=0)
@@ -701,7 +700,6 @@ class SkillPublishInternalResponse(ContractModel):
 class SkillPublishArtifactInternalRequest(ContractModel):
     context: InternalRequestContext
     actor_id: str = Field(min_length=1, max_length=256)
-    source_id: str = Field(min_length=1, max_length=128)
     activate: bool = True
     command_id: str = Field(min_length=1, max_length=256)
     expected_revision: int = Field(default=0, ge=0)
@@ -752,45 +750,6 @@ class SkillInstallationInternalRequest(ContractModel):
 class SkillInstallationInternalResponse(ContractModel):
     api_version: str = INTERNAL_API_VERSION
     installation: dict[str, Any]
-
-
-class SkillSourceConfigureInternalRequest(ContractModel):
-    context: InternalRequestContext
-    actor_id: str = Field(min_length=1, max_length=256)
-    source_id: str = Field(min_length=1, max_length=128)
-    kind: Literal["mcp"]
-    desired_state: Literal["enabled", "disabled"]
-    publisher_allowlist: tuple[str, ...]
-    credential_ref: str | None = Field(default=None, max_length=512)
-    config_metadata: dict[str, Any] = Field(default_factory=dict)
-    priority: int = Field(default=0, ge=-1000, le=1000)
-    command_id: str = Field(min_length=1, max_length=256)
-    expected_revision: int = Field(ge=0)
-
-
-class SkillSourceRetireInternalRequest(ContractModel):
-    context: InternalRequestContext
-    actor_id: str = Field(min_length=1, max_length=256)
-    source_id: str = Field(min_length=1, max_length=128)
-    reason_code: str = Field(min_length=1, max_length=128)
-    command_id: str = Field(min_length=1, max_length=256)
-    expected_revision: int = Field(ge=1)
-
-
-class SkillSourceReadInternalRequest(ContractModel):
-    context: InternalRequestContext
-    source_id: str | None = Field(default=None, max_length=128)
-
-
-class SkillSourceSyncInternalRequest(ContractModel):
-    context: InternalRequestContext
-    source_id: str = Field(min_length=1, max_length=128)
-
-
-class SkillSourceInternalResponse(ContractModel):
-    api_version: str = INTERNAL_API_VERSION
-    sources: tuple[dict[str, Any], ...] = ()
-    sync_result: dict[str, Any] | None = None
 
 
 class SkillRevokeInternalRequest(ContractModel):
@@ -938,8 +897,6 @@ class SkillAdminSnapshotInternalResponse(ContractModel):
     publications: tuple[dict[str, Any], ...] = ()
     installations: tuple[dict[str, Any], ...] = ()
     publishers: tuple[dict[str, Any], ...] = ()
-    sources: tuple[dict[str, Any], ...] = ()
-    source_sync_states: tuple[dict[str, Any], ...] = ()
 
 
 class AdminOperationRequest(ContractModel):

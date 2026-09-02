@@ -13,7 +13,6 @@ from auraclaw.action.skill_lifecycle import (
     SkillAdmissionAuditRecord,
     SkillLifecycleStore,
     SkillPublishCommit,
-    SkillSourceLease,
 )
 from auraclaw.action.skill_packages import (
     DefaultSkillPackageContentScanner,
@@ -40,9 +39,6 @@ from auraclaw.contracts.skills import (
     SkillPackageRetentionStatus,
     SkillPublicationRecord,
     SkillPublicationStatus,
-    SkillSourceDesiredState,
-    SkillSourceKind,
-    SkillSourceRecord,
 )
 from auraclaw.contracts.tools import ArtifactRef
 
@@ -83,7 +79,6 @@ class SkillPublicationService:
         artifact_lifecycle: SkillArtifactLifecycle | None = None,
         publisher_trust: SkillPublisherTrustService | None = None,
         content_scanner: SkillPackageContentScanner | None = None,
-        bootstrap_sources: tuple[SkillSourceRecord, ...] = (),
     ) -> None:
         self._registry = registry
         self._lifecycle = lifecycle
@@ -94,16 +89,11 @@ class SkillPublicationService:
         self._content_policy_version = self._content_scanner.policy_version
         if _CONTENT_POLICY_VERSION.fullmatch(self._content_policy_version) is None:
             raise ValueError("Skill content policy version is invalid")
-        self._bootstrap_sources = {
-            (source.tenant_id, source.source_id): source for source in bootstrap_sources
-        }
 
     async def publish(
         self,
         command: PublishSkillCommand,
         package: SkillPackage,
-        *,
-        source_lease: SkillSourceLease | None = None,
     ) -> PublishedSkill:
         started = time.monotonic()
         trace = _AdmissionTrace.from_package("publish", package)
@@ -115,14 +105,10 @@ class SkillPublicationService:
             trace.package_digest = skill_package_digest(package)
             trace.stage = "content_scan"
             self._scan_content(package)
-            trace.stage = "source_authorization"
-            source = await self._authorized_source(command, package)
             trace.stage = "lifecycle_commit"
             result = await self._publish(
                 command,
                 package,
-                source=source,
-                source_lease=source_lease,
                 signature_key_id=key_id,
                 signature_verified=externally_verified,
             )
@@ -178,13 +164,10 @@ class SkillPublicationService:
                 raise VersionConflictError("Skill package digest does not match")
             trace.stage = "content_scan"
             self._scan_content(package)
-            trace.stage = "source_authorization"
-            source = await self._authorized_source(command, package)
             trace.stage = "lifecycle_commit"
             result = await self._publish(
                 command,
                 package,
-                source=source,
                 artifact_ref=artifact_ref,
                 artifact_claimed=True,
                 signature_key_id=key_id,
@@ -201,12 +184,10 @@ class SkillPublicationService:
         command: PublishSkillCommand,
         package: SkillPackage,
         *,
-        source: SkillSourceRecord,
         artifact_ref: ArtifactRef | None = None,
         artifact_claimed: bool = False,
         signature_key_id: str | None = None,
         signature_verified: bool = False,
-        source_lease: SkillSourceLease | None = None,
     ) -> PublishedSkill:
         digest = skill_package_digest(package)
         manifest = package.manifest
@@ -339,7 +320,6 @@ class SkillPublicationService:
                 version=manifest.version,
                 package_digest=publication.package_digest,
                 status=desired_status,
-                source_id=source.source_id,
                 revision=1,
                 created_by=command.actor_id,
                 updated_by=command.actor_id,
@@ -352,7 +332,6 @@ class SkillPublicationService:
                 update={
                     "package_digest": package_record.package_digest,
                     "status": SkillPublicationStatus.ACTIVE,
-                    "source_id": source.source_id,
                     "revision": existing.revision + 1,
                     "updated_by": command.actor_id,
                     "updated_at": now,
@@ -367,7 +346,6 @@ class SkillPublicationService:
             record = existing.model_copy(
                 update={
                     "status": desired_status,
-                    "source_id": source.source_id,
                     "revision": existing.revision + 1,
                     "updated_by": command.actor_id,
                     "updated_at": now,
@@ -387,7 +365,6 @@ class SkillPublicationService:
                     "version_constraint": f"={manifest.version}",
                     "pinned_package_digest": package_record.package_digest,
                     "status": SkillInstallationStatus.ACTIVE,
-                    "source_id": source.source_id,
                     "auto_upgrade": False,
                     "revision": existing_installation.revision + 1,
                     "updated_by": command.actor_id,
@@ -401,7 +378,6 @@ class SkillPublicationService:
         else:
             installation = await self._new_installation(
                 command,
-                source,
                 package_record,
                 now,
             )
@@ -412,7 +388,6 @@ class SkillPublicationService:
                     command, digest, artifact_ref
                 ),
                 actor_id=command.actor_id,
-                source_id=source.source_id,
                 correlation_id=command.correlation_id,
                 causation_id=command.causation_id,
                 expected_publication_revision=expected_publication_revision,
@@ -420,7 +395,6 @@ class SkillPublicationService:
                 publication=record,
                 installation=installation,
                 occurred_at=now,
-                source_lease=source_lease,
                 replace_purged=replace_purged,
                 expected_installation_revision=(
                     existing_installation.revision
@@ -489,7 +463,6 @@ class SkillPublicationService:
                 command_id=command.command_id,
                 operation=trace.operation,
                 actor_id=command.actor_id,
-                source_id=command.source_id,
                 correlation_id=command.correlation_id,
                 causation_id=command.causation_id,
                 publisher=trace.publisher,
@@ -512,44 +485,9 @@ class SkillPublicationService:
             )
         )
 
-    async def _authorized_source(
-        self, command: PublishSkillCommand, package: SkillPackage
-    ) -> SkillSourceRecord:
-        source = await self._lifecycle.get_source(command.tenant_id, command.source_id)
-        if source is None:
-            source = self._bootstrap_sources.get((command.tenant_id, command.source_id))
-        if source is None:
-            template = self._bootstrap_sources.get(("*", command.source_id))
-            if template is not None:
-                source = template.model_copy(update={"tenant_id": command.tenant_id})
-        if (
-            source is not None
-            and await self._lifecycle.get_source(command.tenant_id, command.source_id) is None
-        ):
-            try:
-                source = await self._lifecycle.put_source(source, expected_revision=0)
-            except VersionConflictError:
-                source = await self._lifecycle.get_source(command.tenant_id, command.source_id)
-        if source is None:
-            raise PolicyDeniedError("Skill Source is not configured")
-        if source.desired_state is not SkillSourceDesiredState.ENABLED:
-            raise PolicyDeniedError("Skill Source is not enabled")
-        registry_authorized_admin = (
-            source.kind is SkillSourceKind.ADMIN_UPLOAD
-            and package.manifest.signature.startswith("ed25519:")
-            and self._publisher_trust is not None
-        )
-        if (
-            package.manifest.publisher not in source.publisher_allowlist
-            and not registry_authorized_admin
-        ):
-            raise PolicyDeniedError("Skill publisher is not allowed by the Source")
-        return source
-
     async def _new_installation(
         self,
         command: PublishSkillCommand,
-        source: SkillSourceRecord,
         package: SkillPackageRecord,
         now: datetime,
     ) -> SkillInstallationRecord | None:
@@ -576,7 +514,6 @@ class SkillPublicationService:
             version_constraint=f"={manifest.version}",
             pinned_package_digest=package.package_digest,
             status=SkillInstallationStatus.ACTIVE,
-            source_id=source.source_id,
             auto_upgrade=False,
             revision=1,
             created_by=command.actor_id,
@@ -599,7 +536,6 @@ def _publish_request_digest(
     payload = {
         "tenant_id": command.tenant_id,
         "actor_id": command.actor_id,
-        "source_id": command.source_id,
         "activate": command.activate,
         "expected_revision": command.expected_revision,
         "package_digest": package_digest,

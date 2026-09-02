@@ -22,7 +22,6 @@ def _admission(admission_id: str, occurred_at: datetime) -> SkillAdmissionAuditR
         command_id=f"command-{admission_id}",
         operation="publish",
         actor_id="admin-a",
-        source_id="sks_admin_upload",
         correlation_id=f"correlation-{admission_id}",
         causation_id=f"causation-{admission_id}",
         publisher="platform",

@@ -15,7 +15,6 @@ from auraclaw.action.skill_publishers import (
     SkillPublisherService,
     SkillPublisherTrustService,
 )
-from auraclaw.action.skill_sources import SkillSourceService
 from auraclaw.api.dependencies import (
     get_collaboration_projection,
     get_observability_service,
@@ -160,7 +159,6 @@ def build_task_api_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
             bearer_token=_service_bearer_token(settings, ServiceIdentity.TASK_API),
         )
         skill_management = skill_publication
-        skill_source_management = skill_publication
         publisher_management = skill_publication
         skill_uploads = RemoteSkillPackageUploadClient(
             settings.artifact_base_url,
@@ -182,13 +180,6 @@ def build_task_api_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
             ),
             retired_activator=skill_publication,
         )
-        skill_source_management = SkillSourceService(
-            skill_lifecycle,
-            projector=InProcessSkillStateProjector(
-                lifecycle=skill_lifecycle,
-                registry=skill_registry,
-            ),
-        )
     app.include_router(
         create_skill_admin_router(
             skill_registry,
@@ -202,7 +193,6 @@ def build_task_api_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
             upload_service=skill_uploads,
             publisher_service=publisher_management,
             admission_reader=skill_publication if skill_lifecycle is None else skill_lifecycle,
-            source_service=skill_source_management,
             capability_availability=SkillDependencyAvailability(
                 capability_catalog_store
             ),

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 
 from auraclaw.action.ports import SkillArtifactOrphan
 from auraclaw.action.skill_lifecycle import InMemorySkillLifecycleStore
@@ -15,9 +15,6 @@ from auraclaw.action.skill_reliability import SkillPublicationReliabilityWorker
 from auraclaw.contracts.skills import (
     PublishSkillCommand,
     SkillManifest,
-    SkillSourceDesiredState,
-    SkillSourceKind,
-    SkillSourceRecord,
 )
 from auraclaw.contracts.tools import ArtifactRef
 from auraclaw.infrastructure.artifacts.store import ArtifactStore, InMemoryObjectStorage
@@ -99,29 +96,14 @@ def test_reliability_worker_delivers_outbox_and_repairs_or_deletes_orphans() -> 
             artifacts=ArtifactStore(InMemoryObjectStorage(), signing_key=_KEY),
             signature_verifier=HmacSkillSignatureVerifier({"acme": _KEY}),
         )
-        now = datetime.now(UTC)
         service = SkillPublicationService(
             registry=registry,
             lifecycle=lifecycle,
-            bootstrap_sources=(
-                SkillSourceRecord(
-                    source_id="sks_source-a",
-                    tenant_id="tenant-a",
-                    kind=SkillSourceKind.ADMIN_UPLOAD,
-                    desired_state=SkillSourceDesiredState.ENABLED,
-                    publisher_allowlist=("acme",),
-                    created_by="system",
-                    updated_by="system",
-                    created_at=now,
-                    updated_at=now,
-                ),
-            ),
         )
         published = await service.publish(
             PublishSkillCommand(
                 tenant_id="tenant-a",
                 actor_id="admin-a",
-                source_id="sks_source-a",
                 command_id="publish-a",
                 correlation_id="corr-a",
                 causation_id="publish-a",
@@ -167,23 +149,9 @@ def test_reliability_worker_renews_and_coalesces_same_tenant_rebuild() -> None:
             artifacts=ArtifactStore(InMemoryObjectStorage(), signing_key=_KEY),
             signature_verifier=HmacSkillSignatureVerifier({"acme": _KEY}),
         )
-        now = datetime.now(UTC)
         service = SkillPublicationService(
             registry=registry,
             lifecycle=lifecycle,
-            bootstrap_sources=(
-                SkillSourceRecord(
-                    source_id="sks_source-a",
-                    tenant_id="tenant-a",
-                    kind=SkillSourceKind.ADMIN_UPLOAD,
-                    desired_state=SkillSourceDesiredState.ENABLED,
-                    publisher_allowlist=("acme",),
-                    created_by="system",
-                    updated_by="system",
-                    created_at=now,
-                    updated_at=now,
-                ),
-            ),
         )
         publications = []
         for index, version in enumerate(("1.0.0", "1.0.1"), start=1):
@@ -192,7 +160,6 @@ def test_reliability_worker_renews_and_coalesces_same_tenant_rebuild() -> None:
                     PublishSkillCommand(
                         tenant_id="tenant-a",
                         actor_id="admin-a",
-                        source_id="sks_source-a",
                         command_id=f"publish-{index}",
                         correlation_id=f"corr-{index}",
                         causation_id=f"publish-{index}",

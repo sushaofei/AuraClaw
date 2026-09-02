@@ -28,9 +28,6 @@ from auraclaw.contracts.skills import (
     SkillInstallationStatus,
     SkillManifest,
     SkillPublicationStatus,
-    SkillSourceDesiredState,
-    SkillSourceKind,
-    SkillSourceRecord,
 )
 from auraclaw.contracts.tools import ArtifactRef
 from auraclaw.infrastructure.artifacts.store import ArtifactStore, InMemoryObjectStorage
@@ -55,21 +52,6 @@ def _package(*, markdown: bytes = b"# Release\n") -> SkillPackage:
     )
 
 
-def _source(*, publishers: tuple[str, ...] = ("acme",)) -> SkillSourceRecord:
-    now = datetime.now(UTC)
-    return SkillSourceRecord(
-        source_id="sks_admin_upload",
-        tenant_id="tenant-a",
-        kind=SkillSourceKind.ADMIN_UPLOAD,
-        desired_state=SkillSourceDesiredState.ENABLED,
-        publisher_allowlist=publishers,
-        created_by="system",
-        updated_by="system",
-        created_at=now,
-        updated_at=now,
-    )
-
-
 def _command(
     *,
     activate: bool = True,
@@ -79,7 +61,6 @@ def _command(
     return PublishSkillCommand(
         tenant_id="tenant-a",
         actor_id="admin-a",
-        source_id="sks_admin_upload",
         activate=activate,
         command_id=command_id,
         expected_revision=expected_revision,
@@ -88,9 +69,7 @@ def _command(
     )
 
 
-def _service(
-    source: SkillSourceRecord,
-) -> tuple[SkillPublicationService, InMemorySkillLifecycleStore]:
+def _service() -> tuple[SkillPublicationService, InMemorySkillLifecycleStore]:
     lifecycle = InMemorySkillLifecycleStore()
     registry = SkillPackageRegistry(
         artifacts=ArtifactStore(InMemoryObjectStorage(), signing_key=_KEY),
@@ -101,7 +80,6 @@ def _service(
         SkillPublicationService(
             registry=registry,
             lifecycle=lifecycle,
-            bootstrap_sources=(source,),
         ),
         lifecycle,
     )
@@ -109,7 +87,7 @@ def _service(
 
 def test_publish_service_persists_package_publication_and_installation() -> None:
     async def scenario() -> None:
-        service, lifecycle = _service(_source())
+        service, lifecycle = _service()
         first = await service.publish(_command(), _package())
         repeated = await service.publish(_command(), _package())
 
@@ -156,9 +134,43 @@ def test_publish_service_persists_package_publication_and_installation() -> None
     asyncio.run(scenario())
 
 
+def test_different_tenants_can_publish_the_same_skill_coordinate() -> None:
+    async def scenario() -> None:
+        service, lifecycle = _service()
+        package = _package()
+        tenant_a = await service.publish(_command(command_id="publish-tenant-a"), package)
+        tenant_b = await service.publish(
+            _command(command_id="publish-tenant-b").model_copy(
+                update={
+                    "tenant_id": "tenant-b",
+                    "actor_id": "admin-b",
+                    "correlation_id": "corr-b",
+                    "causation_id": "publish-tenant-b",
+                }
+            ),
+            package,
+        )
+
+        assert tenant_a.package_digest == tenant_b.package_digest
+        assert await lifecycle.get_publication(
+            "tenant-a", "acme", "release.prepare", "1.0.0"
+        ) is not None
+        assert await lifecycle.get_publication(
+            "tenant-b", "acme", "release.prepare", "1.0.0"
+        ) is not None
+        assert await lifecycle.get_installation(
+            "tenant-a", "acme", "release.prepare"
+        ) is not None
+        assert await lifecycle.get_installation(
+            "tenant-b", "acme", "release.prepare"
+        ) is not None
+
+    asyncio.run(scenario())
+
+
 def test_staged_publication_requires_revision_to_activate() -> None:
     async def scenario() -> None:
-        service, lifecycle = _service(_source())
+        service, lifecycle = _service()
         staged = await service.publish(
             _command(activate=False, command_id="publish-staged"), _package()
         )
@@ -186,24 +198,9 @@ def test_staged_publication_requires_revision_to_activate() -> None:
     asyncio.run(scenario())
 
 
-def test_publish_service_enforces_source_publisher_allowlist() -> None:
-    async def scenario() -> None:
-        service, lifecycle = _service(_source(publishers=("other",)))
-        with pytest.raises(PolicyDeniedError, match="publisher"):
-            await service.publish(_command(), _package())
-        audit = (await lifecycle.list_admissions("tenant-a"))[0]
-        assert audit.outcome == "rejected"
-        assert audit.stage == "source_authorization"
-        assert audit.safe_error_code == "policy_denied"
-        assert audit.publisher == "acme"
-        assert audit.package_digest == skill_package_digest(_package())
-
-    asyncio.run(scenario())
-
-
 def test_invalid_signature_is_audited_without_signature_material() -> None:
     async def scenario() -> None:
-        service, lifecycle = _service(_source())
+        service, lifecycle = _service()
         valid = _package()
         invalid_manifest = valid.manifest.model_copy(
             update={"signature": f"hmac-sha256:{'0' * 64}"}
@@ -236,7 +233,7 @@ def test_content_findings_quarantine_admission_without_persisting_package(
     markdown: bytes, finding: str
 ) -> None:
     async def scenario() -> None:
-        service, lifecycle = _service(_source())
+        service, lifecycle = _service()
         with pytest.raises(SkillContentRejectedError):
             await service.publish(_command(), _package(markdown=markdown))
         audit = (await lifecycle.list_admissions("tenant-a"))[0]
@@ -321,7 +318,6 @@ def test_artifact_read_failure_audit_does_not_persist_sensitive_error() -> None:
             registry=registry,
             lifecycle=lifecycle,
             artifacts=FailingArtifacts(),
-            bootstrap_sources=(_source(),),
         )
         artifact_ref = ArtifactRef(
             artifact_id="art_sensitive",
@@ -345,7 +341,7 @@ def test_artifact_read_failure_audit_does_not_persist_sensitive_error() -> None:
 
 def test_publish_service_cannot_reactivate_revoked_publication() -> None:
     async def scenario() -> None:
-        service, lifecycle = _service(_source())
+        service, lifecycle = _service()
         await service.publish(_command(), _package())
         publication = await lifecycle.get_publication(
             "tenant-a", "acme", "release.prepare", "1.0.0"
@@ -416,7 +412,6 @@ def test_staged_artifact_publish_reuses_validated_immutable_artifact() -> None:
             lifecycle=lifecycle,
             artifacts=artifacts,
             artifact_lifecycle=artifacts,  # type: ignore[arg-type]
-            bootstrap_sources=(_source(),),
         )
         artifact_ref = ArtifactRef(
             artifact_id="art_staged",

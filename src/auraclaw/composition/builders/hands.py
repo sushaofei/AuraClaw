@@ -57,9 +57,7 @@ from auraclaw.action.skill_publishers import (
     SkillPublisherTrustService,
 )
 from auraclaw.action.skill_rebuild import SkillStateRebuilder
-from auraclaw.action.skill_reconciler import SkillPackageReconciler
 from auraclaw.action.skill_reliability import SkillPublicationReliabilityWorker
-from auraclaw.action.skill_sources import SkillSourceService
 from auraclaw.action.tool_gateway import ToolGateway, ToolRegistry
 from auraclaw.composition.services import (
     EmptyApprovalReader,
@@ -546,20 +544,7 @@ def build_action_hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         max_concurrent_per_host=settings.mcp_reconcile_max_concurrent_per_host,
         server_timeout_seconds=settings.mcp_reconcile_server_timeout_seconds,
     )
-    skill_reconciler = SkillPackageReconciler(
-        store=capability_catalog_store,
-        connectors=app.state.capability_connectors,
-        lifecycle=skill_lifecycle,
-        publication=skill_publication,
-        rebuilder=skill_state_projector,
-        snapshot_provider=reconciler.snapshot_for,
-        max_concurrent=settings.mcp_reconcile_max_concurrent,
-        max_concurrent_per_tenant=settings.mcp_reconcile_max_concurrent_per_tenant,
-        max_concurrent_per_host=settings.mcp_reconcile_max_concurrent_per_host,
-        server_timeout_seconds=settings.mcp_reconcile_server_timeout_seconds,
-    )
     app.state.catalog_reconciler = reconciler
-    app.state.skill_reconciler = skill_reconciler
 
     async def initialize_remote_catalog() -> None:
         await initialize_registry()
@@ -568,14 +553,12 @@ def build_action_hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
             if setter is not None:
                 setter(reconciler.handle_notification)
         await reconciler.reconcile_all()
-        await skill_reconciler.reconcile_all()
 
     async def reconcile_catalog_and_skills() -> int:
         results = await reconciler.reconcile_all_results()
         manager = getattr(app.state, "mcp_connection_manager", None)
         if manager is not None:
             await manager.record_reconcile_results(results)
-        await skill_reconciler.reconcile_all()
         return sum(result.status is CapabilityStatus.ACTIVE for result in results)
 
     async def reconcile_mcp_revisions() -> int:
@@ -663,11 +646,6 @@ def build_action_hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
                     rebuilder=skill_state_projector,
                     publishers=skill_publishers,
                     admissions=skill_lifecycle,
-                    sources=SkillSourceService(
-                        skill_lifecycle,
-                        synchronizer=getattr(app.state, "skill_reconciler", None),
-                        projector=skill_state_projector,
-                    ),
                     artifacts=artifact_reader,
                     package_cache=skill_content_cache,
                 )

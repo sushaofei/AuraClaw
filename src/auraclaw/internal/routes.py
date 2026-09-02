@@ -101,11 +101,6 @@ from auraclaw.contracts.internal import (
     SkillRestoreInternalResponse,
     SkillRevokeInternalRequest,
     SkillRevokeInternalResponse,
-    SkillSourceConfigureInternalRequest,
-    SkillSourceInternalResponse,
-    SkillSourceReadInternalRequest,
-    SkillSourceRetireInternalRequest,
-    SkillSourceSyncInternalRequest,
     SkillStateInternalRequest,
     SkillStateInternalResponse,
     ValidateLeaseRequest,
@@ -375,26 +370,6 @@ def skill_publication_routes(
             SkillStateInternalRequest,
             SkillStateInternalResponse,
             service.state,
-        ),
-        "/sources/configure": contract_route(
-            SkillSourceConfigureInternalRequest,
-            SkillSourceInternalResponse,
-            service.configure_source,
-        ),
-        "/sources/retire": contract_route(
-            SkillSourceRetireInternalRequest,
-            SkillSourceInternalResponse,
-            service.retire_source,
-        ),
-        "/sources/read": contract_route(
-            SkillSourceReadInternalRequest,
-            SkillSourceInternalResponse,
-            service.read_sources,
-        ),
-        "/sources/sync": contract_route(
-            SkillSourceSyncInternalRequest,
-            SkillSourceInternalResponse,
-            service.sync_source,
         ),
         "/publishers/register": contract_route(
             SkillPublisherRegisterInternalRequest,

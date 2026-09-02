@@ -3,10 +3,9 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
-import hashlib
 import json
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import Protocol
 
 from auraclaw.contracts.errors import (
@@ -19,16 +18,11 @@ from auraclaw.contracts.skills import (
     SkillPackageRecord,
     SkillPublicationRecord,
     SkillPublicationStatus,
-    SkillSourceDesiredState,
-    SkillSourceRecord,
-    SkillSourceSyncState,
 )
 
 PackageKey = tuple[str, str, str, str]
 PublicationKey = tuple[str, str, str, str]
 InstallationKey = tuple[str, str, str]
-SourceKey = tuple[str, str]
-PublicationSourceKey = tuple[str, str, str, str, str]
 CommandKey = tuple[str, str]
 
 
@@ -37,7 +31,6 @@ class SkillPublishCommit:
     command_id: str
     request_digest: str
     actor_id: str
-    source_id: str
     correlation_id: str
     causation_id: str
     expected_publication_revision: int
@@ -45,43 +38,8 @@ class SkillPublishCommit:
     publication: SkillPublicationRecord
     installation: SkillInstallationRecord | None
     occurred_at: datetime
-    source_lease: SkillSourceLease | None = None
     replace_purged: bool = False
     expected_installation_revision: int | None = None
-
-
-@dataclass(frozen=True)
-class SkillSourceLease:
-    tenant_id: str
-    source_id: str
-    owner: str
-    fencing_token: int
-    expires_at: datetime
-
-
-@dataclass(frozen=True, order=True)
-class SkillSourcePackageIdentity:
-    publisher: str
-    name: str
-    version: str
-
-
-@dataclass(frozen=True)
-class SkillSourceSnapshotCommit:
-    state: SkillSourceSyncState
-    lease: SkillSourceLease
-    observed: tuple[SkillSourcePackageIdentity, ...]
-    missing_snapshot_threshold: int
-    actor_id: str
-    command_prefix: str
-    correlation_id: str
-    causation_id: str
-    occurred_at: datetime
-
-
-@dataclass(frozen=True)
-class SkillSourceSnapshotResult:
-    retired: tuple[SkillPublicationRecord, ...]
 
 
 @dataclass(frozen=True)
@@ -94,20 +52,6 @@ class SkillRestoreCommit:
     causation_id: str
     expected_revision: int
     publication: SkillPublicationRecord
-    occurred_at: datetime
-
-
-@dataclass(frozen=True)
-class SkillSourceConfigCommit:
-    command_id: str
-    request_digest: str
-    operation: str
-    actor_id: str
-    correlation_id: str
-    causation_id: str
-    reason_code: str | None
-    expected_revision: int
-    source: SkillSourceRecord
     occurred_at: datetime
 
 
@@ -133,7 +77,6 @@ class SkillAdmissionAuditRecord:
     command_id: str
     operation: str
     actor_id: str
-    source_id: str
     correlation_id: str
     causation_id: str
     publisher: str | None
@@ -316,44 +259,6 @@ class SkillLifecycleStore(Protocol):
         self, tenant_id: str
     ) -> tuple[SkillInstallationRecord, ...]: ...
 
-    async def put_source(
-        self, record: SkillSourceRecord, *, expected_revision: int
-    ) -> SkillSourceRecord: ...
-
-    async def commit_source_config(
-        self, commit: SkillSourceConfigCommit
-    ) -> SkillSourceRecord: ...
-
-    async def get_source(
-        self, tenant_id: str, source_id: str
-    ) -> SkillSourceRecord | None: ...
-
-    async def list_sources(self, tenant_id: str) -> tuple[SkillSourceRecord, ...]: ...
-
-    async def put_sync_state(self, state: SkillSourceSyncState) -> None: ...
-
-    async def get_sync_state(
-        self, tenant_id: str, source_id: str
-    ) -> SkillSourceSyncState | None: ...
-
-    async def claim_source_lease(
-        self, *, tenant_id: str, source_id: str, owner: str, ttl: timedelta
-    ) -> SkillSourceLease | None: ...
-
-    async def renew_source_lease(
-        self, lease: SkillSourceLease, *, ttl: timedelta
-    ) -> SkillSourceLease | None: ...
-
-    async def release_source_lease(self, lease: SkillSourceLease) -> None: ...
-
-    async def put_sync_state_fenced(
-        self, state: SkillSourceSyncState, *, lease: SkillSourceLease
-    ) -> None: ...
-
-    async def commit_source_snapshot(
-        self, commit: SkillSourceSnapshotCommit
-    ) -> SkillSourceSnapshotResult: ...
-
     async def commit_restore(
         self, commit: SkillRestoreCommit
     ) -> SkillPublicationRecord: ...
@@ -370,20 +275,7 @@ class InMemorySkillLifecycleStore:
     _installations: dict[InstallationKey, SkillInstallationRecord] = field(
         default_factory=dict
     )
-    _sources: dict[SourceKey, SkillSourceRecord] = field(default_factory=dict)
-    _sync_states: dict[SourceKey, SkillSourceSyncState] = field(default_factory=dict)
-    _source_leases: dict[SourceKey, SkillSourceLease] = field(default_factory=dict)
-    _source_inventory: dict[
-        tuple[str, str, str, str, str], tuple[int, int]
-    ] = field(default_factory=dict)
-    _publication_sources: dict[PublicationSourceKey, bool] = field(
-        default_factory=dict
-    )
-    _source_retirement_commands: set[tuple[str, str]] = field(default_factory=set)
     _restore_commands: dict[CommandKey, str] = field(default_factory=dict)
-    _source_config_commands: dict[CommandKey, tuple[str, str]] = field(
-        default_factory=dict
-    )
     _installation_commands: dict[CommandKey, tuple[str, InstallationKey]] = field(
         default_factory=dict
     )
@@ -508,13 +400,6 @@ class InMemorySkillLifecycleStore:
     ) -> SkillPublishCommitResult:
         key = (commit.package.tenant_id, commit.command_id)
         async with self._lock:
-            if commit.source_lease is not None:
-                if (
-                    commit.source_lease.tenant_id != commit.package.tenant_id
-                    or commit.source_lease.source_id != commit.source_id
-                ):
-                    raise VersionConflictError("Skill Source lease scope mismatch")
-                self._require_active_lease(commit.source_lease)
             existing_command = self._commands.get(key)
             if existing_command is not None:
                 request_digest, result = existing_command
@@ -580,26 +465,6 @@ class InMemorySkillLifecycleStore:
                 self._installations = installations
                 raise
             result = SkillPublishCommitResult(package, publication, installation)
-            reference_key = (
-                package.tenant_id,
-                publication.publisher,
-                publication.name,
-                publication.version,
-                commit.source_id,
-            )
-            self._publication_sources[reference_key] = True
-            selected_source = self._select_publication_source(publication)
-            if selected_source is not None and selected_source != publication.source_id:
-                publication = publication.model_copy(
-                    update={
-                        "source_id": selected_source,
-                        "revision": publication.revision + 1,
-                        "updated_by": commit.actor_id,
-                        "updated_at": commit.occurred_at,
-                    }
-                )
-                self._publications[_publication_key(publication)] = publication
-                result = SkillPublishCommitResult(package, publication, installation)
             self._commands[key] = (commit.request_digest, result)
             outbox_id = f"{commit.package.tenant_id}:{commit.command_id}:published"
             self._outbox[outbox_id] = SkillOutboxRecord(
@@ -656,34 +521,6 @@ class InMemorySkillLifecycleStore:
         self._publications[key] = commit.publication
         self._installations[installation_key] = commit.installation
         return commit.package, commit.publication, commit.installation
-
-    def _select_publication_source(
-        self, publication: SkillPublicationRecord
-    ) -> str | None:
-        candidates: list[tuple[int, str]] = []
-        for key, available in self._publication_sources.items():
-            tenant_id, publisher, name, version, source_id = key
-            if not available or (
-                tenant_id,
-                publisher,
-                name,
-                version,
-            ) != (
-                publication.tenant_id,
-                publication.publisher,
-                publication.name,
-                publication.version,
-            ):
-                continue
-            source = self._sources.get((tenant_id, source_id))
-            if (
-                source is not None
-                and source.desired_state is SkillSourceDesiredState.ENABLED
-            ):
-                candidates.append((source.priority, source_id))
-        if not candidates:
-            return None
-        return min(candidates, key=lambda item: (-item[0], item[1]))[1]
 
     async def claim_outbox(
         self, *, owner: str, limit: int = 100, claim_ttl: timedelta = timedelta(seconds=30)
@@ -826,11 +663,6 @@ class InMemorySkillLifecycleStore:
         package = self._packages.get(key)
         if package is None:
             raise NotFoundError("Skill package was not found")
-        if (
-            record.source_id is not None
-            and (record.tenant_id, record.source_id) not in self._sources
-        ):
-            raise NotFoundError("Skill Source was not found")
         if package.package_digest != record.package_digest:
             raise VersionConflictError("Skill publication package digest mismatch")
         if existing is not None and existing.package_digest != record.package_digest:
@@ -881,11 +713,6 @@ class InMemorySkillLifecycleStore:
         _validate_revision(existing, record.revision, expected_revision, "installation")
         if existing is not None and existing.installation_id != record.installation_id:
             raise VersionConflictError("Skill installation identity is immutable")
-        if (
-            record.source_id is not None
-            and (record.tenant_id, record.source_id) not in self._sources
-        ):
-            raise NotFoundError("Skill Source was not found")
         self._installations[key] = record
         return record
 
@@ -934,278 +761,6 @@ class InMemorySkillLifecycleStore:
             )
         )
 
-    async def put_source(
-        self, record: SkillSourceRecord, *, expected_revision: int
-    ) -> SkillSourceRecord:
-        key = (record.tenant_id, record.source_id)
-        existing = self._sources.get(key)
-        _validate_revision(existing, record.revision, expected_revision, "source")
-        if existing is not None and existing.kind is not record.kind:
-            raise VersionConflictError("Skill Source kind is immutable")
-        self._sources[key] = record
-        return record
-
-    async def commit_source_config(
-        self, commit: SkillSourceConfigCommit
-    ) -> SkillSourceRecord:
-        key = (commit.source.tenant_id, commit.command_id)
-        async with self._lock:
-            replay = self._source_config_commands.get(key)
-            if replay is not None:
-                request_digest, source_id = replay
-                if request_digest != commit.request_digest:
-                    raise VersionConflictError("Skill Source command id was reused")
-                current = self._sources.get((commit.source.tenant_id, source_id))
-                if current is None:
-                    raise VersionConflictError("Skill Source command result is incomplete")
-                return current
-            result = await self.put_source(
-                commit.source, expected_revision=commit.expected_revision
-            )
-            if result.desired_state is SkillSourceDesiredState.RETIRED:
-                for reference_key in tuple(self._publication_sources):
-                    if (
-                        reference_key[0] == result.tenant_id
-                        and reference_key[4] == result.source_id
-                    ):
-                        self._publication_sources[reference_key] = False
-            affected_publications = {
-                reference_key[:4]
-                for reference_key in self._publication_sources
-                if reference_key[0] == result.tenant_id
-                and reference_key[4] == result.source_id
-            }
-            for publication_key in affected_publications:
-                publication = self._publications.get(publication_key)
-                if publication is None or publication.status in {
-                    SkillPublicationStatus.RETIRED,
-                    SkillPublicationStatus.REVOKED,
-                }:
-                    continue
-                selected = self._select_publication_source(publication)
-                if selected == publication.source_id:
-                    continue
-                self._publications[publication_key] = publication.model_copy(
-                    update={
-                        "source_id": selected or publication.source_id,
-                        "status": (
-                            publication.status
-                            if selected is not None
-                            else SkillPublicationStatus.RETIRED
-                        ),
-                        "revision": publication.revision + 1,
-                        "updated_by": commit.actor_id,
-                        "updated_at": commit.occurred_at,
-                        "reason_code": (
-                            publication.reason_code
-                            if selected is not None
-                            else commit.reason_code or "source_unavailable"
-                        ),
-                    }
-                )
-            self._source_config_commands[key] = (
-                commit.request_digest,
-                result.source_id,
-            )
-            return result
-
-    async def get_source(
-        self, tenant_id: str, source_id: str
-    ) -> SkillSourceRecord | None:
-        return self._sources.get((tenant_id, source_id))
-
-    async def list_sources(self, tenant_id: str) -> tuple[SkillSourceRecord, ...]:
-        return tuple(
-            source
-            for (source_tenant, _source_id), source in sorted(
-                self._sources.items(), key=lambda item: item[0]
-            )
-            if source_tenant == tenant_id
-        )
-
-    async def put_sync_state(self, state: SkillSourceSyncState) -> None:
-        key = (state.tenant_id, state.source_id)
-        if key not in self._sources:
-            raise NotFoundError("Skill Source was not found")
-        existing = self._sync_states.get(key)
-        if existing is not None and state.generation < existing.generation:
-            raise VersionConflictError("Skill Source generation cannot move backwards")
-        self._sync_states[key] = state
-
-    async def get_sync_state(
-        self, tenant_id: str, source_id: str
-    ) -> SkillSourceSyncState | None:
-        return self._sync_states.get((tenant_id, source_id))
-
-    async def claim_source_lease(
-        self, *, tenant_id: str, source_id: str, owner: str, ttl: timedelta
-    ) -> SkillSourceLease | None:
-        key = (tenant_id, source_id)
-        async with self._lock:
-            if key not in self._sources:
-                raise NotFoundError("Skill Source was not found")
-            now = datetime.now(UTC)
-            current = self._source_leases.get(key)
-            if current is not None and current.expires_at > now:
-                return None
-            lease = SkillSourceLease(
-                tenant_id=tenant_id,
-                source_id=source_id,
-                owner=owner,
-                fencing_token=1 if current is None else current.fencing_token + 1,
-                expires_at=now + ttl,
-            )
-            self._source_leases[key] = lease
-            return lease
-
-    async def renew_source_lease(
-        self, lease: SkillSourceLease, *, ttl: timedelta
-    ) -> SkillSourceLease | None:
-        async with self._lock:
-            try:
-                self._require_active_lease(lease)
-            except VersionConflictError:
-                return None
-            renewed = SkillSourceLease(
-                tenant_id=lease.tenant_id,
-                source_id=lease.source_id,
-                owner=lease.owner,
-                fencing_token=lease.fencing_token,
-                expires_at=datetime.now(UTC) + ttl,
-            )
-            self._source_leases[(lease.tenant_id, lease.source_id)] = renewed
-            return renewed
-
-    async def release_source_lease(self, lease: SkillSourceLease) -> None:
-        async with self._lock:
-            key = (lease.tenant_id, lease.source_id)
-            current = self._source_leases.get(key)
-            if current == lease:
-                self._source_leases[key] = lease.__class__(
-                    **{**lease.__dict__, "expires_at": datetime.now(UTC)}
-                )
-
-    async def put_sync_state_fenced(
-        self, state: SkillSourceSyncState, *, lease: SkillSourceLease
-    ) -> None:
-        async with self._lock:
-            self._require_active_lease(lease)
-            key = (state.tenant_id, state.source_id)
-            if key != (lease.tenant_id, lease.source_id):
-                raise VersionConflictError("Skill Source lease scope mismatch")
-            existing = self._sync_states.get(key)
-            if existing is not None and state.generation < existing.generation:
-                raise VersionConflictError("Skill Source generation cannot move backwards")
-            self._sync_states[key] = state
-
-    async def commit_source_snapshot(
-        self, commit: SkillSourceSnapshotCommit
-    ) -> SkillSourceSnapshotResult:
-        if commit.missing_snapshot_threshold < 2:
-            raise ValueError("Skill Source missing snapshot threshold must be at least two")
-        async with self._lock:
-            self._require_active_lease(commit.lease)
-            state = commit.state
-            if (state.tenant_id, state.source_id) != (
-                commit.lease.tenant_id,
-                commit.lease.source_id,
-            ):
-                raise VersionConflictError("Skill Source lease scope mismatch")
-            existing_state = self._sync_states.get(
-                (state.tenant_id, state.source_id)
-            )
-            if existing_state is not None and state.generation <= existing_state.generation:
-                raise VersionConflictError(
-                    "Skill Source complete snapshot generation must advance"
-                )
-            observed = set(commit.observed)
-            retired: list[SkillPublicationRecord] = []
-            now = commit.occurred_at
-            for key, publication in tuple(self._publications.items()):
-                if (
-                    publication.tenant_id != state.tenant_id
-                    or (
-                            state.tenant_id,
-                            publication.publisher,
-                            publication.name,
-                            publication.version,
-                            state.source_id,
-                        ) not in self._publication_sources
-                    or publication.status in {
-                        SkillPublicationStatus.RETIRED,
-                        SkillPublicationStatus.REVOKED,
-                    }
-                ):
-                    continue
-                identity = SkillSourcePackageIdentity(
-                    publication.publisher,
-                    publication.name,
-                    publication.version,
-                )
-                inventory_key = (
-                    state.tenant_id,
-                    state.source_id,
-                    identity.publisher,
-                    identity.name,
-                    identity.version,
-                )
-                if identity in observed:
-                    self._source_inventory[inventory_key] = (state.generation, 0)
-                    self._publication_sources[
-                        (
-                            state.tenant_id,
-                            publication.publisher,
-                            publication.name,
-                            publication.version,
-                            state.source_id,
-                        )
-                    ] = True
-                    continue
-                previous = self._source_inventory.get(inventory_key)
-                missing = 1 if previous is None else previous[1] + 1
-                self._source_inventory[inventory_key] = (state.generation, missing)
-                if missing < commit.missing_snapshot_threshold:
-                    continue
-                self._publication_sources[
-                    (
-                        state.tenant_id,
-                        publication.publisher,
-                        publication.name,
-                        publication.version,
-                        state.source_id,
-                    )
-                ] = False
-                selected_source = self._select_publication_source(publication)
-                if selected_source is not None:
-                    if selected_source != publication.source_id:
-                        self._publications[key] = publication.model_copy(
-                            update={
-                                "source_id": selected_source,
-                                "revision": publication.revision + 1,
-                                "updated_by": commit.actor_id,
-                                "updated_at": now,
-                            }
-                        )
-                    continue
-                command_id = _retirement_command_id(commit.command_prefix, identity)
-                command_key = (state.tenant_id, command_id)
-                if command_key in self._source_retirement_commands:
-                    continue
-                updated = publication.model_copy(
-                    update={
-                        "status": SkillPublicationStatus.RETIRED,
-                        "revision": publication.revision + 1,
-                        "updated_by": commit.actor_id,
-                        "updated_at": now,
-                        "reason_code": "source_missing_confirmed",
-                    }
-                )
-                self._publications[key] = updated
-                self._source_retirement_commands.add(command_key)
-                retired.append(updated)
-            self._sync_states[(state.tenant_id, state.source_id)] = state
-            return SkillSourceSnapshotResult(tuple(retired))
-
     async def commit_restore(
         self, commit: SkillRestoreCommit
     ) -> SkillPublicationRecord:
@@ -1244,26 +799,9 @@ class InMemorySkillLifecycleStore:
             self._restore_commands[command_key] = commit.request_digest
             return updated
 
-    def _require_active_lease(self, lease: SkillSourceLease) -> None:
-        current = self._source_leases.get((lease.tenant_id, lease.source_id))
-        if (
-            current != lease
-            or current is None
-            or current.expires_at <= datetime.now(UTC)
-        ):
-            raise VersionConflictError("Skill Source lease is stale")
-
-
 def _package_key(record: SkillPackageRecord) -> PackageKey:
     manifest = record.manifest
     return record.tenant_id, manifest.publisher, manifest.name, manifest.version
-
-
-def _retirement_command_id(
-    prefix: str, identity: SkillSourcePackageIdentity
-) -> str:
-    value = f"{identity.publisher}\0{identity.name}\0{identity.version}"
-    return f"{prefix}:{hashlib.sha256(value.encode()).hexdigest()}"
 
 
 def _publication_key(record: SkillPublicationRecord) -> PublicationKey:
@@ -1276,7 +814,7 @@ def _installation_key(record: SkillInstallationRecord) -> InstallationKey:
 
 def _validate_revision(
     existing: (
-        SkillPublicationRecord | SkillInstallationRecord | SkillSourceRecord | None
+        SkillPublicationRecord | SkillInstallationRecord | None
     ),
     revision: int,
     expected_revision: int,

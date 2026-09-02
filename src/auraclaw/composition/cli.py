@@ -363,7 +363,6 @@ async def _publish_skill_archive(
     tenant_id: str,
     actor_id: str,
     publisher: str,
-    source_id: str,
     activate: bool,
     expected_revision: int,
     command_id: str,
@@ -399,7 +398,6 @@ async def _publish_skill_archive(
         "/v1/admin/skill-publications",
         headers={**headers, "X-Expected-Revision": str(expected_revision)},
         json={
-            "source_id": source_id,
             "activate": activate,
             "artifact_ref": artifact_ref,
             "expected_digest": skill_package_digest(package),
@@ -477,7 +475,6 @@ async def _run_skills_command(args: argparse.Namespace) -> None:
             tenant_id=args.tenant,
             actor_id=args.actor,
             publisher=args.publisher,
-            source_id=args.source,
             activate=not args.staged,
             expected_revision=args.expected_revision,
             command_id=command_id,
@@ -538,7 +535,6 @@ def build_parser() -> argparse.ArgumentParser:
     publish.add_argument("--tenant", required=True)
     publish.add_argument("--publisher", required=True)
     publish.add_argument("--actor", default="skill-cli")
-    publish.add_argument("--source", default="sks_admin_upload")
     publish.add_argument("--api-url")
     publish.add_argument("--token-env", default="AURACLAW_API_TOKEN")
     publish.add_argument(
