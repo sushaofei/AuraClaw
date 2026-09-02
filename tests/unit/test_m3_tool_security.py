@@ -177,6 +177,33 @@ def test_tool_gateway_surfaces_controlled_boundary_reason() -> None:
     asyncio.run(scenario())
 
 
+def test_tool_gateway_returns_recoverable_result_for_invalid_model_arguments() -> None:
+    async def scenario() -> None:
+        hands = RecordingHands({"ok": True})
+        gateway = ToolGateway(
+            registry=ToolRegistry((_capability(ToolPermission.READ_ONLY),)),
+            policy=PolicyEngine(),
+            approvals=InMemoryApprovalProjection(),
+            hands=hands,
+            artifacts=ArtifactStore(
+                InMemoryObjectStorage(), signing_key=b"schema-validation-key"
+            ),
+        )
+        invocation = _invocation()
+        invocation = ToolInvocation(
+            **{**invocation.__dict__, "arguments": {"filter": "not-an-input"}}
+        )
+        result = await gateway.execute(invocation)
+
+        assert result.status.value == "error"
+        assert result.error_code == "tool_schema_invalid"
+        assert result.side_effect_status == "not_started"
+        assert result.summary == "$ is missing required fields: ['target']"
+        assert hands.calls == 0
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize(
     ("error", "expected_status", "expected_code"),
     [
@@ -238,8 +265,9 @@ def test_schema_validation_happens_before_hands_execution() -> None:
         gateway, _ = _gateway(hands, InMemoryApprovalProjection())
         invalid = _invocation()
         invalid = ToolInvocation(**{**invalid.__dict__, "arguments": {"unexpected": True}})
-        with pytest.raises(SchemaValidationError):
-            await gateway.execute(invalid)
+        result = await gateway.execute(invalid)
+        assert result.error_code == "tool_schema_invalid"
+        assert result.side_effect_status == "not_started"
         assert hands.calls == 0
 
     asyncio.run(scenario())

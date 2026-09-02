@@ -66,6 +66,14 @@ class BudgetExceededError(AuraClawError):
     status_code = 409
 
 
+class TerminalBudgetExceededError(BudgetExceededError):
+    code = "agent_terminal_budget_exhausted"
+
+
+class ModelOutputTruncatedError(BudgetExceededError):
+    code = "model_output_truncated_before_terminal"
+
+
 class SkillPromptBudgetExceededError(BudgetExceededError):
     code = "skill_prompt_budget_exceeded"
 

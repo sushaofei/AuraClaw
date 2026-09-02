@@ -35,7 +35,11 @@ from auraclaw.contracts.capabilities import (
     CapabilityTrustLevel,
     McpServerDefinition,
 )
-from auraclaw.contracts.errors import AuthorizationError, NotFoundError
+from auraclaw.contracts.errors import (
+    AuthorizationError,
+    BudgetExceededError,
+    NotFoundError,
+)
 from auraclaw.contracts.events import NewEvent
 from auraclaw.contracts.hands import HandsToolResult
 from auraclaw.contracts.skills import SkillBinding, SkillManifest
@@ -334,6 +338,21 @@ class _Capabilities:
     async def load_skill_manifest(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
         del args, kwargs
         return {}
+
+
+class _RecoverableSchemaCapabilities(_Capabilities):
+    async def execute(
+        self, assignment: RuntimeAssignment, call: ToolCall
+    ) -> dict[str, Any]:
+        if call.name == "github.issue.get" and "number" not in call.arguments:
+            self.calls.append(call.name)
+            return {
+                "status": "error",
+                "error_code": "tool_schema_invalid",
+                "summary": "$ is missing required fields: ['number']",
+                "side_effect_status": "not_started",
+            }
+        return await super().execute(assignment, call)
 
 
 class _ResourceCapabilities(_Capabilities):
@@ -673,6 +692,126 @@ def test_capability_loop_searches_loads_calls_and_returns_final_output() -> None
             "server_id": "github",
             "version": "1.0.0",
         }
+
+    asyncio.run(scenario())
+
+
+def test_capability_loop_allows_model_to_correct_invalid_tool_arguments() -> None:
+    async def scenario() -> None:
+        capabilities = _RecoverableSchemaCapabilities()
+        model = _ScriptedModel(
+            [
+                _response(
+                    "",
+                    ToolCall(
+                        tool_invocation_id="search-schema",
+                        name="auraclaw.capabilities.search",
+                        arguments={"query": "github issue", "kinds": ["tool"]},
+                    ),
+                ),
+                _response(
+                    "",
+                    ToolCall(
+                        tool_invocation_id="load-schema",
+                        name="auraclaw.capabilities.load",
+                        arguments={"capability_ids": ["cap-one"]},
+                    ),
+                ),
+                _response(
+                    "",
+                    ToolCall(
+                        tool_invocation_id="invalid-schema-call",
+                        name="github.issue.get",
+                        arguments={"filter": "open"},
+                    ),
+                ),
+                _response(
+                    "",
+                    ToolCall(
+                        tool_invocation_id="corrected-schema-call",
+                        name="github.issue.get",
+                        arguments={"number": 31},
+                    ),
+                ),
+                _response("Issue 31 is open."),
+            ]
+        )
+        control = _Control()
+        session = _Session("Inspect issue 31")
+        harness = AgentHarness(
+            control_store=control,
+            session=session,
+            model=model,
+            tools=capabilities,
+            runtime_events=_RuntimeEvents(),
+            capability_controller=RuntimeCapabilityController(capabilities),
+        )
+
+        await harness.execute(_assignment())
+
+        assert control.outcome == "completed"
+        assert capabilities.calls.count("github.issue.get") == 2
+        assert any(
+            message["role"] == "tool"
+            and "tool_schema_invalid" in message["content"]
+            for message in model.requests[3].messages
+        )
+        assert any(
+            message["role"] == "tool"
+            and '"number":31' in message["content"]
+            for message in model.requests[4].messages
+        )
+
+    asyncio.run(scenario())
+
+
+def test_repeated_invalid_tool_arguments_fail_with_bounded_no_progress() -> None:
+    async def scenario() -> None:
+        capabilities = _RecoverableSchemaCapabilities()
+        repeated_calls = [
+            _response(
+                "",
+                ToolCall(
+                    tool_invocation_id=f"invalid-repeat-{index}",
+                    name="github.issue.get",
+                    arguments={"filter": "open"},
+                ),
+            )
+            for index in range(4)
+        ]
+        model = _ScriptedModel(
+            [
+                _response(
+                    "",
+                    ToolCall(
+                        tool_invocation_id="search-repeat",
+                        name="auraclaw.capabilities.search",
+                        arguments={"query": "github issue", "kinds": ["tool"]},
+                    ),
+                ),
+                _response(
+                    "",
+                    ToolCall(
+                        tool_invocation_id="load-repeat",
+                        name="auraclaw.capabilities.load",
+                        arguments={"capability_ids": ["cap-one"]},
+                    ),
+                ),
+                *repeated_calls,
+            ]
+        )
+        harness = AgentHarness(
+            control_store=_Control(),
+            session=_Session("Inspect issue 31"),
+            model=model,
+            tools=capabilities,
+            runtime_events=_RuntimeEvents(),
+            capability_controller=RuntimeCapabilityController(capabilities),
+        )
+
+        with pytest.raises(BudgetExceededError, match="repeated no-progress"):
+            await harness.execute(_assignment())
+        assert capabilities.calls.count("github.issue.get") == 3
 
     asyncio.run(scenario())
 

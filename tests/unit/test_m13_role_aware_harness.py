@@ -7,7 +7,10 @@ from typing import Any
 
 import pytest
 
-from auraclaw.contracts.errors import CollaborationValidationError
+from auraclaw.contracts.errors import (
+    CollaborationValidationError,
+    ModelOutputTruncatedError,
+)
 from auraclaw.contracts.events import NewEvent
 from auraclaw.control.ports import RuntimeAssignment, RuntimeCheckpoint
 from auraclaw.runtime.clients import IdempotentToolClient
@@ -122,6 +125,7 @@ class _Model:
 class _CollaborationClient:
     def __init__(self) -> None:
         self.children: list[dict[str, Any]] = []
+        self.operations: list[str] = []
 
     async def execute(
         self,
@@ -132,6 +136,7 @@ class _CollaborationClient:
         command_id: str,
     ) -> dict[str, Any]:
         del assignment, command_id
+        self.operations.append(operation)
         if operation == "get_graph":
             return {"root_session_id": "root", "children": list(self.children)}
         if operation == "create_child":
@@ -142,6 +147,8 @@ class _CollaborationClient:
             }
             self.children.append(child)
             return child
+        if operation == "publish_result":
+            return {"status": "published", **arguments}
         raise AssertionError(operation)
 
 
@@ -270,6 +277,167 @@ def test_worker_without_publish_result_fails_closed() -> None:
     asyncio.run(scenario())
 
 
+def test_worker_truncation_uses_reserved_recovery_turn_and_publishes_once() -> None:
+    async def scenario() -> None:
+        control = _Control()
+        session = _Session("unused root goal")
+        session.events = [
+            SimpleNamespace(
+                type="child.created",
+                payload={
+                    "goal": "summarize a large dataset",
+                    "output_contract": {
+                        "required_fields": ["summary", "result_ref"]
+                    },
+                    "input_refs": [],
+                    "tool_permissions": [],
+                },
+                run_id="run-m13",
+                occurred_at=datetime.now(UTC),
+            )
+        ]
+        model = _Model(
+            [
+                ModelResponse(
+                    model_call_id="placeholder",
+                    provider="test",
+                    model="test",
+                    completed_output="{\"large\":\"unfinished",
+                    finish_reason="length",
+                    usage={"output_tokens": 80},
+                ),
+                ModelResponse(
+                    model_call_id="placeholder",
+                    provider="test",
+                    model="test",
+                    completed_output="",
+                    finish_reason="tool_calls",
+                    usage={"output_tokens": 10},
+                    tool_calls=(
+                        ToolCall(
+                            tool_invocation_id="publish-after-truncation",
+                            name=PUBLISH_RESULT,
+                            arguments={
+                                "summary": "dataset could not be expanded inline",
+                                "result_ref": "result://tenant-m13/child/run-m13",
+                                "limitations": ["no artifact write permission"],
+                            },
+                        ),
+                    ),
+                ),
+            ]
+        )
+        collaboration = _CollaborationClient()
+        harness = AgentHarness(
+            control_store=control,  # type: ignore[arg-type]
+            session=session,  # type: ignore[arg-type]
+            model=model,
+            tools=IdempotentToolClient(),
+            runtime_events=_RuntimeEvents(),
+            collaboration_controller=RuntimeCollaborationController(collaboration),
+            terminal_output_reserve=20,
+            per_turn_output_tokens=100,
+        )
+
+        await harness.execute(
+            RuntimeAssignment(
+                **{
+                    **_assignment("worker").__dict__,
+                    "budget": _assignment("worker").budget.__class__(
+                        max_steps=6, max_output_tokens=100
+                    ),
+                }
+            )
+        )
+
+        assert len(model.requests) == 2
+        assert model.requests[0].max_output_tokens == 80
+        assert model.requests[1].max_output_tokens == 20
+        assert any(
+            "previous model output was truncated" in message["content"]
+            for message in model.requests[1].messages
+            if message["role"] == "system"
+        )
+        assert control.outcome == "completed"
+        assert collaboration.operations.count("publish_result") == 1
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("finish_reason", ["mystery", "content_filter"])
+def test_worker_does_not_treat_unknown_or_refused_finish_as_truncation(
+    finish_reason: str,
+) -> None:
+    async def scenario() -> None:
+        model = _Model(
+            [
+                ModelResponse(
+                    model_call_id="placeholder",
+                    provider="test",
+                    model="test",
+                    completed_output="",
+                    finish_reason=finish_reason,
+                )
+            ]
+        )
+        harness = AgentHarness(
+            control_store=_Control(),  # type: ignore[arg-type]
+            session=_Session("worker goal"),  # type: ignore[arg-type]
+            model=model,
+            tools=IdempotentToolClient(),
+            runtime_events=_RuntimeEvents(),
+            collaboration_controller=RuntimeCollaborationController(
+                _CollaborationClient()
+            ),
+        )
+        with pytest.raises(Exception, match="finish reason|refused"):
+            await harness.execute(_assignment("worker"))
+        assert len(model.requests) == 1
+
+    asyncio.run(scenario())
+
+
+def test_worker_truncation_without_remaining_budget_uses_specific_error() -> None:
+    async def scenario() -> None:
+        model = _Model(
+            [
+                ModelResponse(
+                    model_call_id="placeholder",
+                    provider="test",
+                    model="test",
+                    completed_output="unfinished",
+                    finish_reason="max_tokens",
+                    usage={"output_tokens": 100},
+                )
+            ]
+        )
+        harness = AgentHarness(
+            control_store=_Control(),  # type: ignore[arg-type]
+            session=_Session("worker goal"),  # type: ignore[arg-type]
+            model=model,
+            tools=IdempotentToolClient(),
+            runtime_events=_RuntimeEvents(),
+            collaboration_controller=RuntimeCollaborationController(
+                _CollaborationClient()
+            ),
+        )
+        assignment = RuntimeAssignment(
+            **{
+                **_assignment("worker").__dict__,
+                "budget": _assignment("worker").budget.__class__(
+                    max_steps=3, max_output_tokens=100
+                ),
+            }
+        )
+
+        with pytest.raises(ModelOutputTruncatedError) as captured:
+            await harness.execute(assignment)
+        assert captured.value.code == "model_output_truncated_before_terminal"
+        assert len(model.requests) == 1
+
+    asyncio.run(scenario())
+
+
 def test_worker_model_receives_authoritative_child_goal_and_contract() -> None:
     async def scenario() -> None:
         control = _Control()
@@ -376,6 +544,12 @@ def test_collaboration_tools_are_role_scoped_and_freeze_owner_operations() -> No
     assert names("worker") == {PUBLISH_RESULT}
     assert names("repair") == {PUBLISH_RESULT}
     assert names("reviewer") == {PUBLISH_REVIEW}
+    publish_schema = controller.model_tools(_assignment("worker"))[0]["function"][
+        "parameters"
+    ]
+    assert publish_schema["properties"]["result_ref"]["enum"] == [
+        "result://tenant-m13/child/run-m13"
+    ]
 
     create_schema = next(
         tool["function"]["parameters"]
@@ -468,6 +642,66 @@ def test_unsupported_child_result_contract_is_rejected_before_creation() -> None
             "summary": "unsupported Child Result fields: test_document",
         }
         assert client.children == []
+
+    asyncio.run(scenario())
+
+
+def test_artifact_contract_without_write_path_is_rejected_before_creation() -> None:
+    async def scenario() -> None:
+        client = _CollaborationClient()
+        controller = RuntimeCollaborationController(client)
+        result = await controller.execute(
+            _assignment(tool_permissions=("price.read",)),
+            ToolCall(
+                tool_invocation_id="create-unwritable-artifact-contract",
+                name=CREATE_CHILD,
+                arguments={
+                    "spec": {
+                        "task_key": "artifact-child",
+                        "role": "worker",
+                        "goal": "persist a large dataset",
+                        "tool_permissions": ["price.read"],
+                        "output_contract": {
+                            "required_fields": [
+                                "summary",
+                                "result_ref",
+                                "artifact_refs",
+                            ],
+                            "require_artifacts": True,
+                        },
+                    }
+                },
+            ),
+        )
+
+        assert result.result["status"] == "denied"
+        assert result.result["error_code"] == "collaboration_invalid"
+        assert "Artifact write permission" in result.result["summary"]
+        assert client.children == []
+
+    asyncio.run(scenario())
+
+
+def test_worker_cannot_publish_an_invented_result_reference() -> None:
+    async def scenario() -> None:
+        client = _CollaborationClient()
+        controller = RuntimeCollaborationController(client)
+        result = await controller.execute(
+            _assignment("worker"),
+            ToolCall(
+                tool_invocation_id="publish-invented-ref",
+                name=PUBLISH_RESULT,
+                arguments={
+                    "summary": "done",
+                    "result_ref": "result://someone-else/result",
+                },
+            ),
+        )
+
+        assert result.result["status"] == "denied"
+        assert result.result["error_code"] == "collaboration_invalid"
+        assert "current persisted Child Result" in result.result["summary"]
+        assert "publish_result" not in client.operations
 
     asyncio.run(scenario())
 

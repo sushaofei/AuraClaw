@@ -51,7 +51,7 @@ class RuntimeCollaborationController:
                 )
             )
         if assignment.role in {"worker", "repair"}:
-            return (self._publish_result_tool(),)
+            return (self._publish_result_tool(assignment),)
         if assignment.role == "reviewer":
             return (self._publish_review_tool(),)
         return ()
@@ -138,6 +138,17 @@ class RuntimeCollaborationController:
             try:
                 self._validate_child_request(assignment, arguments)
             except (AuthorizationError, CollaborationValidationError) as exc:
+                return CollaborationExecution(
+                    result={
+                        "status": "denied",
+                        "error_code": exc.code,
+                        "summary": exc.message,
+                    }
+                )
+        if call.name == PUBLISH_RESULT:
+            try:
+                self._validate_published_result(assignment, arguments)
+            except CollaborationValidationError as exc:
                 return CollaborationExecution(
                     result={
                         "status": "denied",
@@ -235,6 +246,51 @@ class RuntimeCollaborationController:
         if unsupported:
             raise CollaborationValidationError(
                 "unsupported Child Result fields: " + ", ".join(unsupported)
+            )
+        requires_artifacts = bool(output_contract.get("require_artifacts")) or (
+            "artifact_refs" in {str(item) for item in required}
+        )
+        if requires_artifacts and not RuntimeCollaborationController._has_artifact_write(
+            requested
+        ):
+            raise CollaborationValidationError(
+                "artifact output contract requires a governed Artifact write permission"
+            )
+
+    @staticmethod
+    def _has_artifact_write(permissions: set[str]) -> bool:
+        write_markers = ("write", "create", "put", "upload", "persist")
+        return any(
+            ("artifact" in permission.lower() or "resource" in permission.lower())
+            and any(marker in permission.lower() for marker in write_markers)
+            for permission in permissions
+        )
+
+    @staticmethod
+    def _result_ref(assignment: RuntimeAssignment) -> str:
+        return (
+            f"result://{assignment.tenant_id}/{assignment.session_id}/"
+            f"{assignment.run_id}"
+        )
+
+    @classmethod
+    def _validate_published_result(
+        cls, assignment: RuntimeAssignment, arguments: dict[str, Any]
+    ) -> None:
+        expected = cls._result_ref(assignment)
+        if arguments.get("result_ref") != expected:
+            raise CollaborationValidationError(
+                "result_ref must identify the current persisted Child Result"
+            )
+        artifact_refs = arguments.get("artifact_refs", ())
+        if artifact_refs and not cls._has_artifact_write(
+            {
+                str(item)
+                for item in assignment.resource_profile.get("tool_permissions", ())
+            }
+        ):
+            raise CollaborationValidationError(
+                "artifact_refs require a governed Artifact write permission"
             )
 
     @staticmethod
@@ -420,7 +476,7 @@ class RuntimeCollaborationController:
         )
 
     @classmethod
-    def _publish_result_tool(cls) -> dict[str, Any]:
+    def _publish_result_tool(cls, assignment: RuntimeAssignment) -> dict[str, Any]:
         return cls._tool(
             PUBLISH_RESULT,
             "Publish this Worker's contract result and terminate the Child Run.",
@@ -428,7 +484,14 @@ class RuntimeCollaborationController:
                 "type": "object",
                 "properties": {
                     "summary": {"type": "string"},
-                    "result_ref": {"type": "string"},
+                    "result_ref": {
+                        "type": "string",
+                        "enum": [cls._result_ref(assignment)],
+                        "description": (
+                            "Canonical reference for the persisted Child Result; use this "
+                            "exact value and never invent an Artifact reference."
+                        ),
+                    },
                     "artifact_refs": {"type": "array", "items": {"type": "string"}},
                     "evidence_refs": {"type": "array", "items": {"type": "string"}},
                     "limitations": {"type": "array", "items": {"type": "string"}},
