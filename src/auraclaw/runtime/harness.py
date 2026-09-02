@@ -17,8 +17,10 @@ from uuid import uuid4
 from auraclaw.contracts.errors import (
     BudgetExceededError,
     CollaborationValidationError,
+    ModelOutputTruncatedError,
     ModelProviderError,
     RuntimeCancelledError,
+    TerminalBudgetExceededError,
 )
 from auraclaw.contracts.events import NewEvent
 from auraclaw.contracts.state import Visibility
@@ -65,6 +67,14 @@ class InjectionPoint(StrEnum):
     AFTER_TOOL = "after_tool"
 
 
+class FinishReasonKind(StrEnum):
+    STOP = "stop"
+    TOOL_CALLS = "tool_calls"
+    TRUNCATED = "truncated"
+    REFUSED = "refused"
+    UNKNOWN = "unknown"
+
+
 FailureInjector = Callable[[InjectionPoint], Awaitable[None] | None]
 
 
@@ -93,7 +103,14 @@ class AgentHarness:
         capability_controller: RuntimeCapabilityController | None = None,
         collaboration_controller: RuntimeCollaborationController | None = None,
         failure_injector: FailureInjector | None = None,
+        per_turn_output_tokens: int = 4096,
+        terminal_output_reserve: int = 512,
+        max_truncation_recoveries: int = 1,
     ) -> None:
+        if per_turn_output_tokens < 1 or terminal_output_reserve < 1:
+            raise ValueError("Runtime output token limits must be positive")
+        if max_truncation_recoveries < 0:
+            raise ValueError("max_truncation_recoveries cannot be negative")
         self._control = control_store
         self._session = session
         self._model = model
@@ -103,6 +120,9 @@ class AgentHarness:
         self._capability_controller = capability_controller
         self._collaboration_controller = collaboration_controller
         self._failure_injector = failure_injector
+        self._per_turn_output_tokens = per_turn_output_tokens
+        self._terminal_output_reserve = terminal_output_reserve
+        self._max_truncation_recoveries = max_truncation_recoveries
 
     async def execute(self, assignment: RuntimeAssignment) -> None:
         execute_started = time.perf_counter()
@@ -381,6 +401,44 @@ class AgentHarness:
                     raise BudgetExceededError(
                         "Runtime cumulative output token budget was exhausted"
                     )
+                terminal_role = assignment.role in {"worker", "repair", "reviewer"}
+                recovery_turn = bool(state.get("truncation_recovery_pending"))
+                terminal_reserve = min(
+                    self._terminal_output_reserve,
+                    max(1, assignment.budget.max_output_tokens // 4),
+                )
+                available_for_turn = remaining_output_tokens
+                if terminal_role and not recovery_turn:
+                    available_for_turn -= terminal_reserve
+                    if available_for_turn < 1:
+                        logger.warning(
+                            "agent.terminal_budget_exhausted role=%s turn=%s "
+                            "remaining=%s reserve=%s",
+                            assignment.role,
+                            turn_index,
+                            remaining_output_tokens,
+                            terminal_reserve,
+                        )
+                        raise TerminalBudgetExceededError(
+                            "terminal collaboration reserve leaves no model turn budget"
+                        )
+                elif recovery_turn:
+                    available_for_turn = min(available_for_turn, terminal_reserve)
+                    trusted += (
+                        {
+                            "role": "system",
+                            "content": (
+                                "The previous model output was truncated before the required "
+                                "terminal collaboration tool call. Do not repeat or continue the "
+                                "large body. Persist any large payload through an authorized "
+                                "Artifact or Resource write capability, then call the required "
+                                "publish_result, publish_review, or join tool with a short summary "
+                                "and valid references. If no governed write path exists, publish "
+                                "an explicit limitation or failure instead of inventing a "
+                                "reference."
+                            ),
+                        },
+                    )
                 checkpoint_ready = asyncio.create_task(
                     self._save_checkpoint(
                         assignment,
@@ -405,7 +463,9 @@ class AgentHarness:
                     ),
                     tools=model_tools,
                     policy=self._policy,
-                    max_output_tokens=remaining_output_tokens,
+                    max_output_tokens=min(
+                        self._per_turn_output_tokens, available_for_turn
+                    ),
                     runtime_metrics=(
                         self._capability_controller.trusted_message_metrics(
                             assignment
@@ -446,6 +506,8 @@ class AgentHarness:
                     "call_index": 0,
                     "sequence": sequence,
                     "deltas_published": True,
+                    "last_turn_was_truncation_recovery": recovery_turn,
+                    "truncation_recovery_pending": False,
                 }
                 await self._save_checkpoint(assignment, "capability.model_completed", state)
                 checkpoint = await self._control.load_checkpoint(
@@ -540,6 +602,12 @@ class AgentHarness:
                     signatures = dict(state.get("call_signatures", {}))
                     repeated = int(signatures.get(signature, 0)) + 1
                     if repeated > 3:
+                        logger.warning(
+                            "tool.argument_validation_failed capability_id=%s "
+                            "repeat_count=%s side_effect_status=not_started outcome=bounded",
+                            call.name,
+                            repeated,
+                        )
                         raise BudgetExceededError(
                             "Runtime detected a repeated no-progress capability call"
                         )
@@ -600,6 +668,14 @@ class AgentHarness:
                         result = execution.result
                         capability_state = execution.state
                         side_events = execution.events
+                    if result.get("error_code") == "tool_schema_invalid":
+                        logger.info(
+                            "tool.argument_validation_failed capability_id=%s "
+                            "repeat_count=%s side_effect_status=%s",
+                            call.name,
+                            repeated,
+                            result.get("side_effect_status", "not_started"),
+                        )
                     state = {
                         **state,
                         "capability_state": capability_state,
@@ -728,6 +804,62 @@ class AgentHarness:
                 if all_children and assignment.role in {"root", "coordinator"}:
                     raise CollaborationValidationError("Coordinator graph was not joined")
                 if assignment.role in {"worker", "repair", "reviewer"}:
+                    finish_kind = self._classify_finish_reason(response)
+                    if finish_kind is FinishReasonKind.TRUNCATED:
+                        recovery_count = int(state.get("truncation_recovery_count", 0))
+                        remaining_after_turn = assignment.budget.max_output_tokens - int(
+                            dict(state.get("usage", {})).get("output_tokens", 0)
+                        )
+                        can_recover = (
+                            recovery_count < self._max_truncation_recoveries
+                            and int(state.get("steps_used", 0)) < assignment.budget.max_steps
+                            and remaining_after_turn > 0
+                        )
+                        logger.warning(
+                            "agent.model_output_truncated role=%s turn=%s used=%s "
+                            "remaining=%s recovery_count=%s recoverable=%s",
+                            assignment.role,
+                            turn_index,
+                            int(dict(state.get("usage", {})).get("output_tokens", 0)),
+                            remaining_after_turn,
+                            recovery_count,
+                            can_recover,
+                        )
+                        if can_recover:
+                            state = {
+                                **state,
+                                "turn_index": turn_index + 1,
+                                "call_index": 0,
+                                "truncation_recovery_count": recovery_count + 1,
+                                "truncation_recovery_pending": True,
+                            }
+                            state.pop("response", None)
+                            state.pop("result", None)
+                            state.pop("tool_invocation_id", None)
+                            await self._save_checkpoint(
+                                assignment, "capability.model_pending", state
+                            )
+                            checkpoint = await self._control.load_checkpoint(
+                                assignment.tenant_id,
+                                assignment.session_id,
+                                assignment.run_id,
+                            )
+                            continue
+                        raise ModelOutputTruncatedError(
+                            "model output was truncated before terminal collaboration result"
+                        )
+                    if state.get("last_turn_was_truncation_recovery"):
+                        raise ModelOutputTruncatedError(
+                            "truncation recovery ended without terminal collaboration result"
+                        )
+                    if finish_kind is FinishReasonKind.REFUSED:
+                        raise ModelProviderError(
+                            "model response was refused before terminal collaboration result"
+                        )
+                    if finish_kind is FinishReasonKind.UNKNOWN:
+                        raise ModelProviderError(
+                            f"unknown model finish reason: {response.finish_reason}"
+                        )
                     raise CollaborationValidationError("role output contract was not published")
             await self._append_once(
                 assignment,
@@ -768,6 +900,21 @@ class AgentHarness:
             await self._control.finish_assignment(self._task_id(assignment), "completed")
             return
         raise BudgetExceededError("Runtime capability step budget was exhausted")
+
+    @staticmethod
+    def _classify_finish_reason(response: ModelResponse) -> FinishReasonKind:
+        if response.tool_calls:
+            return FinishReasonKind.TOOL_CALLS
+        reason = response.finish_reason.strip().lower().replace("-", "_")
+        if reason in {"stop", "end_turn", "completed"}:
+            return FinishReasonKind.STOP
+        if reason in {"tool_calls", "function_call", "function_calls"}:
+            return FinishReasonKind.TOOL_CALLS
+        if reason in {"length", "max_tokens", "max_output_tokens"}:
+            return FinishReasonKind.TRUNCATED
+        if reason in {"content_filter", "safety", "refusal", "refused"}:
+            return FinishReasonKind.REFUSED
+        return FinishReasonKind.UNKNOWN
 
     async def _apply_skill_binding_disposition(
         self,

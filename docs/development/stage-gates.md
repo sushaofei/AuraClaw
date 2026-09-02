@@ -3024,3 +3024,30 @@ active-reference barrier，并简化 AuraX 卸载入口。
 - [x] 单元测试覆盖 Worker 首轮上下文、非法 required fields、重启后继续等待、failed/cancelled 唤醒、缺失 wait set 与取消收敛。
 - [x] 内存与 PostgreSQL Control Store 实现相同的原子 checkpoint/suspend 和 waiting assignment 扫描语义。
 - [x] Ruff、Mypy、import-linter、定向与完整 Pytest 通过；共享测试环境 PostgreSQL 用例因并发消费者争用保留为隔离环境门禁。
+
+## 阶段 Agent Runtime 截断恢复与参数纠错（Issue #81）
+
+状态：完成。角色终态发布使用显式 finish reason 状态机、确定性预算预留与有界恢复。
+
+### 终态状态机与预算
+
+- [x] Runtime 集中分类 stop、tool calls、length/max tokens、拒绝与未知 finish reason。
+- [x] Worker、Repair、Reviewer 在终态工具前截断时持久化原始 `model.turn.completed`，不把不完整正文写成 Child Result。
+- [x] 截断进入至多一次 checkpoint 化 recovery turn；恢复指令禁止重复大正文并要求受治理持久化或明确限制。
+- [x] recovery 次数、usage、turn 与 tool checkpoint 支持崩溃恢复；耗尽时返回 `model_output_truncated_before_terminal`。
+- [x] 每轮上限与累计预算分离；普通角色轮为终态工具保留预算，恢复轮只能使用该 reserve，累计 usage 不突破 Run budget。
+
+### Tool 参数与结果引用
+
+- [x] Tool Gateway 在副作用开始前把模型参数 `SchemaValidationError` 转成 `tool_schema_invalid`、`not_started` Tool Result。
+- [x] Harness 记录正常 `tool.call.completed` 并允许下一模型轮纠错；相同 name/arguments/error 重复由 no-progress 上限终止。
+- [x] 安全、租户、fencing、checkpoint 与内部协议错误不在可恢复参数错误边界内，继续 fail fast。
+- [x] 要求 Artifact 的 Child 合约必须申请 Root grant 内的受治理 Artifact/Resource 写权限，否则创建阶段拒绝。
+- [x] Worker `result_ref` 由 Tool schema 固定为当前 tenant/Child/Run 的 canonical Result 引用；伪造引用返回可恢复 denied。
+- [x] 结构化日志覆盖 output truncated、terminal budget exhausted 与 argument validation failed（含 repeat/side-effect 状态），Tool Gateway 同步写入参数校验失败指标。
+
+### 测试与交付
+
+- [x] 单测覆盖截断恢复成功、预算耗尽专用错误、未知/拒绝 finish reason、终态 reserve、参数纠错、重复错误有界终止、Artifact 合约拒绝与 canonical result ref。
+- [x] 现有 checkpoint/tool-call 幂等回归继续覆盖 model 后、tool 前与 tool 后恢复；Canonical Events 仍为唯一结果事实源。
+- [x] Ruff、Mypy、import-linter、定向与完整 Pytest 通过。

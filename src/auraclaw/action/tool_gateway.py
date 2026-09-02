@@ -491,6 +491,7 @@ class ToolGateway:
         self._instance_id = instance_id or f"hands-{secrets.token_hex(8)}"
         self._execution_claim_ttl = execution_claim_ttl
         self._cancellation_poll_interval = cancellation_poll_interval
+        self._metrics = metric_writer
         self._results: dict[tuple[str, str], tuple[str, ToolResult]] = {}
         self._pending_approvals: dict[tuple[str, str, str], ApprovalRecord] = {}
         self._inflight: dict[tuple[str, str], set[asyncio.Task[Any]]] = {}
@@ -606,7 +607,41 @@ class ToolGateway:
 
     async def _execute_once(self, invocation: ToolInvocation) -> ToolResult:
         capability = self._registry.get(invocation.tool_name, invocation.tool_version)
-        JsonSchemaValidator.validate(invocation.arguments, capability.input_schema)
+        try:
+            JsonSchemaValidator.validate(invocation.arguments, capability.input_schema)
+        except SchemaValidationError as exc:
+            logger.info(
+                "tool.argument_validation_failed capability_id=%s@%s "
+                "tenant_id=%s session_id=%s run_id=%s "
+                "side_effect_status=not_started",
+                invocation.tool_name,
+                invocation.tool_version,
+                invocation.tenant_id,
+                invocation.session_id,
+                invocation.run_id,
+            )
+            if self._metrics is not None:
+                try:
+                    await self._metrics.write_metric(
+                        MetricPoint(
+                            name="tool.argument_validation_failed",
+                            value=1.0,
+                            observed_at=datetime.now(UTC),
+                            tenant_id=invocation.tenant_id,
+                            root_session_id=invocation.root_session_id,
+                            session_id=invocation.session_id,
+                            run_id=invocation.run_id,
+                            labels={"capability_id": invocation.tool_name},
+                        )
+                    )
+                except Exception:
+                    pass
+            return ToolResult(
+                status=ToolResultStatus.ERROR,
+                summary=exc.message,
+                error_code=exc.code,
+                side_effect_status="not_started",
+            )
         digest = action_digest(
             invocation.tool_name, invocation.tool_version, invocation.arguments
         )
