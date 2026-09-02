@@ -23,7 +23,6 @@ from auraclaw.model_gateway.ports import (
     ModelCallReservation,
     ModelCancellation,
 )
-from auraclaw.runtime.harness import AgentHarness
 from auraclaw.runtime.ports import (
     ModelPolicy,
     ModelRequest,
@@ -31,6 +30,7 @@ from auraclaw.runtime.ports import (
     ModelStreamChunk,
     ProviderCancellationResult,
 )
+from auraclaw.runtime.rounds import ModelRoundExecutor
 
 
 class _StreamingModel:
@@ -410,9 +410,11 @@ async def test_runtime_business_cancel_propagates_to_active_model_call() -> None
             return True
 
     model = BlockingModel()
-    harness = object.__new__(AgentHarness)
-    harness._model = model
-    harness._control = CancelledControl(model.started)
+    model_round = ModelRoundExecutor(
+        model=model,  # type: ignore[arg-type]
+        control=CancelledControl(model.started),  # type: ignore[arg-type]
+        runtime_events=object(),  # type: ignore[arg-type]
+    )
     assignment = SimpleNamespace(
         tenant_id="t1",
         session_id="session-1",
@@ -426,7 +428,7 @@ async def test_runtime_business_cancel_propagates_to_active_model_call() -> None
         messages=(),
     )
     with pytest.raises(RuntimeCancelledError, match="run cancelled"):
-        await harness._generate_with_live_deltas(assignment, request, sequence=0)
+        await model_round.execute(assignment, request, sequence=0)  # type: ignore[arg-type]
     assert model.cancelled_request == request
 
 

@@ -131,7 +131,7 @@ async def test_harness_publishes_deltas_during_stream() -> None:
         resource_profile={},
         budget=RuntimeBudget(),
     )
-    response, sequence = await harness._generate_with_live_deltas(
+    response, sequence = await harness._model_rounds.execute(
         assignment,
         ModelRequest(
             model_call_id="mdl_1",
