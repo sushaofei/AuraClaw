@@ -11,6 +11,7 @@ import asyncpg
 import httpx
 import pytest
 from fastapi import FastAPI
+from tests.skill_lifecycle_contract import assert_skill_lifecycle_core_contract
 
 from auraclaw.action.skill_internal_service import SkillPublicationInternalService
 from auraclaw.action.skill_lifecycle import (
@@ -86,6 +87,35 @@ MIGRATION = "\n".join(
     )
 )
 pytestmark = pytest.mark.skipif(DATABASE_URL is None, reason="PostgreSQL test URL not configured")
+
+
+def test_postgres_store_satisfies_shared_lifecycle_contract() -> None:
+    async def scenario() -> None:
+        assert DATABASE_URL is not None
+        connection = await asyncpg.connect(DATABASE_URL)
+        await _ensure_skill_lifecycle_schema(connection)
+        suffix = uuid4().hex
+        tenant_id = f"tenant-contract-{suffix}"
+        store = PostgresSkillLifecycleStore(DATABASE_URL)
+        try:
+            await assert_skill_lifecycle_core_contract(
+                store,
+                tenant_id=tenant_id,
+                identity_suffix=suffix,
+            )
+        finally:
+            await store.close()
+            for table in (
+                "skill_installation",
+                "skill_publication",
+                "skill_package",
+            ):
+                await connection.execute(
+                    f"DELETE FROM hands.{table} WHERE tenant_id=$1", tenant_id
+                )
+            await connection.close()
+
+    asyncio.run(scenario())
 
 
 def test_source_config_uses_canonical_publication_lock_order() -> None:

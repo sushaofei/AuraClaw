@@ -370,8 +370,14 @@ CLI/Admin -> Task API -> Artifact Service create/finalize -> immutable Artifact 
 版本冲突判断，避免恶意包通过既有版本探测绕过准入错误。开发 memory profile 可以使用进程内适配器；
 SQL profile 必须走 Action Hands。该链路解决 Artifact 所有权，不代表统一 Catalog 已完成：在持久包恢复、
 Installation 投影与 Resolver 回查就绪前，不能提前删除 Runtime 的兼容目录。
-Task API 在迁移期可把已确认的发布结果写入本副本只读兼容缓存，以保证同请求副本的旧查询入口立即可见；
-该缓存不是事实源，也不提供跨副本一致性，后续必须由持久查询/统一 Catalog 取代。
+Task API 不再维护发布结果兼容缓存。Admin Catalog 经内部契约读取 Action Hands 的持久 lifecycle snapshot，
+由 `SkillAdminCatalogQueryService` 统一完成 latest-version、过滤、Installation 状态与依赖健康判断；HTTP route
+只负责鉴权、参数和响应映射。跨服务客户端共享 workload bearer、timeout、command/query context 与有限
+瞬时故障重试策略；写调用复用稳定 command id，服务端命令账本继续承担幂等事实。
+
+持久 Lifecycle Adapter 以单一事务维护聚合间不变量，但 Package、Publication、Installation 与 Source 的
+SQL 行映射分别隔离。拆分只改变代码所有权，不改变数据库 schema、事务边界、revision CAS、Outbox 或
+Canonical Event 语义；内存与 PostgreSQL 适配器仍必须满足相同 Lifecycle Port 契约。
 
 开发者 CLI 提供 `auraclaw skills sign|validate|test|publish`。`validate` 使用与服务端相同的包解析、路径、
 Manifest、digest 和签名规则；`test` 只验证 `tests/*.json` 声明式向量，绝不加载或执行包内 Python、

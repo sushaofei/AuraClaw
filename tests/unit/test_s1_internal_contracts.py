@@ -26,6 +26,7 @@ from auraclaw.contracts.internal import (
     CancellationResponse,
     CheckpointResponse,
     CheckpointState,
+    ContractModel,
     CredentialInvokeRequest,
     CredentialInvokeResponse,
     EventInput,
@@ -67,6 +68,14 @@ from auraclaw.runtime.ports import ToolCall
 from auraclaw.session.internal_service import SessionInternalService
 
 SIGNING_KEY = b"s1-lease-assertion-signing-key-0001"
+
+
+class _RetryRequest(ContractModel):
+    value: str
+
+
+class _RetryResponse(ContractModel):
+    value: str
 
 
 def _context(
@@ -159,6 +168,32 @@ def test_session_in_process_and_http_adapters_share_the_contract() -> None:
             assert response.api_version == INTERNAL_API_VERSION
             assert response.events[0]["causation_id"] == "causation-s1"
             assert response.events[0]["actor"] == {"type": "runtime", "id": "runtime-s1"}
+
+    asyncio.run(scenario())
+
+
+def test_http_contract_client_retries_transient_transport_failure() -> None:
+    async def scenario() -> None:
+        attempts = 0
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise httpx.ConnectError("temporary connection failure", request=request)
+            return httpx.Response(200, json={"value": "accepted"})
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url="http://internal"
+        ) as raw:
+            response = await HttpContractClient(
+                raw,
+                retry_attempts=2,
+                retry_backoff_seconds=0,
+            ).call("/command", _RetryRequest(value="request"), _RetryResponse)
+
+        assert attempts == 2
+        assert response.value == "accepted"
 
     asyncio.run(scenario())
 
