@@ -3114,3 +3114,41 @@ active-reference barrier，并简化 AuraX 卸载入口。
 - [x] Runtime 架构文档已同步；数据库和 Event migration 不适用。
 - [x] 暂存范围排除 `.vscode/launch.json`、`docs/tmp/`、Secret、缓存和虚拟环境。
 - [x] 以一个 intentional commit 提交并 push 当前分支到 `origin`，同步关闭 Issue #84。
+
+## 阶段 R2.3：Skill/Capability 业务链路收敛（Issue #85）
+
+状态：完成。Skill 控制面按 lifecycle、publication、catalog/reconciliation 与 Admin 查询链路明确所有权，
+并删除发布客户端的只读兼容缓存。
+
+### 范围、非目标与回滚
+
+- [x] 保持 Skill Package、Publication、Installation、Source、Capability Catalog 的业务模型和生产拓扑不变。
+- [x] 不修改数据库/Event schema、revision CAS、Outbox、Artifact 所有权或 Runtime binding 语义。
+- [x] 回滚为整体恢复本阶段结构提交；本阶段无数据迁移或数据降级步骤。
+
+### 高内聚边界
+
+| 业务链路 | 入口 / 用例 | 状态 owner | Port / Adapter | 事件或派生流 |
+|---|---|---|---|---|
+| Lifecycle | `SkillManagementService`、`SkillPublicationService` | `SkillLifecycleStore` | memory / PostgreSQL lifecycle adapter | revision CAS、command ledger、Outbox |
+| Publication | Admin/Internal route → `SkillPublicationInternalService` | Package / Publication / Installation | Artifact 与 Lifecycle ports | `skill.publication.committed` Outbox |
+| Catalog / reconciliation | Source/Outbox worker → Reconciler / Rebuilder | lifecycle facts；Catalog 为可重建投影 | Source、Artifact、Capability Catalog ports | generation / reconcile signal |
+| Admin Catalog | HTTP route → `SkillAdminCatalogQueryService` | lifecycle snapshot | snapshot reader、capability availability | 只读，无业务写入 |
+
+- [x] Admin Catalog 的 latest-version、filter、Installation 与 dependency availability 规则收敛到独立 Action 用例。
+- [x] Admin HTTP route 只保留身份、输入/输出与分页表示，不再拥有 Catalog 选择算法。
+- [x] PostgreSQL Lifecycle 事务协调保持集中，Package、Publication、Installation、Source 行映射按聚合拆分。
+- [x] 内存与 PostgreSQL Lifecycle 继续实现同一稳定 Port，并由既有语义一致性回归覆盖。
+- [x] 内部客户端的 workload bearer、timeout、command/query context 与有限 retry 由共享组件统一管理。
+- [x] 默认 retry 只覆盖 transport error 与 502/503/504；稳定 command id 和服务端命令账本保证写重试幂等。
+
+### 兼容清理、测试与交付
+
+- [x] 删除 `RemoteSkillPublicationClient` 的 `compatibility_cache` 参数、写旁路及恢复分支。
+- [x] 删除 Admin route 中重复的 PublishedSkill、availability 与 semver 辅助实现，不保留双实现。
+- [x] Catalog 用例测试覆盖语义化版本选择、复合过滤与依赖不可用；内部契约测试覆盖瞬时连接失败重试。
+- [x] Skill lifecycle、publication、reconcile、publisher、Admin 与 MCP hot-config 定向回归通过。
+- [x] 完整 Pytest（580 passed，3 skipped）、Ruff、Mypy 与 10 条 import-linter 合同通过。
+- [x] 架构与代码组织文档同步；数据库/Event migration 不适用。
+- [x] 暂存范围排除 `.vscode/launch.json`、`compose.prod.yml`、`docs/tmp/`、Secret、缓存和虚拟环境。
+- [x] 以一个 intentional commit 提交并 push 当前分支到 `origin`，同步关闭 Issue #85 与 Epic #82。

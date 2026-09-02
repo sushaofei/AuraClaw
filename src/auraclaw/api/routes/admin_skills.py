@@ -11,18 +11,24 @@ from typing import Annotated, Any, Literal, Protocol
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from pydantic import AwareDatetime, Field, model_validator
 
+from auraclaw.action.skill_admin_catalog import (
+    SkillAdminCatalogQueryService,
+    SkillCatalogQuery,
+)
+from auraclaw.action.skill_admin_catalog import (
+    published_skill as _published_skill,
+)
+from auraclaw.action.skill_admin_catalog import (
+    semver_key as _semver_key,
+)
 from auraclaw.action.skill_lifecycle import (
     SkillAdmissionMetricRecord,
     SkillAdmissionPage,
 )
-from auraclaw.action.skill_packages import (
-    SkillPackage,
-    SkillPackageRegistry,
-    skill_capability_descriptor,
-)
+from auraclaw.action.skill_packages import SkillPackage, SkillPackageRegistry
 from auraclaw.api.dependencies import RequestIdentity, request_identity
 from auraclaw.contracts.capabilities import CapabilityDescriptor
-from auraclaw.contracts.errors import NotFoundError, VersionConflictError
+from auraclaw.contracts.errors import NotFoundError
 from auraclaw.contracts.internal import (
     ArtifactFinalizeResponse,
     ContractModel,
@@ -43,7 +49,6 @@ from auraclaw.contracts.skills import (
     SkillInstallationOperation,
     SkillInstallationRecord,
     SkillPackageRecord,
-    SkillPackageRetentionStatus,
     SkillPublicationRecord,
     SkillPublisherKeyRecord,
     SkillPublisherRecord,
@@ -305,6 +310,11 @@ def create_skill_admin_router(
     if admission_quarantine_alert_min_samples < 1:
         raise ValueError("Skill admission quarantine alert minimum samples must be positive")
     router = APIRouter(prefix="/v1/admin", tags=["skill-admin"])
+    catalog_query_service = (
+        SkillAdminCatalogQueryService(management_service, capability_availability)
+        if management_service is not None
+        else None
+    )
 
     @router.get("/skill-sources")
     async def list_skill_sources(identity: Identity) -> dict[str, Any]:
@@ -435,90 +445,40 @@ def create_skill_admin_router(
         cursor: Annotated[str | None, Query(max_length=2048)] = None,
         limit: Annotated[int, Query(ge=1, le=500)] = 100,
     ) -> dict[str, Any]:
-        service = _require_management_service(management_service)
-        package_records, publication_state_records, installation_records = (
-            await service.get_admin_snapshot(identity.tenant_id)
+        _require_management_service(management_service)
+        assert catalog_query_service is not None
+        catalog_items = await catalog_query_service.list_latest(
+            identity.tenant_id,
+            SkillCatalogQuery(
+                text=q,
+                publisher=publisher,
+                risk_level=risk_level,
+                publication_status=publication_status,
+                installation_status=installation_status,
+                source_id=source_id,
+            ),
         )
-        packages = {
-            (item.manifest.publisher, item.manifest.name, item.manifest.version): item
-            for item in package_records
-            if item.retention_status is not SkillPackageRetentionStatus.PURGED
-        }
-        publication_records = {
-            (item.publisher, item.name, item.version): item
-            for item in publication_state_records
-        }
-        latest: dict[tuple[str, str], PublishedSkill] = {}
-        for key, publication_state in publication_records.items():
-            package = packages.get(key)
-            if package is None:
-                continue
-            publication = _published_skill(package, publication_state)
-            skill_key = (publication.manifest.publisher, publication.manifest.name)
-            current = latest.get(skill_key)
-            if current is None or _semver_key(publication.manifest.version) > _semver_key(
-                current.manifest.version
-            ):
-                latest[skill_key] = publication
-        installations = {
-            (item.publisher, item.name): item
-            for item in installation_records
-        }
         items: list[dict[str, Any]] = []
-        normalized_query = (q or "").casefold()
-        for publication in latest.values():
+        for catalog_item in catalog_items:
+            publication = catalog_item.publication
             manifest = publication.manifest
-            installation = installations.get((manifest.publisher, manifest.name))
-            current_state = publication_records.get(
-                (manifest.publisher, manifest.name, manifest.version)
-            )
-            if publisher and manifest.publisher != publisher:
-                continue
-            if risk_level and manifest.risk_level != risk_level:
-                continue
-            if publication_status and publication.status.value != publication_status:
-                continue
-            if installation_status and (
-                installation is None or installation.status.value != installation_status
-            ):
-                continue
-            effective_source_id = (
-                installation.source_id
-                if installation is not None
-                else current_state.source_id if current_state is not None else None
-            )
-            if source_id and effective_source_id != source_id:
-                continue
-            haystack = " ".join(
-                (manifest.publisher, manifest.name, manifest.description)
-            ).casefold()
-            if normalized_query and normalized_query not in haystack:
-                continue
+            installation = catalog_item.installation
+            current_state = catalog_item.publication_state
             publication_payload = {
                 "status": publication.status.value,
-                "revision": None if current_state is None else current_state.revision,
-                "source_id": None if current_state is None else current_state.source_id,
+                "revision": current_state.revision,
+                "source_id": current_state.source_id,
             }
             installation_payload = (
                 None if installation is None else _installation_summary(installation)
             )
-            availability = _skill_availability(publication, installation)
-            if (
-                availability == "available"
-                and capability_availability is not None
-                and not await capability_availability.is_available(
-                    identity.tenant_id,
-                    skill_capability_descriptor(publication),
-                )
-            ):
-                availability = "dependencies_unavailable"
             items.append(
                 {
                     **_summary(publication),
                     "latest_version": manifest.version,
                     "publication": publication_payload,
                     "installation": installation_payload,
-                    "availability": availability,
+                    "availability": catalog_item.availability,
                 }
             )
         page, next_cursor = _page(items, cursor=cursor, limit=limit, key=_skill_item_key)
@@ -1562,22 +1522,6 @@ def _package_state_summary(package: SkillPackageRecord) -> dict[str, Any]:
     }
 
 
-def _published_skill(
-    package: SkillPackageRecord,
-    publication: SkillPublicationRecord,
-) -> PublishedSkill:
-    if package.package_digest != publication.package_digest:
-        raise VersionConflictError("Skill package and publication digests do not match")
-    return PublishedSkill(
-        tenant_id=package.tenant_id,
-        manifest=package.manifest,
-        package_digest=package.package_digest,
-        artifact_ref=package.artifact_ref,
-        status=publication.status,
-        revocation_action=publication.revocation_action,
-    )
-
-
 async def _skill_markdown(
     reader: SkillContentReader | None,
     registry: SkillPackageRegistry,
@@ -1591,27 +1535,8 @@ async def _skill_markdown(
     return registry.skill_markdown(tenant_id, publisher, name, version)
 
 
-def _skill_availability(
-    publication: PublishedSkill,
-    installation: SkillInstallationRecord | None,
-) -> str:
-    if publication.status.value != "active":
-        return "publication_unavailable"
-    if installation is None:
-        return "not_installed"
-    if installation.status.value != "active":
-        return f"installation_{installation.status.value}"
-    return "available"
-
-
 def _skill_item_key(item: dict[str, Any]) -> tuple[str, ...]:
     return (str(item["publisher"]), str(item["name"]))
-
-
-def _semver_key(version: str) -> tuple[int, int, int]:
-    core = version.split("-", 1)[0]
-    major, minor, patch = core.split(".")
-    return int(major), int(minor), int(patch)
 
 
 def _page(

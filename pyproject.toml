@@ -129,9 +129,16 @@ forbidden_modules = [
 ]
 
 [[tool.importlinter.contracts]]
-name = "Action Hands does not depend on Runtime or Control"
+name = "Action Hands business and Skill lifecycle adapters do not depend on Runtime or Control"
 type = "forbidden"
-source_modules = ["auraclaw.action"]
+source_modules = [
+  "auraclaw.action",
+  "auraclaw.infrastructure.persistence.postgres_skill_lifecycle",
+  "auraclaw.infrastructure.persistence.postgres_skill_package_records",
+  "auraclaw.infrastructure.persistence.postgres_skill_publication_records",
+  "auraclaw.infrastructure.persistence.postgres_skill_installation_records",
+  "auraclaw.infrastructure.persistence.postgres_skill_source_records",
+]
 forbidden_modules = ["auraclaw.runtime", "auraclaw.control"]
 
 [project.scripts]

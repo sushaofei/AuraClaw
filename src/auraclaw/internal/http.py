@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, NoReturn, TypeVar
@@ -269,9 +270,22 @@ class InProcessContractClient:
 
 
 class HttpContractClient:
-    def __init__(self, client: httpx.AsyncClient, *, bearer_token: str | None = None) -> None:
+    def __init__(
+        self,
+        client: httpx.AsyncClient,
+        *,
+        bearer_token: str | None = None,
+        retry_attempts: int = 1,
+        retry_backoff_seconds: float = 0.0,
+    ) -> None:
+        if retry_attempts < 1:
+            raise ValueError("internal contract retry attempts must be positive")
+        if retry_backoff_seconds < 0:
+            raise ValueError("internal contract retry backoff cannot be negative")
         self._client = client
         self._bearer_token = bearer_token
+        self._retry_attempts = retry_attempts
+        self._retry_backoff_seconds = retry_backoff_seconds
 
     def _headers(self) -> dict[str, str]:
         headers = {"X-AuraClaw-Contract-Version": INTERNAL_API_VERSION}
@@ -285,11 +299,25 @@ class HttpContractClient:
         request: RequestModel,
         response_model: type[ResponseModel],
     ) -> ResponseModel:
-        response = await self._client.post(
-            path,
-            json=request.model_dump(mode="json"),
-            headers=self._headers(),
-        )
+        response: httpx.Response | None = None
+        for attempt in range(self._retry_attempts):
+            try:
+                response = await self._client.post(
+                    path,
+                    json=request.model_dump(mode="json"),
+                    headers=self._headers(),
+                )
+            except httpx.TransportError:
+                if attempt + 1 >= self._retry_attempts:
+                    raise
+            else:
+                if response.status_code not in {502, 503, 504}:
+                    break
+                if attempt + 1 >= self._retry_attempts:
+                    break
+            if self._retry_backoff_seconds:
+                await asyncio.sleep(self._retry_backoff_seconds * (attempt + 1))
+        assert response is not None
         if response.is_error:
             _raise_contract_error(response)
         return response_model.model_validate(response.json())

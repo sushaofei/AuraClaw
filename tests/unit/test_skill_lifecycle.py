@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from pydantic import ValidationError
+from tests.skill_lifecycle_contract import assert_skill_lifecycle_core_contract
 
 from auraclaw.action.skill_lifecycle import InMemorySkillLifecycleStore
 from auraclaw.contracts.errors import NotFoundError, VersionConflictError
@@ -25,6 +26,16 @@ from auraclaw.contracts.tools import ArtifactRef
 
 DIGEST_A = f"sha256:{'a' * 64}"
 DIGEST_B = f"sha256:{'b' * 64}"
+
+
+def test_memory_store_satisfies_shared_lifecycle_contract() -> None:
+    asyncio.run(
+        assert_skill_lifecycle_core_contract(
+            InMemorySkillLifecycleStore(),
+            tenant_id="tenant-memory-contract",
+            identity_suffix="memory_contract",
+        )
+    )
 
 
 def _manifest(version: str = "1.0.0") -> SkillManifest:

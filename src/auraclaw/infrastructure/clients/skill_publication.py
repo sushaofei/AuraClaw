@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import base64
-from contextlib import suppress
 from datetime import datetime
 from uuid import uuid4
 
@@ -12,11 +11,9 @@ from auraclaw.action.skill_lifecycle import (
     SkillAdmissionMetricRecord,
     SkillAdmissionPage,
 )
-from auraclaw.action.skill_packages import SkillPackage, SkillPackageRegistry
+from auraclaw.action.skill_packages import SkillPackage
 from auraclaw.contracts.errors import NotFoundError
 from auraclaw.contracts.internal import (
-    InternalRequestContext,
-    ServiceIdentity,
     SkillAdminSnapshotInternalRequest,
     SkillAdminSnapshotInternalResponse,
     SkillAdmissionListInternalRequest,
@@ -64,7 +61,6 @@ from auraclaw.contracts.skills import (
     RevokeSkillPublisherKeyCommand,
     RotateSkillPublisherKeyCommand,
     SkillInstallationRecord,
-    SkillInstallationStatus,
     SkillPackageRecord,
     SkillPublicationRecord,
     SkillPublisherKeyRecord,
@@ -73,7 +69,15 @@ from auraclaw.contracts.skills import (
     SkillSourceSyncState,
 )
 from auraclaw.contracts.tools import ArtifactRef
-from auraclaw.internal.http import HttpContractClient
+from auraclaw.infrastructure.clients.internal import (
+    InternalContractSession,
+)
+from auraclaw.infrastructure.clients.internal import (
+    command_context as _context,
+)
+from auraclaw.infrastructure.clients.internal import (
+    query_context as _query_context,
+)
 
 
 class RemoteSkillPublicationClient:
@@ -86,26 +90,23 @@ class RemoteSkillPublicationClient:
         bearer_token: str,
         timeout: float = 60.0,
         transport: httpx.AsyncBaseTransport | None = None,
-        compatibility_cache: SkillPackageRegistry | None = None,
     ) -> None:
-        self._client = httpx.AsyncClient(base_url=base_url, timeout=timeout, transport=transport)
-        self._contract = HttpContractClient(self._client, bearer_token=bearer_token)
-        self._compatibility_cache = compatibility_cache
+        self._session = InternalContractSession(
+            base_url,
+            bearer_token=bearer_token,
+            timeout=timeout,
+            transport=transport,
+        )
+        self._contract = self._session.contract
 
     async def aclose(self) -> None:
-        await self._client.aclose()
+        await self._session.aclose()
 
     async def publish(self, command: PublishSkillCommand, package: SkillPackage) -> PublishedSkill:
         response = await self._contract.call(
             "/internal/v1/skill-publications/publish",
             SkillPublishInternalRequest(
-                context=InternalRequestContext(
-                    tenant_id=command.tenant_id,
-                    service_identity=ServiceIdentity.TASK_API,
-                    request_id=command.command_id,
-                    correlation_id=command.correlation_id,
-                    causation_id=command.causation_id,
-                ),
+                context=_context(command),
                 actor_id=command.actor_id,
                 source_id=command.source_id,
                 activate=command.activate,
@@ -118,10 +119,7 @@ class RemoteSkillPublicationClient:
             ),
             SkillPublishInternalResponse,
         )
-        publication = PublishedSkill.model_validate(response.publication)
-        if self._compatibility_cache is not None:
-            publication = self._compatibility_cache.restore(command.tenant_id, package, publication)
-        return publication
+        return PublishedSkill.model_validate(response.publication)
 
     async def publish_artifact(
         self,
@@ -212,16 +210,7 @@ class RemoteSkillPublicationClient:
             ),
             SkillInstallationInternalResponse,
         )
-        installation = SkillInstallationRecord.model_validate(response.installation)
-        if self._compatibility_cache is not None:
-            with suppress(NotFoundError):
-                self._compatibility_cache.set_skill_discoverable(
-                    command.tenant_id,
-                    command.publisher,
-                    command.name,
-                    discoverable=(installation.status is SkillInstallationStatus.ACTIVE),
-                )
-        return installation
+        return SkillInstallationRecord.model_validate(response.installation)
 
     async def revoke_publication(
         self,
@@ -244,16 +233,7 @@ class RemoteSkillPublicationClient:
             ),
             SkillRevokeInternalResponse,
         )
-        publication = SkillPublicationRecord.model_validate(response.publication)
-        if self._compatibility_cache is not None:
-            with suppress(NotFoundError):
-                self._compatibility_cache.revoke(
-                    command.tenant_id,
-                    command.publisher,
-                    command.name,
-                    command.version,
-                )
-        return publication
+        return SkillPublicationRecord.model_validate(response.publication)
 
     async def restore_publication(
         self,
@@ -306,13 +286,7 @@ class RemoteSkillPublicationClient:
         return await self._contract.call(
             "/internal/v1/skill-publications/package",
             SkillPackageStateInternalRequest(
-                context=InternalRequestContext(
-                    tenant_id=tenant_id,
-                    service_identity=ServiceIdentity.TASK_API,
-                    request_id=request_id,
-                    correlation_id=request_id,
-                    causation_id=request_id,
-                ),
+                context=_query_context(tenant_id, request_id),
                 publisher=publisher,
                 name=name,
                 version=version,
@@ -499,13 +473,7 @@ class RemoteSkillPublicationClient:
         response = await self._contract.call(
             "/internal/v1/skill-publications/publishers/state",
             SkillPublisherStateInternalRequest(
-                context=InternalRequestContext(
-                    tenant_id=tenant_id,
-                    service_identity=ServiceIdentity.TASK_API,
-                    request_id=request_id,
-                    correlation_id=request_id,
-                    causation_id=request_id,
-                ),
+                context=_query_context(tenant_id, request_id),
                 publisher=publisher,
             ),
             SkillPublisherInternalResponse,
@@ -539,13 +507,7 @@ class RemoteSkillPublicationClient:
         return await self._contract.call(
             "/internal/v1/skill-publications/state",
             SkillStateInternalRequest(
-                context=InternalRequestContext(
-                    tenant_id=tenant_id,
-                    service_identity=ServiceIdentity.TASK_API,
-                    request_id=request_id,
-                    correlation_id=request_id,
-                    causation_id=request_id,
-                ),
+                context=_query_context(tenant_id, request_id),
                 publisher=publisher,
                 name=name,
                 version=version,
@@ -645,40 +607,6 @@ class RemoteSkillPublicationClient:
             ),
             SkillAdminSnapshotInternalResponse,
         )
-
-
-def _context(
-    command: (
-        PublishSkillCommand
-        | ChangeSkillInstallationCommand
-        | RevokeSkillPublicationCommand
-        | PurgeSkillPackageCommand
-        | RegisterSkillPublisherCommand
-        | RotateSkillPublisherKeyCommand
-        | RevokeSkillPublisherKeyCommand
-        | ChangeSkillPublisherStatusCommand
-        | RestoreSkillPublicationCommand
-        | ConfigureSkillSourceCommand
-        | RetireSkillSourceCommand
-    ),
-) -> InternalRequestContext:
-    return InternalRequestContext(
-        tenant_id=command.tenant_id,
-        service_identity=ServiceIdentity.TASK_API,
-        request_id=command.command_id,
-        correlation_id=command.correlation_id,
-        causation_id=command.causation_id,
-    )
-
-
-def _query_context(tenant_id: str, request_id: str) -> InternalRequestContext:
-    return InternalRequestContext(
-        tenant_id=tenant_id,
-        service_identity=ServiceIdentity.TASK_API,
-        request_id=request_id,
-        correlation_id=request_id,
-        causation_id=request_id,
-    )
 
 
 def _publisher_state(

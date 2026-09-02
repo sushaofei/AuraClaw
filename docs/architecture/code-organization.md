@@ -37,7 +37,7 @@ infrastructure -> implements stable ports
 | `projection/` | 可删除、可重建的投影规则与维护逻辑 |
 | `control/` | Runnable、Assignment、Lease、Fencing 和调度 |
 | `runtime/` | 可恢复 Agent Loop、角色执行和受控客户端 |
-| `action/` | Capability Catalog、Tool/Resource/Skill 与 Hands 应用逻辑 |
+| `action/` | Capability Catalog、Tool/Resource/Skill、Admin Catalog 查询与 Hands 应用逻辑 |
 | `policy/`、`credential_proxy/`、`artifact/` | 独立信任域的业务边界 |
 | `delivery/`、`observability/` | 可靠结果交付、观测和审计 |
 | `gateways/` | Task、Query、Streaming 接入边界 |
@@ -46,6 +46,16 @@ infrastructure -> implements stable ports
 | `composition/` | 唯一对象图、服务装配和 CLI 实现选择 |
 
 `application/`、`admin/`、`internal/` 及各服务外观包承载兼容入口或跨边界用例；新增核心规则应优先进入上表对应的明确边界，而不是扩展通用杂项包。
+
+Skill 控制面按业务链路组织，而不是按 HTTP 页面堆叠规则：`action/skill_lifecycle.py` 定义生命周期
+Port 与内存参考实现，发布、管理、Source 对账分别由明确的应用服务负责，Admin 列表的 latest-version、
+filter 与 dependency availability 语义归 `action/skill_admin_catalog.py`。HTTP route 只做身份/参数与响应
+映射。PostgreSQL 生命周期适配器保留事务协调，Package、Publication、Installation、Source 的行映射
+分别位于 `infrastructure/persistence/postgres_skill_*_records.py`，避免单一适配器同时承担全部聚合适配。
+
+跨服务客户端统一通过 `infrastructure/clients/internal.py` 建立 timeout、workload bearer、请求上下文与
+有限瞬时故障重试；稳定 command id 使写命令重试保持幂等。业务客户端只声明契约路径和 DTO，不各自
+复制认证、correlation/causation 或 retry 策略。
 
 ## 生产进程映射
 

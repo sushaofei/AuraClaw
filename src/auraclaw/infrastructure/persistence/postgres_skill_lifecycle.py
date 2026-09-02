@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from typing import Any
 
 import asyncpg  # type: ignore[import-untyped]
 
@@ -29,23 +28,37 @@ from auraclaw.contracts.errors import NotFoundError, VersionConflictError
 from auraclaw.contracts.skills import (
     SkillInstallationRecord,
     SkillInstallationStatus,
-    SkillManifest,
     SkillPackageRecord,
     SkillPackageRetentionStatus,
     SkillPublicationRecord,
     SkillPublicationStatus,
-    SkillRevocationAction,
     SkillSourceDesiredState,
-    SkillSourceKind,
     SkillSourceRecord,
     SkillSourceSyncState,
 )
-from auraclaw.contracts.tools import ArtifactRef
 from auraclaw.infrastructure.persistence.postgres_common import (
     LazyPool,
     json_dumps,
     json_loads,
     retry_serializable_transaction,
+)
+from auraclaw.infrastructure.persistence.postgres_skill_installation_records import (
+    installation_from_row,
+    installation_values,
+)
+from auraclaw.infrastructure.persistence.postgres_skill_package_records import (
+    artifact_payload,
+    package_from_row,
+)
+from auraclaw.infrastructure.persistence.postgres_skill_publication_records import (
+    publication_from_row,
+    publication_values,
+)
+from auraclaw.infrastructure.persistence.postgres_skill_source_records import (
+    source_from_row,
+    source_lease_from_row,
+    source_values,
+    sync_state_from_row,
 )
 
 
@@ -276,7 +289,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
                 )
                 if selected_row is None:
                     raise VersionConflictError("Skill publication source selection failed")
-                committed_publication = _publication(dict(selected_row))
+                committed_publication = publication_from_row(dict(selected_row))
             result = SkillPublishCommitResult(
                 package=package,
                 publication=committed_publication,
@@ -343,7 +356,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
                 )
                 if current is None:
                     raise VersionConflictError("Skill restore command result is incomplete")
-                return _publication(dict(current))
+                return publication_from_row(dict(current))
             current_row = await connection.fetchrow(
                 """SELECT * FROM hands.skill_publication
                 WHERE tenant_id=$1 AND publisher=$2 AND name=$3 AND version=$4
@@ -355,7 +368,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
             )
             if current_row is None:
                 raise NotFoundError("Skill publication was not found")
-            current = _publication(dict(current_row))
+            current = publication_from_row(dict(current_row))
             if current.revision != commit.expected_revision:
                 raise VersionConflictError("Skill publication revision conflict")
             if current.status is not SkillPublicationStatus.RETIRED:
@@ -404,7 +417,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
                 record.revision,
                 commit.occurred_at,
             )
-            return _publication(dict(updated))
+            return publication_from_row(dict(updated))
 
     async def claim_outbox(
         self,
@@ -515,7 +528,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
                 manifest.version,
                 record.package_digest,
                 json_dumps(manifest.model_dump(mode="json")),
-                json_dumps(_artifact_payload(record.artifact_ref)),
+                json_dumps(artifact_payload(record.artifact_ref)),
                 record.signature_key_id,
                 record.retention_status.value,
                 record.retention_until,
@@ -529,7 +542,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
         except asyncpg.UniqueViolationError as exc:
             raise VersionConflictError("Skill package digest belongs to another version") from exc
         if row is not None:
-            return _package(dict(row))
+            return package_from_row(dict(row))
         existing = await self.get_package(
             record.tenant_id,
             manifest.publisher,
@@ -552,7 +565,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
             name,
             version,
         )
-        return None if row is None else _package(dict(row))
+        return None if row is None else package_from_row(dict(row))
 
     async def list_packages(self, tenant_id: str) -> tuple[SkillPackageRecord, ...]:
         pool = await self.pool()
@@ -561,7 +574,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
             ORDER BY publisher,name,version""",
             tenant_id,
         )
-        return tuple(_package(dict(row)) for row in rows)
+        return tuple(package_from_row(dict(row)) for row in rows)
 
     async def list_package_tombstones(
         self, tenant_id: str, publisher: str, name: str
@@ -575,7 +588,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
             publisher,
             name,
         )
-        return tuple(_package(dict(row)) for row in rows)
+        return tuple(package_from_row(dict(row)) for row in rows)
 
     async def update_package_retention(
         self, record: SkillPackageRecord, *, expected_revision: int
@@ -607,7 +620,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
         )
         if row is None:
             raise VersionConflictError("Skill package retention revision conflict")
-        return _package(dict(row))
+        return package_from_row(dict(row))
 
     async def put_publication(
         self, record: SkillPublicationRecord, *, expected_revision: int
@@ -647,7 +660,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
                             $15,$16,$17)
                     ON CONFLICT (tenant_id,publisher,name,version) DO NOTHING
                     RETURNING *""",
-                    *_publication_values(record),
+                    *publication_values(record),
                 )
             else:
                 row = await connection.fetchrow(
@@ -681,7 +694,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
                 )
             if row is None:
                 raise VersionConflictError("Skill publication revision conflict")
-        return _publication(dict(row))
+        return publication_from_row(dict(row))
 
     async def get_publication(
         self, tenant_id: str, publisher: str, name: str, version: str
@@ -695,7 +708,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
             name,
             version,
         )
-        return None if row is None else _publication(dict(row))
+        return None if row is None else publication_from_row(dict(row))
 
     async def list_publications(self, tenant_id: str) -> tuple[SkillPublicationRecord, ...]:
         pool = await self.pool()
@@ -704,7 +717,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
             ORDER BY publisher,name,version""",
             tenant_id,
         )
-        return tuple(_publication(dict(row)) for row in rows)
+        return tuple(publication_from_row(dict(row)) for row in rows)
 
     async def list_tenants(self) -> tuple[str, ...]:
         pool = await self.pool()
@@ -740,7 +753,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,
                         $16,$17,$18)
                 ON CONFLICT (tenant_id,publisher,name) DO NOTHING RETURNING *""",
-                *_installation_values(record),
+                *installation_values(record),
             )
         else:
             row = await pool.fetchrow(
@@ -775,7 +788,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
             )
         if row is None:
             raise VersionConflictError("Skill installation revision conflict")
-        return _installation(dict(row))
+        return installation_from_row(dict(row))
 
     @retry_serializable_transaction("skill.installation.change")
     async def commit_installation_change(
@@ -807,7 +820,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
                     raise VersionConflictError(
                         "Skill installation command result is incomplete"
                     )
-                return _installation(dict(current))
+                return installation_from_row(dict(current))
             _require_next_revision(
                 record.revision, commit.expected_revision, "installation"
             )
@@ -861,7 +874,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
                         str(concurrent["name"]),
                     )
                     if current is not None:
-                        return _installation(dict(current))
+                        return installation_from_row(dict(current))
                 raise VersionConflictError("Skill installation revision conflict")
             await connection.execute(
                 """INSERT INTO hands.skill_installation_command
@@ -884,7 +897,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
                 record.revision,
                 commit.occurred_at,
             )
-            return _installation(dict(row))
+            return installation_from_row(dict(row))
 
     async def get_installation(
         self, tenant_id: str, publisher: str, name: str
@@ -897,7 +910,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
             publisher,
             name,
         )
-        return None if row is None else _installation(dict(row))
+        return None if row is None else installation_from_row(dict(row))
 
     async def list_installations(self, tenant_id: str) -> tuple[SkillInstallationRecord, ...]:
         pool = await self.pool()
@@ -906,7 +919,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
             WHERE tenant_id=$1 ORDER BY publisher,name""",
             tenant_id,
         )
-        return tuple(_installation(dict(row)) for row in rows)
+        return tuple(installation_from_row(dict(row)) for row in rows)
 
     async def put_source(
         self, record: SkillSourceRecord, *, expected_revision: int
@@ -921,7 +934,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
                  created_at,updated_at,priority)
                 VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7::jsonb,$8,$9,$10,$11,$12,$13)
                 ON CONFLICT (tenant_id,source_id) DO NOTHING RETURNING *""",
-                *_source_values(record),
+                *source_values(record),
             )
         else:
             row = await pool.fetchrow(
@@ -946,7 +959,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
             )
         if row is None:
             raise VersionConflictError("Skill Source revision conflict")
-        return _source(dict(row))
+        return source_from_row(dict(row))
 
     @retry_serializable_transaction("skill.source.config")
     async def commit_source_config(
@@ -973,7 +986,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
                 )
                 if current is None:
                     raise VersionConflictError("Skill Source command result is incomplete")
-                return _source(dict(current))
+                return source_from_row(dict(current))
             _require_next_revision(record.revision, commit.expected_revision, "source")
             if commit.expected_revision == 0:
                 row = await connection.fetchrow(
@@ -983,7 +996,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
                      created_at,updated_at,priority)
                     VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7::jsonb,$8,$9,$10,$11,$12,$13)
                     ON CONFLICT (tenant_id,source_id) DO NOTHING RETURNING *""",
-                    *_source_values(record),
+                    *source_values(record),
                 )
             else:
                 row = await connection.fetchrow(
@@ -1025,7 +1038,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
                         str(concurrent["source_id"]),
                     )
                     if current is not None:
-                        return _source(dict(current))
+                        return source_from_row(dict(current))
                 raise VersionConflictError("Skill Source revision conflict")
             if record.desired_state is SkillSourceDesiredState.RETIRED:
                 await connection.execute(
@@ -1111,7 +1124,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
                 record.revision,
                 commit.occurred_at,
             )
-            return _source(dict(row))
+            return source_from_row(dict(row))
 
     async def get_source(self, tenant_id: str, source_id: str) -> SkillSourceRecord | None:
         pool = await self.pool()
@@ -1121,7 +1134,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
             tenant_id,
             source_id,
         )
-        return None if row is None else _source(dict(row))
+        return None if row is None else source_from_row(dict(row))
 
     async def list_sources(self, tenant_id: str) -> tuple[SkillSourceRecord, ...]:
         pool = await self.pool()
@@ -1130,7 +1143,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
             WHERE tenant_id=$1 ORDER BY priority DESC,source_id""",
             tenant_id,
         )
-        return tuple(_source(dict(row)) for row in rows)
+        return tuple(source_from_row(dict(row)) for row in rows)
 
     async def put_sync_state(self, state: SkillSourceSyncState) -> None:
         pool = await self.pool()
@@ -1176,7 +1189,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
             tenant_id,
             source_id,
         )
-        return None if row is None else _sync_state(dict(row))
+        return None if row is None else sync_state_from_row(dict(row))
 
     async def claim_source_lease(
         self, *, tenant_id: str, source_id: str, owner: str, ttl: timedelta
@@ -1197,7 +1210,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
             owner,
             ttl,
         )
-        return None if row is None else _source_lease(dict(row))
+        return None if row is None else source_lease_from_row(dict(row))
 
     async def renew_source_lease(
         self, lease: SkillSourceLease, *, ttl: timedelta
@@ -1215,7 +1228,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
             lease.fencing_token,
             ttl,
         )
-        return None if row is None else _source_lease(dict(row))
+        return None if row is None else source_lease_from_row(dict(row))
 
     async def release_source_lease(self, lease: SkillSourceLease) -> None:
         pool = await self.pool()
@@ -1305,7 +1318,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
                 state.source_id,
             )
             for row in rows:
-                publication = _publication(dict(row))
+                publication = publication_from_row(dict(row))
                 identity = SkillSourcePackageIdentity(
                     publication.publisher,
                     publication.name,
@@ -1465,7 +1478,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
                     identity.version,
                     commit.occurred_at,
                 )
-                retired.append(_publication(dict(updated_row)))
+                retired.append(publication_from_row(dict(updated_row)))
             sync_row = await connection.fetchrow(
                 """INSERT INTO hands.skill_source_sync_state
                 (source_id,tenant_id,generation,cursor,complete_snapshot,
@@ -1517,7 +1530,7 @@ async def _put_package_transaction(
             manifest.version,
             record.package_digest,
             json_dumps(manifest.model_dump(mode="json")),
-            json_dumps(_artifact_payload(record.artifact_ref)),
+            json_dumps(artifact_payload(record.artifact_ref)),
             record.signature_key_id,
             record.retention_status.value,
             record.retention_until,
@@ -1586,9 +1599,9 @@ async def _replace_purged_package_transaction(
     if package_row is None or publication_row is None or installation_row is None:
         raise VersionConflictError("Purged Skill replacement state is incomplete")
 
-    previous_package = _package(dict(package_row))
-    previous_publication = _publication(dict(publication_row))
-    previous_installation = _installation(dict(installation_row))
+    previous_package = package_from_row(dict(package_row))
+    previous_publication = publication_from_row(dict(publication_row))
+    previous_installation = installation_from_row(dict(installation_row))
     if (
         package.retention_status is not SkillPackageRetentionStatus.RETAINED
         or publication.status is not SkillPublicationStatus.ACTIVE
@@ -1650,7 +1663,7 @@ async def _replace_purged_package_transaction(
         RETURNING *""",
         package.package_digest,
         json_dumps(manifest.model_dump(mode="json")),
-        json_dumps(_artifact_payload(package.artifact_ref)),
+        json_dumps(artifact_payload(package.artifact_ref)),
         package.signature_key_id,
         package.retention_status.value,
         package.retention_until,
@@ -1735,9 +1748,9 @@ async def _replace_purged_package_transaction(
     ):
         raise VersionConflictError("Purged Skill replacement revision conflict")
     return (
-        _package(dict(updated_package_row)),
-        _publication(dict(updated_publication_row)),
-        _installation(dict(updated_installation_row)),
+        package_from_row(dict(updated_package_row)),
+        publication_from_row(dict(updated_publication_row)),
+        installation_from_row(dict(updated_installation_row)),
     )
 
 
@@ -1759,7 +1772,7 @@ async def _put_publication_transaction(
                     $15,$16,$17)
             ON CONFLICT (tenant_id,publisher,name,version) DO NOTHING
             RETURNING *""",
-            *_publication_values(record),
+            *publication_values(record),
         )
     elif record.revision == expected_revision:
         row = await connection.fetchrow(
@@ -1813,11 +1826,11 @@ async def _put_publication_transaction(
             record.version,
         )
         if concurrent is not None:
-            current = _publication(dict(concurrent))
+            current = publication_from_row(dict(concurrent))
             if current.package_digest == record.package_digest and current.status is record.status:
                 return current
         raise VersionConflictError("Skill publication revision conflict")
-    return _publication(dict(row))
+    return publication_from_row(dict(row))
 
 
 async def _put_installation_transaction(
@@ -1836,10 +1849,10 @@ async def _put_installation_transaction(
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,
                 $16,$17,$18)
         ON CONFLICT (tenant_id,publisher,name) DO NOTHING RETURNING *""",
-        *_installation_values(record),
+        *installation_values(record),
     )
     if row is not None:
-        return _installation(dict(row))
+        return installation_from_row(dict(row))
     current_row = await connection.fetchrow(
         """SELECT * FROM hands.skill_installation
         WHERE tenant_id=$1 AND publisher=$2 AND name=$3""",
@@ -1849,7 +1862,7 @@ async def _put_installation_transaction(
     )
     if current_row is None:
         raise VersionConflictError("Skill installation revision conflict")
-    current = _installation(dict(current_row))
+    current = installation_from_row(dict(current_row))
     if (
         current.status is not record.status
         or current.pinned_package_digest != record.pinned_package_digest
@@ -1895,10 +1908,10 @@ async def _load_publish_result(
         )
         if installation_row is None:
             raise VersionConflictError("Skill command result is incomplete")
-        installation = _installation(dict(installation_row))
+        installation = installation_from_row(dict(installation_row))
     return SkillPublishCommitResult(
-        package=_package(dict(package_row)),
-        publication=_publication(dict(publication_row)),
+        package=package_from_row(dict(package_row)),
+        publication=publication_from_row(dict(publication_row)),
         installation=installation,
         replayed=replayed,
     )
@@ -1924,200 +1937,3 @@ async def _require_active_source_lease(
 def _require_next_revision(revision: int, expected_revision: int, label: str) -> None:
     if revision != expected_revision + 1:
         raise VersionConflictError(f"Skill {label} next revision is invalid")
-
-
-def _source_lease(row: dict[str, Any]) -> SkillSourceLease:
-    return SkillSourceLease(
-        tenant_id=str(row["tenant_id"]),
-        source_id=str(row["source_id"]),
-        owner=str(row["owner"]),
-        fencing_token=int(row["fencing_token"]),
-        expires_at=row["expires_at"],
-    )
-
-
-def _artifact_payload(ref: ArtifactRef) -> dict[str, object]:
-    return {
-        "artifact_id": ref.artifact_id,
-        "version": ref.version,
-        "content_hash": ref.content_hash,
-        "media_type": ref.media_type,
-        "size": ref.size,
-    }
-
-
-def _artifact(value: Any) -> ArtifactRef:
-    payload = dict(json_loads(value))
-    return ArtifactRef(
-        artifact_id=str(payload["artifact_id"]),
-        version=int(payload["version"]),
-        content_hash=str(payload["content_hash"]),
-        media_type=str(payload["media_type"]),
-        size=int(payload["size"]),
-    )
-
-
-def _package(row: dict[str, Any]) -> SkillPackageRecord:
-    return SkillPackageRecord(
-        tenant_id=str(row["tenant_id"]),
-        manifest=SkillManifest.model_validate(json_loads(row["manifest_json"])),
-        package_digest=str(row["package_digest"]),
-        artifact_ref=_artifact(row["artifact_ref"]),
-        signature_key_id=row["signature_key_id"],
-        retention_status=SkillPackageRetentionStatus(str(row["retention_status"])),
-        retention_until=row["retention_until"],
-        legal_hold=bool(row["legal_hold"]),
-        retention_revision=int(row["retention_revision"]),
-        retention_updated_by=str(row["retention_updated_by"]),
-        retention_updated_at=row["retention_updated_at"],
-        created_at=row["created_at"],
-        purged_at=row["purged_at"],
-    )
-
-
-def _publication_values(record: SkillPublicationRecord) -> tuple[object, ...]:
-    return (
-        record.publication_id,
-        record.tenant_id,
-        record.publisher,
-        record.name,
-        record.version,
-        record.package_digest,
-        record.status.value,
-        record.source_id,
-        record.revision,
-        record.created_by,
-        record.updated_by,
-        record.created_at,
-        record.updated_at,
-        record.reason_code,
-        (record.revocation_action.value if record.revocation_action is not None else None),
-        record.revocation_policy_version,
-        record.revocation_policy_decision_id,
-    )
-
-
-def _publication(row: dict[str, Any]) -> SkillPublicationRecord:
-    return SkillPublicationRecord(
-        publication_id=str(row["publication_id"]),
-        tenant_id=str(row["tenant_id"]),
-        publisher=str(row["publisher"]),
-        name=str(row["name"]),
-        version=str(row["version"]),
-        package_digest=str(row["package_digest"]),
-        status=SkillPublicationStatus(str(row["status"])),
-        source_id=row["source_id"],
-        revision=int(row["revision"]),
-        created_by=str(row["created_by"]),
-        updated_by=str(row["updated_by"]),
-        created_at=row["created_at"],
-        updated_at=row["updated_at"],
-        reason_code=row["reason_code"],
-        revocation_action=row.get("revocation_action"),
-        revocation_policy_version=row.get("revocation_policy_version"),
-        revocation_policy_decision_id=row.get("revocation_policy_decision_id"),
-    )
-
-
-def _installation_values(record: SkillInstallationRecord) -> tuple[object, ...]:
-    return (
-        record.installation_id,
-        record.tenant_id,
-        record.publisher,
-        record.name,
-        record.version_constraint,
-        record.pinned_package_digest,
-        record.status.value,
-        record.source_id,
-        record.auto_upgrade,
-        record.revision,
-        record.created_by,
-        record.updated_by,
-        record.created_at,
-        record.updated_at,
-        record.reason_code,
-        (
-            record.uninstall_action.value
-            if record.uninstall_action is not None
-            else None
-        ),
-        record.uninstall_policy_version,
-        record.uninstall_policy_decision_id,
-    )
-
-
-def _installation(row: dict[str, Any]) -> SkillInstallationRecord:
-    return SkillInstallationRecord(
-        installation_id=str(row["installation_id"]),
-        tenant_id=str(row["tenant_id"]),
-        publisher=str(row["publisher"]),
-        name=str(row["name"]),
-        version_constraint=str(row["version_constraint"]),
-        pinned_package_digest=row["pinned_package_digest"],
-        status=SkillInstallationStatus(str(row["status"])),
-        source_id=row["source_id"],
-        auto_upgrade=bool(row["auto_upgrade"]),
-        revision=int(row["revision"]),
-        created_by=str(row["created_by"]),
-        updated_by=str(row["updated_by"]),
-        created_at=row["created_at"],
-        updated_at=row["updated_at"],
-        reason_code=row["reason_code"],
-        uninstall_action=(
-            SkillRevocationAction(str(row["uninstall_action"]))
-            if row.get("uninstall_action") is not None
-            else None
-        ),
-        uninstall_policy_version=row.get("uninstall_policy_version"),
-        uninstall_policy_decision_id=row.get("uninstall_policy_decision_id"),
-    )
-
-
-def _source_values(record: SkillSourceRecord) -> tuple[object, ...]:
-    return (
-        record.source_id,
-        record.tenant_id,
-        record.kind.value,
-        record.desired_state.value,
-        json_dumps(record.publisher_allowlist),
-        record.credential_ref,
-        json_dumps(record.config_metadata),
-        record.revision,
-        record.created_by,
-        record.updated_by,
-        record.created_at,
-        record.updated_at,
-        record.priority,
-    )
-
-
-def _source(row: dict[str, Any]) -> SkillSourceRecord:
-    return SkillSourceRecord(
-        source_id=str(row["source_id"]),
-        tenant_id=str(row["tenant_id"]),
-        kind=SkillSourceKind(str(row["kind"])),
-        desired_state=SkillSourceDesiredState(str(row["desired_state"])),
-        publisher_allowlist=tuple(json_loads(row["publisher_allowlist"])),
-        credential_ref=row["credential_ref"],
-        config_metadata=dict(json_loads(row["config_metadata"])),
-        priority=int(row.get("priority", 0)),
-        revision=int(row["revision"]),
-        created_by=str(row["created_by"]),
-        updated_by=str(row["updated_by"]),
-        created_at=row["created_at"],
-        updated_at=row["updated_at"],
-    )
-
-
-def _sync_state(row: dict[str, Any]) -> SkillSourceSyncState:
-    return SkillSourceSyncState(
-        source_id=str(row["source_id"]),
-        tenant_id=str(row["tenant_id"]),
-        generation=int(row["generation"]),
-        cursor=row["cursor"],
-        complete_snapshot=bool(row["complete_snapshot"]),
-        last_success_at=row["last_success_at"],
-        last_attempt_at=row["last_attempt_at"],
-        consecutive_failures=int(row["consecutive_failures"]),
-        safe_error_code=row["safe_error_code"],
-    )
