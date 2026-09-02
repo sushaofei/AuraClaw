@@ -28,9 +28,6 @@ from auraclaw.contracts.skills import (
     RevokeSkillPublicationCommand,
     SkillInstallationStatus,
     SkillManifest,
-    SkillSourceDesiredState,
-    SkillSourceKind,
-    SkillSourceRecord,
 )
 from auraclaw.contracts.tools import ArtifactRef
 
@@ -92,7 +89,6 @@ def _package() -> SkillPackage:
 
 def test_rebuild_restores_registry_catalog_and_installation_visibility() -> None:
     async def scenario() -> None:
-        now = datetime.now(UTC)
         artifacts = _Artifacts()
         lifecycle = InMemorySkillLifecycleStore()
         publishing_registry = SkillPackageRegistry(
@@ -102,25 +98,11 @@ def test_rebuild_restores_registry_catalog_and_installation_visibility() -> None
         publisher = SkillPublicationService(
             registry=publishing_registry,
             lifecycle=lifecycle,
-            bootstrap_sources=(
-                SkillSourceRecord(
-                    source_id="sks_admin_upload",
-                    tenant_id="*",
-                    kind=SkillSourceKind.ADMIN_UPLOAD,
-                    desired_state=SkillSourceDesiredState.ENABLED,
-                    publisher_allowlist=("platform",),
-                    created_by="system",
-                    updated_by="system",
-                    created_at=now,
-                    updated_at=now,
-                ),
-            ),
         )
         published = await publisher.publish(
             PublishSkillCommand(
                 tenant_id="tenant-a",
                 actor_id="admin-a",
-                source_id="sks_admin_upload",
                 command_id="publish-rebuild-1",
                 correlation_id="corr-1",
                 causation_id="publish-rebuild-1",

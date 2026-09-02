@@ -774,8 +774,8 @@ prompt、Skill/Resource 正文或 Chain-of-Thought。Tool 参数/结果递归脱
 Skill 启停是租户级目录状态，**不改**进行中 Run 的 Skill binding。Publisher Registry 只保存
 Ed25519 公钥，不接收或生成私钥；新发布只接受 active key，retiring key 仅用于恢复历史包，revoked key
 立即 fail closed。相关入口挂在 task-api 的 `/v1/admin/skills*` 与 `/v1/admin/skill-publishers*`。
-普通来源下架产生的 `retired` Publication 只能经显式 restore 恢复。restore 先持久化 reviewer、reason、
-correlation/causation 和 revision 证据，再复验原 Artifact 与当前 Source/Publisher/key 信任；失败保持
+`retired` Publication 只能经显式 restore 恢复。restore 先持久化 reviewer、reason、
+correlation/causation 和 revision 证据，再复验原 Artifact 与当前 Publisher/key 信任；失败保持
 `restoring` 且不进入新发现，同一 Idempotency-Key 可在修复信任条件后重试。
 
 安全 revoke 与普通停用不同。Publication 会持久化 reason、`continue|pause|cancel`、policy version 和
@@ -788,20 +788,9 @@ Publisher suspend 使用可恢复的默认 `pause`；Publisher/key revoke 通过
 而是在固定 binding 校验时按签名 key 动态联结；多个同时生效的策略按 `cancel > pause > continue` 裁决。
 Publisher 永久 revoke 后不可 resume，key revoke 也不可逆，且两者都严格限定在当前 tenant。
 
-Skill Source 管理入口只接受 MCP Source，均按当前可信 tenant 隔离：
-
-- `POST /v1/admin/skill-sources`：创建 Source，要求 `Idempotency-Key`；
-- `GET /v1/admin/skill-sources` 与 `GET /v1/admin/skill-sources/{source_id}`：列举或读取；
-- `PATCH /v1/admin/skill-sources/{source_id}`：更新状态、allowlist、credential ref、metadata 或 priority，
-  要求 `Idempotency-Key` 与 `X-Expected-Revision`；
-- `POST /v1/admin/skill-sources/{source_id}:sync`：触发已启用 Source 的受租约保护同步；
-- `DELETE /v1/admin/skill-sources/{source_id}`：软退役，要求幂等键、expected revision 与
-  `X-Reason-Code`，不物理删除审计和来源引用。
-
-`credential_ref` 只能保存 Secret 引用，`config_metadata` 禁止 token/password 等敏感字段。一个版本可由
-多个 Source 共同提供；服务选择最高 priority 的 enabled/available 来源，并在单源下架时切换备用来源。
-客户端不得把 Source 列表当作 Publication 或 Installation 状态，也不得用重建/同步绕过 tenant 的
-disabled/uninstalled 抑制事实。
+Skill 不建模或暴露 Source。相同 publisher/name/version 可在不同 tenant 独立发布；可信性由 Publisher
+公钥、签名、digest、内容扫描和 Admission 决策证明。客户端不得发送 `source_id` 或调用已移除的
+`/v1/admin/skill-sources*` 路由。
 
 `POST /v1/admin/skills/{publisher}/{name}:uninstall` 默认返回 `draining`：新解析立即停止，已有 Run 的固定
 binding 可完成；服务在 Canonical Event 中不再发现活动主 Skill 或依赖引用后自动转为 `uninstalled`。
@@ -829,19 +818,18 @@ tenant Registry 的 active key 独立验签。CLI 不接受命令行私钥，也
 为 1–500：
 
 - `GET /v1/admin/skills`：聚合 Catalog、Publication 和 Installation；支持 `q`、publisher、risk、
-  publication/installation status、source 过滤。兼容字段 `skills` 保留，新增权威管理字段 `items` 与
+  publication/installation status 过滤。兼容字段 `skills` 保留，新增权威管理字段 `items` 与
   `next_cursor`；
 - `GET /v1/admin/skill-installations`：包含 disabled、draining 和 uninstalled；
-- `GET /v1/admin/skill-publications`：按 publisher/name/source/status 查询所有版本；
+- `GET /v1/admin/skill-publications`：按 publisher/name/status 查询所有版本；
 - `GET /v1/admin/skill-packages`：查询 retention、legal hold 和 purge 状态；
 - `GET /v1/admin/skill-publishers`：查询 Publisher 与公钥状态；
 - `GET /v1/admin/skills/{publisher}/{name}/management`：单 Skill 的 Installation、各版本 Publication
   与 Package retention 聚合详情；
-- `GET /v1/admin/skill-sources/{source_id}/sync-state`：安全同步状态，不暴露 lease owner 或凭据。
 
 `items[].publication.status`、`items[].installation.status` 与 `items[].availability` 含义不同：前两者仍是
 各自权威生命周期状态，`availability` 只是服务端根据两者派生的管理展示结果。客户端不得把 Publication
-的 `active` 当成 tenant 已启用，也不得逐行查询 Installation 或从 Source allowlist 反推 Publisher。
+的 `active` 当成 tenant 已启用，也不得逐行查询 Installation 或从发布入口参数反推 Publisher 信任。
 
 已签名大包通过 `POST /v1/admin/skill-package-uploads` 把 canonical archive 代理给 AuraClaw。请求使用
 `application/vnd.auraclaw.skill-package+json`，并携带 `X-Upload-Name`、`X-Content-SHA256` 与

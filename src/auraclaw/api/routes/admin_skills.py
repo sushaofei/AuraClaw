@@ -36,13 +36,11 @@ from auraclaw.contracts.internal import (
 from auraclaw.contracts.skills import (
     ChangeSkillInstallationCommand,
     ChangeSkillPublisherStatusCommand,
-    ConfigureSkillSourceCommand,
     PublishedSkill,
     PublishSkillCommand,
     PurgeSkillPackageCommand,
     RegisterSkillPublisherCommand,
     RestoreSkillPublicationCommand,
-    RetireSkillSourceCommand,
     RevokeSkillPublicationCommand,
     RevokeSkillPublisherKeyCommand,
     RotateSkillPublisherKeyCommand,
@@ -54,9 +52,6 @@ from auraclaw.contracts.skills import (
     SkillPublisherRecord,
     SkillPublisherStatusOperation,
     SkillRevocationAction,
-    SkillSourceDesiredState,
-    SkillSourceKind,
-    SkillSourceRecord,
 )
 from auraclaw.contracts.tools import ArtifactRef
 
@@ -67,14 +62,13 @@ _MAX_ENCODED_UPLOAD_BYTES = 24 * 1024 * 1024
 
 
 class PublishSkillRequest(ContractModel):
-    source_id: str = Field(min_length=1, max_length=128)
     activate: bool = True
     files: dict[str, str] | None = Field(default=None, min_length=1, max_length=_MAX_UPLOAD_FILES)
     artifact_ref: dict[str, Any] | None = None
     expected_digest: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
 
     @model_validator(mode="after")
-    def validate_source(self) -> PublishSkillRequest:
+    def validate_payload(self) -> PublishSkillRequest:
         direct = self.files is not None
         staged = self.artifact_ref is not None or self.expected_digest is not None
         if direct == staged:
@@ -82,16 +76,6 @@ class PublishSkillRequest(ContractModel):
         if staged and (self.artifact_ref is None or self.expected_digest is None):
             raise ValueError("Staged publication requires artifact_ref and expected_digest")
         return self
-
-
-class SkillSourceRequest(ContractModel):
-    source_id: str = Field(pattern=r"^sks_[A-Za-z0-9_.-]+$")
-    kind: Literal["mcp"] = "mcp"
-    desired_state: Literal["enabled", "disabled"] = "enabled"
-    publisher_allowlist: tuple[str, ...] = Field(min_length=1, max_length=256)
-    credential_ref: str | None = Field(default=None, max_length=512)
-    config_metadata: dict[str, Any] = Field(default_factory=dict)
-    priority: int = Field(default=0, ge=-1000, le=1000)
 
 
 class RegisterSkillPublisherRequest(ContractModel):
@@ -245,28 +229,6 @@ class SkillAdmissionReader(Protocol):
     ) -> tuple[SkillAdmissionMetricRecord, ...]: ...
 
 
-class SkillSourceManager(Protocol):
-    async def configure_source(
-        self, command: ConfigureSkillSourceCommand
-    ) -> SkillSourceRecord: ...
-
-    async def retire_source(
-        self, command: RetireSkillSourceCommand
-    ) -> SkillSourceRecord: ...
-
-    async def list_sources(self, tenant_id: str) -> tuple[SkillSourceRecord, ...]: ...
-
-    async def get_source(self, tenant_id: str, source_id: str) -> SkillSourceRecord: ...
-
-    async def sync_source(
-        self, tenant_id: str, source_id: str
-    ) -> dict[str, object]: ...
-
-    async def get_source_sync_state(
-        self, tenant_id: str, source_id: str
-    ) -> object | None: ...
-
-
 def _summary(publication: PublishedSkill, *, skill_markdown: str | None = None) -> dict[str, Any]:
     manifest = publication.manifest
     payload = {
@@ -297,7 +259,6 @@ def create_skill_admin_router(
     upload_service: SkillPackageUploadManager | None = None,
     publisher_service: SkillPublisherManager | None = None,
     admission_reader: SkillAdmissionReader | None = None,
-    source_service: SkillSourceManager | None = None,
     capability_availability: SkillCapabilityAvailability | None = None,
     admission_metrics_window_hours: int = 24,
     admission_quarantine_alert_ratio: float = 0.25,
@@ -316,122 +277,6 @@ def create_skill_admin_router(
         else None
     )
 
-    @router.get("/skill-sources")
-    async def list_skill_sources(identity: Identity) -> dict[str, Any]:
-        service = _require_source_service(source_service)
-        return {
-            "sources": [
-                _source_summary(source)
-                for source in await service.list_sources(identity.tenant_id)
-            ]
-        }
-
-    @router.get("/skill-sources/{source_id}")
-    async def get_skill_source(source_id: str, identity: Identity) -> dict[str, Any]:
-        return {
-            "source": _source_summary(
-                await _require_source_service(source_service).get_source(
-                    identity.tenant_id, source_id
-                )
-            )
-        }
-
-    @router.get("/skill-sources/{source_id}/sync-state")
-    async def get_skill_source_sync_state(
-        source_id: str, identity: Identity
-    ) -> dict[str, Any]:
-        service = _require_source_service(source_service)
-        state = await service.get_source_sync_state(identity.tenant_id, source_id)
-        return {
-            "source_id": source_id,
-            "sync_state": (
-                None
-                if state is None
-                else state.model_dump(mode="json")
-                if hasattr(state, "model_dump")
-                else state
-            ),
-        }
-
-    async def _configure_source(
-        request: SkillSourceRequest,
-        identity: Identity,
-        command_id: str,
-        expected_revision: int,
-    ) -> dict[str, Any]:
-        result = await _require_source_service(source_service).configure_source(
-            ConfigureSkillSourceCommand(
-                tenant_id=identity.tenant_id,
-                actor_id=identity.actor.id,
-                source_id=request.source_id,
-                kind=SkillSourceKind(request.kind),
-                desired_state=SkillSourceDesiredState(request.desired_state),
-                publisher_allowlist=request.publisher_allowlist,
-                credential_ref=request.credential_ref,
-                config_metadata=request.config_metadata,
-                priority=request.priority,
-                command_id=command_id,
-                expected_revision=expected_revision,
-                correlation_id=identity.correlation_id,
-                causation_id=command_id,
-            )
-        )
-        return {"source": _source_summary(result)}
-
-    @router.post("/skill-sources", status_code=status.HTTP_201_CREATED)
-    async def create_skill_source(
-        request: SkillSourceRequest,
-        identity: Identity,
-        command_id: str = Header(alias="Idempotency-Key"),
-    ) -> dict[str, Any]:
-        return await _configure_source(request, identity, command_id, 0)
-
-    @router.patch("/skill-sources/{source_id}")
-    async def update_skill_source(
-        source_id: str,
-        request: SkillSourceRequest,
-        identity: Identity,
-        command_id: str = Header(alias="Idempotency-Key"),
-        expected_revision: int = Header(alias="X-Expected-Revision", ge=1),
-    ) -> dict[str, Any]:
-        if request.source_id != source_id:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail="Skill Source path and body id differ",
-            )
-        return await _configure_source(
-            request, identity, command_id, expected_revision
-        )
-
-    @router.post("/skill-sources/{source_id}:sync", status_code=status.HTTP_202_ACCEPTED)
-    async def sync_skill_source(source_id: str, identity: Identity) -> dict[str, Any]:
-        return {
-            "sync": await _require_source_service(source_service).sync_source(
-                identity.tenant_id, source_id
-            )
-        }
-
-    @router.delete("/skill-sources/{source_id}", status_code=status.HTTP_202_ACCEPTED)
-    async def retire_skill_source(
-        source_id: str,
-        identity: Identity,
-        command_id: str = Header(alias="Idempotency-Key"),
-        expected_revision: int = Header(alias="X-Expected-Revision", ge=1),
-        reason_code: str = Header(alias="X-Reason-Code", min_length=1, max_length=128),
-    ) -> dict[str, Any]:
-        result = await _require_source_service(source_service).retire_source(
-            RetireSkillSourceCommand(
-                tenant_id=identity.tenant_id,
-                actor_id=identity.actor.id,
-                source_id=source_id,
-                reason_code=reason_code,
-                command_id=command_id,
-                expected_revision=expected_revision,
-                correlation_id=identity.correlation_id,
-                causation_id=command_id,
-            )
-        )
-        return {"source": _source_summary(result)}
 
     @router.get("/skills")
     async def list_skills(
@@ -441,7 +286,6 @@ def create_skill_admin_router(
         risk_level: Annotated[str | None, Query(max_length=64)] = None,
         publication_status: Annotated[str | None, Query(max_length=64)] = None,
         installation_status: Annotated[str | None, Query(max_length=64)] = None,
-        source_id: Annotated[str | None, Query(max_length=128)] = None,
         cursor: Annotated[str | None, Query(max_length=2048)] = None,
         limit: Annotated[int, Query(ge=1, le=500)] = 100,
     ) -> dict[str, Any]:
@@ -455,7 +299,6 @@ def create_skill_admin_router(
                 risk_level=risk_level,
                 publication_status=publication_status,
                 installation_status=installation_status,
-                source_id=source_id,
             ),
         )
         items: list[dict[str, Any]] = []
@@ -467,7 +310,6 @@ def create_skill_admin_router(
             publication_payload = {
                 "status": publication.status.value,
                 "revision": current_state.revision,
-                "source_id": current_state.source_id,
             }
             installation_payload = (
                 None if installation is None else _installation_summary(installation)
@@ -829,7 +671,6 @@ def create_skill_admin_router(
             str | None, Query(alias="status", max_length=64)
         ] = None,
         publisher: Annotated[str | None, Query(max_length=128)] = None,
-        source_id: Annotated[str | None, Query(max_length=128)] = None,
         cursor: Annotated[str | None, Query(max_length=2048)] = None,
         limit: Annotated[int, Query(ge=1, le=500)] = 100,
     ) -> dict[str, Any]:
@@ -839,7 +680,6 @@ def create_skill_admin_router(
             for item in await service.list_installations(identity.tenant_id)
             if (not status_filter or item.status.value == status_filter)
             and (not publisher or item.publisher == publisher)
-            and (not source_id or item.source_id == source_id)
         ]
         page, next_cursor = _page(
             records,
@@ -857,7 +697,6 @@ def create_skill_admin_router(
         ] = None,
         publisher: Annotated[str | None, Query(max_length=128)] = None,
         name: Annotated[str | None, Query(max_length=256)] = None,
-        source_id: Annotated[str | None, Query(max_length=128)] = None,
         cursor: Annotated[str | None, Query(max_length=2048)] = None,
         limit: Annotated[int, Query(ge=1, le=500)] = 100,
     ) -> dict[str, Any]:
@@ -868,7 +707,6 @@ def create_skill_admin_router(
             if (not status_filter or item.status.value == status_filter)
             and (not publisher or item.publisher == publisher)
             and (not name or item.name == name)
-            and (not source_id or item.source_id == source_id)
         ]
         page, next_cursor = _page(
             records,
@@ -1134,7 +972,6 @@ def create_skill_admin_router(
         command = PublishSkillCommand(
             tenant_id=identity.tenant_id,
             actor_id=identity.actor.id,
-            source_id=payload.source_id,
             activate=payload.activate,
             command_id=command_id,
             expected_revision=expected_revision,
@@ -1397,21 +1234,6 @@ def _require_admission_reader(
     return reader
 
 
-def _require_source_service(
-    service: SkillSourceManager | None,
-) -> SkillSourceManager:
-    if service is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Skill Source service is not configured",
-        )
-    return service
-
-
-def _source_summary(source: SkillSourceRecord) -> dict[str, Any]:
-    return source.model_dump(mode="json")
-
-
 def _publisher_summary(
     publisher: SkillPublisherRecord,
     keys: tuple[SkillPublisherKeyRecord, ...],
@@ -1466,7 +1288,6 @@ def _installation_summary(
         "version_constraint": installation.version_constraint,
         "pinned_package_digest": installation.pinned_package_digest,
         "status": installation.status.value,
-        "source_id": installation.source_id,
         "auto_upgrade": installation.auto_upgrade,
         "revision": installation.revision,
         "reason_code": installation.reason_code,
@@ -1491,7 +1312,6 @@ def _publication_state_summary(
         "version": publication.version,
         "package_digest": publication.package_digest,
         "status": publication.status.value,
-        "source_id": publication.source_id,
         "revision": publication.revision,
         "reason_code": publication.reason_code,
         "revocation_action": (

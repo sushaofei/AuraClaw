@@ -94,7 +94,7 @@ registration lease 内仍活跃时，新进程注册会 fail closed。因此显�
   Publication Reliability 每轮只领取 `AURACLAW_SKILL_RELIABILITY_MAX_CONCURRENT` 条 Outbox，按 tenant
   合并 rebuild、跨 tenant 并行，并以 `AURACLAW_SKILL_RELIABILITY_CLAIM_TTL_SECONDS` 续租；complete/fail
   影响零行视为 owner 丢失，不把旧 worker 的结果冒充成功。
-  Skill Source/Publication/Publisher 写事务使用固定数据库锁层级；多 publication 始终按
+  Skill Publication/Publisher 写事务使用固定数据库锁层级；多 publication 始终按
   tenant/publisher/name/version 排序加锁。`40P01`/`40001` 从事务入口按原 command 语义有限重试，
   不在失败语句中间继续。观察 `postgres.transaction.retry{operation=skill.*}` 与
   `postgres.transaction.retry_exhausted`；持续增长时检查长事务、缺失索引和数据库 lock wait。

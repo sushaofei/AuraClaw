@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from auraclaw.contracts.hands import (
     HandsPromptDescriptor,
@@ -40,8 +40,8 @@ class HandsResourceRegistry:
         resources: Sequence[RegisteredResource] = (),
         templates: Sequence[RegisteredResourceTemplate] = (),
     ) -> None:
-        self._resources: dict[str, RegisteredResource] = {}
-        self._templates: dict[str, RegisteredResourceTemplate] = {}
+        self._resources: dict[str, list[RegisteredResource]] = {}
+        self._templates: dict[str, list[RegisteredResourceTemplate]] = {}
         for resource in resources:
             self.register_resource(resource)
         for template in templates:
@@ -51,28 +51,61 @@ class HandsResourceRegistry:
         uri = resource.descriptor.uri
         if uri is None:
             raise ValueError("Resource descriptor must define a uri")
-        if uri in self._resources:
-            raise ValueError(f"Resource already registered: {uri}")
         if any(content.uri != uri for content in resource.contents):
             raise ValueError("Resource content URI must match the descriptor URI")
-        self._resources[uri] = resource
+        registrations = self._resources.setdefault(uri, [])
+        if any(
+            _tenant_scopes_overlap(current.tenant_ids, resource.tenant_ids)
+            for current in registrations
+        ):
+            raise ValueError(f"Resource already registered: {uri}")
+        registrations.append(resource)
 
-    def unregister_resource(self, uri: str) -> bool:
-        return self._resources.pop(uri, None) is not None
+    def unregister_resource(self, uri: str, *, tenant_id: str | None = None) -> bool:
+        if tenant_id is None:
+            return self._resources.pop(uri, None) is not None
+        registrations = self._resources.get(uri)
+        if registrations is None:
+            return False
+        changed = False
+        remaining: list[RegisteredResource] = []
+        for resource in registrations:
+            if tenant_id not in resource.tenant_ids:
+                remaining.append(resource)
+                continue
+            changed = True
+            other_tenants = tuple(
+                current for current in resource.tenant_ids if current != tenant_id
+            )
+            if other_tenants:
+                remaining.append(replace(resource, tenant_ids=other_tenants))
+        if remaining:
+            self._resources[uri] = remaining
+        else:
+            self._resources.pop(uri, None)
+        return changed
 
     def register_template(self, template: RegisteredResourceTemplate) -> None:
         uri_template = template.descriptor.uri_template
         if uri_template is None:
             raise ValueError("Resource template descriptor must define uri_template")
-        if uri_template in self._templates:
+        registrations = self._templates.setdefault(uri_template, [])
+        if any(
+            _tenant_scopes_overlap(current.tenant_ids, template.tenant_ids)
+            for current in registrations
+        ):
             raise ValueError(f"Resource template already registered: {uri_template}")
-        self._templates[uri_template] = template
+        registrations.append(template)
 
     def discover_resources(self, tenant_id: str) -> list[HandsResourceDescriptor]:
         return [
             resource.descriptor
             for resource in sorted(
-                self._resources.values(),
+                (
+                    resource
+                    for registrations in self._resources.values()
+                    for resource in registrations
+                ),
                 key=lambda item: item.descriptor.uri or item.descriptor.name,
             )
             if _visible_to(resource.tenant_ids, tenant_id)
@@ -82,7 +115,11 @@ class HandsResourceRegistry:
         return [
             template.descriptor
             for template in sorted(
-                self._templates.values(),
+                (
+                    template
+                    for registrations in self._templates.values()
+                    for template in registrations
+                ),
                 key=lambda item: item.descriptor.uri_template or item.descriptor.name,
             )
             if _visible_to(template.tenant_ids, tenant_id)
@@ -92,14 +129,23 @@ class HandsResourceRegistry:
         return self.get_resource(tenant_id, uri).contents
 
     def get_resource(self, tenant_id: str, uri: str) -> RegisteredResource:
-        resource = self._resources.get(uri)
-        if resource is None or not _visible_to(resource.tenant_ids, tenant_id):
+        resource = next(
+            (
+                current
+                for current in self._resources.get(uri, ())
+                if _visible_to(current.tenant_ids, tenant_id)
+            ),
+            None,
+        )
+        if resource is None:
             raise KeyError(f"Resource not found: {uri}")
         return resource
 
     def has_resource(self, tenant_id: str, uri: str) -> bool:
-        resource = self._resources.get(uri)
-        return resource is not None and _visible_to(resource.tenant_ids, tenant_id)
+        return any(
+            _visible_to(resource.tenant_ids, tenant_id)
+            for resource in self._resources.get(uri, ())
+        )
 
 
 class HandsPromptRegistry:
@@ -149,6 +195,10 @@ class HandsPromptRegistry:
 
 def _visible_to(tenant_ids: tuple[str, ...], tenant_id: str) -> bool:
     return not tenant_ids or tenant_id in tenant_ids
+
+
+def _tenant_scopes_overlap(first: tuple[str, ...], second: tuple[str, ...]) -> bool:
+    return not first or not second or not set(first).isdisjoint(second)
 
 
 # Compatibility aliases while callers migrate off MCP-named registries.

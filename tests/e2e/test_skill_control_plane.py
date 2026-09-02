@@ -6,7 +6,6 @@ import json
 import os
 import subprocess
 import sys
-from datetime import UTC, datetime
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -32,9 +31,6 @@ from auraclaw.api.routes.admin_skills import create_skill_admin_router
 from auraclaw.contracts.capabilities import CapabilityKind
 from auraclaw.contracts.skills import (
     SkillManifest,
-    SkillSourceDesiredState,
-    SkillSourceKind,
-    SkillSourceRecord,
 )
 from auraclaw.contracts.tools import ArtifactRef, ToolInvocation
 from auraclaw.infrastructure.artifacts.store import ArtifactStore, InMemoryObjectStorage
@@ -132,23 +128,9 @@ def test_real_cli_admin_api_catalog_and_lifecycle_e2e(tmp_path) -> None:
     )
     lifecycle = InMemorySkillLifecycleStore()
     catalog = CapabilityCatalog(InMemoryCapabilityCatalogStore())
-    now = datetime.now(UTC)
     publication = SkillPublicationService(
         registry=registry,
         lifecycle=lifecycle,
-        bootstrap_sources=(
-            SkillSourceRecord(
-                source_id="sks_admin_upload",
-                tenant_id="tenant-a",
-                kind=SkillSourceKind.ADMIN_UPLOAD,
-                desired_state=SkillSourceDesiredState.ENABLED,
-                publisher_allowlist=("platform",),
-                created_by="system",
-                updated_by="system",
-                created_at=now,
-                updated_at=now,
-            ),
-        ),
     )
     rebuilder = SkillStateRebuilder(
         lifecycle=lifecycle,
@@ -176,7 +158,6 @@ def test_real_cli_admin_api_catalog_and_lifecycle_e2e(tmp_path) -> None:
                 "X-Expected-Revision": "0",
             },
             json={
-                "source_id": "sks_admin_upload",
                 "activate": True,
                 "files": {
                     path: base64.b64encode(content).decode()

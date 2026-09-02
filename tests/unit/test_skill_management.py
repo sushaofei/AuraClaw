@@ -39,9 +39,6 @@ from auraclaw.contracts.skills import (
     SkillPublicationRecord,
     SkillPublicationStatus,
     SkillRevocationAction,
-    SkillSourceDesiredState,
-    SkillSourceKind,
-    SkillSourceRecord,
 )
 from auraclaw.contracts.tools import ArtifactRef, ToolInvocation
 
@@ -144,20 +141,6 @@ async def _service() -> tuple[
 ]:
     now = datetime.now(UTC)
     lifecycle = InMemorySkillLifecycleStore()
-    await lifecycle.put_source(
-        SkillSourceRecord(
-            source_id="sks_admin_upload",
-            tenant_id="tenant-a",
-            kind=SkillSourceKind.ADMIN_UPLOAD,
-            desired_state=SkillSourceDesiredState.ENABLED,
-            publisher_allowlist=("platform",),
-            created_by="system",
-            updated_by="system",
-            created_at=now,
-            updated_at=now,
-        ),
-        expected_revision=0,
-    )
     manifest = SkillManifest(
         name="release.prepare",
         version="1.0.0",
@@ -192,7 +175,6 @@ async def _service() -> tuple[
             version="1.0.0",
             package_digest=_DIGEST,
             status=SkillPublicationStatus.ACTIVE,
-            source_id="sks_admin_upload",
             revision=1,
             created_by="publisher",
             updated_by="publisher",
@@ -458,7 +440,6 @@ def test_restore_is_reviewed_idempotent_and_revalidates_retired_artifact() -> No
         assert restored.reason_code is None
         assert len(activator.calls) == 1
         activation, artifact_ref, digest = activator.calls[0]
-        assert activation.source_id == "sks_admin_upload"
         assert activation.expected_revision == 3
         assert activation.causation_id == "restore-1"
         assert artifact_ref.artifact_id == "art_skill"
@@ -764,7 +745,6 @@ def test_purge_ignores_retention_and_history_but_rejects_active_bindings() -> No
             PublishSkillCommand(
                 tenant_id="tenant-a",
                 actor_id="publisher-a",
-                source_id="sks_admin_upload",
                 command_id="republish-1",
                 correlation_id="corr-republish",
                 causation_id="republish-1",

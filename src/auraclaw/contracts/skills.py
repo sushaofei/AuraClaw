@@ -53,21 +53,6 @@ class SkillPackageRetentionStatus(StrEnum):
     PURGED = "purged"
 
 
-class SkillSourceKind(StrEnum):
-    BUILTIN = "builtin"
-    ADMIN_UPLOAD = "admin_upload"
-    MCP = "mcp"
-    MODEL_COMPILER = "model_compiler"
-    GIT = "git"
-    OCI = "oci"
-
-
-class SkillSourceDesiredState(StrEnum):
-    ENABLED = "enabled"
-    DISABLED = "disabled"
-    RETIRED = "retired"
-
-
 class SkillPublisherStatus(StrEnum):
     ACTIVE = "active"
     SUSPENDED = "suspended"
@@ -96,7 +81,6 @@ class SkillInstallationOperation(StrEnum):
 class PublishSkillCommand(ContractModel):
     tenant_id: str = Field(min_length=1, max_length=128)
     actor_id: str = Field(min_length=1, max_length=256)
-    source_id: str = Field(min_length=1, max_length=128)
     activate: bool = True
     command_id: str = Field(min_length=1, max_length=256)
     expected_revision: int = Field(default=0, ge=0)
@@ -266,33 +250,6 @@ class ChangeSkillPublisherStatusCommand(ContractModel):
         if self.revocation_action is SkillRevocationAction.CONTINUE:
             raise ValueError("Publisher security action cannot continue")
         return self
-
-
-class ConfigureSkillSourceCommand(ContractModel):
-    tenant_id: str = Field(min_length=1, max_length=128)
-    actor_id: str = Field(min_length=1, max_length=256)
-    source_id: str = Field(pattern=r"^sks_[A-Za-z0-9_.-]+$")
-    kind: SkillSourceKind
-    desired_state: SkillSourceDesiredState
-    publisher_allowlist: tuple[str, ...]
-    credential_ref: str | None = Field(default=None, max_length=512)
-    config_metadata: dict[str, Any] = Field(default_factory=dict)
-    priority: int = Field(default=0, ge=-1000, le=1000)
-    command_id: str = Field(min_length=1, max_length=256)
-    expected_revision: int = Field(ge=0)
-    correlation_id: str = Field(min_length=1, max_length=256)
-    causation_id: str = Field(min_length=1, max_length=256)
-
-
-class RetireSkillSourceCommand(ContractModel):
-    tenant_id: str = Field(min_length=1, max_length=128)
-    actor_id: str = Field(min_length=1, max_length=256)
-    source_id: str = Field(pattern=r"^sks_[A-Za-z0-9_.-]+$")
-    reason_code: str = Field(min_length=1, max_length=128)
-    command_id: str = Field(min_length=1, max_length=256)
-    expected_revision: int = Field(ge=1)
-    correlation_id: str = Field(min_length=1, max_length=256)
-    causation_id: str = Field(min_length=1, max_length=256)
 
 
 class SkillToolRequirement(ContractModel):
@@ -548,7 +505,6 @@ class SkillPublicationRecord(ContractModel):
     version: str = Field(pattern=_SEMVER)
     package_digest: str = Field(pattern=_DIGEST)
     status: SkillPublicationStatus = SkillPublicationStatus.STAGED
-    source_id: str | None = Field(default=None, max_length=128)
     revision: int = Field(default=1, ge=1)
     created_by: str = Field(min_length=1, max_length=256)
     updated_by: str = Field(min_length=1, max_length=256)
@@ -600,7 +556,6 @@ class SkillInstallationRecord(ContractModel):
     version_constraint: str = Field(default="*", min_length=1, max_length=128)
     pinned_package_digest: str | None = Field(default=None, pattern=_DIGEST)
     status: SkillInstallationStatus = SkillInstallationStatus.ACTIVE
-    source_id: str | None = Field(default=None, max_length=128)
     auto_upgrade: bool = True
     revision: int = Field(default=1, ge=1)
     created_by: str = Field(min_length=1, max_length=256)
@@ -667,65 +622,6 @@ class SkillInstallationRecord(ContractModel):
             )
         ):
             raise ValueError("Only draining or uninstalled Skill may carry uninstall evidence")
-        return self
-
-
-class SkillSourceRecord(ContractModel):
-    source_id: str = Field(pattern=r"^sks_[A-Za-z0-9_.-]+$")
-    tenant_id: str = Field(min_length=1, max_length=128)
-    kind: SkillSourceKind
-    desired_state: SkillSourceDesiredState = SkillSourceDesiredState.DISABLED
-    publisher_allowlist: tuple[str, ...] = ()
-    credential_ref: str | None = Field(default=None, max_length=512)
-    config_metadata: dict[str, Any] = Field(default_factory=dict)
-    priority: int = Field(default=0, ge=-1000, le=1000)
-    revision: int = Field(default=1, ge=1)
-    created_by: str = Field(min_length=1, max_length=256)
-    updated_by: str = Field(min_length=1, max_length=256)
-    created_at: datetime
-    updated_at: datetime
-
-    @field_validator("publisher_allowlist")
-    @classmethod
-    def validate_publishers(cls, publishers: tuple[str, ...]) -> tuple[str, ...]:
-        if len(publishers) != len(set(publishers)):
-            raise ValueError("Skill Source publisher allowlist must be unique")
-        if any(re.fullmatch(_SKILL_NAME, publisher) is None for publisher in publishers):
-            raise ValueError("Skill Source publisher is invalid")
-        return publishers
-
-    @model_validator(mode="after")
-    def validate_source_security(self) -> SkillSourceRecord:
-        if self.desired_state is SkillSourceDesiredState.ENABLED and not self.publisher_allowlist:
-            raise ValueError("Enabled Skill Source requires a publisher allowlist")
-        if _contains_sensitive_metadata_key(self.config_metadata):
-            raise ValueError(
-                "Skill Source metadata cannot contain credentials or secrets; use credential_ref"
-            )
-        return self
-
-
-class SkillSourceSyncState(ContractModel):
-    source_id: str = Field(pattern=r"^sks_[A-Za-z0-9_.-]+$")
-    tenant_id: str = Field(min_length=1, max_length=128)
-    generation: int = Field(default=0, ge=0)
-    cursor: str | None = Field(default=None, max_length=2048)
-    complete_snapshot: bool = False
-    last_success_at: datetime | None = None
-    last_attempt_at: datetime | None = None
-    consecutive_failures: int = Field(default=0, ge=0)
-    safe_error_code: str | None = Field(default=None, max_length=128)
-
-    @model_validator(mode="after")
-    def validate_sync_evidence(self) -> SkillSourceSyncState:
-        if self.complete_snapshot and self.last_success_at is None:
-            raise ValueError("Complete Skill Source snapshot requires last_success_at")
-        if (
-            self.last_success_at is not None
-            and self.last_attempt_at is not None
-            and self.last_success_at > self.last_attempt_at
-        ):
-            raise ValueError("Skill Source success cannot be after its last attempt")
         return self
 
 

@@ -50,7 +50,6 @@ X-Correlation-ID: <trace id>
 | Publication | `staged`, `validating`, `active`, `restoring`, `quarantined`, `retired`, `revoked` |
 | Installation | `active`, `disabled`, `draining`, `uninstalled` |
 | Package retention | `retained`, `purged` |
-| Source desired state | `enabled`, `disabled`, `retired` |
 | Publisher | `active`, `suspended`, `revoked` |
 | Publisher key | `active`, `retiring`, `revoked` |
 
@@ -61,7 +60,7 @@ Catalog 的 `availability` 是派生值，常见值包括 `available`、`publica
 ### 2.1 查询 Skill Catalog
 
 ```http
-GET /v1/admin/skills?q=&publisher=&risk_level=&publication_status=&installation_status=&source_id=&cursor=&limit=
+GET /v1/admin/skills?q=&publisher=&risk_level=&publication_status=&installation_status=&cursor=&limit=
 ```
 
 响应同时保留兼容字段 `skills` 和权威字段 `items`；两者内容相同，新客户端应读取 `items` 与
@@ -91,8 +90,8 @@ GET /v1/admin/skills/{publisher}/{name}/installation
 ## 3. 管理列表与详情
 
 ```http
-GET /v1/admin/skill-installations?status=&publisher=&source_id=&cursor=&limit=
-GET /v1/admin/skill-publications?status=&publisher=&name=&source_id=&cursor=&limit=
+GET /v1/admin/skill-installations?status=&publisher=&cursor=&limit=
+GET /v1/admin/skill-publications?status=&publisher=&name=&cursor=&limit=
 GET /v1/admin/skill-packages?retention_status=&publisher=&name=&legal_hold=&cursor=&limit=
 GET /v1/admin/skill-publications/{publisher}/{name}/versions/{version}
 GET /v1/admin/skill-packages/{publisher}/{name}/versions/{version}
@@ -107,7 +106,6 @@ GET /v1/admin/skill-packages/{publisher}/{name}/versions/{version}
   "version_constraint": ">=1.0.0,<2.0.0",
   "pinned_package_digest": "sha256:...",
   "status": "active",
-  "source_id": "sks_admin_upload",
   "auto_upgrade": false,
   "revision": 3,
   "reason_code": null,
@@ -116,56 +114,10 @@ GET /v1/admin/skill-packages/{publisher}/{name}/versions/{version}
 }
 ```
 
-Publication 摘要包含 `publisher`、`name`、`version`、`package_digest`、`status`、`source_id`、`revision`、治理原因和撤销策略证据。Package 摘要包含 retention 状态、到期时间、legal hold、retention revision 和 purge 时间。
+Publication 摘要包含 `publisher`、`name`、`version`、`package_digest`、`status`、`revision`、治理原因和撤销策略证据。Package 摘要包含 retention 状态、到期时间、legal hold、retention revision 和 purge 时间。
 
-## 4. Source 管理
+Skill 不再建模 Source。发布物由 `(tenant_id, publisher, name, version)` 隔离和定位，可信性由 Publisher 公钥、包签名、digest、内容扫描与 Admission 决策共同保证。
 
-### 4.1 查询
-
-```http
-GET /v1/admin/skill-sources
-GET /v1/admin/skill-sources/{source_id}
-GET /v1/admin/skill-sources/{source_id}/sync-state
-```
-
-### 4.2 创建 Source
-
-```http
-POST /v1/admin/skill-sources
-Idempotency-Key: <uuid>
-Content-Type: application/json
-```
-
-```json
-{
-  "source_id": "sks_acme_mcp",
-  "kind": "mcp",
-  "desired_state": "enabled",
-  "publisher_allowlist": ["acme"],
-  "credential_ref": "vault/skills/acme#token",
-  "config_metadata": {},
-  "priority": 100
-}
-```
-
-`source_id` 必须以 `sks_` 开头；allowlist 最多 256 项；priority 范围 -1000–1000。`config_metadata` 只能保存非敏感配置，Secret 应通过 `credential_ref` 间接引用。
-
-### 4.3 修改、同步与退役
-
-```http
-PATCH /v1/admin/skill-sources/{source_id}
-Idempotency-Key: <uuid>
-X-Expected-Revision: <current revision>
-
-POST /v1/admin/skill-sources/{source_id}:sync
-
-DELETE /v1/admin/skill-sources/{source_id}
-Idempotency-Key: <uuid>
-X-Expected-Revision: <current revision>
-X-Reason-Code: source-retired
-```
-
-DELETE 是软退役，不直接删除历史事实。一个 Publication 可以保留多个来源引用；目录会选择 enabled 且 available 的最高优先级来源，同优先级按 source id 稳定排序。
 
 ## 5. 代理上传与发布
 
@@ -214,7 +166,6 @@ Content-Type: application/json
 
 ```json
 {
-  "source_id": "sks_admin_upload",
   "activate": true,
   "artifact_ref": {
     "artifact_id": "...",
@@ -231,7 +182,6 @@ Content-Type: application/json
 
 ```json
 {
-  "source_id": "sks_admin_upload",
   "activate": true,
   "files": {
     "manifest.json": "<base64>",
@@ -240,7 +190,7 @@ Content-Type: application/json
 }
 ```
 
-`files` 和 `artifact_ref` 必须二选一。两种模式都会进入同一套服务端 digest、签名、Publisher、Source 和内容安全准入；direct 不是绕过准入的接口。AuraX 应使用代理上传加 Artifact 发布流程，以统一处理大包和对象存储细节。
+`files` 和 `artifact_ref` 必须二选一。两种模式都会进入同一套服务端 digest、签名、Publisher 和内容安全准入；direct 不是绕过准入的接口。AuraX 应使用代理上传加 Artifact 发布流程，以统一处理大包和对象存储细节。
 
 `activate=false` 创建 staged Publication。它与 OBS multipart 无关。
 
@@ -363,10 +313,10 @@ X-Skill-Revocation-Action: cancel
 POST /v1/admin/skill-publications/{publisher}/{name}/versions/{version}:restore
 Idempotency-Key: <uuid>
 X-Expected-Revision: <current revision>
-X-Reason-Code: source-restored
+X-Reason-Code: operator-restored
 ```
 
-只有 `retired` Publication 可以 restore。服务先进入 `restoring`，再从原 Artifact 重读并复验 digest、Source、Publisher 和签名信任；全部通过后才恢复为 `active`。`revoked` 版本不能 restore。
+只有 `retired` Publication 可以 restore。服务先进入 `restoring`，再从原 Artifact 重读并复验 digest、Publisher 和签名信任；全部通过后才恢复为 `active`。`revoked` 版本不能 restore。
 
 ## 9. Package retention 与清理
 
@@ -396,7 +346,7 @@ GET /v1/admin/skill-admissions?outcome=&stage=&content_policy_version=&since=&cu
 - `stage`: 失败或完成的准入阶段；
 - `content_policy_version`: 例如 `skill-content-v1`。
 
-响应记录 operation、actor、Source、命令和追踪上下文、可用的 Skill identity/digest、阶段、结果、稳定错误码和耗时，不包含包正文、Secret、私钥、命中片段或异常原文。
+响应记录 operation、actor、命令和追踪上下文、可用的 Skill identity/digest、阶段、结果、稳定错误码和耗时，不包含包正文、Secret、私钥、命中片段或异常原文。
 
 ### 10.2 查询指标
 

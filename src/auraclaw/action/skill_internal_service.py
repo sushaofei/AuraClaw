@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import base64
 import binascii
-from dataclasses import asdict, is_dataclass
-from typing import Any, cast
+from dataclasses import asdict
+from typing import Any
 
 from auraclaw.action.ports import ArtifactContentReader
 from auraclaw.action.skill_content_cache import SkillPackageContentCache
@@ -17,7 +17,6 @@ from auraclaw.action.skill_packages import (
 )
 from auraclaw.action.skill_publication import SkillPublicationService
 from auraclaw.action.skill_publishers import SkillPublisherService
-from auraclaw.action.skill_sources import SkillSourceService
 from auraclaw.contracts.errors import (
     AuthorizationError,
     SchemaValidationError,
@@ -50,31 +49,22 @@ from auraclaw.contracts.internal import (
     SkillRestoreInternalResponse,
     SkillRevokeInternalRequest,
     SkillRevokeInternalResponse,
-    SkillSourceConfigureInternalRequest,
-    SkillSourceInternalResponse,
-    SkillSourceReadInternalRequest,
-    SkillSourceRetireInternalRequest,
-    SkillSourceSyncInternalRequest,
     SkillStateInternalRequest,
     SkillStateInternalResponse,
 )
 from auraclaw.contracts.skills import (
     ChangeSkillInstallationCommand,
     ChangeSkillPublisherStatusCommand,
-    ConfigureSkillSourceCommand,
     PublishSkillCommand,
     PurgeSkillPackageCommand,
     RegisterSkillPublisherCommand,
     RestoreSkillPublicationCommand,
-    RetireSkillSourceCommand,
     RevokeSkillPublicationCommand,
     RevokeSkillPublisherKeyCommand,
     RotateSkillPublisherKeyCommand,
     SkillInstallationOperation,
     SkillPublisherStatusOperation,
     SkillRevocationAction,
-    SkillSourceDesiredState,
-    SkillSourceKind,
 )
 from auraclaw.contracts.tools import ArtifactRef
 
@@ -90,7 +80,6 @@ class SkillPublicationInternalService:
         rebuilder: SkillTenantRebuilder | None = None,
         publishers: SkillPublisherService | None = None,
         admissions: SkillLifecycleStore | None = None,
-        sources: SkillSourceService | None = None,
         artifacts: ArtifactContentReader | None = None,
         package_cache: SkillPackageContentCache | None = None,
     ) -> None:
@@ -99,99 +88,9 @@ class SkillPublicationInternalService:
         self._rebuilder = rebuilder
         self._publishers = publishers
         self._admissions = admissions
-        self._sources = sources
         self._artifacts = artifacts
         self._package_cache = package_cache
 
-    async def configure_source(
-        self, request: SkillSourceConfigureInternalRequest
-    ) -> SkillSourceInternalResponse:
-        self._validate_management_request(
-            request.context.service_identity,
-            request.context.request_id,
-            request.command_id,
-        )
-        service = self._require_sources()
-        result = await service.configure(
-            ConfigureSkillSourceCommand(
-                tenant_id=request.context.tenant_id,
-                actor_id=request.actor_id,
-                source_id=request.source_id,
-                kind=SkillSourceKind(request.kind),
-                desired_state=SkillSourceDesiredState(request.desired_state),
-                publisher_allowlist=request.publisher_allowlist,
-                credential_ref=request.credential_ref,
-                config_metadata=request.config_metadata,
-                priority=request.priority,
-                command_id=request.command_id,
-                expected_revision=request.expected_revision,
-                correlation_id=request.context.correlation_id,
-                causation_id=request.context.causation_id,
-            )
-        )
-        return SkillSourceInternalResponse(
-            sources=(result.model_dump(mode="json"),)
-        )
-
-    async def retire_source(
-        self, request: SkillSourceRetireInternalRequest
-    ) -> SkillSourceInternalResponse:
-        self._validate_management_request(
-            request.context.service_identity,
-            request.context.request_id,
-            request.command_id,
-        )
-        result = await self._require_sources().retire(
-            RetireSkillSourceCommand(
-                tenant_id=request.context.tenant_id,
-                actor_id=request.actor_id,
-                source_id=request.source_id,
-                reason_code=request.reason_code,
-                command_id=request.command_id,
-                expected_revision=request.expected_revision,
-                correlation_id=request.context.correlation_id,
-                causation_id=request.context.causation_id,
-            )
-        )
-        return SkillSourceInternalResponse(
-            sources=(result.model_dump(mode="json"),)
-        )
-
-    async def read_sources(
-        self, request: SkillSourceReadInternalRequest
-    ) -> SkillSourceInternalResponse:
-        if request.context.service_identity is not ServiceIdentity.TASK_API:
-            raise AuthorizationError("workload may not query Skill Sources")
-        service = self._require_sources()
-        records = (
-            (await service.get_source(request.context.tenant_id, request.source_id),)
-            if request.source_id is not None
-            else await service.list_sources(request.context.tenant_id)
-        )
-        return SkillSourceInternalResponse(
-            sources=tuple(record.model_dump(mode="json") for record in records)
-        )
-
-    async def sync_source(
-        self, request: SkillSourceSyncInternalRequest
-    ) -> SkillSourceInternalResponse:
-        if request.context.service_identity is not ServiceIdentity.TASK_API:
-            raise AuthorizationError("workload may not synchronize Skill Sources")
-        result = await self._require_sources().sync(
-            request.context.tenant_id, request.source_id
-        )
-        return SkillSourceInternalResponse(
-            sync_result=(
-                asdict(cast(Any, result))
-                if is_dataclass(result) and not isinstance(result, type)
-                else {"status": "completed"}
-            )
-        )
-
-    def _require_sources(self) -> SkillSourceService:
-        if self._sources is None:
-            raise SchemaValidationError("Skill Source service is not configured")
-        return self._sources
 
     async def admin_snapshot(
         self, request: SkillAdminSnapshotInternalRequest
@@ -201,12 +100,6 @@ class SkillPublicationInternalService:
         if self._management is None or self._admissions is None:
             raise SchemaValidationError("Skill management query is not configured")
         tenant_id = request.context.tenant_id
-        sources = await self._admissions.list_sources(tenant_id)
-        sync_states: list[dict[str, Any]] = []
-        for source in sources:
-            state = await self._admissions.get_sync_state(tenant_id, source.source_id)
-            if state is not None:
-                sync_states.append(state.model_dump(mode="json"))
         publisher_rows: tuple[dict[str, Any], ...] = ()
         if self._publishers is not None:
             publisher_rows = tuple(
@@ -230,8 +123,6 @@ class SkillPublicationInternalService:
                 for item in await self._management.list_installations(tenant_id)
             ),
             publishers=publisher_rows,
-            sources=tuple(item.model_dump(mode="json") for item in sources),
-            source_sync_states=tuple(sync_states),
         )
 
     async def list_admissions(
@@ -296,7 +187,6 @@ class SkillPublicationInternalService:
             PublishSkillCommand(
                 tenant_id=request.context.tenant_id,
                 actor_id=request.actor_id,
-                source_id=request.source_id,
                 activate=request.activate,
                 command_id=request.command_id,
                 expected_revision=request.expected_revision,
@@ -320,7 +210,6 @@ class SkillPublicationInternalService:
             PublishSkillCommand(
                 tenant_id=request.context.tenant_id,
                 actor_id=request.actor_id,
-                source_id=request.source_id,
                 activate=request.activate,
                 command_id=request.command_id,
                 expected_revision=request.expected_revision,

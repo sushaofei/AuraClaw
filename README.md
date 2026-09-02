@@ -426,30 +426,23 @@ revoke 与 key revoke 均持久化 `pause|cancel`、policy version 和 decision 
 Publisher/key 签名的固定 binding；永久 revoked Publisher 不可 resume。
 发布的 Package、Publication、首个 Installation、成功命令账本和 Outbox 在 Action Hands 中原子提交；
 周期可靠性任务修复 Artifact binding 与 Catalog，并在 retention 到期后对未引用的 ready Skill Artifact
-执行带 Policy 和并发 fencing 的孤儿回收。MCP Skill Source 的周期发现使用 tenant/source 级持久租约；
-租约 fencing token 同时约束 Publication 事务与 Sync State，过期 Hands 副本不能提交迟到快照。
-对账按 Package 隔离下载、准入和发布失败：坏包只返回稳定 error code，其余包继续处理；含失败的轮次
-持久化为不完整快照，绝不据此判断来源消失或自动退役旧版本。
-管理员通过 `/v1/admin/skill-sources` 创建、调整优先级、禁用或软退役 MCP Source，并可显式触发单源
-同步。一个不可变 Publication 可保留多个来源引用；目录选择 enabled 且 available 的最高优先级来源，
-同优先级按 source id 稳定排序。单个来源消失或退役时先切换到可用备用来源，只有没有备用来源时才
-普通退役 Publication；Installation 的 tenant 抑制状态不会因另一个来源重新发现而被覆盖。
+执行带 Policy 和并发 fencing 的孤儿回收。Skill 不建模来源；同名版本按 tenant 隔离，发布可信性由
+Publisher 公钥、包签名、digest、内容扫描和 Admission 决策共同保证。
 普通 uninstall 先进入不可发现的 `draining`，已有 Run 的固定 binding 按 `continue` 策略运行；Action Hands
 从 Canonical Session Events 确认所有主 Skill/依赖引用的 Run 已终态后，才收敛为 `uninstalled`。
 `POST ...:uninstall?force=true` 会持久化 `cancel` 策略并立即进入 `uninstalled`，活动 Runtime 在下一轮或
 下一 step 的 binding 检查点写入取消证据。安装管理命令有独立幂等账本，多个 Hands 副本不会重复推进 revision。
-某版本只有在连续两个完整快照中缺失才自动转为 `retired`；任一完整快照重新观察到它都会清零缺失计数。
-`retired` 不再参与新发现，但保留不可变内容供既有固定 binding 读取，并与安全 `revoked` 明确区分。
+`retired` Publication 不再参与新发现，但保留不可变内容供既有固定 binding 读取，并与安全 `revoked` 明确区分。
 安全 revoke 必须选择允许的运行时动作（默认 cancel）并持久化 Policy 证据。Runtime 每轮/每步检查
 固定 binding，并在 Publication、Publisher、key 和强制卸载策略之间采用 `cancel > pause > continue`：
 continue 不恢复新发现，pause 保存 checkpoint 后挂起，cancel 写入 Canonical 终态证据。
-退役版本不会因来源重新出现而自动复活；管理员必须提交带 expected revision、reason 和幂等键的显式
-restore。服务先审计化进入不可发现的 `restoring`，再从原 Artifact 重读并复验 digest、Source、Publisher
+退役版本必须由管理员提交带 expected revision、reason 和幂等键的显式 restore。服务先审计化进入
+不可发现的 `restoring`，再从原 Artifact 重读并复验 digest、Publisher
 及签名信任，全部通过后才恢复 `active`；验证失败会停留在 `restoring`，同一命令可安全重试。
-每次统一发布准入还会写入 tenant 隔离的 `skill_admission_audit`：记录 operation、actor、Source、
+每次统一发布准入还会写入 tenant 隔离的 `skill_admission_audit`：记录 operation、actor、
 command/correlation/causation、可用的 Skill identity/digest、验证阶段、结果、稳定 error code 与耗时，
 但不记录包正文、异常消息、Secret 或私钥。该表是内部安全审计面，不作为公开包内容查询接口。
-签名验证后、Source 授权前还会执行确定性内容扫描：拒绝脚本/可执行扩展、ELF/PE/Mach-O/WASM magic、
+签名验证后还会执行确定性内容扫描：拒绝脚本/可执行扩展、ELF/PE/Mach-O/WASM magic、
 高置信私钥或 token、Secret 赋值以及指令劫持模式。命中项只记录稳定 finding code，并把本次 admission
 记为 `quarantined`；不会创建 Package、Publication 或 Installation。已上传 Artifact 继续受 retention 与
 孤儿 GC 管理，扫描器不会执行或反序列化包内代码。
@@ -524,8 +517,8 @@ Metrics Pipeline 和 Alert Receiver 通过同一观测端口接入。
 
 ## 能力与业务数据
 
-AuraClaw 不再直接读取业务数据库或内置业务 Tool。Tool、Resource 与 Skill 包均通过
+AuraClaw 不再直接读取业务数据库或内置业务 Tool。Tool 与 Resource 通过
 `action-hands` 的 MCP / Java API egress 对账发现；业务数据由远端 MCP Server 提供。
-Skill 包经 `skill://` Resource 下载并由 `SkillPackageReconciler` 发布。开发与联调见
+Skill 包通过受治理的管理 API 上传和发布。开发与联调见
 [MCP 开发手册](docs/guides/mcp-development.md)。价格洞察的本地 DWD 直连路径已经移除，
-业务 Tool、Resource 与 Skill 统一通过受治理的 MCP egress 接入。
+业务 Tool 与 Resource 统一通过受治理的 MCP egress 接入。

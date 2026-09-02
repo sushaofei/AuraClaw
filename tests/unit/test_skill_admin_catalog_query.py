@@ -86,7 +86,6 @@ def _publication(package: SkillPackageRecord) -> SkillPublicationRecord:
         version=package.manifest.version,
         package_digest=package.package_digest,
         status=SkillPublicationStatus.ACTIVE,
-        source_id="source-a",
         created_by="admin",
         updated_by="admin",
         created_at=now,
@@ -105,7 +104,6 @@ def test_catalog_query_selects_latest_and_reports_dependency_availability() -> N
             publisher="platform",
             name="release.prepare",
             status=SkillInstallationStatus.ACTIVE,
-            source_id="source-a",
             created_by="admin",
             updated_by="admin",
             created_at=now,
@@ -128,7 +126,6 @@ def test_catalog_query_selects_latest_and_reports_dependency_availability() -> N
                 risk_level="medium",
                 publication_status="active",
                 installation_status="active",
-                source_id="source-a",
             ),
         )
 

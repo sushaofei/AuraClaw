@@ -304,7 +304,6 @@ def test_cli_publish_uses_staged_upload_then_artifact_publication() -> None:
                 tenant_id="tenant-a",
                 actor_id="admin-a",
                 publisher="platform",
-                source_id="sks_admin_upload",
                 activate=True,
                 expected_revision=0,
                 command_id="publish-cli-1",

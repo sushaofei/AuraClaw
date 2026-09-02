@@ -137,7 +137,6 @@ source_modules = [
   "auraclaw.infrastructure.persistence.postgres_skill_package_records",
   "auraclaw.infrastructure.persistence.postgres_skill_publication_records",
   "auraclaw.infrastructure.persistence.postgres_skill_installation_records",
-  "auraclaw.infrastructure.persistence.postgres_skill_source_records",
 ]
 forbidden_modules = ["auraclaw.runtime", "auraclaw.control"]
 

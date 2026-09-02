@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-from datetime import UTC, datetime
 
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -42,9 +41,6 @@ from auraclaw.contracts.skills import (
     SkillPublisherStatus,
     SkillPublisherStatusOperation,
     SkillRevocationAction,
-    SkillSourceDesiredState,
-    SkillSourceKind,
-    SkillSourceRecord,
 )
 from auraclaw.contracts.tools import ArtifactRef, ToolInvocation
 from auraclaw.infrastructure.artifacts.store import ArtifactStore, InMemoryObjectStorage
@@ -332,18 +328,6 @@ def test_ed25519_publisher_can_publish_and_key_id_is_persisted() -> None:
         await publishers.register(_publisher_command())
         await publishers.rotate_key(_rotate("key-2026-a", public_key, 1, "rotate-1"))
         lifecycle = InMemorySkillLifecycleStore()
-        now = datetime.now(UTC)
-        source = SkillSourceRecord(
-            source_id="sks_admin_upload",
-            tenant_id="tenant-a",
-            kind=SkillSourceKind.ADMIN_UPLOAD,
-            desired_state=SkillSourceDesiredState.ENABLED,
-            publisher_allowlist=("platform",),
-            created_by="system",
-            updated_by="system",
-            created_at=now,
-            updated_at=now,
-        )
         artifacts = ArtifactStore(
             InMemoryObjectStorage(), signing_key=b"artifact-signing-key"
         )
@@ -358,13 +342,11 @@ def test_ed25519_publisher_can_publish_and_key_id_is_persisted() -> None:
             registry=registry,
             lifecycle=lifecycle,
             publisher_trust=SkillPublisherTrustService(publisher_store),
-            bootstrap_sources=(source,),
         )
         result = await publication.publish(
             PublishSkillCommand(
                 tenant_id="tenant-a",
                 actor_id="publisher-admin",
-                source_id=source.source_id,
                 command_id="publish-ed25519",
                 correlation_id="corr-a",
                 causation_id="publish-ed25519",

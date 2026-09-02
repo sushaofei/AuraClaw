@@ -291,7 +291,7 @@ class SkillPackageRegistry:
             for resource in _package_resources(tenant_id, normalized, publication.package_digest):
                 uri = resource.descriptor.uri
                 if uri is not None:
-                    self._resources.unregister_resource(uri)
+                    self._resources.unregister_resource(uri, tenant_id=tenant_id)
                 self._resources.register_resource(resource)
         return publication
 
@@ -325,7 +325,7 @@ class SkillPackageRegistry:
                 ):
                     uri = resource.descriptor.uri
                     if uri is not None:
-                        self._resources.unregister_resource(uri)
+                        self._resources.unregister_resource(uri, tenant_id=tenant_id)
         for key in old_keys:
             self._packages.pop(key, None)
             self._publications.pop(key, None)
@@ -378,16 +378,11 @@ class SkillPackageRegistry:
                 and existing.status is SkillPublicationStatus.STAGED
             ):
                 reactivated = existing.model_copy(update={"status": SkillPublicationStatus.ACTIVE})
+                if self._resources is not None:
+                    self._register_resources(tenant_id, normalized, digest)
                 self._publications[key] = reactivated
                 self._packages[key] = normalized
                 self._discoverable.add(key)
-                if self._resources is not None:
-                    for resource in _package_resources(
-                        tenant_id,
-                        normalized,
-                        digest,
-                    ):
-                        self._resources.register_resource(resource)
                 return reactivated
             return existing
         archive = _package_archive(normalized)
@@ -413,14 +408,31 @@ class SkillPackageRegistry:
             artifact_ref=artifact_ref,
             status=status,
         )
+        if self._resources is not None and status is SkillPublicationStatus.ACTIVE:
+            self._register_resources(tenant_id, normalized, digest)
         self._packages[key] = normalized
         self._publications[key] = publication
         if status is SkillPublicationStatus.ACTIVE:
             self._discoverable.add(key)
-        if self._resources is not None and status is SkillPublicationStatus.ACTIVE:
-            for resource in _package_resources(tenant_id, normalized, digest):
-                self._resources.register_resource(resource)
         return publication
+
+    def _register_resources(
+        self,
+        tenant_id: str,
+        package: SkillPackage,
+        package_digest: str,
+    ) -> None:
+        assert self._resources is not None
+        registered_uris: list[str] = []
+        try:
+            for resource in _package_resources(tenant_id, package, package_digest):
+                self._resources.register_resource(resource)
+                if resource.descriptor.uri is not None:
+                    registered_uris.append(resource.descriptor.uri)
+        except Exception:
+            for uri in registered_uris:
+                self._resources.unregister_resource(uri, tenant_id=tenant_id)
+            raise
 
     def forget_package(self, tenant_id: str, publisher: str, name: str, version: str) -> None:
         key = (tenant_id, publisher, name, version)
@@ -431,7 +443,10 @@ class SkillPackageRegistry:
             return
         for resource in _package_resources(tenant_id, package, publication.package_digest):
             if resource.descriptor.uri is not None:
-                self._resources.unregister_resource(resource.descriptor.uri)
+                self._resources.unregister_resource(
+                    resource.descriptor.uri,
+                    tenant_id=tenant_id,
+                )
 
     def revoke(
         self,
@@ -463,7 +478,7 @@ class SkillPackageRegistry:
             ):
                 uri = resource.descriptor.uri
                 if uri is not None:
-                    self._resources.unregister_resource(uri)
+                    self._resources.unregister_resource(uri, tenant_id=tenant_id)
         return revoked
 
     def candidates(
@@ -559,7 +574,7 @@ class SkillPackageRegistry:
                 uri = resource.descriptor.uri
                 if uri is None:
                     continue
-                self._resources.unregister_resource(uri)
+                self._resources.unregister_resource(uri, tenant_id=tenant_id)
                 if should_expose:
                     self._resources.register_resource(resource)
 

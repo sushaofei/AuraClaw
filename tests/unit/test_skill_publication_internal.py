@@ -48,9 +48,6 @@ from auraclaw.contracts.skills import (
     SkillManifest,
     SkillPublicationStatus,
     SkillPublisherStatusOperation,
-    SkillSourceDesiredState,
-    SkillSourceKind,
-    SkillSourceRecord,
 )
 from auraclaw.contracts.tools import ArtifactRef
 from auraclaw.infrastructure.clients.skill_publication import (
@@ -116,7 +113,6 @@ def _package() -> SkillPackage:
 
 def test_task_api_client_publishes_through_action_hands_service() -> None:
     async def scenario() -> None:
-        now = datetime.now(UTC)
         artifacts = _ArtifactWriter()
         lifecycle = InMemorySkillLifecycleStore()
         registry = SkillPackageRegistry(
@@ -128,19 +124,6 @@ def test_task_api_client_publishes_through_action_hands_service() -> None:
             registry=registry,
             lifecycle=lifecycle,
             artifacts=artifacts,
-            bootstrap_sources=(
-                SkillSourceRecord(
-                    source_id="sks_admin_upload",
-                    tenant_id="*",
-                    kind=SkillSourceKind.ADMIN_UPLOAD,
-                    desired_state=SkillSourceDesiredState.ENABLED,
-                    publisher_allowlist=("platform",),
-                    created_by="system",
-                    updated_by="system",
-                    created_at=now,
-                    updated_at=now,
-                ),
-            ),
         )
         catalog_store = InMemoryCapabilityCatalogStore()
         catalog = CapabilityCatalog(catalog_store)
@@ -263,7 +246,6 @@ def test_task_api_client_publishes_through_action_hands_service() -> None:
                 PublishSkillCommand(
                     tenant_id="tenant-a",
                     actor_id="admin-a",
-                    source_id="sks_admin_upload",
                     command_id="publish-internal-1",
                     expected_revision=0,
                     correlation_id="corr-1",
@@ -275,7 +257,6 @@ def test_task_api_client_publishes_through_action_hands_service() -> None:
                 PublishSkillCommand(
                     tenant_id="tenant-a",
                     actor_id="admin-a",
-                    source_id="sks_admin_upload",
                     command_id="publish-internal-staged-retry",
                     expected_revision=1,
                     correlation_id="corr-staged-retry",
@@ -295,7 +276,6 @@ def test_task_api_client_publishes_through_action_hands_service() -> None:
                     PublishSkillCommand(
                         tenant_id="tenant-a",
                         actor_id="admin-a",
-                        source_id="sks_admin_upload",
                         command_id="publish-internal-unsafe",
                         expected_revision=0,
                         correlation_id="corr-unsafe",

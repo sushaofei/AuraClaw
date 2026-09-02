@@ -11,7 +11,10 @@ from auraclaw.action.capability_catalog import (
     InMemoryCapabilityCatalogStore,
 )
 from auraclaw.action.hands import HandsGateway
-from auraclaw.action.mcp_primitives import McpResourceRegistry
+from auraclaw.action.mcp_primitives import (
+    McpResourceRegistry,
+    RegisteredResource,
+)
 from auraclaw.action.ports import PolicyEvaluation
 from auraclaw.action.skill_packages import (
     HmacSkillSignatureVerifier,
@@ -34,6 +37,7 @@ from auraclaw.contracts.errors import (
     SchemaValidationError,
     VersionConflictError,
 )
+from auraclaw.contracts.hands import HandsResourceContent, HandsResourceDescriptor
 from auraclaw.contracts.skills import (
     SkillManifest,
     SkillRequirement,
@@ -275,6 +279,66 @@ def test_skill_package_publish_is_signed_immutable_and_progressively_loadable() 
                 package_digest=publication.package_digest,
                 path="SKILL.md",
             )
+
+    asyncio.run(scenario())
+
+
+def test_same_skill_coordinates_are_isolated_by_tenant() -> None:
+    async def scenario() -> None:
+        verifier = HmacSkillSignatureVerifier({"platform": _PUBLISHER_KEY})
+        resources = McpResourceRegistry()
+        registry = SkillPackageRegistry(
+            artifacts=_artifacts(),
+            signature_verifier=verifier,
+            resources=resources,
+        )
+        uri = "skill://platform/release.prepare/1.4.0/SKILL.md"
+
+        await registry.publish(
+            "tenant-a",
+            _package(verifier, instructions="# Tenant A"),
+        )
+        await registry.publish(
+            "tenant-b",
+            _package(verifier, instructions="# Tenant B"),
+        )
+
+        assert resources.read("tenant-a", uri)[0].text == "# Tenant A"
+        assert resources.read("tenant-b", uri)[0].text == "# Tenant B"
+
+        registry.forget_package("tenant-a", "platform", "release.prepare", "1.4.0")
+
+        with pytest.raises(KeyError, match="Resource not found"):
+            resources.read("tenant-a", uri)
+        assert resources.read("tenant-b", uri)[0].text == "# Tenant B"
+
+    asyncio.run(scenario())
+
+
+def test_resource_registration_failure_does_not_publish_partial_state() -> None:
+    async def scenario() -> None:
+        verifier = HmacSkillSignatureVerifier({"platform": _PUBLISHER_KEY})
+        resources = McpResourceRegistry()
+        uri = "skill://platform/release.prepare/1.4.0/SKILL.md"
+        resources.register_resource(
+            RegisteredResource(
+                descriptor=HandsResourceDescriptor(uri=uri, name="existing"),
+                contents=(HandsResourceContent(uri=uri, text="existing"),),
+                tenant_ids=("tenant-a",),
+            )
+        )
+        registry = SkillPackageRegistry(
+            artifacts=_artifacts(),
+            signature_verifier=verifier,
+            resources=resources,
+        )
+
+        with pytest.raises(ValueError, match="Resource already registered"):
+            await registry.publish("tenant-a", _package(verifier))
+
+        assert registry.list_publications("tenant-a") == ()
+        assert registry.candidates("tenant-a", "release.prepare") == ()
+        assert resources.read("tenant-a", uri)[0].text == "existing"
 
     asyncio.run(scenario())
 

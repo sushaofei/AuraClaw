@@ -3152,3 +3152,31 @@ active-reference barrier，并简化 AuraX 卸载入口。
 - [x] 架构与代码组织文档同步；数据库/Event migration 不适用。
 - [x] 暂存范围排除 `.vscode/launch.json`、`compose.prod.yml`、`docs/tmp/`、Secret、缓存和虚拟环境。
 - [x] 以一个 intentional commit 提交并 push 当前分支到 `origin`，同步关闭 Issue #85 与 Epic #82。
+
+## 阶段 R2.4：移除 Skill Source 并统一发布准入（Issue #87）
+
+状态：完成。Skill 来源不再作为领域身份或管理资源；发布安全统一由 Publisher、签名、digest、
+内容扫描和 Admission 决策证明，同名 Skill 版本继续按 tenant 隔离。
+
+### 模型、接口与迁移
+
+- [x] 删除 Source/Sync State/Lease/Inventory 契约、服务、对账器、持久化映射和进程装配。
+- [x] Publication、Installation、发布命令、Admission 审计及内部/公开 API 不再包含 `source_id`。
+- [x] 删除 `/v1/admin/skill-sources*` 路由、CLI `--source` 参数及 Source 管理客户端。
+- [x] `0056` migration 删除 Source 相关表和列，并提供可执行的 down migration。
+- [x] 临时 PostgreSQL 中验证 migration up/down/up，以及两个 tenant 发布相同 Skill 坐标。
+
+### 租户隔离、安全与客户端
+
+- [x] Skill Package、Publication、Installation、Catalog 与资源注册继续以 tenant 为隔离边界。
+- [x] Publisher/key 信任、包签名、digest、内容扫描、Admission 审计和撤销语义保持不变。
+- [x] AuraX SDK 删除 Source 类型和方法，发布请求不再发送 `source_id`。
+- [x] AuraX 删除 Sources 页签和 Source ID 输入，仅保留 Catalog、Publishers 与 Admissions。
+- [x] API、发布指南、数据库参考、部署演练与生命周期架构文档同步。
+
+### 质量与交付
+
+- [x] AuraClaw Ruff、Mypy、10 条 import-linter 合同、完整 unit 与 Skill e2e 回归通过。
+- [x] AuraX SDK 47 tests、desktop typecheck 与 lint 通过；lint 仅保留既有 ChatView hook warnings。
+- [x] 暂存范围排除 `.vscode/launch.json`、`compose.prod.yml`、`docs/tmp/`、Secret、缓存和虚拟环境。
+- [x] AuraClaw 与 AuraX 分别以 intentional commit 提交并 push 当前分支到 `origin`，同步更新 Issue #87。

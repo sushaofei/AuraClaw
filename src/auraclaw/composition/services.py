@@ -52,11 +52,6 @@ from auraclaw.contracts.internal import (
     ServiceIdentity,
 )
 from auraclaw.contracts.mcp_registry import McpActiveSnapshotEntry
-from auraclaw.contracts.skills import (
-    SkillSourceDesiredState,
-    SkillSourceKind,
-    SkillSourceRecord,
-)
 from auraclaw.contracts.tools import CredentialReference
 from auraclaw.control.ports import RuntimeAssignment
 from auraclaw.infrastructure.artifacts.store import ArtifactStore, InMemoryObjectStorage
@@ -161,18 +156,6 @@ def _skill_publication_service(
             )
         else:
             selected_lifecycle = InMemorySkillLifecycleStore()
-    now = datetime.now(UTC)
-    admin_upload = SkillSourceRecord(
-        source_id="sks_admin_upload",
-        tenant_id="*",
-        kind=SkillSourceKind.ADMIN_UPLOAD,
-        desired_state=SkillSourceDesiredState.ENABLED,
-        publisher_allowlist=("platform",),
-        created_by="system",
-        updated_by="system",
-        created_at=now,
-        updated_at=now,
-    )
     return (
         SkillPublicationService(
             registry=registry,
@@ -180,7 +163,6 @@ def _skill_publication_service(
             artifacts=artifact_reader,
             artifact_lifecycle=artifact_lifecycle,
             publisher_trust=publisher_trust,
-            bootstrap_sources=(admin_upload,),
         ),
         selected_lifecycle,
     )

@@ -8,7 +8,7 @@
 
 首次生成并发布 Skill：
 
-`创建 Skill 目录 → 编写 manifest.json → 编写 SKILL.md → 添加 tests/*.json → 使用 Publisher 私钥签名 → 使用对应公钥执行 validate → 执行声明式 test → CLI 将 canonical archive 上传到 AuraClaw → AuraClaw 代理写入 OBS 并完成 Artifact finalize → 使用 artifact_ref 创建 Publication → AuraClaw 执行 digest、签名、Publisher、Source 和内容安全准入 → 创建或更新 Installation → 检查 Catalog、Publication、Installation 和 Admission 审计 → 发布完成`
+`创建 Skill 目录 → 编写 manifest.json → 编写 SKILL.md → 添加 tests/*.json → 使用 Publisher 私钥签名 → 使用对应公钥执行 validate → 执行声明式 test → CLI 将 canonical archive 上传到 AuraClaw → AuraClaw 代理写入 OBS 并完成 Artifact finalize → 使用 artifact_ref 创建 Publication → AuraClaw 执行 digest、签名、Publisher 和内容安全准入 → 创建或更新 Installation → 检查 Catalog、Publication、Installation 和 Admission 审计 → 发布完成`
 
 后续版本维护：
 
@@ -324,7 +324,7 @@ CLI 会：
 3. 将 archive 上传到 AuraClaw 的代理上传接口；
 4. 由 AuraClaw 在服务端完成 OBS single/multipart 上传、ETag 校验和 finalize；
 5. 使用返回的 `artifact_ref` 创建 Publication；
-6. 进入统一的服务端验签、内容扫描、Source 授权和准入流程。
+6. 进入统一的服务端验签、Publisher 信任、内容扫描和准入流程。
 
 客户端不应实现 OBS 直传，也不应依赖 AuraClaw 内部对象存储结构。
 
@@ -343,7 +343,6 @@ AURACLAW_API_TOKEN='<access token>' \
 
 常用可选项：
 
-- `--source`：发布来源，默认 `sks_admin_upload`；
 - `--actor`：审计 actor，默认 `skill-cli`；
 - `--command-id`：显式提供幂等命令 ID；
 - `--expected-revision`：创建时通常为 `0`；
@@ -397,7 +396,7 @@ AURACLAW_API_TOKEN='<access token>' \
 
 - `retired`：普通退役，不参与新发现，但保留不可变内容供已有 binding 使用；可以显式 restore；
 - `revoked`：安全撤销，不可恢复；必须选择 `continue`、`pause` 或 `cancel` 运行时动作，默认 `cancel`；
-- `restoring`：正在重新读取原 Artifact 并复验 digest、Source、Publisher 和签名信任。
+- `restoring`：正在重新读取原 Artifact 并复验 digest、Publisher 和签名信任。
 
 不要用安全 revoke 代替普通版本下线。`retired` 和 `revoked` 的恢复语义不同。
 
@@ -424,7 +423,7 @@ purge。`retention_until` 和终态 Session 的历史 binding 不阻止物理清
 | `413 Payload Too Large` | 代理上传体超过 24 MiB | 移除非必要资产并重新打包 |
 | `415 Unsupported Media Type` | 上传 Content-Type 错误 | 使用 CLI，或按接口手册设置媒体类型 |
 | Admission `quarantined` | 命中可执行内容、Secret 或指令劫持策略 | 根据稳定 finding code 清理内容并发布新版本 |
-| restore 长时间停在 `restoring` | 原 Artifact、签名信任或 Source 复验失败 | 查询 Admission/运维日志，修复信任或 Artifact 问题后以同一命令安全重试 |
+| restore 长时间停在 `restoring` | 原 Artifact 或签名信任复验失败 | 查询 Admission/运维日志，修复信任或 Artifact 问题后以同一命令安全重试 |
 
 写请求重试必须沿用同一个 `Idempotency-Key` 且请求内容完全相同。revoke、force uninstall、purge、key revoke 和 Publisher revoke 等高风险操作不得在无人确认时自动重试。
 
