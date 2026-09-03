@@ -151,6 +151,11 @@ class SkillPublicationReliabilityWorker:
                         media_type=str(artifact_payload["media_type"]),
                         size=int(artifact_payload["size"]),
                     )
+                    if not await self._lifecycle.has_artifact_reference(
+                        record.tenant_id, artifact_ref.artifact_id, artifact_ref.version
+                    ):
+                        prepared.append(record)
+                        continue
                     package_digest = str(record.payload["package_digest"])
                     correlation_id = f"skill-outbox:{record.outbox_id}"
                     await self._artifacts.claim_publication(

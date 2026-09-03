@@ -442,7 +442,7 @@ class SkillPublicationService:
                 now,
             )
         upgrade = None
-        if installation is not None and existing_installation is not None and not replace_purged:
+        if installation is not None and existing_installation is not None:
             upgrade = SkillUpgradeState(
                 tenant_id=command.tenant_id,
                 publisher=manifest.publisher,

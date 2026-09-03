@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from uuid import uuid4
 
 import asyncpg  # type: ignore[import-untyped]
 
@@ -17,6 +18,7 @@ from auraclaw.action.skill_lifecycle import (
     _publish_outbox_payload,
     decode_skill_admission_cursor,
     encode_skill_admission_cursor,
+    is_replaced_package,
     validate_upgrade,
 )
 from auraclaw.contracts.errors import NotFoundError, VersionConflictError
@@ -50,6 +52,180 @@ from auraclaw.infrastructure.persistence.postgres_skill_publication_records impo
 
 
 class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
+    async def claim_upgrade(self, state: SkillUpgradeState, *, ttl: timedelta) -> str | None:
+        pool = await self.pool()
+        token = uuid4().hex
+        row = await pool.fetchrow(
+            """INSERT INTO hands.skill_upgrade_claim
+            (tenant_id,publisher,name,generation,token,expires_at)
+            SELECT tenant_id,publisher,name,generation,$5,now()+$6::interval
+            FROM hands.skill_upgrade_current WHERE tenant_id=$1 AND publisher=$2 AND name=$3
+              AND generation=$4 AND phase <> 'completed'
+            ON CONFLICT (tenant_id,publisher,name) DO UPDATE SET
+              generation=excluded.generation,token=excluded.token,expires_at=excluded.expires_at
+            WHERE hands.skill_upgrade_claim.expires_at <= now()
+            RETURNING token""",
+            state.tenant_id,
+            state.publisher,
+            state.name,
+            state.generation,
+            token,
+            ttl,
+        )
+        return str(row["token"]) if row is not None else None
+
+    async def renew_upgrade(self, state: SkillUpgradeState, token: str, *, ttl: timedelta) -> bool:
+        pool = await self.pool()
+        result = await pool.execute(
+            """UPDATE hands.skill_upgrade_claim claim SET expires_at=now()+$6::interval
+            FROM hands.skill_upgrade_current current
+            WHERE claim.tenant_id=$1 AND claim.publisher=$2 AND claim.name=$3
+              AND claim.generation=$4 AND claim.token=$5 AND claim.expires_at>now()
+              AND current.tenant_id=claim.tenant_id AND current.publisher=claim.publisher
+              AND current.name=claim.name AND current.generation=claim.generation""",
+            state.tenant_id,
+            state.publisher,
+            state.name,
+            state.generation,
+            token,
+            ttl,
+        )
+        return str(result) == "UPDATE 1"
+
+    async def set_upgrade_phase(
+        self, state: SkillUpgradeState, token: str, *, phase: str, reason: str | None = None
+    ) -> bool:
+        if phase not in {"draining", "deleting", "completed", "blocked"}:
+            raise ValueError("Invalid Skill upgrade phase")
+        pool = await self.pool()
+        async with pool.acquire() as connection, connection.transaction():
+            changed = await connection.fetchval(
+                """UPDATE hands.skill_upgrade_current current SET phase=$6,reason_code=$7,
+                updated_at=now() FROM hands.skill_upgrade_claim claim
+                WHERE current.tenant_id=$1 AND current.publisher=$2 AND current.name=$3
+                  AND current.generation=$4 AND claim.tenant_id=current.tenant_id
+                  AND claim.publisher=current.publisher AND claim.name=current.name
+                  AND claim.generation=current.generation AND claim.token=$5
+                  AND claim.expires_at>now()
+                RETURNING true""",
+                state.tenant_id,
+                state.publisher,
+                state.name,
+                state.generation,
+                token,
+                phase,
+                reason,
+            )
+            if changed and phase != "deleting":
+                await connection.execute(
+                    "DELETE FROM hands.skill_upgrade_claim WHERE token=$1", token
+                )
+            return bool(changed)
+
+    async def remove_replaced_package(
+        self, state: SkillUpgradeState, token: str, package: SkillPackageRecord
+    ) -> bool:
+        if package.legal_hold or not is_replaced_package(state, package):
+            return False
+        pool = await self.pool()
+        identity = (state.tenant_id, state.publisher, state.name, package.manifest.version)
+        async with pool.acquire() as connection, connection.transaction():
+            await connection.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
+                f"skill:{state.tenant_id}:{state.publisher}:{state.name}",
+            )
+            claim = await connection.fetchrow(
+                """SELECT claim.token FROM hands.skill_upgrade_claim claim
+                JOIN hands.skill_upgrade_current current USING (tenant_id,publisher,name,generation)
+                WHERE claim.tenant_id=$1 AND claim.publisher=$2 AND claim.name=$3
+                  AND claim.generation=$4 AND claim.token=$5 AND claim.expires_at>now()
+                  AND current.phase='deleting' FOR UPDATE OF claim,current""",
+                state.tenant_id,
+                state.publisher,
+                state.name,
+                state.generation,
+                token,
+            )
+            if claim is None:
+                return False
+            pinned = await connection.fetchval(
+                """SELECT pinned_package_digest FROM hands.skill_installation
+                WHERE tenant_id=$1 AND publisher=$2 AND name=$3 FOR UPDATE""",
+                *identity[:3],
+            )
+            if pinned == package.package_digest:
+                return False
+            current = await connection.fetchrow(
+                """SELECT * FROM hands.skill_package WHERE tenant_id=$1 AND publisher=$2
+                AND name=$3 AND version=$4 FOR UPDATE""",
+                *identity,
+            )
+            if current is not None and current["package_digest"] == package.package_digest:
+                publication = await connection.fetchrow(
+                    """SELECT status,revocation_action FROM hands.skill_publication
+                    WHERE tenant_id=$1 AND publisher=$2 AND name=$3 AND version=$4 FOR UPDATE""",
+                    *identity,
+                )
+                if current["legal_hold"] or (
+                    publication is not None
+                    and (
+                        publication["status"] != "revoked"
+                        or publication["revocation_action"] != "cancel"
+                    )
+                ):
+                    return False
+                await connection.execute(
+                    """DELETE FROM hands.skill_publication_restore_command
+                    WHERE tenant_id=$1 AND publisher=$2 AND name=$3 AND version=$4""",
+                    *identity,
+                )
+                await connection.execute(
+                    """DELETE FROM hands.skill_publication WHERE tenant_id=$1 AND publisher=$2
+                    AND name=$3 AND version=$4""",
+                    *identity,
+                )
+                await connection.execute(
+                    """DELETE FROM hands.skill_package WHERE tenant_id=$1 AND publisher=$2
+                    AND name=$3 AND version=$4""",
+                    *identity,
+                )
+            tombstone_hold = await connection.fetchval(
+                """SELECT EXISTS(SELECT 1 FROM hands.skill_package_tombstone
+                WHERE tenant_id=$1 AND publisher=$2 AND name=$3 AND version=$4
+                  AND package_digest=$5 AND legal_hold)""",
+                *identity,
+                package.package_digest,
+            )
+            if tombstone_hold:
+                raise VersionConflictError("Skill package tombstone is under legal hold")
+            await connection.execute(
+                """DELETE FROM hands.skill_package_tombstone WHERE tenant_id=$1 AND publisher=$2
+                AND name=$3 AND version=$4 AND package_digest=$5""",
+                *identity,
+                package.package_digest,
+            )
+            await connection.execute(
+                """DELETE FROM hands.skill_outbox WHERE (tenant_id,command_id) IN (
+                  SELECT tenant_id,command_id FROM hands.skill_command WHERE tenant_id=$1
+                    AND publisher=$2 AND name=$3 AND version=$4 AND package_digest=$5)""",
+                *identity,
+                package.package_digest,
+            )
+            await connection.execute(
+                """UPDATE hands.skill_command SET version=NULL,package_digest=NULL
+                WHERE tenant_id=$1 AND publisher=$2 AND name=$3
+                  AND version=$4 AND package_digest=$5""",
+                *identity,
+                package.package_digest,
+            )
+            await connection.execute(
+                """DELETE FROM hands.skill_admission_audit WHERE tenant_id=$1 AND publisher=$2
+                AND name=$3 AND version=$4 AND package_digest=$5""",
+                *identity,
+                package.package_digest,
+            )
+            return True
+
     async def get_publish_command_digest(self, tenant_id: str, command_id: str) -> str | None:
         pool = await self.pool()
         value = await pool.fetchval(
