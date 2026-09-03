@@ -467,3 +467,36 @@ def test_pending_tool_recovery_is_periodic_and_does_not_steal_a_queued_claim() -
         assert await control.wake_assignment(item.task_id) is False
         assert recovery_claim.item == item
     asyncio.run(scenario())
+
+
+def test_cancelled_run_with_pending_write_remains_scheduled_for_reconciliation() -> None:
+    async def scenario() -> None:
+        store, control = InMemoryEventStore(), InMemoryControlStateStore()
+        feed = RunnableFeedConsumer(source=store, store=control, worker_id="pending-cancel",
+                                    waiting_recovery_interval=timedelta(0))
+        item = RunnableItem(task_id="tenant:session:run", tenant_id="tenant",
+                            root_session_id="session", session_id="session", run_id="run",
+                            source_version=1)
+        await control.enqueue(item)
+        claim = (await control.claim("scheduler"))[0]
+        lease = await control.acquire_lease("session:tenant:session", "scheduler",
+                                            ttl=timedelta(seconds=30))
+        assert lease is not None
+        assignment = RuntimeAssignment(tenant_id="tenant", root_session_id="session",
+            session_id="session", run_id="run", runtime_id="runtime", lease_id=lease.lease_id,
+            fencing_token=lease.fencing_token, role="root", resource_profile={})
+        assert await control.assign(item.task_id, assignment, claim_token=claim.claim_token)
+        await store.append(root_session_id="session", session_id="session", run_id="run",
+            context=CommandContext(tenant_id="tenant", command_id="stop", expected_version=0,
+                actor=Actor(type="runtime", id="test"), correlation_id="test", causation_id="test"),
+            events=[NewEvent(type="run.requested", payload={"run_id": "run"}),
+                NewEvent(type="skill.invocation.requested", payload={
+                    "skill_activation_id": "activation", "tool_invocation_id": "write"}),
+                NewEvent(type="run.cancelled", payload={"run_id": "run"})], command_result={})
+        for _ in range(3):
+            await feed.run_once()
+            await asyncio.sleep(0)
+        recovery = await control.claim("recovery")
+        assert len(recovery) == 1 and recovery[0].item.run_id == "run"
+
+    asyncio.run(scenario())

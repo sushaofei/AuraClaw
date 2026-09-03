@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
@@ -141,6 +142,7 @@ class _Session:
                 type=event.type,
                 payload=dict(event.payload),
                 run_id=assignment.run_id,
+                session_id=assignment.session_id,
                 occurred_at=datetime.now(UTC),
             )
             for event in events
@@ -1383,4 +1385,55 @@ def test_unknown_workflow_result_suspends_without_terminal_or_another_model_turn
         assert len(model.requests) == 3
         assert not any(event.type in {"skill.completed", "run.completed"}
                        for event in session.events)
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("stopped", ["cancelled", "deadline", "failure"])
+def test_stopped_run_reconciles_original_write_without_model_or_business_call(stopped: str) -> None:
+    from auraclaw.domain.skill_execution import pending_skill_invocations
+
+    class Recoverable(_Capabilities):
+        observed = "unknown"
+        queried = 0
+
+        async def invocation_status(self, assignment, invocation_id):
+            assert invocation_id == "write-receipt"
+            self.queried += 1
+            return {"found": True, "status": self.observed, "side_effect_status": "unknown"}
+
+    class Control(_Control):
+        async def is_cancelled(self, *args):
+            return stopped == "cancelled"
+
+    async def scenario() -> None:
+        assignment = _assignment()
+        if stopped == "deadline":
+            assignment = replace(assignment, deadline=datetime.now(UTC) - timedelta(seconds=1))
+        control, session = Control(), _Session("cancelled workflow")
+        capabilities, model = Recoverable(kind="skill"), _ScriptedModel([])
+        requested = NewEvent(type="skill.invocation.requested", payload={
+            "skill_activation_id": "activation-receipt", "tool_invocation_id": "write-receipt",
+            "package_digest": "sha256:old"})
+        facts = [requested]
+        if stopped == "cancelled":
+            facts.append(NewEvent(type="run.cancelled", payload={"run_id": assignment.run_id}))
+        await session.append(assignment, facts, command_id="fixture", operation="fixture")
+        harness = AgentHarness(control_store=control, session=session, model=model,
+                               tools=capabilities, runtime_events=_RuntimeEvents(),
+                               capability_controller=RuntimeCapabilityController(capabilities))
+        async def recover():
+            if stopped == "failure":
+                assert await harness.record_failure(assignment, RuntimeError("fixture fault"))
+            else:
+                await harness.execute(assignment)
+        await recover()
+        assert control.suspended_reason == "waiting_for_tool" and control.outcome is None
+        assert pending_skill_invocations(session.events, run_id=assignment.run_id)
+        capabilities.observed = "success"
+        await recover()
+        assert not pending_skill_invocations(session.events, run_id=assignment.run_id)
+        assert control.outcome == ("cancelled" if stopped == "cancelled" else "failed")
+        assert capabilities.queried == 2 and not model.requests
+        assert sum(e.type == "skill.cancelled" for e in session.events) == 1
+
     asyncio.run(scenario())

@@ -105,6 +105,17 @@ class RuntimeCapabilityController:
         self._trusted_message_metrics: dict[tuple[str, str, str], dict[str, float]] = {}
         self._workflow_metrics: dict[tuple[str, str, str], dict[str, float]] = {}
 
+    async def invocation_status(
+        self, assignment: RuntimeAssignment, invocation_id: str
+    ) -> dict[str, Any]:
+        lookup = getattr(self._client, "invocation_status", None)
+        if not callable(lookup):
+            return {}
+        try:
+            return dict(await asyncio.wait_for(lookup(assignment, invocation_id), timeout=5))
+        except Exception:
+            return {}
+
     @staticmethod
     def empty_state() -> dict[str, Any]:
         return {
@@ -1023,8 +1034,33 @@ class RuntimeCapabilityController:
             existing["workflow_state"] = step.state
             existing["workflow_next_step_index"] = step.next_step_index
             existing["workflow_completed_steps"] = list(step.completed_steps)
+            step_events: tuple[NewEvent, ...] = ()
+            invocation_id = step.pending_invocation_id or step.settled_invocation_id
+            if invocation_id:
+                pending = step.pending_invocation_id is not None
+                if pending:
+                    existing["workflow_invocation_cycle"] = int(
+                        existing.get("workflow_invocation_cycle", 0)
+                    ) + 1
+                existing["workflow_status"] = "unknown" if pending else "running"
+                existing["workflow_pending_invocation_id"] = invocation_id if pending else None
+                step_events = (NewEvent(
+                    type="skill.invocation.requested" if pending else "skill.invocation.settled",
+                    payload={"skill_activation_id": activation.skill_activation_id,
+                             "tool_invocation_id": invocation_id,
+                             "invocation_cycle": existing.get("workflow_invocation_cycle", 0),
+                             "package_digest": binding.package_digest},
+                ),)
+            if progress is not None:
+                await progress(state, step_events)
+            else:
+                events.extend(step_events)
+
+        async def before_workflow_step() -> dict[str, Any] | None:
+            disposition = await self.binding_disposition(assignment, state)
             if progress is not None:
                 await progress(state, ())
+            return disposition
 
         workflow_result = await self._workflow_executor.execute(
             assignment,
@@ -1048,7 +1084,7 @@ class RuntimeCapabilityController:
             ),
             start_step_index=int(existing.get("workflow_next_step_index", 0)),
             on_progress=checkpoint_workflow,
-            before_step=lambda: self.binding_disposition(assignment, state),
+            before_step=before_workflow_step,
             completed_steps=tuple(existing.get("workflow_completed_steps", ())),
             deadline=datetime.fromisoformat(str(existing["workflow_deadline"])),
             pending_invocation_id=(existing.get("workflow_pending_invocation_id")

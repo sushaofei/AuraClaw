@@ -16,6 +16,7 @@ from auraclaw.control.ports import (
     RuntimeBudget,
 )
 from auraclaw.domain.collaboration import CollaborationAggregate
+from auraclaw.domain.skill_execution import RUN_TERMINAL_EVENTS, pending_skill_invocations
 from auraclaw.projection.collaboration.projector import COLLABORATION_EVENTS
 from auraclaw.session.ports import ClaimedOutboxRecord
 
@@ -84,9 +85,7 @@ class RunnableFeedConsumer:
         self._store = store
         self._worker_id = worker_id
         self._wait_seconds = max(0.0, wait_seconds)
-        self._waiting_recovery_interval = max(
-            0.0, waiting_recovery_interval.total_seconds()
-        )
+        self._waiting_recovery_interval = max(0.0, waiting_recovery_interval.total_seconds())
         self._next_waiting_recovery_at = 0.0
         self._ack_tasks: set[asyncio.Task[None]] = set()
 
@@ -102,16 +101,29 @@ class RunnableFeedConsumer:
         for record in records:
             try:
                 if (
-                    record.event.type in {"run.completed", "run.failed", "run.cancelled"}
-                    and record.event.run_id is not None
+                    record.event.type in RUN_TERMINAL_EVENTS
+                    or record.event.type == "skill.invocation.requested"
                 ):
-                    await self._store.finish_assignment(
+                    observed = await self._source.load(
+                        record.event.tenant_id, record.event.session_id
+                    )
+                    terminal = next(
                         (
+                            e
+                            for e in observed
+                            if e.run_id == record.event.run_id and e.type in RUN_TERMINAL_EVENTS
+                        ),
+                        None,
+                    )
+                    if terminal is not None:
+                        task_id = (
                             f"{record.event.tenant_id}:{record.event.session_id}:"
                             f"{record.event.run_id}"
-                        ),
-                        record.event.type.removeprefix("run."),
-                    )
+                        )
+                        if pending_skill_invocations(observed, run_id=record.event.run_id):
+                            await self._store.suspend_assignment(task_id, "waiting_for_tool")
+                        else:
+                            await self._store.finish_assignment(task_id, terminal.type[4:])
                 item = self._derive_from_record(record)
                 if item is None:
                     events = await self._source.load(
@@ -123,9 +135,7 @@ class RunnableFeedConsumer:
                     and item.root_session_id != item.session_id
                     and (item.user_id is None or item.dept_id is None)
                 ):
-                    root_events = await self._source.load(
-                        item.tenant_id, item.root_session_id
-                    )
+                    root_events = await self._source.load(item.tenant_id, item.root_session_id)
                     item = replace(
                         item,
                         user_id=item.user_id or self._owner_user_id(root_events),
@@ -134,13 +144,8 @@ class RunnableFeedConsumer:
                 if item is not None:
                     inserted = await self._store.enqueue(item)
                     enqueued += int(inserted)
-                    if (
-                        not inserted
-                        and record.event.type in APPROVAL_RESUME_EVENTS
-                    ):
-                        enqueued += int(
-                            await self._store.wake_assignment(item.task_id)
-                        )
+                    if not inserted and record.event.type in APPROVAL_RESUME_EVENTS:
+                        enqueued += int(await self._store.wake_assignment(item.task_id))
                 if (
                     record.event.root_session_id != record.event.session_id
                     and record.event.type in COLLABORATION_CONTROL_EVENTS
@@ -155,9 +160,7 @@ class RunnableFeedConsumer:
                         record.event.root_session_id,
                         root_events,
                     )
-                    for collaboration_item in self._derive_collaboration(
-                        root_events, graph=graph
-                    ):
+                    for collaboration_item in self._derive_collaboration(root_events, graph=graph):
                         enqueued += int(await self._store.enqueue(collaboration_item))
                     await self._wake_waiting_coordinator(graph)
                 # Ack off the schedule critical path; enqueue is idempotent so
@@ -223,9 +226,7 @@ class RunnableFeedConsumer:
                         record.outbox_id,
                     )
             except Exception:
-                logger.exception(
-                    "failed to ack control outbox outbox_id=%s", record.outbox_id
-                )
+                logger.exception("failed to ack control outbox outbox_id=%s", record.outbox_id)
 
         task = asyncio.create_task(_ack(), name=f"control-outbox-ack-{record.outbox_id}")
         self._ack_tasks.add(task)
@@ -272,9 +273,7 @@ class RunnableFeedConsumer:
         )
 
     @staticmethod
-    def _derive(
-        events: Sequence[CanonicalEvent], source_version: int
-    ) -> RunnableItem | None:
+    def _derive(events: Sequence[CanonicalEvent], source_version: int) -> RunnableItem | None:
         if not events:
             return None
         role = "root"
@@ -307,7 +306,12 @@ class RunnableFeedConsumer:
                 if event.run_id is not None:
                     terminal_runs.add(event.run_id)
         latest = events[-1]
-        if run_id is None or run_id in terminal_runs or dependencies:
+        recovering = bool(pending_skill_invocations(events, run_id=run_id))
+        if (
+            run_id is None
+            or (run_id in terminal_runs and not recovering)
+            or (dependencies and not recovering)
+        ):
             return None
         return RunnableItem(
             task_id=f"{latest.tenant_id}:{latest.session_id}:{run_id}",
@@ -333,9 +337,7 @@ class RunnableFeedConsumer:
             return []
         root = events[0].root_session_id
         tenant_id = events[0].tenant_id
-        selected_graph = graph or CollaborationAggregate.from_events(
-            tenant_id, root, events
-        )
+        selected_graph = graph or CollaborationAggregate.from_events(tenant_id, root, events)
         latest_versions: dict[str, int] = {}
         runtime_budgets: dict[str, RuntimeBudget] = {}
         for event in events:
@@ -347,12 +349,8 @@ class RunnableFeedConsumer:
             configured = event.payload.get("runtime_budget")
             if isinstance(configured, dict):
                 runtime_budgets[event.session_id] = RuntimeBudget(
-                    max_steps=int(
-                        configured.get("max_steps", DEFAULT_RUNTIME_MAX_STEPS)
-                    ),
-                    max_output_tokens=int(
-                        configured.get("max_output_tokens", 8192)
-                    ),
+                    max_steps=int(configured.get("max_steps", DEFAULT_RUNTIME_MAX_STEPS)),
+                    max_output_tokens=int(configured.get("max_output_tokens", 8192)),
                     max_cost=(
                         float(configured["max_cost"])
                         if configured.get("max_cost") is not None
@@ -382,9 +380,7 @@ class RunnableFeedConsumer:
             )
         return items
 
-    async def _wake_waiting_coordinator(
-        self, graph: CollaborationAggregate
-    ) -> bool:
+    async def _wake_waiting_coordinator(self, graph: CollaborationAggregate) -> bool:
         root = graph.nodes.get(graph.root_session_id)
         terminal = {"completed", "failed", "cancelled"}
         if root is None or root.run_id is None or root.status in terminal:
@@ -397,14 +393,10 @@ class RunnableFeedConsumer:
             "collaboration.waiting_children",
         }:
             return False
-        waiting = tuple(
-            str(item) for item in checkpoint.state.get("waiting_child_ids", ())
-        )
+        waiting = tuple(str(item) for item in checkpoint.state.get("waiting_child_ids", ()))
         if not waiting:
             children = tuple(
-                node
-                for node in graph.nodes.values()
-                if node.parent_session_id is not None
+                node for node in graph.nodes.values() if node.parent_session_id is not None
             )
             active = tuple(node for node in children if node.status not in terminal)
             if not children or active:

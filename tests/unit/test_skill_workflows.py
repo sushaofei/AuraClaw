@@ -771,3 +771,44 @@ def test_settled_write_uses_authoritative_result_without_execution_reentry(
             assert not client.resource_uris
 
     asyncio.run(scenario())
+
+
+def test_write_request_is_committed_before_dispatch_and_settled_before_next_step() -> None:
+    async def scenario() -> None:
+        package = _package()
+        binding = _binding(package)
+        binding = binding.model_copy(
+            update={
+                "resolved_tools": (
+                    binding.resolved_tools[0].model_copy(update={"expected_side_effect": "write"}),
+                )
+            }
+        )
+        committed: list[str] = []
+
+        class Client(_Client):
+            async def execute(self, assignment, call):
+                if call.name == "inventory.lookup":
+                    assert committed == ["skill.activated", "skill.invocation.requested"]
+                return await super().execute(assignment, call)
+
+            async def read_resource(self, assignment, uri):
+                assert committed[-1] == "skill.invocation.settled"
+                return await super().read_resource(assignment, uri)
+
+        async def progress(state, events=()):
+            committed.extend(event.type for event in events)
+
+        client = Client(package, binding)
+        controller = RuntimeCapabilityController(client)  # type: ignore[arg-type]
+        result = await controller.execute(
+            _assignment(), _activation_call(), _controller_state(package), progress=progress
+        )
+        assert result.result["status"] == "completed"
+        assert committed == [
+            "skill.activated",
+            "skill.invocation.requested",
+            "skill.invocation.settled",
+        ]
+
+    asyncio.run(scenario())

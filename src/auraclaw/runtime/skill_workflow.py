@@ -38,6 +38,8 @@ class WorkflowStepProgress:
     next_step_index: int
     completed_steps: tuple[str, ...]
     state: dict[str, Any]
+    pending_invocation_id: str | None = None
+    settled_invocation_id: str | None = None
 
 
 WorkflowProgressCallback = Callable[[WorkflowStepProgress], Awaitable[None]]
@@ -90,6 +92,15 @@ class RuntimeSkillWorkflowExecutor:
                     observed.get("status") in {"error", "denied", "cancelled"}
                     and observed.get("side_effect_status") not in {None, "unknown"}
                 ):
+                    if on_progress is not None:
+                        await on_progress(
+                            WorkflowStepProgress(
+                                next_step_index=start_step_index,
+                                completed_steps=completed_steps,
+                                state=_copy_object(resume_state or {}),
+                                settled_invocation_id=pending_invocation_id,
+                            )
+                        )
                     pending_invocation_id = None
             return WorkflowExecutionResult(
                 status="unknown" if pending_invocation_id else "failed",
@@ -244,6 +255,15 @@ class RuntimeSkillWorkflowExecutor:
                         )
                     result = recorded_result
                 else:
+                    if context["write_in_flight"] and on_progress is not None:
+                        await on_progress(
+                            WorkflowStepProgress(
+                                next_step_index=step_index,
+                                completed_steps=tuple(completed),
+                                state=_copy_object(state),
+                                pending_invocation_id=invocation_id,
+                            )
+                        )
                     result = await self._call_tool(
                         assignment,
                         step,
@@ -265,6 +285,25 @@ class RuntimeSkillWorkflowExecutor:
                     step=step,
                     arguments=arguments,
                 )
+            if (
+                context["write_in_flight"]
+                and on_progress is not None
+                and (
+                    result.get("status") == "success"
+                    or (
+                        result.get("status") in {"error", "denied", "cancelled"}
+                        and result.get("side_effect_status") not in {None, "unknown"}
+                    )
+                )
+            ):
+                await on_progress(
+                    WorkflowStepProgress(
+                        next_step_index=step_index,
+                        completed_steps=tuple(completed),
+                        state=_copy_object(state),
+                        settled_invocation_id=invocation_id,
+                    )
+                )
             if result.get("error_code") == "approval_required":
                 approval_request = _approval_request(result)
                 return WorkflowExecutionResult(
@@ -283,10 +322,10 @@ class RuntimeSkillWorkflowExecutor:
             context["write_in_flight"] = False
             status = result.get("status")
             if (
-                status in {"timeout", "cancelled"}
+                status != "success"
                 and step.operation == "tool.call"
                 and tools[step.capability].expected_side_effect != "read"
-                and result.get("side_effect_status") != "not_started"
+                and result.get("side_effect_status") in {None, "unknown"}
             ):
                 status = "unknown"
             if status != "success":

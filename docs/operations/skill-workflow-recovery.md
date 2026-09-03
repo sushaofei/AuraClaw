@@ -38,3 +38,21 @@ root session、session、run；同租户其他 Run 不能读取结果。Runtime 
 此阶段无 DDL，Hands 严格 DTO 消费者需同步发布；先服务端后 Runtime。全量 686 passed /
 60 skipped，PostgreSQL 双副本、Hands 隔离与工作流联合 47 passed。全 Run 取消和 Canonical
 引用 drain 仍在后续阶段处理，不能凭这一项宣称 #96 全部完成。
+
+### Run 停止后的 Canonical 收尾（#95/#96 N）
+
+声明式写步骤在业务 I/O 前提交 skill.invocation.requested，确认结果后提交 skill.invocation.settled；
+每次审批执行循环单独编号，之前的确认不能释放下一次执行的引用。Run 取消、deadline 或异常不代表
+写副作用已结束。Runtime 在持有有效 fencing 的前提下，仅查询原调用并记录确认/终态，不能产生新模型
+或业务调用。每次唤醒最多查询 8 个原调用，每次查询限 5 秒，未知状态继续 waiting_for_tool。
+Control 对已取消但仍有待确认调用的 Run 保留恢复调度；异常处理不能覆盖恢复的调度状态。
+
+内存与 PostgreSQL 的引用查询共用同一语义：Skill 终态可释放对应 activation，Run 终态可释放普通
+引用；存在未确认写调用时两者都不能强行释放。Canonical 业务事实与产物不属于旧 Skill 包历史清理。
+每个新步骤仍检查 Run 取消/deadline 和 Skill 撤销；确认已发出调用的结果仅检查租约 fencing。
+
+无 DDL。Runtime、Session（含新 control outbox 类型）和 Control 需协调发布，先停旧 Runtime 的新任务
+接入并处理其在途写调用，再启用旧包物理清理。旧程序未记录 requested 事实的未知调用不能据此推断已
+安全结束，发布前必须核对原调用结果，不能从 checkpoint 缺失或 Run 终态推断成功。
+全量 691 passed / 61 skipped；PostgreSQL、取消/超时/异常恢复与工作流联合 54 passed，
+随后增加的真实 dispatch 前事件提交顺序回归通过；Ruff/Mypy/架构合同通过。

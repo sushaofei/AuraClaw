@@ -38,7 +38,10 @@ class CanonicalEventCommitter:
         *,
         identity: str,
         visibility: Visibility = Visibility.INTERNAL,
+        recovery: bool = False,
     ) -> None:
+        if recovery and event_type not in {"run.failed", "run.cancelled"}:
+            raise ValueError("Recovery cannot begin new execution")
         if event_type == "approval.requested":
             if self.approval_request_is_pending(existing, identity):
                 return
@@ -53,7 +56,7 @@ class CanonicalEventCommitter:
             for event in existing
         ):
             return
-        await self._guard.check(assignment)
+        await (self._guard.fence(assignment) if recovery else self._guard.check(assignment))
         appended = await self._session.append(
             assignment,
             [NewEvent(type=event_type, payload=payload, visibility=visibility)],
@@ -69,9 +72,22 @@ class CanonicalEventCommitter:
             existing.extend(refreshed)
 
     async def append_capability_event(
-        self, assignment: RuntimeAssignment, event: NewEvent
+        self, assignment: RuntimeAssignment, event: NewEvent, *, recovery: bool = False
     ) -> None:
-        if event.payload.get("skill_activation_id"):
+        if recovery and event.type not in {
+            "skill.invocation.settled",
+            "skill.completed",
+            "skill.failed",
+            "skill.cancelled",
+        }:
+            raise ValueError("Recovery cannot begin new execution")
+        if event.type.startswith("skill.invocation."):
+            identity = (
+                str(event.payload["tool_invocation_id"])
+                + ":"
+                + str(event.payload.get("invocation_cycle", 0))
+            )
+        elif event.payload.get("skill_activation_id"):
             identity = str(event.payload["skill_activation_id"])
         else:
             identity = hashlib.sha256(
@@ -84,8 +100,10 @@ class CanonicalEventCommitter:
             ).hexdigest()[:24]
         if event.type == "skill.activated":
             existing = await self._session.load(assignment)
-            if any(item.type == event.type and item.payload.get("skill_activation_id") == identity
-                   for item in existing):
+            if any(
+                item.type == event.type and item.payload.get("skill_activation_id") == identity
+                for item in existing
+            ):
                 return
         terminal_types = {"skill.completed", "skill.failed", "skill.cancelled"}
         if event.type in terminal_types:
@@ -97,17 +115,20 @@ class CanonicalEventCommitter:
                     for item in existing
                 ):
                     return
-                await self._guard.check(assignment)
+                await (self._guard.fence(assignment) if recovery else self._guard.check(assignment))
                 try:
                     await self._session.append(
-                        assignment, [event], command_id=f"runtime:skill.terminal:{identity}",
-                        operation="runtime.skill.terminal", expected_version=len(existing),
+                        assignment,
+                        [event],
+                        command_id=f"runtime:skill.terminal:{identity}",
+                        operation="runtime.skill.terminal",
+                        expected_version=len(existing),
                     )
                     return
                 except VersionConflictError:
                     continue
             raise VersionConflictError("Skill terminal event conflicted with concurrent events")
-        await self._guard.check(assignment)
+        await (self._guard.fence(assignment) if recovery else self._guard.check(assignment))
         await self._session.append(
             assignment,
             [event],
@@ -116,9 +137,7 @@ class CanonicalEventCommitter:
         )
 
     @classmethod
-    def approval_request_is_pending(
-        cls, existing: list[Any], approval_id: str
-    ) -> bool:
+    def approval_request_is_pending(cls, existing: list[Any], approval_id: str) -> bool:
         open_request = False
         for event in existing:
             if str(event.payload.get("approval_id", "")) != approval_id:

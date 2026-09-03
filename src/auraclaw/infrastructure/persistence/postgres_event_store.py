@@ -118,12 +118,34 @@ class PostgresEventStore(LazyPool):
                         a.payload#>'{activation,binding,resolved_skills}',
                         '[]'::jsonb)) dependency
                       WHERE dependency->>'package_digest'=$4))))
-              AND NOT EXISTS(
+              AND ((NOT EXISTS(
                 SELECT 1 FROM session_core.canonical_event t
                 WHERE t.tenant_id=a.tenant_id
                   AND t.session_id=a.session_id AND t.run_id=a.run_id
-                  AND t.event_type IN
-                    ('run.completed','run.failed','run.cancelled'))
+                  AND t.event_type IN ('run.completed','run.failed','run.cancelled'))
+                AND NOT EXISTS(
+                  SELECT 1 FROM session_core.canonical_event t
+                  WHERE t.tenant_id=a.tenant_id AND t.session_id=a.session_id AND t.run_id=a.run_id
+                    AND t.payload->>'skill_activation_id'=a.payload->>'skill_activation_id'
+                    AND t.event_type IN ('skill.completed','skill.failed','skill.cancelled')))
+                OR EXISTS(
+                  SELECT 1 FROM session_core.canonical_event pending
+                  WHERE pending.tenant_id=a.tenant_id AND pending.session_id=a.session_id
+                    AND pending.run_id=a.run_id AND pending.event_type='skill.invocation.requested'
+                    AND pending.payload->>'skill_activation_id'=a.payload->>'skill_activation_id'
+                    AND NOT EXISTS(
+                      SELECT 1 FROM session_core.canonical_event settled
+                      WHERE settled.tenant_id=pending.tenant_id
+                        AND settled.session_id=pending.session_id AND settled.run_id=pending.run_id
+                        AND settled.event_type='skill.invocation.settled'
+                        AND settled.aggregate_version>pending.aggregate_version
+                        AND settled.payload->>'invocation_cycle' IS NOT DISTINCT FROM
+                            pending.payload->>'invocation_cycle'
+                        AND settled.payload->>'skill_activation_id'
+                          =pending.payload->>'skill_activation_id'
+                        AND settled.payload->>'tool_invocation_id'
+                          =pending.payload->>'tool_invocation_id')))
+
         )"""
         return bool(await pool.fetchval(query, tenant_id, publisher, name, package_digest))
 

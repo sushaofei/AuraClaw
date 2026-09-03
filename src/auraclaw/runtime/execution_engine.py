@@ -17,11 +17,13 @@ from auraclaw.contracts.errors import (
     CollaborationValidationError,
     ModelOutputTruncatedError,
     ModelProviderError,
+    RuntimeCancelledError,
     TerminalBudgetExceededError,
 )
 from auraclaw.contracts.events import NewEvent
 from auraclaw.contracts.state import Visibility
 from auraclaw.control.ports import RuntimeAssignment
+from auraclaw.domain.skill_execution import RUN_TERMINAL_EVENTS, pending_skill_invocations
 from auraclaw.runtime.capability_controller import RuntimeCapabilityController
 from auraclaw.runtime.collaboration_controller import RuntimeCollaborationController
 from auraclaw.runtime.event_committer import CanonicalEventCommitter
@@ -146,10 +148,22 @@ class RuntimeExecutionEngine:
 
     async def execute(self, assignment: RuntimeAssignment) -> None:
         execute_started = time.perf_counter()
-        await self._guard_service.check(assignment)
+        try:
+            await self._guard_service.check(assignment)
+        except RuntimeCancelledError:
+            if await self._recover_pending_outcomes(assignment):
+                return
+            raise
         if assignment.budget.max_steps < 1:
             raise BudgetExceededError("Runtime step budget is exhausted")
         events = await self._session.load(assignment)
+        terminal = next((e for e in events if e.run_id == assignment.run_id
+                         and e.type in RUN_TERMINAL_EVENTS), None)
+        if terminal is not None:
+            if await self._recover_pending_outcomes(assignment):
+                return
+            await self._control.finish_assignment(self._task_id(assignment), terminal.type[4:])
+            return
         await self._events.append_once(
             assignment,
             events,
@@ -686,8 +700,18 @@ class RuntimeExecutionEngine:
                             current_call: ToolCall = call,
                             current_call_index: int = call_index,
                         ) -> None:
+                            recovery = bool(capability_events) and all(
+                                event.type == "skill.invocation.settled"
+                                for event in capability_events
+                            )
+                            if recovery:
+                                await self._guard_service.fence(assignment)
+                            else:
+                                await self._guard_service.check(assignment)
                             for event in capability_events:
-                                await self._events.append_capability_event(assignment, event)
+                                await self._events.append_capability_event(
+                                    assignment, event, recovery=recovery
+                                )
                             progress_state = {
                                 **current_state,
                                 "capability_state": capability_progress,
@@ -1048,8 +1072,59 @@ class RuntimeExecutionEngine:
         await self._control.finish_assignment(self._task_id(assignment), "cancelled")
         return True
 
-    async def record_failure(self, assignment: RuntimeAssignment, error: Exception) -> None:
-        """Persist a terminal business fact before releasing a failed assignment."""
+    async def _recover_pending_outcomes(self, assignment: RuntimeAssignment) -> bool:
+        """Read-only reconciliation survives a stopped Run; no model or business call is allowed."""
+        await self._guard_service.fence(assignment)
+        events = await self._session.load(assignment)
+        pending = pending_skill_invocations(events, run_id=assignment.run_id)
+        if not pending:
+            return False
+        if self._capability_controller is None:
+            await self._control.suspend_assignment(self._task_id(assignment), "waiting_for_tool")
+            return True
+        # Bound each wake. Remaining receipts stay in Canonical Events for the next wake.
+        for requested in pending[:8]:
+            invocation_id = str(requested.payload["tool_invocation_id"])
+            observed = await self._capability_controller.invocation_status(
+                assignment, invocation_id
+            )
+            known = observed.get("status") == "success" or (
+                observed.get("status") in {"error", "denied", "cancelled"}
+                and observed.get("side_effect_status") not in {None, "unknown"}
+            )
+            if not known:
+                continue
+            await self._events.append_capability_event(assignment, NewEvent(
+                type="skill.invocation.settled",
+                payload={**requested.payload, "status": observed["status"],
+                         "side_effect_status": observed.get("side_effect_status")},
+            ), recovery=True)
+        events = await self._session.load(assignment)
+        if pending_skill_invocations(events, run_id=assignment.run_id):
+            await self._control.suspend_assignment(self._task_id(assignment), "waiting_for_tool")
+            return True
+        for activation_id in dict.fromkeys(e.payload["skill_activation_id"] for e in pending):
+            await self._events.append_capability_event(assignment, NewEvent(
+                type="skill.cancelled", payload={"skill_activation_id": activation_id,
+                    "error_code": "run_stopped_after_invocation_settled"},
+            ), recovery=True)
+        events = await self._session.load(assignment)
+        terminal = next((e for e in events if e.run_id == assignment.run_id
+                         and e.type in RUN_TERMINAL_EVENTS), None)
+        if terminal is None:
+            await self._events.append_once(assignment, events, "run.failed",
+                {"run_id": assignment.run_id, "error_code": "run_stopped_after_invocation_settled"},
+                identity=assignment.run_id, recovery=True)
+        await self._capability_controller.release_run(assignment)
+        await self._control.finish_assignment(
+            self._task_id(assignment), terminal.type[4:] if terminal is not None else "failed"
+        )
+        return True
+
+    async def record_failure(self, assignment: RuntimeAssignment, error: Exception) -> bool:
+        """Return True when pending-result recovery owns assignment disposition."""
+        if await self._recover_pending_outcomes(assignment):
+            return True
         events = await self._session.load(assignment)
         if any(
             event.type in {"run.completed", "run.failed", "run.cancelled"}
@@ -1058,7 +1133,7 @@ class RuntimeExecutionEngine:
         ):
             if self._capability_controller is not None:
                 await self._capability_controller.release_run(assignment)
-            return
+            return False
         checkpoint = await self._control.load_checkpoint(
             assignment.tenant_id,
             assignment.session_id,
@@ -1117,9 +1192,11 @@ class RuntimeExecutionEngine:
             },
             identity=assignment.run_id,
             visibility=Visibility.USER,
+            recovery=True,
         )
         if self._capability_controller is not None:
             await self._capability_controller.release_run(assignment)
+        return False
 
     async def _record_approval_wait(
         self,
