@@ -190,6 +190,12 @@ class HandsRuntimeAdapter:
         result = await self._client.call_tool(assignment, tool_call_to_hands(call))
         return result.as_dict()
 
+    async def invocation_status(
+        self, assignment: RuntimeAssignment, invocation_id: str
+    ) -> dict[str, Any]:
+        result = await self._client.get_invocation_status(assignment, invocation_id)
+        return result.model_dump(mode="json")
+
     async def cancel(self, assignment: RuntimeAssignment, tool_invocation_id: str) -> bool:
         return await self._client.cancel_invocation(assignment, tool_invocation_id)
 

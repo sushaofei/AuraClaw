@@ -631,8 +631,14 @@ class RuntimeExecutionEngine:
                             default=str,
                         ).encode()
                     ).hexdigest()
+                    recovering_pending = any(
+                        isinstance(item, dict) and item.get("workflow_status") == "unknown"
+                        and (item.get("activation", {}).get("activation_key")
+                             == call.tool_invocation_id)
+                        for item in state.get("capability_state", {}).get("active_skills", ())
+                    )
                     signatures = dict(state.get("call_signatures", {}))
-                    repeated = int(signatures.get(signature, 0)) + 1
+                    repeated = int(signatures.get(signature, 0)) + (0 if recovering_pending else 1)
                     if repeated > 3:
                         logger.warning(
                             "tool.argument_validation_failed capability_id=%s "
@@ -675,10 +681,13 @@ class RuntimeExecutionEngine:
                             )
                         async def checkpoint_capability_progress(
                             capability_progress: dict[str, Any],
+                            capability_events: tuple[NewEvent, ...] = (),
                             current_state: dict[str, Any] = state,
                             current_call: ToolCall = call,
                             current_call_index: int = call_index,
                         ) -> None:
+                            for event in capability_events:
+                                await self._events.append_capability_event(assignment, event)
                             progress_state = {
                                 **current_state,
                                 "capability_state": capability_progress,
@@ -691,6 +700,11 @@ class RuntimeExecutionEngine:
                                 progress_state,
                             )
 
+                        self._capability_controller.restore_skill_events(
+                            state.get("capability_state", {}),
+                            [event for event in await self._session.load(assignment)
+                             if event.run_id == assignment.run_id],
+                        )
                         execution = await self._capability_controller.execute(
                             assignment,
                             call,
@@ -724,7 +738,8 @@ class RuntimeExecutionEngine:
                         "call_index": call_index,
                         "collaboration_terminal": terminal,
                         "waiting_child_ids": list(waiting_child_ids),
-                        "steps_used": int(state.get("steps_used", 0)) + 1,
+                        "steps_used": int(state.get("steps_used", 0))
+                        + (0 if recovering_pending else 1),
                     }
                     if int(state["steps_used"]) > assignment.budget.max_steps:
                         raise BudgetExceededError("Runtime capability step budget was exhausted")
@@ -740,6 +755,17 @@ class RuntimeExecutionEngine:
 
                 for side_event in side_events:
                     await self._events.append_capability_event(assignment, side_event)
+
+                if result.get("status") == "unknown" and result.get("skill_activation_id"):
+                    # Keep the call cursor and original invocation. A wake-up
+                    # queries that result before any further workflow execution.
+                    await self._progress.save_checkpoint(
+                        assignment, RuntimePhase.CAPABILITY_WORKFLOW_RUNNING, state
+                    )
+                    await self._control.suspend_assignment(
+                        self._task_id(assignment), "waiting_for_tool"
+                    )
+                    return
 
                 if result.get("error_code") == "approval_required":
                     await self._record_approval_wait(
@@ -997,12 +1023,8 @@ class RuntimeExecutionEngine:
             await self._control.suspend_assignment(self._task_id(assignment), "skill_revoked")
             return True
         events = await self._session.load(assignment)
-        await self._events.append_once(
-            assignment,
-            events,
-            "skill.cancelled",
-            evidence,
-            identity=activation_id,
+        await self._events.append_capability_event(
+            assignment, NewEvent(type="skill.cancelled", payload=evidence)
         )
         events = await self._session.load(assignment)
         await self._events.append_once(

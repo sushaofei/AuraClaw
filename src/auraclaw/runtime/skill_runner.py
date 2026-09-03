@@ -335,8 +335,10 @@ class SkillRunner:
         guard: bool = True,
     ) -> None:
         events = await self._session.load(assignment)
+        terminal_types = {"skill.completed", "skill.failed", "skill.cancelled"}
+        is_terminal = event_type in terminal_types
         if any(
-            event.type == event_type
+            (event.type in terminal_types if is_terminal else event.type == event_type)
             and event.payload.get("skill_activation_id") == activation.skill_activation_id
             for event in events
         ):
@@ -356,8 +358,10 @@ class SkillRunner:
         await self._session.append(
             assignment,
             [NewEvent(type=event_type, payload=event_payload)],
-            command_id=(f"runtime:{event_type}:{activation.skill_activation_id}"),
-            operation=f"runtime.{event_type}",
+            command_id=(f"runtime:skill.terminal:{activation.skill_activation_id}" if is_terminal
+                        else f"runtime:{event_type}:{activation.skill_activation_id}"),
+            operation="runtime.skill.terminal" if is_terminal else f"runtime.{event_type}",
+            expected_version=len(events),
         )
 
     async def _activation_started_at(

@@ -9,11 +9,16 @@ import time
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import quote
 
 from auraclaw.contracts.capabilities import RequiredCapabilityRef
-from auraclaw.contracts.errors import NotFoundError, SkillPromptBudgetExceededError
+from auraclaw.contracts.errors import (
+    NotFoundError,
+    SchemaValidationError,
+    SkillPromptBudgetExceededError,
+)
 from auraclaw.contracts.events import NewEvent
 from auraclaw.contracts.skills import SkillActivation, effective_skill_role
 from auraclaw.control.ports import RuntimeAssignment
@@ -39,7 +44,7 @@ class CapabilityExecution:
     events: tuple[NewEvent, ...] = ()
 
 
-CapabilityProgressCallback = Callable[[dict[str, Any]], Awaitable[None]]
+CapabilityProgressCallback = Callable[[dict[str, Any], tuple[NewEvent, ...]], Awaitable[None]]
 
 
 class CapabilityAdmissionError(RuntimeError):
@@ -727,6 +732,42 @@ class RuntimeCapabilityController:
             state=current,
         )
 
+    def restore_skill_events(self, state: dict[str, Any], events: list[Any]) -> None:
+        active = list(state.get("active_skills", ()))
+        known = {item.get("activation", {}).get("skill_activation_id")
+                 for item in active if isinstance(item, dict)}
+        for event in events:
+            activation = event.payload.get("activation")
+            if (event.type == "skill.activated" and isinstance(activation, dict)
+                    and activation.get("skill_activation_id") not in known):
+                active.append({"activation": activation, "binding": activation["binding"]})
+                known.add(activation.get("skill_activation_id"))
+        state["active_skills"] = active
+        for item in state.get("active_skills", ()):
+            if not isinstance(item, dict) or not isinstance(item.get("activation"), dict):
+                continue
+            activation = item["activation"]
+            relevant = [event for event in events if event.payload.get("skill_activation_id")
+                        == activation.get("skill_activation_id")]
+            activated = next((event for event in relevant if event.type == "skill.activated"), None)
+            if not item.get("workflow_deadline") and activated is not None:
+                item["workflow_deadline"] = (activated.occurred_at + timedelta(
+                    seconds=activation["binding"]["timeout_seconds"]
+                )).isoformat()
+            terminal = next((event for event in relevant if event.type in {
+                "skill.completed", "skill.failed", "skill.cancelled",
+            }), None)
+            if terminal is not None:
+                item["workflow_status"] = terminal.type.removeprefix("skill.")
+                item["workflow_error_code"] = terminal.payload.get("error")
+                if terminal.type == "skill.completed":
+                    try:
+                        output = json.loads(terminal.payload.get("output_summary", "{}"))
+                    except (ValueError, TypeError):
+                        output = {}
+                    saved_output = terminal.payload.get("workflow_output", output)
+                    item["workflow_output"] = saved_output if isinstance(saved_output, dict) else {}
+
     def terminal_events(self, state: dict[str, Any], output: str) -> tuple[NewEvent, ...]:
         events: list[NewEvent] = []
         for item in state.get("active_skills", ()):
@@ -735,7 +776,8 @@ class RuntimeCapabilityController:
             activation = item.get("activation")
             if not isinstance(activation, dict):
                 continue
-            if item.get("workflow_status") == "completed":
+            if (item.get("workflow_status") is not None
+                    or activation.get("binding", {}).get("resolved_workflow") is not None):
                 continue
             events.append(
                 NewEvent(
@@ -810,6 +852,13 @@ class RuntimeCapabilityController:
                 *(item.capability_id for item in binding.resolved_resources),
                 *(item.capability_id for item in binding.resolved_skills),
             ]
+            if existing.get("workflow_status") in {"failed", "cancelled"}:
+                return CapabilityExecution(
+                    result={"status": existing["workflow_status"],
+                            "error_code": existing.get("workflow_error_code", "workflow_terminal"),
+                            "skill_activation_id": activation.skill_activation_id},
+                    state=state,
+                )
             if existing.get("workflow_status") == "completed":
                 return CapabilityExecution(
                     result={
@@ -914,6 +963,16 @@ class RuntimeCapabilityController:
                 )
             )
 
+        if not events and progress is not None and binding.resolved_workflow is not None:
+            events.append(NewEvent(type="skill.activated", payload={
+                "skill_activation_id": activation.skill_activation_id,
+                "activation_key": activation.activation_key,
+                "skill_name": binding.skill_name, "skill_version": binding.skill_version,
+                "package_digest": binding.package_digest, "policy_version": binding.policy_version,
+                "policy_decision_id": binding.policy_decision_id,
+                "workflow_digest": binding.resolved_workflow.workflow_digest,
+                "activation": activation.model_dump(mode="json"),
+            }))
         if binding.resolved_workflow is None:
             return CapabilityExecution(
                 result={
@@ -928,6 +987,24 @@ class RuntimeCapabilityController:
             )
 
         assert existing is not None
+        absent = [key for key in dependency_ids if key not in state.get("loaded", {})]
+        if absent:
+            missing = await self._load_skill_dependencies(
+                assignment, state, absent, activation_call_id=call.tool_invocation_id
+            )
+            if missing:
+                return CapabilityExecution(
+                    result={"status": "denied", "error_code": "skill_dependency_load_failed",
+                            "missing_capability_ids": missing}, state=state, events=tuple(events),
+                )
+        if not existing.get("workflow_deadline"):
+            existing["workflow_deadline"] = (
+                datetime.now(UTC) + timedelta(seconds=binding.timeout_seconds)
+            ).isoformat()
+        # Commit activation first, then checkpoint its deadline before any I/O.
+        if progress is not None:
+            await progress(state, tuple(events))
+            events.clear()
 
         async def checkpoint_workflow(step: WorkflowStepProgress) -> None:
             assert existing is not None
@@ -935,7 +1012,7 @@ class RuntimeCapabilityController:
             existing["workflow_next_step_index"] = step.next_step_index
             existing["workflow_completed_steps"] = list(step.completed_steps)
             if progress is not None:
-                await progress(state)
+                await progress(state, ())
 
         workflow_result = await self._workflow_executor.execute(
             assignment,
@@ -959,6 +1036,10 @@ class RuntimeCapabilityController:
             ),
             start_step_index=int(existing.get("workflow_next_step_index", 0)),
             on_progress=checkpoint_workflow,
+            completed_steps=tuple(existing.get("workflow_completed_steps", ())),
+            deadline=datetime.fromisoformat(str(existing["workflow_deadline"])),
+            pending_invocation_id=(existing.get("workflow_pending_invocation_id")
+                                   if existing.get("workflow_status") == "unknown" else None),
         )
         metrics = self._workflow_metrics.setdefault(self._run_key(assignment), {})
         metrics["skill.workflow.activation.count"] = (
@@ -989,18 +1070,34 @@ class RuntimeCapabilityController:
                 state=state,
                 events=tuple(events),
             )
+        existing["workflow_error_code"] = workflow_result.error_code
+        if workflow_result.status == "unknown":
+            existing["workflow_pending_step"] = workflow_result.pending_step_id
+            existing["workflow_pending_invocation_id"] = workflow_result.pending_invocation_id
+            return CapabilityExecution(
+                result={"status": "unknown", "error_code": workflow_result.error_code,
+                        "skill_activation_id": activation.skill_activation_id,
+                        "pending_invocation_id": workflow_result.pending_invocation_id},
+                state=state, events=tuple(events),
+            )
         existing.pop("workflow_pending_step", None)
         existing.pop("workflow_pending_invocation_id", None)
-        if workflow_result.status == "failed":
+        if workflow_result.status == "completed":
+            try:
+                _validate_object(workflow_result.output, dict(contract.get("output_schema", {})))
+            except (SchemaValidationError, ValueError):
+                existing["workflow_status"] = "failed"
+                existing["workflow_error_code"] = "workflow_output_invalid"
+        if existing["workflow_status"] in {"failed", "cancelled"}:
             events.append(
                 NewEvent(
-                    type="skill.failed",
+                    type=f"skill.{existing['workflow_status']}",
                     payload={
                         "skill_activation_id": activation.skill_activation_id,
                         "skill_name": binding.skill_name,
                         "package_digest": binding.package_digest,
                         "workflow_digest": binding.resolved_workflow.workflow_digest,
-                        "error": workflow_result.error_code,
+                        "error": existing["workflow_error_code"],
                         "steps_completed": len(workflow_result.completed_steps),
                     },
                 )
@@ -1008,16 +1105,12 @@ class RuntimeCapabilityController:
             return CapabilityExecution(
                 result={
                     "status": "error",
-                    "error_code": workflow_result.error_code,
+                    "error_code": existing["workflow_error_code"],
                     "skill_activation_id": activation.skill_activation_id,
                 },
                 state=state,
                 events=tuple(events),
             )
-        _validate_object(
-            workflow_result.output,
-            dict(contract.get("output_schema", {})),
-        )
         existing["workflow_output"] = workflow_result.output
         existing.pop("workflow_state", None)
         existing.pop("workflow_next_step_index", None)
@@ -1033,6 +1126,7 @@ class RuntimeCapabilityController:
                     "policy_version": binding.policy_version,
                     "policy_decision_id": binding.policy_decision_id,
                     "workflow_digest": binding.resolved_workflow.workflow_digest,
+                    "workflow_output": workflow_result.output,
                     "output_summary": json.dumps(
                         workflow_result.output,
                         sort_keys=True,

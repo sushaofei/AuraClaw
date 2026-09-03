@@ -1340,3 +1340,47 @@ def test_real_mcp_skill_search_load_resolve_and_instruction_activation() -> None
         assert "signed release checklist" in messages[0]["content"]
 
     asyncio.run(scenario())
+
+
+def test_unknown_workflow_result_suspends_without_terminal_or_another_model_turn() -> None:
+    from auraclaw.runtime.capability_controller import CapabilityExecution
+
+    class PendingWorkflowController(RuntimeCapabilityController):
+        async def _activate_skill(self, assignment, call, state, *, progress):
+            result = await super()._activate_skill(assignment, call, state, progress=progress)
+            result.state["active_skills"][0]["workflow_status"] = "unknown"
+            return CapabilityExecution(
+                result={"status": "unknown", "skill_activation_id": "pending-activation",
+                        "pending_invocation_id": "original-write"},
+                state=result.state, events=result.events,
+            )
+
+    async def scenario() -> None:
+        capabilities = _Capabilities(kind="skill")
+        model = _ScriptedModel([
+            _response("", ToolCall(tool_invocation_id="pending-search",
+                name="auraclaw.capabilities.search", arguments={"query": "release"})),
+            _response("", ToolCall(tool_invocation_id="pending-load",
+                name="auraclaw.capabilities.load", arguments={"capability_ids": ["cap-one"]})),
+            _response("", ToolCall(tool_invocation_id="pending-activate",
+                name="auraclaw.skills.activate", arguments={"capability_id": "cap-one"})),
+            _response("must not generate"),
+        ])
+        control, session = _Control(), _Session("Run a workflow")
+        harness = AgentHarness(control_store=control, session=session, model=model,
+                               tools=capabilities, runtime_events=_RuntimeEvents(),
+                               capability_controller=PendingWorkflowController(capabilities))
+        await harness.execute(_assignment())
+        assert control.suspended_reason == "waiting_for_tool"
+        assert control.outcome is None
+        assert control.checkpoint.phase == "capability.workflow_running"
+        assert control.checkpoint.state["result"]["pending_invocation_id"] == "original-write"
+        steps = control.checkpoint.state["steps_used"]
+        for _ in range(5):
+            await harness.execute(_assignment())
+            assert control.outcome is None
+            assert control.checkpoint.state["steps_used"] == steps
+        assert len(model.requests) == 3
+        assert not any(event.type in {"skill.completed", "run.completed"}
+                       for event in session.events)
+    asyncio.run(scenario())

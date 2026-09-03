@@ -155,7 +155,7 @@ def test_postgres_control_claim_lease_fencing_checkpoint_and_capacity() -> None:
                 lease_id=lease.lease_id,
                 fencing_token=lease.fencing_token,
                 role="root",
-                resource_profile={},
+                resource_profile={}, user_id="user-a", dept_id="dept-a",
             )
             assert await store_a.assign(
                 task_id,
@@ -222,6 +222,11 @@ def test_postgres_control_claim_lease_fencing_checkpoint_and_capacity() -> None:
             assert len(waiting) == 1
             assert waiting[0].session_id == assignment.session_id
             assert waiting[0].run_id == assignment.run_id
+            assert await store_b.wake_assignment(task_id)
+            await store_a.suspend_assignment(task_id, "waiting_for_tool")
+            restored_identity = await store_b.get_assignment(task_id)
+            assert restored_identity is not None
+            assert (restored_identity.user_id, restored_identity.dept_id) == ("user-a", "dept-a")
             assert await store_b.wake_assignment(task_id)
         finally:
             await store_a.close()
@@ -398,4 +403,69 @@ def test_postgres_runnable_feed_and_two_orchestrators_schedule_exactly_once() ->
             finally:
                 await connection.close()
 
+    asyncio.run(scenario())
+
+
+def test_postgres_skill_terminal_is_exclusive_across_committers_and_restart() -> None:
+    from auraclaw.runtime.event_committer import CanonicalEventCommitter
+
+    async def scenario() -> None:
+        assert DATABASE_URL is not None
+        suffix = uuid4().hex
+        assignment = RuntimeAssignment(
+            tenant_id=f"terminal-{suffix}", root_session_id="root", session_id="session",
+            run_id="run", runtime_id="runtime", lease_id="lease", fencing_token=1,
+            role="worker", resource_profile={},
+        )
+        first, second = PostgresEventStore(DATABASE_URL), PostgresEventStore(DATABASE_URL)
+
+        class Session:
+            def __init__(self, store):
+                self.store = store
+
+            async def load(self, assignment):
+                return await self.store.load(assignment.tenant_id, assignment.session_id)
+
+            async def append(self, assignment, events, *, command_id, operation,
+                             expected_version=None):
+                result = await self.store.append(
+                    root_session_id=assignment.root_session_id, session_id=assignment.session_id,
+                    run_id=assignment.run_id, events=events, command_result={},
+                    context=CommandContext(
+                        command_id=command_id, operation=operation, tenant_id=assignment.tenant_id,
+                        actor=Actor(type="runtime", id="runtime"), correlation_id="terminal-test",
+                        causation_id="test", expected_version=expected_version or 0,
+                    ),
+                )
+                return result.events
+
+        class Guard:
+            async def check(self, assignment):
+                pass
+
+        try:
+            a = CanonicalEventCommitter(Session(first), Guard())
+            b = CanonicalEventCommitter(Session(second), Guard())
+            await a.append_capability_event(assignment, NewEvent(
+                type="skill.failed", payload={"skill_activation_id": "activation"},
+            ))
+            # A stale checkpoint/chat completion cannot overwrite the canonical failure.
+            await asyncio.gather(*(b.append_capability_event(assignment, NewEvent(
+                type=kind, payload={"skill_activation_id": "activation"},
+            )) for kind in ("skill.failed", "skill.completed", "skill.cancelled")))
+            events = await first.load(assignment.tenant_id, assignment.session_id)
+            assert [event.type for event in events] == ["skill.failed"]
+        finally:
+            await first.close()
+            await second.close()
+            connection = await asyncpg.connect(DATABASE_URL)
+            await connection.execute(
+                "DELETE FROM session_core.outbox WHERE event_id IN "
+                "(SELECT event_id FROM session_core.canonical_event WHERE tenant_id=$1)",
+                assignment.tenant_id,
+            )
+            for table in ("canonical_event", "command_dedup", "session_head"):
+                await connection.execute(f"DELETE FROM session_core.{table} WHERE tenant_id=$1",
+                                         assignment.tenant_id)
+            await connection.close()
     asyncio.run(scenario())

@@ -203,6 +203,7 @@ class InMemoryControlStateStore:
                 "failed",
                 "waiting_children",
                 "waiting_for_human",
+                "waiting_for_tool",
             }:
                 return False
             self._assignments[task_id] = (assignment, "assigned")
@@ -360,6 +361,7 @@ class InMemoryControlStateStore:
                 "cancelled",
                 "waiting_children",
                 "waiting_for_human",
+                "waiting_for_tool",
             }:
                 return True
             resource_id = f"session:{assignment.tenant_id}:{assignment.session_id}"
@@ -389,6 +391,7 @@ class InMemoryControlStateStore:
                     "cancelled",
                     "waiting_children",
                     "waiting_for_human",
+                    "waiting_for_tool",
                 }:
                     self._assignment_started_at.pop(task_id, None)
                     resource_id = f"session:{assignment.tenant_id}:{assignment.session_id}"
@@ -400,7 +403,7 @@ class InMemoryControlStateStore:
                 self._queue[task_id] = (queued[0], "acked", queued[2])
 
     async def suspend_assignment(self, task_id: str, reason: str) -> None:
-        if reason not in {"waiting_children", "waiting_for_human"}:
+        if reason not in {"waiting_children", "waiting_for_human", "waiting_for_tool"}:
             raise ValueError(f"unsupported assignment suspension: {reason}")
         await self.finish_assignment(task_id, reason)
 
@@ -410,7 +413,7 @@ class InMemoryControlStateStore:
         checkpoint: RuntimeCheckpoint,
         reason: str,
     ) -> None:
-        if reason not in {"waiting_children", "waiting_for_human"}:
+        if reason not in {"waiting_children", "waiting_for_human", "waiting_for_tool"}:
             raise ValueError(f"unsupported assignment suspension: {reason}")
         async with self._lock:
             entry = self._assignments.get(task_id)
@@ -443,7 +446,7 @@ class InMemoryControlStateStore:
             queued = self._queue.get(task_id)
             if (
                 entry is None
-                or entry[1] not in {"waiting_children", "waiting_for_human"}
+                or entry[1] not in {"waiting_children", "waiting_for_human", "waiting_for_tool"}
                 or queued is None
             ):
                 return False

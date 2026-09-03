@@ -3309,3 +3309,17 @@ Ruff、Mypy（248 文件）、10 条架构合同通过。迁移不适用，部�
 
 正式调用链与 PostgreSQL 集成 8 passed，契约/身份 30 passed，审批等相关回归 66 passed。
 实际部署尚未执行；网络推送状态以 Git/issue 交付记录为准。
+
+
+## Skill / MCP 修复 C：工作流状态与预算（Issue #96）
+
+- [x] 显式成功推进；失败/取消互斥终态，未知写调用保留原 ID 并暂停分配。
+- [x] Resource 的 timeout/retry 生效，workflow/reference/backoff 共用固定总 deadline。
+- [x] deadline 在执行前保存，审批与重启不重置预算；输出校验失败不会完成。
+- [x] 声明式工作流不由聊天终结补 completed；Canonical 终态去重和 checkpoint 恢复接入。
+- [x] 内存/PostgreSQL 的 waiting_for_tool 暂停/唤醒、身份恢复、终态及 invocation 跨副本集成通过（9 passed）。
+- [x] 状态矩阵、真实 Resource 超时、未知写不重放和模型暂停路径回归通过。
+- [x] Ruff、Mypy（248 文件）、10 条架构合同通过；无 DDL 迁移，升级/恢复文档同步。
+- [x] 提交范围不含无关文件/秘密；现场部署、自动恢复与 #94 在途清理联合验收继续跟进，issue 不关闭。
+
+全量 624 passed / 54 skipped；多次未知调用唤醒专项回归另行通过。部署前参见 [工作流恢复](../operations/skill-workflow-recovery.md)。
