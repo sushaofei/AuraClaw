@@ -40,6 +40,8 @@ from auraclaw.contracts.tools import (
 )
 
 _NAME = re.compile(r"^[A-Za-z0-9_.:/{}-]{1,256}$")
+MAX_DESCRIPTOR_DEPTH = 64
+MAX_DESCRIPTOR_BYTES = 256 * 1024
 
 
 class ResourceCacheInvalidator(Protocol):
@@ -59,6 +61,14 @@ CapabilityReconcileResult = McpReconcileResult
 
 
 class CapabilitySchemaDriftError(ValueError):
+    pass
+
+
+class CapabilityDescriptorDepthError(ValueError):
+    pass
+
+
+class CapabilityDescriptorSizeError(ValueError):
     pass
 
 
@@ -757,26 +767,32 @@ def _prefix_allowed(value: str, prefixes: tuple[str, ...]) -> bool:
 
 
 def _digest(value: dict[str, Any]) -> str:
-    encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
-    if len(encoded) > 256 * 1024:
-        raise ValueError("remote MCP descriptor exceeds size limit")
+    # JSON Schema properties/items add structural levels beyond the business
+    # object's depth. Validate iteratively before serializing untrusted data.
     _validate_depth(value, depth=0)
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    if len(encoded) > MAX_DESCRIPTOR_BYTES:
+        raise CapabilityDescriptorSizeError("remote MCP descriptor exceeds size limit")
     return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
 
 
 def _validate_depth(value: Any, *, depth: int) -> None:
-    if depth > 16:
-        raise ValueError("remote MCP descriptor exceeds recursion limit")
-    if isinstance(value, dict):
-        for key, item in value.items():
-            if not isinstance(key, str) or len(key) > 256:
-                raise ValueError("remote MCP descriptor key is invalid")
-            _validate_depth(item, depth=depth + 1)
-    elif isinstance(value, list):
-        for item in value:
-            _validate_depth(item, depth=depth + 1)
-    elif value is not None and not isinstance(value, (str, int, float, bool)):
-        raise ValueError("remote MCP descriptor contains unsupported data")
+    pending = [(value, depth)]
+    while pending:
+        current, current_depth = pending.pop()
+        if current_depth > MAX_DESCRIPTOR_DEPTH:
+            raise CapabilityDescriptorDepthError(
+                "remote MCP descriptor exceeds recursion limit"
+            )
+        if isinstance(current, dict):
+            for key, item in current.items():
+                if not isinstance(key, str) or len(key) > 256:
+                    raise ValueError("remote MCP descriptor key is invalid")
+                pending.append((item, current_depth + 1))
+        elif isinstance(current, list):
+            pending.extend((item, current_depth + 1) for item in current)
+        elif current is not None and not isinstance(current, (str, int, float, bool)):
+            raise ValueError("remote MCP descriptor contains unsupported data")
 
 
 def _executor_payload(result: HandsToolResult) -> dict[str, object]:

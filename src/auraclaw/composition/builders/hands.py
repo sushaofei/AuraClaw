@@ -626,11 +626,24 @@ def build_action_hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
             ServiceIdentity.ACTION_HANDS,
         ),
     )
+
+    class AppStateMcpCapabilityTester:
+        async def test_capability(self, **kwargs: Any) -> dict[str, Any]:
+            active_manager = getattr(app.state, "mcp_connection_manager", None)
+            if active_manager is None:
+                raise RuntimeError("MCP connection manager is not initialized")
+            return dict(await active_manager.test_capability(**kwargs))
+
     app.mount(
         "/internal/v1/mcp-registry",
         create_contract_app(
             "action-hands-mcp-registry",
-            mcp_registry_routes(McpRegistryInternalService(mcp_registry)),
+            mcp_registry_routes(
+                McpRegistryInternalService(
+                    mcp_registry,
+                    capability_tester=AppStateMcpCapabilityTester(),
+                )
+            ),
             workload_identities=mcp_identities,
         ),
     )

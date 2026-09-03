@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections.abc import Callable, MutableMapping
 from datetime import UTC, datetime
+from time import monotonic
 from typing import Any, Protocol
 from urllib.parse import urlsplit
+from uuid import uuid4
 
 from auraclaw.action.bounded import bounded_partition_map
 from auraclaw.action.capability_catalog import CapabilityCatalog
@@ -15,8 +18,20 @@ from auraclaw.action.catalog_reconciler import (
 )
 from auraclaw.action.mcp_registry import McpServerRegistryService
 from auraclaw.action.ports import CapabilityConnector
-from auraclaw.contracts.capabilities import CapabilityStatus, McpServerDefinition
-from auraclaw.contracts.errors import AuraClawError
+from auraclaw.action.tool_gateway import JsonSchemaValidator
+from auraclaw.contracts.capabilities import (
+    CapabilityKind,
+    CapabilityStatus,
+    McpServerDefinition,
+)
+from auraclaw.contracts.errors import (
+    AuraClawError,
+    AuthorizationError,
+    InvalidTransitionError,
+    NotFoundError,
+    SchemaValidationError,
+)
+from auraclaw.contracts.hands import HandsTrustedContext
 from auraclaw.contracts.mcp_registry import (
     McpActiveSnapshotEntry,
     McpDesiredState,
@@ -120,6 +135,122 @@ class McpConnectionManager:
         if self._egress is not None and not keep_egress:
             await self._egress.revoke(entry.server_id)
         await self._record_tested(entry)
+
+    async def test_capability(
+        self,
+        *,
+        tenant_id: str,
+        actor_id: str,
+        dept_id: str | None,
+        server_id: str,
+        capability_id: str,
+        input_payload: dict[str, Any],
+        expected_output: Any = None,
+    ) -> dict[str, Any]:
+        """Run an explicit, read-only capability probe through the managed connector."""
+        if self._catalog is None:
+            raise NotFoundError("MCP capability catalog is unavailable")
+        capability = await self._catalog.get(
+            tenant_id=tenant_id, capability_id=capability_id
+        )
+        if capability is None or capability.server_id != server_id:
+            raise NotFoundError("MCP capability was not found")
+        connector = self._connectors.get(server_id)
+        if connector is None:
+            raise InvalidTransitionError("MCP server is not active on this runtime")
+
+        source = capability.metadata.get("source")
+        source = source if isinstance(source, dict) else {}
+        trusted = HandsTrustedContext(
+            tenant_id=tenant_id,
+            root_session_id="mcp-capability-test",
+            session_id="mcp-capability-test",
+            run_id=f"mcp-capability-test-{uuid4()}",
+            runtime_id=self._instance_id,
+            lease_id="mcp-capability-test",
+            fencing_token=1,
+            user_id=actor_id,
+            dept_id=dept_id,
+        )
+        started = monotonic()
+        schema_valid: bool | None = None
+        error: str | None = None
+
+        if capability.kind is CapabilityKind.TOOL:
+            if capability.permission != "read-only":
+                raise AuthorizationError(
+                    "Only read-only MCP tools can be invoked from capability tests"
+                )
+            input_schema = source.get("inputSchema")
+            if isinstance(input_schema, dict):
+                JsonSchemaValidator.validate(input_payload, input_schema)
+            result = await connector.call_tool(
+                trusted,
+                name=capability.canonical_name,
+                arguments=input_payload,
+                invocation_id=f"mcp-test-{uuid4()}",
+            )
+            output: Any = result.content
+            if output is None:
+                output = result.as_dict()
+            if result.status != "success":
+                error = result.summary or result.error_code or "MCP Tool returned an error"
+            output_schema = source.get("outputSchema")
+            if isinstance(output_schema, dict) and output_schema:
+                try:
+                    JsonSchemaValidator.validate(output, output_schema)
+                    schema_valid = True
+                except SchemaValidationError as exc:
+                    schema_valid = False
+                    error = exc.message
+        elif capability.kind in {
+            CapabilityKind.RESOURCE,
+            CapabilityKind.RESOURCE_TEMPLATE,
+        }:
+            configured_uri = source.get("uri")
+            uri = input_payload.get("uri", configured_uri)
+            if not isinstance(uri, str) or not uri:
+                raise SchemaValidationError(
+                    "Resource template tests require input.uri with a concrete URI"
+                )
+            if capability.kind is CapabilityKind.RESOURCE:
+                allowed = uri == configured_uri
+            else:
+                template = source.get("uri_template") or source.get("uriTemplate")
+                allowed = isinstance(template, str) and _matches_test_uri(template, uri)
+            if not allowed:
+                raise AuthorizationError(
+                    "Resource test URI must match the selected capability"
+                )
+            contents = await connector.read_resource(trusted, uri)
+            output = [item.model_dump(mode="json") for item in contents]
+        elif capability.kind is CapabilityKind.PROMPT:
+            if any(not isinstance(value, str) for value in input_payload.values()):
+                raise SchemaValidationError("Prompt test arguments must be strings")
+            prompt_result = await connector.get_prompt(
+                trusted,
+                capability.canonical_name,
+                arguments={key: str(value) for key, value in input_payload.items()},
+            )
+            output = prompt_result.model_dump(mode="json")
+        else:
+            raise InvalidTransitionError("This capability kind cannot be tested")
+
+        expectation_matched = (
+            None
+            if expected_output is None
+            else _contains_expected(output, expected_output)
+        )
+        passed = error is None and expectation_matched is not False
+        return {
+            "status": "passed" if passed else "failed",
+            "kind": capability.kind.value,
+            "output": output,
+            "schema_valid": schema_valid,
+            "expectation_matched": expectation_matched,
+            "duration_ms": max(0, round((monotonic() - started) * 1000)),
+            "error": error,
+        }
 
     async def apply(
         self,
@@ -419,3 +550,28 @@ def _probe_context(entry: McpActiveSnapshotEntry) -> Any:
         deadline=None,
         user_id="mcp-admin",
     )
+
+
+def _contains_expected(actual: Any, expected: Any) -> bool:
+    """Return whether actual contains the expected JSON fragment recursively."""
+    if isinstance(expected, dict):
+        return isinstance(actual, dict) and all(
+            key in actual and _contains_expected(actual[key], value)
+            for key, value in expected.items()
+        )
+    if isinstance(expected, list):
+        return isinstance(actual, list) and len(actual) >= len(expected) and all(
+            _contains_expected(actual[index], value)
+            for index, value in enumerate(expected)
+        )
+    # JSON booleans must not compare equal to numbers (True == 1 in Python).
+    if isinstance(actual, bool) != isinstance(expected, bool):
+        return False
+    return bool(actual == expected)
+
+
+def _matches_test_uri(template: str, uri: str) -> bool:
+    """Support simple path variables; reject other URI-template operators."""
+    escaped = re.escape(template)
+    pattern = re.sub(r"\\\{[A-Za-z0-9_.-]+\\\}", r"[^/?#]+", escaped)
+    return re.fullmatch(pattern, uri) is not None

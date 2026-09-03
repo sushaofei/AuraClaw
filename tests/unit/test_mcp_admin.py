@@ -93,7 +93,19 @@ def _seed() -> tuple[McpServerRegistryService, CapabilityCatalog]:
                     description="Create a governed order",
                     tenant_id="tenant-a",
                     status=CapabilityStatus.ACTIVE,
+                    permission="write-with-approval",
+                    risk_level="medium",
                     updated_at=datetime.now(UTC),
+                    metadata={
+                        "source": {
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {"order_id": {"type": "string"}},
+                                "required": ["order_id"],
+                            },
+                            "outputSchema": {"type": "object"},
+                        }
+                    },
                 ),
                 CapabilityDescriptor(
                     capability_id="cap-order-docs",
@@ -105,7 +117,40 @@ def _seed() -> tuple[McpServerRegistryService, CapabilityCatalog]:
                     title="Order docs",
                     tenant_id="tenant-a",
                     status=CapabilityStatus.ACTIVE,
+                    permission="read-only",
                     updated_at=datetime.now(UTC),
+                    metadata={
+                        "source": {
+                            "name": "docs",
+                            "uri": "order://docs",
+                            "mime_type": "text/markdown",
+                        }
+                    },
+                ),
+                CapabilityDescriptor(
+                    capability_id="cap-order-review",
+                    kind=CapabilityKind.PROMPT,
+                    server_id="local-order-mcp",
+                    canonical_name="order.review",
+                    version="1",
+                    content_digest="sha256:order.review",
+                    title="Review order",
+                    tenant_id="tenant-a",
+                    status=CapabilityStatus.ACTIVE,
+                    permission="read-only",
+                    updated_at=datetime.now(UTC),
+                    metadata={
+                        "source": {
+                            "name": "order.review",
+                            "arguments": [
+                                {
+                                    "name": "order_id",
+                                    "description": "Order identifier",
+                                    "required": True,
+                                }
+                            ],
+                        }
+                    },
                 ),
             ),
         )
@@ -138,6 +183,89 @@ def test_mcp_admin_lists_catalogued_tools() -> None:
             headers={"X-Tenant-ID": "other", "X-Actor-ID": "admin-2"},
         )
         assert outsider.status_code == 403
+
+
+def test_mcp_admin_lists_groupable_capabilities_with_schemas() -> None:
+    registry, catalog = _seed()
+    app = _task_app()
+    app.include_router(create_mcp_admin_router(registry, catalog=catalog))
+    app.state.config_ready = True
+    headers = {"X-Tenant-ID": "tenant-a", "X-Actor-ID": "admin-1"}
+    with TestClient(app) as client:
+        listed = client.get(
+            "/v1/admin/mcp-servers/local-order-mcp/capabilities",
+            headers=headers,
+        )
+        assert listed.status_code == 200, listed.text
+        capabilities = listed.json()["capabilities"]
+        assert [item["kind"] for item in capabilities] == [
+            "tool",
+            "resource",
+            "prompt",
+        ]
+        tool = next(item for item in capabilities if item["kind"] == "tool")
+        assert tool["input_schema"]["required"] == ["order_id"]
+        assert tool["output_schema"] == {"type": "object"}
+        assert tool["read_only"] is False
+        assert tool["enabled"] is True
+        resource = next(item for item in capabilities if item["kind"] == "resource")
+        assert resource["uri"] == "order://docs"
+        prompt = next(item for item in capabilities if item["kind"] == "prompt")
+        assert prompt["arguments"][0]["name"] == "order_id"
+
+
+def test_mcp_admin_invokes_capability_test_with_simulated_input() -> None:
+    registry, catalog = _seed()
+
+    class CapabilityTestOps:
+        def __getattr__(self, name: str) -> object:
+            return getattr(registry, name)
+
+        async def test_capability(self, **kwargs: object) -> dict[str, object]:
+            assert kwargs["tenant_id"] == "tenant-a"
+            assert kwargs["actor_id"] == "admin-1"
+            assert kwargs["dept_id"] == "dept-a"
+            assert kwargs["server_id"] == "local-order-mcp"
+            assert kwargs["capability_id"] == "cap-order-create"
+            assert kwargs["input_payload"] == {"order_id": "order-42"}
+            assert kwargs["expected_output"] == {"accepted": True}
+            return {
+                "status": "passed",
+                "kind": "tool",
+                "output": {"accepted": True, "order_id": "order-42"},
+                "schema_valid": True,
+                "expectation_matched": True,
+                "duration_ms": 7,
+                "error": None,
+            }
+
+    app = _task_app()
+    app.include_router(
+        create_mcp_admin_router(
+            registry,
+            lifecycle=CapabilityTestOps(),  # type: ignore[arg-type]
+            catalog=catalog,
+        )
+    )
+    app.state.config_ready = True
+    headers = {
+        "X-Tenant-ID": "tenant-a",
+        "X-Actor-ID": "admin-1",
+        "X-Dept-ID": "dept-a",
+    }
+    with TestClient(app) as client:
+        tested = client.post(
+            "/v1/admin/mcp-servers/local-order-mcp/capabilities/cap-order-create:test",
+            headers=headers,
+            json={
+                "input": {"order_id": "order-42"},
+                "expected_output": {"accepted": True},
+            },
+        )
+    assert tested.status_code == 200, tested.text
+    assert tested.json()["status"] == "passed"
+    assert tested.json()["schema_valid"] is True
+    assert tested.json()["expectation_matched"] is True
 
 
 def test_mcp_admin_hard_deletes_server_via_gateway_alias() -> None:
