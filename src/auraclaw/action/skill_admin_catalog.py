@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
+from auraclaw.action.skill_availability import skill_availability as skill_availability
 from auraclaw.action.skill_packages import skill_capability_descriptor
 from auraclaw.contracts.capabilities import CapabilityDescriptor
 from auraclaw.contracts.errors import VersionConflictError
@@ -156,19 +157,6 @@ def published_skill(
         status=publication.status,
         revocation_action=publication.revocation_action,
     )
-
-
-def skill_availability(
-    publication: PublishedSkill,
-    installation: SkillInstallationRecord | None,
-) -> str:
-    if publication.status.value != "active":
-        return "publication_unavailable"
-    if installation is None:
-        return "not_installed"
-    if installation.status.value != "active":
-        return f"installation_{installation.status.value}"
-    return "available"
 
 
 def semver_key(version: str) -> tuple[int, int, int]:
