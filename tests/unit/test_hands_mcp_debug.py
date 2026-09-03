@@ -94,7 +94,6 @@ def test_policy_allows_mcp_remote_invoke_without_tool_permission() -> None:
                 attributes={
                     "method": "server/discover",
                     "server_id": "java-mcp",
-                    "trust_level": "tenant_verified",
                 },
             )
         )
@@ -106,8 +105,7 @@ def test_policy_allows_mcp_remote_invoke_without_tool_permission() -> None:
 
 def test_debug_mcp_credential_scope_matches_egress_adapter() -> None:
     from auraclaw.contracts.capabilities import (
-        CapabilityTrustLevel,
-        McpAuthStrategy,
+            McpAuthStrategy,
         McpNetworkMode,
     )
     from auraclaw.contracts.mcp_registry import (
@@ -129,7 +127,6 @@ def test_debug_mcp_credential_scope_matches_egress_adapter() -> None:
             network_mode=McpNetworkMode.LOOPBACK,
             auth_strategy=McpAuthStrategy.WORKLOAD_TRUSTED_CONTEXT,
             credential_ref="vault/java-mcp#client_secret",
-            trust_level=CapabilityTrustLevel.TENANT_VERIFIED,
             allowed_tool_prefixes=("",),
         )
         proxy = CredentialProxy(

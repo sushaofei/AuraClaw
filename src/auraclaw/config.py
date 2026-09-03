@@ -331,7 +331,6 @@ class Settings(BaseSettings):
         default=60.0, gt=0.0, le=3600.0
     )
     mcp_allow_private_auth_none: bool | None = None
-    mcp_trust_remote_tool_annotations: bool = False
     skill_signing_key: SecretStr | None = None
     skill_admission_retention_days: int = Field(default=365, ge=30, le=3650)
     skill_admission_cleanup_interval_seconds: float = Field(

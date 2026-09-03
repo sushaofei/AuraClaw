@@ -22,7 +22,6 @@ from auraclaw.action.skill_packages import (
 from auraclaw.action.skill_publishers import SkillPublisherTrustService
 from auraclaw.contracts.capabilities import (
     CapabilityStatus,
-    CapabilityTrustLevel,
     McpServerDefinition,
 )
 from auraclaw.contracts.observability import MetricPoint
@@ -332,7 +331,6 @@ def _skill_server(tenant_id: str) -> McpServerDefinition:
         title="AuraClaw Skill Registry",
         endpoint="https://skill-registry.auraclaw.invalid/mcp",
         credential_ref="internal://action-hands/skill-registry",
-        trust_level=CapabilityTrustLevel.TENANT_VERIFIED,
         status=CapabilityStatus.ACTIVE,
         enabled=True,
         metadata={"managed_source": "skill-lifecycle"},

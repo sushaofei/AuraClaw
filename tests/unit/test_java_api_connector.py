@@ -18,7 +18,6 @@ from auraclaw.action.ports import PolicyEvaluation
 from auraclaw.action.tool_gateway import ToolGateway, ToolRegistry
 from auraclaw.contracts.capabilities import (
     CapabilityStatus,
-    CapabilityTrustLevel,
     JavaApiArgumentBinding,
     JavaApiOperationDefinition,
     JavaApiServerDefinition,
@@ -92,7 +91,6 @@ def _server() -> JavaApiServerDefinition:
         title="Inventory Java API",
         base_url="https://inventory.example/api",
         credential_ref="vault/inventory#token",
-        trust_level=CapabilityTrustLevel.TENANT_VERIFIED,
         operations=(
             JavaApiOperationDefinition(
                 operation_id="get-sku",

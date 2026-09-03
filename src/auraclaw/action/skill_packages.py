@@ -25,7 +25,6 @@ from auraclaw.contracts.capabilities import (
     CapabilityDescriptor,
     CapabilityKind,
     CapabilityStatus,
-    CapabilityTrustLevel,
 )
 from auraclaw.contracts.errors import (
     NotFoundError,
@@ -1286,7 +1285,6 @@ def skill_capability_descriptor(
         description=manifest.description,
         tags=tuple(manifest.applies_when),
         tenant_id=publication.tenant_id,
-        trust_level=CapabilityTrustLevel.TENANT_VERIFIED,
         classification=manifest.data_classification,
         permission="read-only",
         risk_level=manifest.risk_level,

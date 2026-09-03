@@ -22,7 +22,6 @@ from auraclaw.contracts.capabilities import (
     CapabilityDescriptor,
     CapabilityKind,
     CapabilityStatus,
-    CapabilityTrustLevel,
     McpServerDefinition,
 )
 from auraclaw.contracts.mcp_registry import McpServerConfig, McpServerWriteCommand
@@ -66,7 +65,6 @@ def _seed() -> tuple[McpServerRegistryService, CapabilityCatalog]:
                         "network_mode": "loopback",
                         "auth_strategy": "none",
                         "allowed_tool_prefixes": ("order.",),
-                        "trust_level": "tenant_verified",
                     }
                 ),
             )
@@ -77,7 +75,6 @@ def _seed() -> tuple[McpServerRegistryService, CapabilityCatalog]:
                 tenant_id="tenant-a",
                 title="Local Order MCP",
                 endpoint="https://order.example/mcp",
-                trust_level=CapabilityTrustLevel.TENANT_VERIFIED,
                 status=CapabilityStatus.QUARANTINED,
                 enabled=False,
             )
@@ -95,7 +92,6 @@ def _seed() -> tuple[McpServerRegistryService, CapabilityCatalog]:
                     title="Create order",
                     description="Create a governed order",
                     tenant_id="tenant-a",
-                    trust_level=CapabilityTrustLevel.TENANT_VERIFIED,
                     status=CapabilityStatus.ACTIVE,
                     updated_at=datetime.now(UTC),
                 ),
@@ -108,7 +104,6 @@ def _seed() -> tuple[McpServerRegistryService, CapabilityCatalog]:
                     content_digest="sha256:order.docs",
                     title="Order docs",
                     tenant_id="tenant-a",
-                    trust_level=CapabilityTrustLevel.TENANT_VERIFIED,
                     status=CapabilityStatus.ACTIVE,
                     updated_at=datetime.now(UTC),
                 ),

@@ -10,7 +10,6 @@ from pydantic import Field, model_validator
 
 from auraclaw.contracts.capabilities import (
     CapabilityStatus,
-    CapabilityTrustLevel,
     McpAuthStrategy,
     McpNetworkMode,
     McpOAuthConfiguration,
@@ -71,7 +70,6 @@ class McpServerConfig(ContractModel):
     allowed_resource_schemes: tuple[str, ...] = ()
     allowed_prompt_prefixes: tuple[str, ...] = ()
     allowed_cidrs: tuple[str, ...] = ()
-    trust_level: CapabilityTrustLevel = CapabilityTrustLevel.EXTERNAL_UNTRUSTED
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
@@ -142,7 +140,6 @@ class McpServerConfig(ContractModel):
             credential_ref=credential_ref,
             oauth=self.oauth,
             auth_strategy=self.auth_strategy,
-            trust_level=self.trust_level,
             allowed_tool_prefixes=self.allowed_tool_prefixes,
             allowed_resource_schemes=self.allowed_resource_schemes,
             allowed_prompt_prefixes=self.allowed_prompt_prefixes,

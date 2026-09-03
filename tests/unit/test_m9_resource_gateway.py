@@ -20,7 +20,6 @@ from auraclaw.contracts.capabilities import (
     CapabilityDescriptor,
     CapabilityKind,
     CapabilityStatus,
-    CapabilityTrustLevel,
     McpServerDefinition,
 )
 from auraclaw.contracts.errors import PolicyDeniedError
@@ -241,7 +240,6 @@ def test_resource_gateway_routes_catalog_resource_to_live_connector() -> None:
             tenant_id="tenant-a",
             title="Remote",
             endpoint="https://remote.example/mcp",
-            trust_level=CapabilityTrustLevel.TENANT_VERIFIED,
             status=CapabilityStatus.ACTIVE,
             enabled=True,
         )
@@ -255,7 +253,6 @@ def test_resource_gateway_routes_catalog_resource_to_live_connector() -> None:
             content_digest=f"sha256:{'a' * 64}",
             title="release",
             tenant_id="tenant-a",
-            trust_level=CapabilityTrustLevel.TENANT_VERIFIED,
             permission="read-only",
             risk_level="low",
             status=CapabilityStatus.ACTIVE,
@@ -303,7 +300,6 @@ def test_catalog_hides_skills_when_dependency_server_is_quarantined() -> None:
             tenant_id="tenant-a",
             title="Tool server",
             endpoint="https://tools.example/mcp",
-            trust_level=CapabilityTrustLevel.TENANT_VERIFIED,
             status=CapabilityStatus.ACTIVE,
             enabled=True,
         )
@@ -312,7 +308,6 @@ def test_catalog_hides_skills_when_dependency_server_is_quarantined() -> None:
             tenant_id="tenant-a",
             title="Skill registry",
             endpoint="https://skills.example/mcp",
-            trust_level=CapabilityTrustLevel.TENANT_VERIFIED,
             status=CapabilityStatus.ACTIVE,
             enabled=True,
         )
@@ -327,7 +322,6 @@ def test_catalog_hides_skills_when_dependency_server_is_quarantined() -> None:
             content_digest=f"sha256:{'b' * 64}",
             title="Price insight",
             tenant_id="tenant-a",
-            trust_level=CapabilityTrustLevel.TENANT_VERIFIED,
             permission="read-only",
             risk_level="low",
             status=CapabilityStatus.ACTIVE,
@@ -342,7 +336,6 @@ def test_catalog_hides_skills_when_dependency_server_is_quarantined() -> None:
             content_digest=f"sha256:{'d' * 64}",
             title="Price evidence",
             tenant_id="tenant-a",
-            trust_level=CapabilityTrustLevel.TENANT_VERIFIED,
             permission="read-only",
             risk_level="low",
             status=CapabilityStatus.ACTIVE,
@@ -358,7 +351,6 @@ def test_catalog_hides_skills_when_dependency_server_is_quarantined() -> None:
             content_digest=f"sha256:{'c' * 64}",
             title="Price insight deviation",
             tenant_id="tenant-a",
-            trust_level=CapabilityTrustLevel.TENANT_VERIFIED,
             permission="read-only",
             risk_level="low",
             status=CapabilityStatus.ACTIVE,

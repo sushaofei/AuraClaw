@@ -11,7 +11,6 @@ from auraclaw.contracts.capabilities import (
     CapabilityDescriptor,
     CapabilityKind,
     CapabilityStatus,
-    CapabilityTrustLevel,
     McpOAuthConfiguration,
     McpServerDefinition,
 )
@@ -29,15 +28,15 @@ class PostgresCapabilityCatalogStore(LazyPool):
         await pool.execute(
             """INSERT INTO hands.downstream_mcp_server
             (server_id,tenant_id,title,endpoint,protocol_revision,credential_ref,
-             trust_level,allowed_tool_prefixes,allowed_resource_schemes,
+             allowed_tool_prefixes,allowed_resource_schemes,
              allowed_prompt_prefixes,status,enabled,metadata,updated_at,
              config_revision)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10::jsonb,$11,$12,
-                    $13::jsonb,now(),$14)
+            VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9::jsonb,$10,$11,
+                    $12::jsonb,now(),$13)
             ON CONFLICT (server_id) DO UPDATE SET
               tenant_id=EXCLUDED.tenant_id,title=EXCLUDED.title,
               endpoint=EXCLUDED.endpoint,protocol_revision=EXCLUDED.protocol_revision,
-              credential_ref=EXCLUDED.credential_ref,trust_level=EXCLUDED.trust_level,
+              credential_ref=EXCLUDED.credential_ref,
               allowed_tool_prefixes=EXCLUDED.allowed_tool_prefixes,
               allowed_resource_schemes=EXCLUDED.allowed_resource_schemes,
               allowed_prompt_prefixes=EXCLUDED.allowed_prompt_prefixes,
@@ -52,7 +51,6 @@ class PostgresCapabilityCatalogStore(LazyPool):
             server.endpoint,
             server.protocol_revision,
             server.credential_ref,
-            server.trust_level.value,
             json_dumps(server.allowed_tool_prefixes),
             json_dumps(server.allowed_resource_schemes),
             json_dumps(server.allowed_prompt_prefixes),
@@ -157,11 +155,11 @@ class PostgresCapabilityCatalogStore(LazyPool):
                 await connection.executemany(
                     """INSERT INTO hands.capability_catalog
                     (capability_id,kind,server_id,canonical_name,version,content_digest,
-                     title,description,tags,tenant_id,trust_level,classification,
+                     title,description,tags,tenant_id,classification,
                      permission,risk_level,required_scopes,status,source_revision,
                      capability_metadata,updated_at,catalog_generation)
-                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11,$12,$13,$14,
-                            $15::jsonb,$16,$17,$18::jsonb,$19,$20)""",
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11,$12,$13,
+                            $14::jsonb,$15,$16,$17::jsonb,$18,$19)""",
                     [
                         (
                             capability.capability_id,
@@ -174,7 +172,6 @@ class PostgresCapabilityCatalogStore(LazyPool):
                             capability.description,
                             json_dumps(capability.tags),
                             capability.tenant_id,
-                            capability.trust_level.value,
                             capability.classification,
                             capability.permission,
                             capability.risk_level,
@@ -395,7 +392,6 @@ def _server(row: object) -> McpServerDefinition:
             if oauth_payload is not None
             else None
         ),
-        trust_level=CapabilityTrustLevel(str(row["trust_level"])),  # type: ignore[index]
         allowed_tool_prefixes=tuple(
             json_loads(row["allowed_tool_prefixes"])  # type: ignore[index]
         ),
@@ -433,7 +429,6 @@ def _capability(row: object) -> CapabilityDescriptor:
         description=str(row["description"]),  # type: ignore[index]
         tags=tuple(json_loads(row["tags"])),  # type: ignore[index]
         tenant_id=row["tenant_id"],  # type: ignore[index]
-        trust_level=CapabilityTrustLevel(str(row["trust_level"])),  # type: ignore[index]
         classification=str(row["classification"]),  # type: ignore[index]
         permission=row["permission"],  # type: ignore[index]
         risk_level=row["risk_level"],  # type: ignore[index]

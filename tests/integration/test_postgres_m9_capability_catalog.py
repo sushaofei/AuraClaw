@@ -12,7 +12,6 @@ from auraclaw.contracts.capabilities import (
     CapabilityDescriptor,
     CapabilityKind,
     CapabilityStatus,
-    CapabilityTrustLevel,
     McpOAuthConfiguration,
     McpServerDefinition,
 )
@@ -48,6 +47,7 @@ def test_postgres_capability_catalog_is_shared_and_tenant_scoped() -> None:
         await connection.execute(CONSISTENCY_MIGRATION)
         await connection.execute(HEALTH_MIGRATION)
         await connection.execute(FENCING_MIGRATION)
+        await connection.execute((ROOT / "migrations/0057_remove_capability_trust.sql").read_text())
         suffix = uuid4().hex
         tenant_id = f"tenant-capability-{suffix}"
         server_id = f"server-{suffix}"
@@ -78,7 +78,6 @@ def test_postgres_capability_catalog_is_shared_and_tenant_scoped() -> None:
                         client_id="auraclaw",
                         resource="https://tenant.example/mcp",
                     ),
-                    trust_level=CapabilityTrustLevel.TENANT_VERIFIED,
                     status=CapabilityStatus.ACTIVE,
                     enabled=True,
                     config_revision=1,
@@ -98,7 +97,6 @@ def test_postgres_capability_catalog_is_shared_and_tenant_scoped() -> None:
                         description="Tenant release policy",
                         tags=("release", "docs"),
                         tenant_id=tenant_id,
-                        trust_level=CapabilityTrustLevel.TENANT_VERIFIED,
                         status=CapabilityStatus.ACTIVE,
                         updated_at=datetime.now(UTC),
                     ),

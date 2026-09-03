@@ -443,8 +443,8 @@ def _tool_descriptor(
     read_only = False
     destructive = False
     if isinstance(annotations, dict):
-        read_only = bool(annotations.get("readOnlyHint", False))
-        destructive = bool(annotations.get("destructiveHint", False))
+        read_only = annotations.get("readOnlyHint") is True
+        destructive = annotations.get("destructiveHint") is True
     input_schema = item.get("inputSchema", {"type": "object"})
     output_schema = item.get("outputSchema", {"type": "object"})
     return HandsToolDescriptor(
