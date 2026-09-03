@@ -290,7 +290,7 @@ class PostgresControlStateStore(_LazyPool):
                       resource_profile=EXCLUDED.resource_profile
                     WHERE control.assignment.assignment_status
                       IN ('expired','completed','failed','waiting_children',
-                          'waiting_for_human')
+                          'waiting_for_human','waiting_for_tool')
                     RETURNING task_id
                     """,
                     task_id,
@@ -553,6 +553,7 @@ class PostgresControlStateStore(_LazyPool):
                 "cancelled",
                 "waiting_children",
                 "waiting_for_human",
+                "waiting_for_tool",
             }
             if str(row["assignment_status"]) in terminal:
                 return True
@@ -590,6 +591,7 @@ class PostgresControlStateStore(_LazyPool):
                 "cancelled",
                 "waiting_children",
                 "waiting_for_human",
+                "waiting_for_tool",
             }:
                 await connection.execute(
                     """DELETE FROM control.runtime_lease AS lease
@@ -612,7 +614,7 @@ class PostgresControlStateStore(_LazyPool):
             )
 
     async def suspend_assignment(self, task_id: str, reason: str) -> None:
-        if reason not in {"waiting_children", "waiting_for_human"}:
+        if reason not in {"waiting_children", "waiting_for_human", "waiting_for_tool"}:
             raise ValueError(f"unsupported assignment suspension: {reason}")
         await self.finish_assignment(task_id, reason)
 
@@ -622,7 +624,7 @@ class PostgresControlStateStore(_LazyPool):
         checkpoint: RuntimeCheckpoint,
         reason: str,
     ) -> None:
-        if reason not in {"waiting_children", "waiting_for_human"}:
+        if reason not in {"waiting_children", "waiting_for_human", "waiting_for_tool"}:
             raise ValueError(f"unsupported assignment suspension: {reason}")
         pool = await self.pool()
         resource_id = f"session:{checkpoint.tenant_id}:{checkpoint.session_id}"
@@ -682,6 +684,7 @@ class PostgresControlStateStore(_LazyPool):
             if status is None or str(status) not in {
                 "waiting_children",
                 "waiting_for_human",
+                "waiting_for_tool",
             }:
                 return False
             updated = await connection.fetchval(

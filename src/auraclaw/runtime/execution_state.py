@@ -53,6 +53,7 @@ _LEGAL_TRANSITIONS: dict[RuntimePhase, frozenset[RuntimePhase]] = {
     ),
     RuntimePhase.CAPABILITY_CALL_COMPLETED: frozenset(
         {
+            RuntimePhase.CAPABILITY_WORKFLOW_RUNNING,
             RuntimePhase.CAPABILITY_MODEL_PENDING,
             RuntimePhase.CAPABILITY_APPROVAL_WAITING,
             RuntimePhase.CAPABILITY_COMPLETED,

@@ -4,6 +4,7 @@ import hashlib
 import json
 from typing import Any
 
+from auraclaw.contracts.errors import VersionConflictError
 from auraclaw.contracts.events import NewEvent
 from auraclaw.contracts.state import Visibility
 from auraclaw.control.ports import RuntimeAssignment
@@ -81,6 +82,31 @@ class CanonicalEventCommitter:
                     default=str,
                 ).encode()
             ).hexdigest()[:24]
+        if event.type == "skill.activated":
+            existing = await self._session.load(assignment)
+            if any(item.type == event.type and item.payload.get("skill_activation_id") == identity
+                   for item in existing):
+                return
+        terminal_types = {"skill.completed", "skill.failed", "skill.cancelled"}
+        if event.type in terminal_types:
+            for _ in range(3):
+                existing = await self._session.load(assignment)
+                if any(
+                    item.type in terminal_types
+                    and item.payload.get("skill_activation_id") == identity
+                    for item in existing
+                ):
+                    return
+                await self._guard.check(assignment)
+                try:
+                    await self._session.append(
+                        assignment, [event], command_id=f"runtime:skill.terminal:{identity}",
+                        operation="runtime.skill.terminal", expected_version=len(existing),
+                    )
+                    return
+                except VersionConflictError:
+                    continue
+            raise VersionConflictError("Skill terminal event conflicted with concurrent events")
         await self._guard.check(assignment)
         await self._session.append(
             assignment,
