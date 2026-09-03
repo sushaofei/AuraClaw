@@ -181,6 +181,11 @@ class ArtifactContentReader(Protocol):
 
 
 class ArtifactDeleter(Protocol):
+    async def purge(
+        self, *, tenant_id: str, artifact_ref: ArtifactRef, actor_id: str,
+        reason_code: str, correlation_id: str,
+    ) -> None: ...
+
     async def delete(
         self,
         *,

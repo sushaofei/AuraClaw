@@ -53,9 +53,7 @@ class S3CompatiblePresigner:
         parsed = urlsplit(self._endpoint)
         object_parts = tuple(object_key.strip("/").split("/"))
         path_parts = (self._bucket, *object_parts) if self._path_style else object_parts
-        canonical_uri = "/" + "/".join(
-            quote(part, safe="-_.~") for part in path_parts
-        )
+        canonical_uri = "/" + "/".join(quote(part, safe="-_.~") for part in path_parts)
         netloc = parsed.netloc if self._path_style else f"{self._bucket}.{parsed.netloc}"
         query = {
             **dict(query_params or {}),
@@ -128,9 +126,7 @@ class S3CompatibleMultipartClient:
         part_count = max(1, math.ceil(expected_size / part_size))
         if part_count > 10_000:
             raise ArtifactAccessError("artifact multipart upload exceeds 10000 parts")
-        url, _ = self._presigner.presign(
-            "POST", object_key, query_params={"uploads": ""}
-        )
+        url, _ = self._presigner.presign("POST", object_key, query_params={"uploads": ""})
         try:
             response = await self._client.post(url)
         except httpx.HTTPError as exc:
@@ -145,9 +141,7 @@ class S3CompatibleMultipartClient:
                 if element.tag.rsplit("}", 1)[-1] == "UploadId" and element.text
             )
         except (ElementTree.ParseError, StopIteration) as exc:
-            raise ArtifactAccessError(
-                "object store returned no multipart upload id"
-            ) from exc
+            raise ArtifactAccessError("object store returned no multipart upload id") from exc
         part_urls = tuple(
             self._presigner.presign(
                 "PUT",
@@ -184,9 +178,7 @@ class S3CompatibleMultipartClient:
             item = ElementTree.SubElement(root, "Part")
             ElementTree.SubElement(item, "PartNumber").text = str(number)
             ElementTree.SubElement(item, "ETag").text = etag
-        url, _ = self._presigner.presign(
-            "POST", object_key, query_params={"uploadId": upload_id}
-        )
+        url, _ = self._presigner.presign("POST", object_key, query_params={"uploadId": upload_id})
         try:
             response = await self._client.post(
                 url,
@@ -199,9 +191,7 @@ class S3CompatibleMultipartClient:
             raise ArtifactAccessError("artifact multipart completion failed")
 
     async def abort(self, object_key: str, upload_id: str) -> bool:
-        url, _ = self._presigner.presign(
-            "DELETE", object_key, query_params={"uploadId": upload_id}
-        )
+        url, _ = self._presigner.presign("DELETE", object_key, query_params={"uploadId": upload_id})
         try:
             response = await self._client.delete(url)
         except httpx.HTTPError:
@@ -266,6 +256,71 @@ class S3CompatibleObjectVerifier:
         except httpx.HTTPError:
             return False
         return response.status_code in {200, 202, 204, 404}
+
+    async def _versioning_status(self) -> str:
+        payload = await self._bucket_xml({"versioning": ""})
+        if payload.tag.rsplit("}", 1)[-1] != "VersioningConfiguration":
+            raise ArtifactAccessError("Object store versioning response is invalid")
+        status = payload.findtext("{*}Status") or payload.findtext("Status") or "disabled"
+        if status not in {"Enabled", "Suspended", "disabled"}:
+            raise ArtifactAccessError("Object store versioning status is unsupported")
+        return status
+
+    async def _bucket_xml(self, query: Mapping[str, str]) -> ElementTree.Element:
+        url, _ = self._presigner.presign("GET", "", query_params=query)
+        async with self._client.stream("GET", url) as response:
+            if response.status_code != 200:
+                raise ArtifactAccessError("Object store cannot verify complete version removal")
+            data = bytearray()
+            async for chunk in response.aiter_bytes():
+                data.extend(chunk)
+                if len(data) > 2 * 1024 * 1024:
+                    raise ArtifactAccessError("Object version listing exceeds limit")
+        if b"<!DOCTYPE" in data or b"<!ENTITY" in data:
+            raise ArtifactAccessError("Object version listing contains unsupported XML")
+        try:
+            return ElementTree.fromstring(bytes(data))
+        except ElementTree.ParseError as exc:
+            raise ArtifactAccessError("Object version listing is invalid") from exc
+
+    async def purge(self, pending: PendingUpload) -> bool:
+        """Remove every object version and marker for exactly this immutable package key."""
+        try:
+            if await self._versioning_status() == "disabled":
+                if not await self.delete(pending):
+                    return False
+                if await self._versioning_status() == "disabled":
+                    return True
+            for _ in range(1000):
+                listing = await self._bucket_xml(
+                    {"versions": "", "prefix": pending.object_key, "max-keys": "1000"}
+                )
+                if listing.tag.rsplit("}", 1)[-1] != "ListVersionsResult":
+                    raise ArtifactAccessError("Object version listing is invalid")
+                versions = []
+                for element in listing:
+                    if element.tag.rsplit("}", 1)[-1] not in {"Version", "DeleteMarker"}:
+                        continue
+                    key = element.findtext("{*}Key") or element.findtext("Key")
+                    if key != pending.object_key:
+                        continue
+                    version = element.findtext("{*}VersionId") or element.findtext("VersionId")
+                    if not version or len(version) > 2048:
+                        raise ArtifactAccessError("Object version identity is invalid")
+                    versions.append((element.tag.rsplit("}", 1)[-1] == "DeleteMarker", version))
+                if not versions:
+                    # Exact key sorts before longer keys; unrelated keys are never deleted.
+                    return True
+                for _marker, version in sorted(versions):
+                    url, _ = self._presigner.presign(
+                        "DELETE", pending.object_key, query_params={"versionId": version}
+                    )
+                    response = await self._client.delete(url)
+                    if response.status_code not in {200, 202, 204, 404}:
+                        return False
+            raise ArtifactAccessError("Object version removal exceeds the page limit")
+        except httpx.HTTPError:
+            return False
 
     async def readiness(self) -> tuple[bool, str]:
         url, _ = self._presigner.presign("HEAD", "health/readiness-probe")

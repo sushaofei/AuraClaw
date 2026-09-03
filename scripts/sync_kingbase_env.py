@@ -9,7 +9,7 @@ from urllib.parse import quote
 from dotenv import dotenv_values
 
 DEFAULT_DATABASE = "chaintower_agent"
-CURRENT_MIGRATION_TARGET = "0061"
+CURRENT_MIGRATION_TARGET = "0062"
 
 
 def _required(values: dict[str, str | None], *names: str) -> str:

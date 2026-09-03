@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from datetime import timedelta
 from uuid import uuid4
 
@@ -139,9 +140,7 @@ class PostgresArtifactRepository(LazyPool):
         )
         return str(result) == "UPDATE 1"
 
-    async def renew_finalize(
-        self, pending: PendingUpload, *, claim_ttl: timedelta
-    ) -> bool:
+    async def renew_finalize(self, pending: PendingUpload, *, claim_ttl: timedelta) -> bool:
         pool = await self.pool()
         result = await pool.execute(
             """UPDATE artifact.metadata SET finalize_heartbeat_at=now(),
@@ -194,6 +193,7 @@ class PostgresArtifactRepository(LazyPool):
         *,
         claim_ttl: timedelta = timedelta(seconds=30),
         ignore_retention: bool = False,
+        include_deleted: bool = False,
     ) -> PendingUpload | None:
         pool = await self.pool()
         await pool.execute(
@@ -210,13 +210,17 @@ class PostgresArtifactRepository(LazyPool):
         token = f"delete_{uuid4().hex}"
         row = await pool.fetchrow(
             """UPDATE artifact.metadata SET status='deleting',gc_claim_token=$4,
-            gc_heartbeat_at=now(),
+            gc_heartbeat_at=now(), deleted_at=NULL, object_state='known',
+            physical_removal_pending=physical_removal_pending OR $7,
+            object_side_effect_started_at=NULL,
             gc_claim_expires_at=now()+$5::interval,gc_attempt_count=gc_attempt_count+1
             WHERE tenant_id=$1 AND artifact_id=$2 AND version=$3
-              AND (status='ready' OR (
+              AND (status='ready' OR ($7 AND status IN ('deleted','reconciling')) OR (
                     status='deleting' AND gc_claim_expires_at <= now()))
-              AND deleted_at IS NULL AND object_state='known' AND NOT legal_hold
-              AND object_side_effect_started_at IS NULL
+              AND ($7 OR (deleted_at IS NULL AND object_state='known'
+                          AND object_side_effect_started_at IS NULL)) AND NOT legal_hold
+              AND ($7 OR NOT physical_removal_pending)
+              AND (NOT $7 OR media_type='application/vnd.auraclaw.skill-package+json')
               AND (($6 AND media_type='application/vnd.auraclaw.skill-package+json'
                         AND skill_bound_at IS NOT NULL)
                    OR (retention_until IS NOT NULL AND retention_until <= now()))
@@ -228,8 +232,58 @@ class PostgresArtifactRepository(LazyPool):
             token,
             claim_ttl,
             ignore_retention,
+            include_deleted,
         )
         return self._pending(row) if row is not None else None
+
+    async def is_removed(self, tenant_id: str, artifact_id: str, version: int) -> bool:
+        pool = await self.pool()
+        return bool(
+            await pool.fetchval(
+                "SELECT EXISTS(SELECT 1 FROM artifact.skill_removal_receipt "
+                "WHERE tenant_id=$1 AND removal_digest=$2)",
+                tenant_id,
+                _removal_digest(tenant_id, artifact_id, version),
+            )
+        )
+
+    async def has_shared_storage(self, pending: PendingUpload) -> bool:
+        pool = await self.pool()
+        return bool(
+            await pool.fetchval(
+                "SELECT EXISTS(SELECT 1 FROM artifact.metadata "
+                "WHERE storage_ref=$1 AND NOT (tenant_id=$2 AND artifact_id=$3 AND version=$4) "
+                "AND deleted_at IS NULL)",
+                pending.object_key,
+                pending.tenant_id,
+                pending.artifact_id,
+                pending.version,
+            )
+        )
+
+    async def mark_ready_removed(self, pending: PendingUpload) -> bool:
+        pool = await self.pool()
+        async with pool.acquire() as connection, connection.transaction():
+            row = await connection.fetchrow(
+                """DELETE FROM artifact.metadata
+                WHERE tenant_id=$1 AND artifact_id=$2 AND version=$3 AND status='deleting'
+                  AND gc_claim_token=$4 AND gc_claim_expires_at > now()
+                  AND media_type='application/vnd.auraclaw.skill-package+json' AND NOT legal_hold
+                RETURNING artifact_id""",
+                pending.tenant_id,
+                pending.artifact_id,
+                pending.version,
+                pending.gc_claim_token,
+            )
+            if row is None:
+                return False
+            await connection.execute(
+                "INSERT INTO artifact.skill_removal_receipt "
+                "(tenant_id,removal_digest) VALUES ($1,$2) ON CONFLICT DO NOTHING",
+                pending.tenant_id,
+                _removal_digest(pending.tenant_id, pending.artifact_id, pending.version),
+            )
+            return True
 
     async def mark_ready_deleted(self, pending: PendingUpload) -> bool:
         pool = await self.pool()
@@ -277,14 +331,8 @@ class PostgresArtifactRepository(LazyPool):
         self, pending: PendingUpload, *, operation: str, reason: str
     ) -> bool:
         pool = await self.pool()
-        token = (
-            pending.finalize_claim_token
-            if operation == "finalize"
-            else pending.gc_claim_token
-        )
-        token_column = (
-            "finalize_claim_token" if operation == "finalize" else "gc_claim_token"
-        )
+        token = pending.finalize_claim_token if operation == "finalize" else pending.gc_claim_token
+        token_column = "finalize_claim_token" if operation == "finalize" else "gc_claim_token"
         result = await pool.execute(
             f"""UPDATE artifact.metadata SET status='reconciling',object_state='unknown',
             reconciliation_reason=$4,reconciliation_updated_at=now(),
@@ -299,9 +347,7 @@ class PostgresArtifactRepository(LazyPool):
         )
         return str(result) == "UPDATE 1"
 
-    async def begin_object_side_effect(
-        self, pending: PendingUpload, *, operation: str
-    ) -> bool:
+    async def begin_object_side_effect(self, pending: PendingUpload, *, operation: str) -> bool:
         pool = await self.pool()
         if operation == "finalize":
             result = await pool.execute(
@@ -329,9 +375,7 @@ class PostgresArtifactRepository(LazyPool):
             )
         return str(result) == "UPDATE 1"
 
-    async def is_deleted(
-        self, tenant_id: str, artifact_id: str, version: int
-    ) -> bool:
+    async def is_deleted(self, tenant_id: str, artifact_id: str, version: int) -> bool:
         pool = await self.pool()
         return bool(
             await pool.fetchval(
@@ -344,9 +388,7 @@ class PostgresArtifactRepository(LazyPool):
             )
         )
 
-    async def release_ready_delete(
-        self, pending: PendingUpload, error: str
-    ) -> bool:
+    async def release_ready_delete(self, pending: PendingUpload, error: str) -> bool:
         pool = await self.pool()
         result = await pool.execute(
             """UPDATE artifact.metadata SET status='ready',gc_claim_token=NULL,
@@ -410,9 +452,7 @@ class PostgresArtifactRepository(LazyPool):
         )
         return self._pending(row) if row is not None else None
 
-    async def bind_skill_publication(
-        self, pending: PendingUpload, package_digest: str
-    ) -> bool:
+    async def bind_skill_publication(self, pending: PendingUpload, package_digest: str) -> bool:
         content_hash = package_digest.removeprefix("sha256:")
         if f"sha256:{content_hash}" != package_digest:
             return False
@@ -506,6 +546,7 @@ class PostgresArtifactRepository(LazyPool):
             WHERE (tenant_id,artifact_id) IN (
                 SELECT tenant_id,artifact_id FROM artifact.metadata
                 WHERE status='reconciling' AND object_state='unknown'
+                  AND NOT physical_removal_pending
                   AND deleted_at IS NULL
                   AND (gc_claim_expires_at IS NULL OR gc_claim_expires_at<=now())
                 ORDER BY reconciliation_updated_at,artifact_id
@@ -535,6 +576,7 @@ class PostgresArtifactRepository(LazyPool):
             gc_claim_token=NULL,gc_claim_expires_at=NULL,gc_heartbeat_at=NULL
             WHERE tenant_id=$1 AND artifact_id=$2 AND gc_claim_token=$3
               AND status='reconciling' AND object_state='unknown'
+              AND NOT physical_removal_pending
               AND gc_claim_expires_at > now()""",
             pending.tenant_id,
             pending.artifact_id,
@@ -629,20 +671,14 @@ class PostgresArtifactRepository(LazyPool):
             version=int(row["version"]),
             upload_mode=str(row["upload_mode"]),
             multipart_upload_id=(
-                str(row["multipart_upload_id"])
-                if row["multipart_upload_id"] is not None
-                else None
+                str(row["multipart_upload_id"]) if row["multipart_upload_id"] is not None else None
             ),
             multipart_part_size=(
-                int(row["multipart_part_size"])
-                if row["multipart_part_size"] is not None
-                else None
+                int(row["multipart_part_size"]) if row["multipart_part_size"] is not None else None
             ),
             multipart_completed=row["multipart_completed_at"] is not None,
             gc_claim_token=(
-                str(row["gc_claim_token"])
-                if row["gc_claim_token"] is not None
-                else None
+                str(row["gc_claim_token"]) if row["gc_claim_token"] is not None else None
             ),
             finalize_claim_token=(
                 str(row["finalize_claim_token"])
@@ -650,9 +686,7 @@ class PostgresArtifactRepository(LazyPool):
                 else None
             ),
             skill_bound_digest=(
-                str(row["skill_bound_digest"])
-                if row["skill_bound_digest"] is not None
-                else None
+                str(row["skill_bound_digest"]) if row["skill_bound_digest"] is not None else None
             ),
             skill_publish_claim_token=(
                 str(row["skill_publish_claim_token"])
@@ -669,3 +703,7 @@ class PostgresArtifactRepository(LazyPool):
                 else None
             ),
         )
+
+
+def _removal_digest(tenant_id: str, artifact_id: str, version: int) -> str:
+    return hashlib.sha256(f"{tenant_id}\0{artifact_id}\0{version}".encode()).hexdigest()
