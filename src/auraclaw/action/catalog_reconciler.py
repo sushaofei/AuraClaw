@@ -19,6 +19,7 @@ from auraclaw.action.ports import CapabilityCatalogStore, CapabilityConnector
 from auraclaw.action.tool_gateway import ToolRegistry
 from auraclaw.contracts.capabilities import (
     CapabilityDescriptor,
+    CapabilityInvocationRef,
     CapabilityKind,
     CapabilityStatus,
     McpServerDefinition,
@@ -236,6 +237,7 @@ class CapabilityCatalogReconciler:
             **server.metadata,
             **({} if published_server is None else published_server.metadata),
         }
+        committed = False
         try:
             snapshot = await connector.snapshot(trusted)
             descriptors = _normalize_snapshot(
@@ -271,6 +273,11 @@ class CapabilityCatalogReconciler:
                     raise CapabilitySchemaDriftError(
                         "remote MCP capability changed without version bump"
                     )
+            if self._tool_registry is not None:
+                self._tool_registry.prepare_owner(connector.connector_id, tuple(
+                    _tool_capability(item, connector.connector_id) for item in descriptors
+                    if item.kind == CapabilityKind.TOOL
+                ))
             snapshot_digest = _catalog_snapshot_digest(server, snapshot, descriptors)
             commit = await self._catalog.replace_server_capabilities(
                 server.server_id,
@@ -279,6 +286,8 @@ class CapabilityCatalogReconciler:
                 snapshot_digest=snapshot_digest,
                 source_revision=snapshot.source_revision,
             )
+            committed = True
+            self._replace_remote_tools(server, descriptors, connector)
             self._snapshots[server.server_id] = snapshot.model_copy(
                 update={
                     "extra": {
@@ -289,7 +298,6 @@ class CapabilityCatalogReconciler:
                     }
                 }
             )
-            self._replace_remote_tools(server, descriptors, connector)
             if self._resource_cache is not None:
                 for uri in sorted(self._pending_invalidations.pop(server.server_id, set())):
                     await self._resource_cache.invalidate(
@@ -379,7 +387,13 @@ class CapabilityCatalogReconciler:
                     }
                 )
             )
-            if existing_items and not health.quarantined:
+            if committed:
+                # Shared catalog commit succeeded, but local installation did not.
+                # Never attach the old schema to a remotely upgraded server.
+                self._remove_remote_tools(server)
+                self._snapshots.pop(server.server_id, None)
+                self._dirty.add(server.server_id)
+            elif existing_items and not health.quarantined:
                 self._replace_remote_tools(server, existing_items, connector)
             elif health.quarantined:
                 self._remove_remote_tools(server)
@@ -469,7 +483,8 @@ class CapabilityCatalogReconciler:
         self._tool_registry.replace_owner(owner, capabilities)
         self._hands_router.replace_owner_routes(
             owner,
-            {capability.name: executor for capability in capabilities},
+            {capability.invocation_ref.model_name: executor for capability in capabilities
+             if capability.invocation_ref is not None},
         )
 
     async def drop_server(self, server_id: str) -> None:
@@ -670,6 +685,7 @@ def _descriptor(
         metadata={
             "source": source,
             "source_type": "mcp",
+            "config_revision": int(server.config_revision or 0),
             "server_title": server.title,
             "endpoint": server.endpoint,
             "search_aliases": list(_server_search_aliases(server)),
@@ -709,6 +725,7 @@ def _tool_capability(
         ),
         risk_level=RiskLevel(descriptor.risk_level or RiskLevel.HIGH),
         runtime_location="remote-mcp",
+        invocation_ref=CapabilityInvocationRef.from_descriptor(descriptor),
         owner=owner,
     )
 

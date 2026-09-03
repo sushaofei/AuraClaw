@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import uuid
 
 import httpx
@@ -20,6 +19,7 @@ from auraclaw.contracts.internal import (
     ServiceIdentity,
 )
 from auraclaw.contracts.tools import ApprovalRecord, PolicyDecision, ToolCapability, ToolInvocation
+from auraclaw.domain.approval import invocation_action_digest
 from auraclaw.internal.http import HttpContractClient
 from auraclaw.observability.redaction import redact_sensitive
 
@@ -48,16 +48,6 @@ class RemotePolicyClient:
     ) -> PolicyEvaluation:
         if invocation is None:
             raise ValueError("remote policy evaluation requires invocation context")
-        encoded = json.dumps(
-            {
-                "arguments": invocation.arguments,
-                "trusted_user_id": invocation.user_id,
-                "trusted_dept_id": invocation.dept_id,
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-            default=str,
-        ).encode()
         response = await self._contract.call(
             "/internal/v1/policy/evaluate",
             PolicyEvaluateRequest(
@@ -74,7 +64,7 @@ class RemotePolicyClient:
                 subject=invocation.actor_id,
                 action=invocation.expected_side_effect,
                 resource=capability.name,
-                input_digest=hashlib.sha256(encoded).hexdigest(),
+                input_digest=invocation_action_digest(invocation),
                 attributes={
                     "action_kind": "tool",
                     "arguments": redact_sensitive(invocation.arguments),
@@ -85,6 +75,8 @@ class RemotePolicyClient:
                     "runtime_location": capability.runtime_location,
                     "trusted_user_id": invocation.user_id,
                     "trusted_dept_id": invocation.dept_id,
+                    "capability_ref": (invocation.capability_ref.model_dump(mode="json")
+                                       if invocation.capability_ref else None),
                 },
             ),
             PolicyEvaluateResponse,

@@ -38,7 +38,8 @@ def invocation_action_digest(invocation: ToolInvocation) -> str:
     rejected, never cleared or replayed with a different invocation key.
     """
     digest = action_digest(invocation.tool_name, invocation.tool_version, invocation.arguments)
-    if invocation.user_id is None and invocation.dept_id is None:
+    if (invocation.user_id is None and invocation.dept_id is None
+            and invocation.capability_ref is None):
         return digest
     payload = {
         "version": 2,
@@ -50,6 +51,8 @@ def invocation_action_digest(invocation: ToolInvocation) -> str:
         "dept_id": invocation.dept_id,
         "actor_role": invocation.actor_role,
     }
+    if invocation.capability_ref is not None:
+        payload["capability_ref"] = invocation.capability_ref.model_dump(mode="json")
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()
 

@@ -698,17 +698,22 @@ class RuntimeCapabilityController:
         if call.name == RESOURCE_READ:
             return await self._read_resource(assignment, call, current)
 
-        loaded_tool = next(
-            (
-                item
-                for item in dict(current.get("loaded", {})).values()
-                if isinstance(item, dict)
-                and item.get("kind") == "tool"
-                and item.get("canonical_name") == call.name
-                and isinstance(item.get("model_tool"), dict)
-            ),
-            None,
-        )
+        matches = [
+            item for item in dict(current.get("loaded", {})).values()
+            if isinstance(item, dict) and item.get("kind") == "tool"
+            and isinstance(item.get("model_tool"), dict)
+            and (item.get("model_tool", {}).get("function", {}).get("name") == call.name
+                 or item.get("canonical_name") == call.name)
+        ]
+        exact = [item for item in matches
+                 if item["model_tool"].get("function", {}).get("name") == call.name]
+        matches = exact or matches
+        if len(matches) > 1:
+            return CapabilityExecution(
+                result={"status": "denied", "error_code": "ambiguous_capability",
+                        "summary": "Use the exact loaded tool alias."}, state=current,
+            )
+        loaded_tool = matches[0] if matches else None
         if loaded_tool is None:
             return CapabilityExecution(
                 result={
@@ -721,6 +726,7 @@ class RuntimeCapabilityController:
         invocation = ToolCall(
             **{
                 **call.__dict__,
+                "name": str(loaded_tool["model_tool"].get("function", {}).get("name") or call.name),
                 "version": str(loaded_tool["version"]),
                 "expected_side_effect": (
                     "read" if loaded_tool.get("permission") == "read-only" else "write"

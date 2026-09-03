@@ -424,7 +424,8 @@ def test_catalog_reconciliation_filters_routes_invalidates_and_recovers() -> Non
         assert await reconciler.reconcile_dirty() == 1
         assert cache.invalidated == [("github://issue/21", "tenant-a")]
         assert tools.get("github.issue.get", "2.2.0").version == "2.2.0"
-        assert tools.get("github.issue.get", "2.1.0").version == "2.1.0"
+        with pytest.raises(PolicyDeniedError, match="stale"):
+            tools.get("github.issue.get", "2.1.0")
         assert {item.name: item.version for item in tools.discover()} == {
             "github.issue.get": "2.2.0", "outside.issue.get": "1.0.0", "lookup": "1.0.0"
         }
@@ -1009,4 +1010,114 @@ def test_upgrade_republishes_previously_filtered_tools_to_each_replica() -> None
         assert generations[0] != old_generation
         assert all(generation > old_generation for generation in generations)
 
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("other_version", ["2.1.0", "2.2.0"])
+def test_same_named_mcp_targets_keep_server_identity_through_gateway(other_version) -> None:
+    from dataclasses import replace
+
+    from auraclaw.action.capability_catalog import _load_result
+    from auraclaw.action.policy import PolicyEngine
+    from auraclaw.action.tool_gateway import ToolGateway
+    from auraclaw.infrastructure.artifacts.store import ArtifactStore, InMemoryObjectStorage
+    from auraclaw.projection.approval.projector import InMemoryApprovalProjection
+
+    async def scenario() -> None:
+        store = InMemoryCapabilityCatalogStore()
+        catalog = CapabilityCatalog(store)
+        servers = [_server().model_copy(update={"server_id": name}) for name in ("one", "two")]
+        class ReadOnlyCredentials(_RemoteCredentials):
+            async def invoke(self, **arguments):
+                result = await super().invoke(**arguments)
+                if arguments["request"]["method"] == "tools/list":
+                    for tool in result["result"]["tools"]:
+                        tool["annotations"] = {"readOnlyHint": True}
+                        tool["description"] = "Read issue"
+                return result
+
+        credentials = [ReadOnlyCredentials(), ReadOnlyCredentials()]
+        credentials[1].tool_version = other_version
+        connectors = {server.server_id: ManagedMcpConnector(
+            server, credentials=credential, policy=_AllowPolicy(),
+        ) for server, credential in zip(servers, credentials, strict=True)}
+        registry = ToolRegistry()
+        router = RoutedHandsExecutor(_UnexpectedHands(), {})
+        reconciler = CapabilityCatalogReconciler(
+            catalog=catalog, store=store, connectors=connectors,
+            tool_registry=registry, hands_router=router,
+        )
+        gateway = ToolGateway(
+            registry=registry, policy=PolicyEngine(), hands=router,
+            approvals=InMemoryApprovalProjection(),
+            artifacts=ArtifactStore(InMemoryObjectStorage(), signing_key=b"route-test-key-12345"),
+        )
+        loaded = []
+        for server in servers:
+            await catalog.register_server(server)
+            assert (await reconciler.reconcile_server(server)).status == CapabilityStatus.ACTIVE
+            descriptors = await store.list_server_capabilities("tenant-a", server.server_id)
+            loaded.append(_load_result(next(item for item in descriptors
+                                           if item.canonical_name == "github.issue.get")))
+        names = [item["model_tool"]["function"]["name"] for item in loaded]
+        assert len(set(names)) == 2 and all(len(name) <= 64 for name in names)
+        invocations = []
+        for index, item in enumerate(loaded):
+            capability = registry.get(names[index], item["version"], tenant_id="tenant-a")
+            invocation = replace(_invocation(capability, user_id="user-a"),
+                                 tool_name=names[index], tool_invocation_id=f"route-{index}",
+                                 idempotency_key=f"route-{index}")
+            invocations.append(invocation)
+            assert (await gateway.execute(invocation)).status.value == "success"
+        for credential in credentials:
+            calls = [call for call in credential.calls if call["request"]["method"] == "tools/call"]
+            assert len(calls) == 1
+            assert calls[0]["request"]["params"]["name"] == "github.issue.get"
+        # Same arguments/idempotency ID but another server is another action.
+        conflict = await gateway.execute(replace(invocations[1],
+            tool_invocation_id=invocations[0].tool_invocation_id,
+            idempotency_key=invocations[0].idempotency_key))
+        assert conflict.error_code == "idempotency_conflict"
+        if other_version == "2.1.0":
+            ambiguous = await gateway.execute(replace(invocations[0], tool_name="github.issue.get",
+                tool_invocation_id="legacy", idempotency_key="legacy"))
+            assert ambiguous.error_code == "ambiguous_capability"
+        await reconciler.drop_server("one")
+        assert (await gateway.execute(replace(invocations[0], tool_invocation_id="after-drop",
+                    idempotency_key="after-drop"))).error_code == "stale_capability"
+        assert (await gateway.execute(replace(invocations[1], tool_invocation_id="survivor",
+                    idempotency_key="survivor"))).status.value == "success"
+        wrong_tenant = await gateway.execute(replace(invocations[1], tenant_id="tenant-b",
+            tool_invocation_id="wrong-tenant", idempotency_key="wrong-tenant"))
+        assert wrong_tenant.error_code == "stale_capability"
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("failure_window", ["before_commit", "after_commit"])
+def test_failed_route_install_does_not_publish_local_readiness(failure_window, monkeypatch) -> None:
+    async def scenario() -> None:
+        store = InMemoryCapabilityCatalogStore()
+        catalog = CapabilityCatalog(store)
+        server = _server()
+        await catalog.register_server(server)
+        connector = ManagedMcpConnector(
+            server, credentials=_RemoteCredentials(), policy=_AllowPolicy())
+        registry = ToolRegistry()
+        reconciler = CapabilityCatalogReconciler(catalog=catalog, store=store,
+            connectors={server.server_id: connector}, tool_registry=registry,
+            hands_router=RoutedHandsExecutor(_UnexpectedHands(), {}))
+
+        def fail(*args, **kwargs):
+            raise ValueError("injected local snapshot failure")
+
+        if failure_window == "before_commit":
+            monkeypatch.setattr(registry, "prepare_owner", fail)
+        else:
+            monkeypatch.setattr(reconciler, "_replace_remote_tools", fail)
+        result = await reconciler.reconcile_server(server)
+        assert result.status == CapabilityStatus.DEGRADED
+        assert registry.discover() == []
+        assert reconciler.snapshot_for(server.server_id) is None
+        generation = await store.get_active_generation(server.server_id)
+        assert bool(generation) == (failure_window == "after_commit")
     asyncio.run(scenario())

@@ -3323,3 +3323,19 @@ Ruff、Mypy（248 文件）、10 条架构合同通过。迁移不适用，部�
 - [x] 提交范围不含无关文件/秘密；现场部署、自动恢复与 #94 在途清理联合验收继续跟进，issue 不关闭。
 
 全量 624 passed / 54 skipped；多次未知调用唤醒专项回归另行通过。部署前参见 [工作流恢复](../operations/skill-workflow-recovery.md)。
+
+
+## Skill / MCP 修复 D：完整目标身份（Issue #97）
+
+- [x] 目录引用与模型别名绑定 tenant/server/capability/version/digest/config revision，远端名称保持不变。
+- [x] Registry/Router 一致键、可信租户过滤、Legacy 歧义拒绝与旧版本 stale 行为通过。
+- [x] 人工/自动审批及执行去重纳入完整目标；PostgreSQL 跨副本同 ID 不同 Server 冲突通过。
+- [x] Workflow 固定引用与已加载 schema/version 复核；执行事件保留可读来源。
+- [x] 发布前预检，发布后本地安装失败清理路由且不提升本机 ready snapshot。
+- [x] 两个真实 HTTP MCP 同名工具，通过 Runtime → HTTP Hands → Gateway → Connector 分别返回正确 Server 标记。
+- [x] Ruff、Mypy（248 文件）、10 条架构合同通过；无 DDL/HTTP DTO 迁移，升级说明同步。
+- [x] 测试、改动范围、秘密排除已核对；真实部署与 #98/#99 联合恢复验收继续，issue 保持开放。
+
+目录/热更新/审批 80 passed；两个真实 HTTP MCP 与 PostgreSQL invocation 联合 7 passed。
+全量回归 628 passed / 54 skipped，原活动元数据断言暴露的兼容变化修复后专项再验证。
+参见 [MCP 目标路由](../operations/mcp-target-routing.md)。

@@ -5,6 +5,8 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
+from auraclaw.contracts.capabilities import CapabilityInvocationRef
+
 
 class ToolPermission(StrEnum):
     READ_ONLY = "read-only"
@@ -62,6 +64,7 @@ class ToolCapability:
     # Only server-registered, read-only authority queries may opt out of replay.
     # This is not an invocation option and is never populated from MCP metadata.
     cache_result: bool = True
+    invocation_ref: CapabilityInvocationRef | None = None
 
     def __post_init__(self) -> None:
         if not self.cache_result and self.permission is not ToolPermission.READ_ONLY:
@@ -97,6 +100,7 @@ class ToolInvocation:
     user_id: str | None = None
     actor_role: str | None = None
     dept_id: str | None = None
+    capability_ref: CapabilityInvocationRef | None = None
 
 
 @dataclass(frozen=True)
