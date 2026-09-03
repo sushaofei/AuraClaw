@@ -6,7 +6,8 @@ from uuid import uuid4
 
 from auraclaw.action.ports import CredentialInvoker, ResourcePolicyEvaluator
 from auraclaw.contracts.capabilities import McpServerDefinition
-from auraclaw.contracts.errors import PolicyDeniedError
+from auraclaw.contracts.diagnostics import safe_error_text
+from auraclaw.contracts.errors import InvalidToolSchemaError, PolicyDeniedError
 from auraclaw.contracts.hands import (
     CapabilitySnapshot,
     HandsPromptArgument,
@@ -63,7 +64,6 @@ class ManagedMcpConnector:
         # AuraClaw Skill contract uses its canonical name.  Keep this mapping
         # explicit in the server definition and translate only at this boundary.
         self._remote_tool_names: dict[str, str] = {}
-        self._tool_argument_wrappers: set[str] = set()
         self._read_only_tools: set[str] = set()
 
     @property
@@ -220,14 +220,9 @@ class ManagedMcpConnector:
         if self._server.protocol_revision == MCP_PROTOCOL_VERSION:
             request_meta.update(_modern_meta())
         remote_name = self._remote_tool_names.get(name, name)
-        remote_arguments = (
-            {"input": dict(arguments)}
-            if name in self._tool_argument_wrappers and "input" not in arguments
-            else dict(arguments)
-        )
         params: dict[str, Any] = {
             "name": remote_name,
-            "arguments": remote_arguments,
+            "arguments": dict(arguments),
             "_meta": request_meta,
         }
         response = await self._transport.send(
@@ -238,9 +233,18 @@ class ManagedMcpConnector:
         if response.error is not None:
             return HandsToolResult(
                 status="error",
-                summary=response.error.message,
-                error_code=str(response.error.code),
+                summary=safe_error_text(response.error.message),
+                error_code="mcp_jsonrpc_error",
                 side_effect_status="unknown",
+                metadata={
+                    "error_details": {
+                        "stage": "protocol",
+                        "origin": "downstream",
+                        "remote_code": response.error.code,
+                        "retryable": False,
+                        "server_id": self._server.server_id,
+                    }
+                },
             )
         result = dict(response.result or {})
         if result.get("isError") is True:
@@ -249,11 +253,23 @@ class ManagedMcpConnector:
                 summary=_tool_error_summary(result),
                 error_code="mcp_tool_error",
                 side_effect_status="unknown",
+                metadata={
+                    "error_details": {
+                        "stage": "remote_tool",
+                        "origin": "downstream",
+                        "retryable": False,
+                        "server_id": self._server.server_id,
+                    }
+                },
             )
         structured = result.get("structuredContent")
         if isinstance(structured, dict):
             status = structured.get("status")
-            if isinstance(status, str) and status in _TOOL_RESULT_STATUSES:
+            if (
+                self._server.metadata.get("result_envelope") == "auraclaw-v1"
+                and isinstance(status, str)
+                and status in _TOOL_RESULT_STATUSES
+            ):
                 content = structured.get("content")
                 return HandsToolResult(
                     status=status,
@@ -284,15 +300,6 @@ class ManagedMcpConnector:
         )
         if canonical_name != remote_name:
             self._remote_tool_names[canonical_name] = remote_name
-        schema = item.get("inputSchema")
-        if (
-            canonical_name
-            and isinstance(schema, dict)
-            and isinstance(schema.get("properties"), dict)
-            and isinstance(schema["properties"].get("input"), dict)
-            and schema.get("required") == ["input"]
-        ):
-            self._tool_argument_wrappers.add(canonical_name)
         descriptor = _tool_descriptor(item, name=canonical_name)
         if descriptor.read_only:
             self._read_only_tools.add(canonical_name)
@@ -358,7 +365,6 @@ class ManagedMcpConnector:
             else {}
         )
         self._remote_tool_names.clear()
-        self._tool_argument_wrappers.clear()
         self._read_only_tools.clear()
         for tool in snapshot.tools:
             self._tool_descriptor(
@@ -443,9 +449,14 @@ def _modern_meta() -> dict[str, Any]:
 
 
 def _tool_error_summary(result: dict[str, Any]) -> str:
+    structured = result.get("structuredContent")
+    if isinstance(structured, dict):
+        error = structured.get("error", structured)
+        if isinstance(error, dict) and isinstance(error.get("message"), str):
+            return safe_error_text(error["message"])
     for item in result.get("content", ()):
         if isinstance(item, dict) and item.get("type") == "text" and item.get("text"):
-            return str(item["text"])[:1_000]
+            return safe_error_text(item["text"])
     return "remote MCP Tool returned an execution error"
 
 
@@ -490,6 +501,10 @@ def _tool_descriptor(
     if isinstance(annotations, dict):
         read_only = annotations.get("readOnlyHint") is True
         destructive = annotations.get("destructiveHint") is True
+    if "inputSchema" in item and not isinstance(item["inputSchema"], dict):
+        raise InvalidToolSchemaError("MCP inputSchema must be a JSON Schema object")
+    if item.get("outputSchema") is not None and not isinstance(item["outputSchema"], dict):
+        raise InvalidToolSchemaError("MCP outputSchema must be a JSON Schema object")
     input_schema = item.get("inputSchema", {"type": "object"})
     output_schema = item.get("outputSchema", {"type": "object"})
     return HandsToolDescriptor(

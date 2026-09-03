@@ -16,7 +16,7 @@ from auraclaw.contracts.capabilities import (
     McpNetworkMode,
     McpServerDefinition,
 )
-from auraclaw.contracts.errors import CredentialAccessError
+from auraclaw.contracts.errors import CredentialAccessError, McpTransportError
 from auraclaw.infrastructure.connectors.mcp.wire import (
     MCP_CLIENT_CAPABILITIES_META_KEY,
     MCP_PROTOCOL_VERSION,
@@ -138,9 +138,9 @@ class HttpxPinnedMcpSender:
         try:
             response = await self._client.send(request, follow_redirects=False)
         except httpx.RequestError as exc:
-            raise CredentialAccessError(
+            raise McpTransportError(
                 "MCP egress target is unreachable",
-                detail=type(exc).__name__,
+                code="mcp_network_error",
             ) from exc
         return McpEgressResponse(
             status_code=response.status_code,
@@ -310,12 +310,15 @@ class ManagedMcpEgressAdapter:
             },
             separators=(",", ":"),
         ).encode()
-        response = await self._send_pinned(
-            "POST",
-            self._server.endpoint,
-            headers=headers,
-            content=jsonrpc_body,
-        )
+        try:
+            response = await self._send_pinned(
+                "POST",
+                self._server.endpoint,
+                headers=headers,
+                content=jsonrpc_body,
+            )
+        except (httpx.HTTPError, OSError) as exc:
+            raise McpTransportError("MCP network request failed", code="mcp_network_error") from exc
         result = _decode_mcp_response(response, self._max_response_bytes)
         return dict(_redact_exact(result, token) if token else result)
 
@@ -475,7 +478,9 @@ class ManagedMcpEgressAdapter:
             content=content,
         )
         if 300 <= response.status_code < 400:
-            raise CredentialAccessError("MCP egress redirects are forbidden")
+            raise McpTransportError(
+                "MCP egress redirects are forbidden", code="mcp_redirect_rejected"
+            )
         return response
 
     def _authorize_method(self, method: str, params: dict[str, Any]) -> None:
@@ -584,9 +589,15 @@ def _decode_mcp_response(
     max_response_bytes: int,
 ) -> dict[str, Any]:
     if len(response.content) > max_response_bytes:
-        raise CredentialAccessError("MCP response exceeds the configured limit")
+        raise McpTransportError(
+            "MCP response exceeds the configured limit", code="mcp_protocol_error", stage="protocol"
+        )
     if not 200 <= response.status_code < 300:
-        raise CredentialAccessError(f"MCP server returned HTTP {response.status_code}")
+        raise McpTransportError(
+            f"MCP server returned HTTP {response.status_code}",
+            code="mcp_http_error",
+            remote_code=response.status_code,
+        )
     content_type = response.headers.get("content-type", "").split(";", 1)[0]
     try:
         if content_type == "text/event-stream":
@@ -604,18 +615,30 @@ def _decode_mcp_response(
             ]
             responses = [event for event in events if isinstance(event, dict) and "id" in event]
             if len(responses) != 1:
-                raise CredentialAccessError("MCP event stream must contain exactly one response")
+                raise McpTransportError(
+                    "MCP event stream must contain exactly one response",
+                    code="mcp_protocol_error",
+                    stage="protocol",
+                )
             payload = dict(responses[0])
             if notifications:
                 payload["_auraclaw_notifications"] = notifications
         elif content_type in {"application/json", ""}:
             payload = json.loads(response.content)
         else:
-            raise CredentialAccessError("MCP response Content-Type is not supported")
+            raise McpTransportError(
+                "MCP response Content-Type is not supported",
+                code="mcp_protocol_error",
+                stage="protocol",
+            )
     except json.JSONDecodeError as exc:
-        raise CredentialAccessError("MCP response is not valid JSON") from exc
+        raise McpTransportError(
+            "MCP response is not valid JSON", code="mcp_protocol_error", stage="protocol"
+        ) from exc
     if not isinstance(payload, dict):
-        raise CredentialAccessError("MCP response must contain a JSON object")
+        raise McpTransportError(
+            "MCP response must contain a JSON object", code="mcp_protocol_error", stage="protocol"
+        )
     return payload
 
 

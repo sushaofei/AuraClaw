@@ -11,6 +11,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
+from auraclaw.action.json_schema import JsonSchemaValidator as JsonSchemaValidator
 from auraclaw.action.policy import PolicyEngine as PolicyEngine
 from auraclaw.action.ports import (
     ApprovalController,
@@ -22,9 +23,11 @@ from auraclaw.action.ports import (
     PolicyEvaluation,
     PolicyEvaluator,
 )
+from auraclaw.contracts.diagnostics import safe_error_text
 from auraclaw.contracts.errors import (
     ApprovalValidationError,
     AuraClawError,
+    ConnectorExecutionError,
     CredentialAccessError,
     PolicyDeniedError,
     SandboxViolationError,
@@ -72,6 +75,8 @@ class ToolRegistry:
             self.register(capability)
 
     def register(self, capability: ToolCapability) -> None:
+        JsonSchemaValidator.check_schema(capability.input_schema)
+        JsonSchemaValidator.check_schema(capability.output_schema)
         key = self._key(capability)
         if key in self._capabilities:
             raise ValueError(f"Tool already registered: {capability.name}@{capability.version}")
@@ -80,21 +85,29 @@ class ToolRegistry:
 
     @staticmethod
     def _key(capability: ToolCapability) -> tuple[str, str]:
-        name = (capability.invocation_ref.model_name
-                if capability.invocation_ref else capability.name)
+        name = (
+            capability.invocation_ref.model_name if capability.invocation_ref else capability.name
+        )
         return name, capability.version
 
     def get(self, name: str, version: str, *, tenant_id: str | None = None) -> ToolCapability:
         def visible(item: ToolCapability) -> bool:
             ref = item.invocation_ref
-            return (tenant_id is None or ref is None or ref.tenant_id is None
-                    or ref.tenant_id == tenant_id)
+            return (
+                tenant_id is None
+                or ref is None
+                or ref.tenant_id is None
+                or ref.tenant_id == tenant_id
+            )
 
         direct = self._capabilities.get((name, version))
         if direct is not None and visible(direct):
             return direct
-        matches = [item for item in self._capabilities.values()
-                   if item.name == name and item.version == version and visible(item)]
+        matches = [
+            item
+            for item in self._capabilities.values()
+            if item.name == name and item.version == version and visible(item)
+        ]
         if len(matches) > 1:
             raise PolicyDeniedError("ambiguous_capability: load an explicit capability target")
         if matches:
@@ -102,10 +115,14 @@ class ToolRegistry:
         raise PolicyDeniedError(f"Tool is not registered or is stale: {name}@{version}")
 
     def prepare_owner(
-        self, owner: str, capabilities: tuple[ToolCapability, ...],
+        self,
+        owner: str,
+        capabilities: tuple[ToolCapability, ...],
     ) -> dict[tuple[str, str], ToolCapability]:
         prepared = {key: item for key, item in self._capabilities.items() if item.owner != owner}
         for capability in capabilities:
+            JsonSchemaValidator.check_schema(capability.input_schema)
+            JsonSchemaValidator.check_schema(capability.output_schema)
             if capability.owner != owner:
                 raise ValueError("Tool owner does not match registry update")
             key = self._key(capability)
@@ -140,59 +157,6 @@ class ToolRegistry:
             if not permissions or item.permission in permissions
         ]
         return sorted(values, key=lambda item: (item.name, item.version))
-
-
-class JsonSchemaValidator:
-    """Small strict JSON Schema subset used at the untrusted Tool boundary."""
-
-    @classmethod
-    def validate(cls, value: Any, schema: dict[str, Any], *, path: str = "$") -> None:
-        expected_type = schema.get("type")
-        if expected_type is not None and not cls._matches_type(value, str(expected_type)):
-            raise SchemaValidationError(f"{path} must be {expected_type}")
-        if "enum" in schema and value not in schema["enum"]:
-            raise SchemaValidationError(f"{path} is not an allowed value")
-        if isinstance(value, dict):
-            properties = dict(schema.get("properties", {}))
-            required = set(schema.get("required", ()))
-            missing = sorted(required.difference(value))
-            if missing:
-                raise SchemaValidationError(f"{path} is missing required fields: {missing}")
-            if schema.get("additionalProperties") is False:
-                extras = sorted(set(value).difference(properties))
-                if extras:
-                    raise SchemaValidationError(f"{path} has unexpected fields: {extras}")
-            for key, child in value.items():
-                child_schema = properties.get(key)
-                if isinstance(child_schema, dict):
-                    cls.validate(child, child_schema, path=f"{path}.{key}")
-        elif isinstance(value, list):
-            item_schema = schema.get("items")
-            if isinstance(item_schema, dict):
-                for index, item in enumerate(value):
-                    cls.validate(item, item_schema, path=f"{path}[{index}]")
-        elif isinstance(value, str):
-            if "minLength" in schema and len(value) < int(schema["minLength"]):
-                raise SchemaValidationError(f"{path} is shorter than minLength")
-            if "maxLength" in schema and len(value) > int(schema["maxLength"]):
-                raise SchemaValidationError(f"{path} is longer than maxLength")
-        elif isinstance(value, int | float) and not isinstance(value, bool):
-            if "minimum" in schema and value < schema["minimum"]:
-                raise SchemaValidationError(f"{path} is below minimum")
-            if "maximum" in schema and value > schema["maximum"]:
-                raise SchemaValidationError(f"{path} is above maximum")
-
-    @staticmethod
-    def _matches_type(value: Any, expected: str) -> bool:
-        return {
-            "object": isinstance(value, dict),
-            "array": isinstance(value, list),
-            "string": isinstance(value, str),
-            "integer": isinstance(value, int) and not isinstance(value, bool),
-            "number": isinstance(value, int | float) and not isinstance(value, bool),
-            "boolean": isinstance(value, bool),
-            "null": value is None,
-        }.get(expected, False)
 
 
 class _KeyedLocks:
@@ -613,16 +577,27 @@ class ToolGateway:
             )
         except PolicyDeniedError as exc:
             return ToolResult(
-                status=ToolResultStatus.DENIED, summary=exc.message,
-                error_code=("ambiguous_capability" if "ambiguous_capability" in exc.message
-                            else "stale_capability"), side_effect_status="not_started",
+                status=ToolResultStatus.DENIED,
+                summary=exc.message,
+                error_code=(
+                    "ambiguous_capability"
+                    if "ambiguous_capability" in exc.message
+                    else "stale_capability"
+                ),
+                side_effect_status="not_started",
             )
-        if (invocation.capability_ref is not None
-                and invocation.capability_ref != capability.invocation_ref):
-            return ToolResult(status=ToolResultStatus.DENIED, error_code="stale_capability",
-                              side_effect_status="not_started")
-        invocation = replace(invocation, tool_name=capability.name,
-                             capability_ref=capability.invocation_ref)
+        if (
+            invocation.capability_ref is not None
+            and invocation.capability_ref != capability.invocation_ref
+        ):
+            return ToolResult(
+                status=ToolResultStatus.DENIED,
+                error_code="stale_capability",
+                side_effect_status="not_started",
+            )
+        invocation = replace(
+            invocation, tool_name=capability.name, capability_ref=capability.invocation_ref
+        )
         try:
             JsonSchemaValidator.validate(invocation.arguments, capability.input_schema)
         except SchemaValidationError as exc:
@@ -657,6 +632,14 @@ class ToolGateway:
                 summary=exc.message,
                 error_code=exc.code,
                 side_effect_status="not_started",
+                metadata={
+                    "error_details": {
+                        "stage": "argument_validation",
+                        "origin": "local",
+                        "retryable": False,
+                        "validation_errors": exc.validation_errors,
+                    }
+                },
             )
         digest = invocation_action_digest(invocation)
         cache_key = (invocation.tenant_id, invocation.idempotency_key)
@@ -962,6 +945,21 @@ class ToolGateway:
                 summary="tool execution timed out",
                 error_code="tool_timeout",
                 side_effect_status="unknown",
+                metadata={
+                    "error_details": {"stage": "transport", "origin": "local", "retryable": False}
+                },
+            )
+        except ConnectorExecutionError as exc:
+            return ToolResult(
+                status=(
+                    ToolResultStatus(exc.status)
+                    if exc.status in {item.value for item in ToolResultStatus}
+                    else ToolResultStatus.ERROR
+                ),
+                summary=safe_error_text(self._redact(exc.message)),
+                error_code=exc.code,
+                side_effect_status=exc.side_effect_status,
+                metadata=self._redact(exc.metadata),
             )
         except (CredentialAccessError, PolicyDeniedError, SandboxViolationError) as exc:
             return ToolResult(
@@ -982,7 +980,7 @@ class ToolGateway:
                 side_effect_status="not_started",
             )
         except Exception as exc:
-            logger.exception(
+            logger.error(
                 "Tool adapter failed without a controlled error "
                 "exception_type=%s tenant_id=%s session_id=%s run_id=%s tool_name=%s",
                 type(exc).__name__,
@@ -996,9 +994,33 @@ class ToolGateway:
                 summary="tool adapter failed",
                 error_code="tool_adapter_error",
                 side_effect_status="unknown",
+                metadata={
+                    "error_details": {
+                        "stage": "dispatch",
+                        "origin": "local",
+                        "retryable": False,
+                        "diagnostic_id": invocation.tool_invocation_id,
+                    }
+                },
             )
         redacted = self._redact(raw)
-        JsonSchemaValidator.validate(redacted, capability.output_schema)
+        try:
+            JsonSchemaValidator.validate(redacted, capability.output_schema)
+        except SchemaValidationError as exc:
+            return ToolResult(
+                status=ToolResultStatus.ERROR,
+                summary=exc.message,
+                error_code="tool_output_schema_invalid",
+                side_effect_status="unknown",
+                metadata={
+                    "error_details": {
+                        "stage": "output_validation",
+                        "origin": "local",
+                        "retryable": False,
+                        "validation_errors": exc.validation_errors,
+                    }
+                },
+            )
         content = await self._extract_artifact(invocation, redacted)
         return ToolResult(
             status=ToolResultStatus.SUCCESS,

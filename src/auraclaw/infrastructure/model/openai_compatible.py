@@ -190,8 +190,7 @@ class OpenAICompatibleProvider:
                             if not first_delta_logged:
                                 first_delta_logged = True
                                 logger.info(
-                                    "provider_ttft_ms=%.2f provider=%s model=%s "
-                                    "model_call=%s",
+                                    "provider_ttft_ms=%.2f provider=%s model=%s model_call=%s",
                                     (time.perf_counter() - started) * 1_000,
                                     self.name,
                                     model,
@@ -243,9 +242,7 @@ class OpenAICompatibleProvider:
             raise ModelRateLimitError("model provider rate limit or quota was exhausted")
         if response.is_error:
             detail = OpenAICompatibleProvider._error_detail(response)
-            raise ModelProviderError(
-                f"model provider returned HTTP {response.status_code}{detail}"
-            )
+            raise ModelProviderError(f"model provider returned HTTP {response.status_code}{detail}")
 
     @staticmethod
     def _error_detail(response: httpx.Response) -> str:
@@ -314,9 +311,7 @@ class OpenAICompatibleProvider:
         return normalized
 
     @staticmethod
-    def _merge_tool_calls(
-        fragments: dict[int, dict[str, str]], raw_calls: Any
-    ) -> None:
+    def _merge_tool_calls(fragments: dict[int, dict[str, str]], raw_calls: Any) -> None:
         if not isinstance(raw_calls, list):
             return
         for raw in raw_calls:
@@ -339,7 +334,11 @@ class OpenAICompatibleProvider:
     ) -> tuple[ToolCall, ...]:
         calls: list[ToolCall] = []
         for index, fragment in sorted(fragments.items()):
-            raw_arguments = fragment["arguments"] or "{}"
+            raw_arguments = fragment["arguments"]
+            if not raw_arguments.strip():
+                raise ModelProviderError(
+                    "model provider omitted tool arguments; expected a JSON object"
+                )
             try:
                 arguments = json.loads(raw_arguments)
             except json.JSONDecodeError as exc:

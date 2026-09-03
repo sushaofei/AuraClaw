@@ -7,7 +7,7 @@ from typing import Any
 
 from auraclaw.action.ports import CredentialInvoker, ResourcePolicyEvaluator
 from auraclaw.contracts.capabilities import CapabilityStatus, McpAuthStrategy, McpServerDefinition
-from auraclaw.contracts.errors import PolicyDeniedError
+from auraclaw.contracts.errors import McpTransportError, PolicyDeniedError
 from auraclaw.contracts.tools import PolicyDecision
 from auraclaw.infrastructure.connectors.mcp.wire import (
     McpJsonRpcRequest,
@@ -26,11 +26,10 @@ class ManagedRemoteMcpTransport:
         credentials: CredentialInvoker,
         policy: ResourcePolicyEvaluator,
     ) -> None:
-        if (
-            not server.enabled
-            or server.status
-            not in {CapabilityStatus.ACTIVE, CapabilityStatus.DEGRADED}
-        ):
+        if not server.enabled or server.status not in {
+            CapabilityStatus.ACTIVE,
+            CapabilityStatus.DEGRADED,
+        }:
             raise ValueError("remote MCP server is not callable")
         if server.resolved_auth_strategy is McpAuthStrategy.NONE:
             credential_ref = server.credential_ref or f"mcp:none:{server.server_id}"
@@ -47,9 +46,9 @@ class ManagedRemoteMcpTransport:
         self._credential_ref = credential_ref
         self._credentials = credentials
         self._policy = policy
-        self._notification_handler: (
-            Callable[[str, str, dict[str, Any]], Awaitable[bool]] | None
-        ) = None
+        self._notification_handler: Callable[[str, str, dict[str, Any]], Awaitable[bool]] | None = (
+            None
+        )
 
     def set_notification_handler(
         self,
@@ -77,10 +76,7 @@ class ManagedRemoteMcpTransport:
             declared_tenant = arguments.get("tenant_id")
             declared_user = arguments.get("user_id")
             declared_dept = arguments.get("dept_id")
-            if (
-                declared_tenant is not None
-                and str(declared_tenant) != trusted_context.tenant_id
-            ):
+            if declared_tenant is not None and str(declared_tenant) != trusted_context.tenant_id:
                 raise PolicyDeniedError("tool argument tenant_id is not an authorization source")
             if (
                 declared_user is not None
@@ -103,8 +99,7 @@ class ManagedRemoteMcpTransport:
             "run_id": trusted_context.run_id,
         }
         if (
-            self._server.resolved_auth_strategy
-            is McpAuthStrategy.WORKLOAD_TRUSTED_CONTEXT
+            self._server.resolved_auth_strategy is McpAuthStrategy.WORKLOAD_TRUSTED_CONTEXT
             and not identity["user_id"]
             and request.method in {"tools/call", "resources/read", "prompts/get"}
         ):
@@ -149,12 +144,12 @@ class ManagedRemoteMcpTransport:
             policy_decision_id=evaluation.decision_id,
         )
         if not isinstance(raw_response, dict):
-            raise ValueError("remote MCP response is not an object")
+            raise McpTransportError(
+                "remote MCP response is not an object", code="mcp_protocol_error", stage="protocol"
+            )
         response = dict(raw_response)
         notifications = response.pop("_auraclaw_notifications", ())
-        if self._notification_handler is not None and isinstance(
-            notifications, list
-        ):
+        if self._notification_handler is not None and isinstance(notifications, list):
             for notification in notifications:
                 if not isinstance(notification, dict):
                     continue
@@ -166,9 +161,24 @@ class ManagedRemoteMcpTransport:
                         method,
                         dict(params),
                     )
-        parsed = McpJsonRpcResponse.model_validate(response)
+        try:
+            parsed = McpJsonRpcResponse.model_validate(response)
+        except ValueError as exc:
+            raise McpTransportError(
+                "remote MCP response violates the protocol",
+                code="mcp_protocol_error",
+                stage="protocol",
+            ) from exc
         if parsed.id != request.id:
-            raise ValueError("remote MCP response id does not match request")
+            raise McpTransportError(
+                "remote MCP response id does not match request",
+                code="mcp_protocol_error",
+                stage="protocol",
+            )
         if (parsed.result is None) == (parsed.error is None):
-            raise ValueError("remote MCP response must contain exactly one result or error")
+            raise McpTransportError(
+                "remote MCP response must contain exactly one result or error",
+                code="mcp_protocol_error",
+                stage="protocol",
+            )
         return parsed

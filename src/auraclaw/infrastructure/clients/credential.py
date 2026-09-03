@@ -6,7 +6,7 @@ from typing import Any
 import httpx
 
 from auraclaw.action.ports import CredentialAdapter
-from auraclaw.contracts.errors import CredentialAccessError
+from auraclaw.contracts.errors import ConnectorExecutionError, CredentialAccessError
 from auraclaw.contracts.internal import (
     CredentialInvokeRequest,
     CredentialInvokeResponse,
@@ -71,6 +71,15 @@ class RemoteCredentialProxy:
             ),
             CredentialInvokeResponse,
         )
+        if response.status == "error" and operation == "mcp.invoke":
+            body = response.response
+            raise ConnectorExecutionError(
+                str(body.get("message", "MCP request failed")),
+                code=str(body.get("code", "mcp_transport_error")),
+                status=str(body.get("status", "error")),
+                side_effect_status=str(body.get("side_effect_status", "unknown")),
+                metadata=dict(body.get("metadata") or {}),
+            )
         return response.response
 
     def redact(self, value: Any) -> Any:

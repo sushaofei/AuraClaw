@@ -3366,3 +3366,17 @@ Ruff、Mypy（248 文件）、10 条架构合同通过。迁移不适用，部�
 - [x] 代码阶段与真实双进程部署验收分别记录，issue 不提前关闭。
 
 参见 [MCP 冷副本就绪](../operations/mcp-cold-replica-readiness.md)。
+
+## Skill / MCP 修复 G：入参、Schema 与错误闭环（Issue #93 A–C）
+
+- [x] 目录到模型 HTTP tools 完整保留 schema，中文分片/嵌套数组/null 到真实 MCP 报文一致。
+- [x] 禁止隐式 input 包装，非法/非对象/缺失模型参数不再改为 {}。
+- [x] 引入成熟 jsonschema 与限时 regex；方言、引用、安全边界、缓存及限制明确并验证。
+- [x] 远端/协议/传输/输入/输出错误分类经跨服务、Canonical Event 和下一轮模型保留，脱敏及未知副作用回归通过。
+- [x] 业务 status 字段不再被误认内部结果信封；旧信封只能显式配置。
+- [x] PostgreSQL invocation 错误元数据、模型/Hands/真实 MCP/AuraMCP 联合 12 passed；全量 665 passed / 56 skipped。
+- [x] Ruff、Mypy（250 文件）、10 条架构合同通过，无 DDL；依赖锁文件、迁移调用者与升级说明同步。
+- [x] SDK 1.29.1 spike 与暂缓整体替换决定有证据；协议生命周期在后续阶段继续，测试环境验收未冒充完成。
+- [x] 提交排除无关修改/秘密，阶段提交并推送；issue 不提前关闭。
+
+参见 [MCP 入参与错误](../operations/mcp-arguments-and-errors.md)。

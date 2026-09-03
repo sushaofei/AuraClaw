@@ -15,6 +15,7 @@ from auraclaw.action.capability_catalog import (
     CapabilityCatalog,
     RoutedHandsExecutor,
 )
+from auraclaw.action.json_schema import JsonSchemaValidator
 from auraclaw.action.ports import (
     CapabilityCatalogStore,
     CapabilityConnector,
@@ -28,7 +29,7 @@ from auraclaw.contracts.capabilities import (
     CapabilityStatus,
     McpServerDefinition,
 )
-from auraclaw.contracts.errors import StaleCapabilitySnapshotError
+from auraclaw.contracts.errors import ConnectorExecutionError, StaleCapabilitySnapshotError
 from auraclaw.contracts.hands import (
     CapabilitySnapshot,
     HandsPromptDescriptor,
@@ -748,6 +749,9 @@ def _normalize_tools(
 ) -> tuple[CapabilityDescriptor, ...]:
     normalized: list[CapabilityDescriptor] = []
     for tool in tools:
+        JsonSchemaValidator.check_schema(tool.input_schema)
+        if tool.output_schema:
+            JsonSchemaValidator.check_schema(tool.output_schema)
         source = {
             "name": tool.name,
             "description": tool.description,
@@ -987,8 +991,14 @@ def _validate_depth(value: Any, *, depth: int) -> None:
 
 
 def _executor_payload(result: HandsToolResult) -> dict[str, object]:
-    if result.status in {"error", "denied", "timeout", "cancelled"}:
-        raise RuntimeError(result.summary or "remote connector Tool returned an error")
+    if result.status != "success":
+        raise ConnectorExecutionError(
+            result.summary or "remote connector Tool did not succeed",
+            code=result.error_code or "remote_tool_error",
+            status=result.status,
+            side_effect_status=result.side_effect_status,
+            metadata=result.metadata,
+        )
     if isinstance(result.content, dict):
         return dict(result.content)
     return result.as_dict()

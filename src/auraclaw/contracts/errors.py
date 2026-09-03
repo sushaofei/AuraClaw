@@ -1,3 +1,4 @@
+from typing import Any
 
 
 class AuraClawError(Exception):
@@ -99,8 +100,42 @@ class ModelProviderError(AuraClawError):
 
 
 class SchemaValidationError(AuraClawError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        validation_errors: list[dict[str, Any]] | None = None,
+        detail: str | None = None,
+        retry_after: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.detail = detail
+        self.retry_after = retry_after
+        self.validation_errors = validation_errors or []
+
     code = "tool_schema_invalid"
     status_code = 422
+
+
+class InvalidToolSchemaError(SchemaValidationError):
+    code = "tool_schema_definition_invalid"
+
+
+class ConnectorExecutionError(AuraClawError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str,
+        status: str = "error",
+        side_effect_status: str = "unknown",
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.status = status
+        self.side_effect_status = side_effect_status
+        self.metadata = metadata or {}
 
 
 class PolicyDeniedError(AuraClawError):
@@ -132,6 +167,29 @@ class SandboxViolationError(AuraClawError):
 class CredentialAccessError(AuraClawError):
     code = "credential_access_denied"
     status_code = 403
+
+
+class McpTransportError(ConnectorExecutionError, CredentialAccessError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "mcp_transport_error",
+        stage: str = "transport",
+        remote_code: int | None = None,
+    ) -> None:
+        super().__init__(
+            message,
+            code=code,
+            metadata={
+                "error_details": {
+                    "stage": stage,
+                    "origin": "downstream",
+                    "retryable": False,
+                    **({"remote_code": remote_code} if remote_code is not None else {}),
+                }
+            },
+        )
 
 
 class CollaborationValidationError(AuraClawError):
