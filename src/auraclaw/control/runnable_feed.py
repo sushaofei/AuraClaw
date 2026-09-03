@@ -176,7 +176,18 @@ class RunnableFeedConsumer:
         if now >= self._next_waiting_recovery_at:
             self._next_waiting_recovery_at = now + self._waiting_recovery_interval
             enqueued += await self._recover_waiting_coordinators()
+            enqueued += await self._recover_waiting_tools()
         return enqueued
+
+    async def _recover_waiting_tools(self, *, limit: int = 100) -> int:
+        # Schedule recovery work only. Runtime owns the original invocation result semantics.
+        recovered = 0
+        for assignment in await self._store.list_waiting_assignments(
+            limit=limit, status="waiting_for_tool"
+        ):
+            task_id = f"{assignment.tenant_id}:{assignment.session_id}:{assignment.run_id}"
+            recovered += int(await self._store.wake_assignment(task_id))
+        return recovered
 
     async def _recover_waiting_coordinators(self, *, limit: int = 100) -> int:
         recovered = 0

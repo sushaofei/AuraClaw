@@ -10,3 +10,20 @@ unknown 或写调用 timeout 且副作用未确定，保留 activation、step �
 声明式工作流仅由实际结果发出终态，聊天结束不为其补发 skill.completed。CanonicalEventCommitter 和 SkillRunner 共用每 activation 的 terminal command 身份及 expected_version，先读取权威终态，避免失败后补完成或重复终态。Canonical 已提交、checkpoint 未保存时，从 activation 事实恢复绑定和 deadline，从第一条 terminal 事实恢复终态；存量矛盾事件不改写。输出校验失败产生 skill.failed。
 
 部署顺序：先更新 Control/Hands（支持 waiting_for_tool 和 invocation status），再更新 Runtime；两种 Control store 的状态字段已有字符串存储，无新 DDL。待查明未知结果的分配可以显式唤醒；自动唤醒/现场恢复验收与后续生命周期联调一起完成。发布前避免把旧 Runtime 分配到新增等待状态。
+
+## 逐步撤销与定时恢复补充（#95/#96）
+
+声明式工作流现在在每个新步骤前进行独立、不可缓存的 binding-status 查询；pause/cancel 阻止后续
+Tool/Resource。已知终态绑定不再参与后续撤销检查。pause 使用合法 waiting_for_human 调度状态，
+保留 workflow cursor；unknown 使用 waiting_for_tool，保留原 invocation。
+
+Control feed 每五秒（既有 waiting_recovery_interval）最多唤醒 100 个等待工具的 assignment。
+唤醒只接受仍为 acked 的 runnable item，不能重置正在排队/已被其他调度者领取的 claim。
+Runtime 再读取原 invocation 状态；调度器不判断业务成功、不直接修改 Session 状态。
+
+工作流总 deadline 已过时仍允许有界查询原写调用结果（单次五秒）。结果未知继续等待；确认为成功或
+已知无未知副作用的失败后，以 workflow_budget_exhausted 结束，不再开始下一步或重放写操作。
+完整 assignment 取消/终止与旧包引用的联合清理仍需 #94 drain 阶段验收；不能用本段替代清理证据。
+
+本阶段全量 675 passed / 56 skipped；临时 PostgreSQL 调度、Runtime 与 invocation 联合验证通过。
+无 DDL，Control/Runtime 应协调升级。

@@ -756,14 +756,16 @@ class RuntimeExecutionEngine:
                 for side_event in side_events:
                     await self._events.append_capability_event(assignment, side_event)
 
-                if result.get("status") == "unknown" and result.get("skill_activation_id"):
+                if (result.get("status") in {"unknown", "paused"}
+                        and result.get("skill_activation_id")):
                     # Keep the call cursor and original invocation. A wake-up
                     # queries that result before any further workflow execution.
                     await self._progress.save_checkpoint(
                         assignment, RuntimePhase.CAPABILITY_WORKFLOW_RUNNING, state
                     )
                     await self._control.suspend_assignment(
-                        self._task_id(assignment), "waiting_for_tool"
+                        self._task_id(assignment),
+                        "waiting_for_human" if result["status"] == "paused" else "waiting_for_tool"
                     )
                     return
 
@@ -1020,7 +1022,7 @@ class RuntimeExecutionEngine:
                 assignment, RuntimePhase.CAPABILITY_SKILL_REVOKED_PAUSED, state
             )
             await self._capability_controller.release_run(assignment)
-            await self._control.suspend_assignment(self._task_id(assignment), "skill_revoked")
+            await self._control.suspend_assignment(self._task_id(assignment), "waiting_for_human")
             return True
         events = await self._session.load(assignment)
         await self._events.append_capability_event(

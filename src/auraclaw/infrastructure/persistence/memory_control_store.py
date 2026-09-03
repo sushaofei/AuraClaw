@@ -447,7 +447,7 @@ class InMemoryControlStateStore:
             if (
                 entry is None
                 or entry[1] not in {"waiting_children", "waiting_for_human", "waiting_for_tool"}
-                or queued is None
+                or queued is None or queued[1] != "acked"
             ):
                 return False
             self._queue[task_id] = (queued[0], "queued", None)
@@ -455,13 +455,14 @@ class InMemoryControlStateStore:
             return True
 
     async def list_waiting_assignments(
-        self, *, limit: int = 100
+        self, *, limit: int = 100, status: str = "waiting_children"
     ) -> tuple[RuntimeAssignment, ...]:
         async with self._lock:
             return tuple(
                 assignment
-                for assignment, status in self._assignments.values()
-                if status == "waiting_children"
+                for task_id, (assignment, current_status) in self._assignments.items()
+                if current_status == status
+                and self._queue.get(task_id, (None, "", None))[1] == "acked"
             )[: max(0, limit)]
 
     async def register_runtime(self, instance: RuntimeInstance) -> None:

@@ -41,6 +41,7 @@ class WorkflowStepProgress:
 
 
 WorkflowProgressCallback = Callable[[WorkflowStepProgress], Awaitable[None]]
+WorkflowGuard = Callable[[], Awaitable[dict[str, Any] | None]]
 
 
 class RuntimeSkillWorkflowExecutor:
@@ -64,6 +65,7 @@ class RuntimeSkillWorkflowExecutor:
         deadline: datetime | None = None,
         pending_invocation_id: str | None = None,
         completed_steps: tuple[str, ...] = (),
+        before_step: WorkflowGuard | None = None,
     ) -> WorkflowExecutionResult:
         deadline = deadline or datetime.now(UTC) + timedelta(
             seconds=activation.binding.timeout_seconds
@@ -73,6 +75,19 @@ class RuntimeSkillWorkflowExecutor:
         remaining = (deadline - datetime.now(UTC)).total_seconds()
         context: dict[str, Any] = {"completed": completed_steps}
         if remaining <= 0:
+            # The execution budget cannot expire the obligation to establish a write's outcome.
+            if pending_invocation_id:
+                lookup = getattr(self._client, "invocation_status", None)
+                try:
+                    observed = (await asyncio.wait_for(lookup(assignment, pending_invocation_id), 5)
+                                if callable(lookup) else {})
+                except Exception:
+                    observed = {}
+                if observed.get("status") == "success" or (
+                    observed.get("status") in {"error", "denied", "cancelled"}
+                    and observed.get("side_effect_status") not in {None, "unknown"}
+                ):
+                    pending_invocation_id = None
             return WorkflowExecutionResult(
                 status="unknown" if pending_invocation_id else "failed", output={},
                 completed_steps=completed_steps, pending_invocation_id=pending_invocation_id,
@@ -85,7 +100,7 @@ class RuntimeSkillWorkflowExecutor:
                     approval_id=approval_id, approval_step_id=approval_step_id,
                     resume_state=resume_state, start_step_index=start_step_index,
                     on_progress=on_progress, context=context,
-                    pending_invocation_id=pending_invocation_id,
+                    pending_invocation_id=pending_invocation_id, before_step=before_step,
                 )
         except TimeoutError:
             return WorkflowExecutionResult(
@@ -115,6 +130,7 @@ class RuntimeSkillWorkflowExecutor:
         on_progress: WorkflowProgressCallback | None = None,
         context: dict[str, Any],
         pending_invocation_id: str | None = None,
+        before_step: WorkflowGuard | None = None,
     ) -> WorkflowExecutionResult:
         resolved = activation.binding.resolved_workflow
         if resolved is None:
@@ -137,6 +153,14 @@ class RuntimeSkillWorkflowExecutor:
         for step_index, step in enumerate(
             document.steps[start_step_index:], start=start_step_index
         ):
+            if before_step is not None and pending_invocation_id is None:
+                disposition = await before_step()
+                if disposition is not None and disposition.get("action") != "continue":
+                    return WorkflowExecutionResult(
+                        status="cancelled" if disposition.get("action") == "cancel" else "paused",
+                        output={}, completed_steps=tuple(completed), pending_step_id=step.id,
+                        error_code="skill_binding_revoked",
+                    )
             arguments = {
                 name: resolve_workflow_value(
                     expression,
@@ -238,6 +262,7 @@ class RuntimeSkillWorkflowExecutor:
                     error_code=_optional_string(result.get("error_code"))
                     or "workflow_step_failed",
                 )
+            pending_invocation_id = None
             state[step.result] = _result_content(result)
             _guard_state_size(state)
             completed.append(step.id)
