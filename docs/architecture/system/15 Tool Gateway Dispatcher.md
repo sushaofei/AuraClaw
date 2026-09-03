@@ -1,5 +1,10 @@
 # Tool Gateway / Dispatcher
 
+MCP Tool 名称不作为前缀准入条件：已启用 Server 的合法 Tool 经 Catalog 对账后登记，
+调用继续执行 tenant、Policy、Approval、Schema 和路由归属检查。Credential Proxy 保留
+认证、DNS/IP 与出站控制，Resource scheme 和 Prompt 前缀限制保持独立。
+升级与历史配置处理见 [MCP Tool 前缀移除升级](../../operations/mcp-tool-prefix-upgrade.md)。
+
 ## 定位
 
 Tool Gateway 是 Brain 与 Hands 之间的同步行动数据平面。它负责工具发现、授权、路由、标准化和传输可靠性，不负责 Runtime 生命周期，也不替 Agent 判断语义上是否应重试。

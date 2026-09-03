@@ -46,7 +46,8 @@ active 配置 revision 恢复 Server 信任和覆盖，Catalog 继承 Server 的
 读取目录时 KingBase 返回 `cached plan must not change result type`，导致 MCP 列表 HTTP 500。
 重新启动 3 个 Task API 后，逐实例验证 MCP 列表均返回 200，Server 数量为 1。
 
-发布目标在 Compose、env 模板、环境生成器及部署脚本中统一为 `0057`；
+该信任模型升级的迁移为 `0057`；当前发布目标已推进到 `0058`，见
+[MCP Tool 前缀移除升级](mcp-tool-prefix-upgrade.md)。
 一键发布默认执行停服、迁移、校验和全部副本重建。应用启动也校验 schema。
 目录读取仅针对该计划失效错误刷新连接池并重试一次；写入和其他数据库错误不重试。
 

@@ -1340,7 +1340,7 @@ Mypy、10 条 import-linter contract 和全量 Pytest 通过；PostgreSQL、Seaw
 ### 范围
 
 - AuraClaw Action Hands 用标准 MCP Client 接入 AuraMCP；Runtime 仍只持有 Hands URL。
-- 身份为 `workload_trusted_context`；Tool 前缀 `auramcp.`，Resource scheme `auramcp`。
+- 身份为 `workload_trusted_context`；Tool 命名使用 `auramcp.`，Resource scheme `auramcp`（Tool 名称不作为前缀准入配置）。
 - 不把 AuraClaw 内核 Tool 迁入 AuraMCP，也不让 Runtime / AuraX 直连。
 
 ### 功能校验
@@ -3240,3 +3240,27 @@ active-reference barrier，并简化 AuraX 卸载入口。
 - [x] 修复镜像在测试环境发布，30 个容器健康、29 个应用容器使用同一镜像；3 个 Task API 的 MCP 列表各连续 3 次返回 200，目录为 20 个只读、5 个写入。
 - [x] 补齐 Compose 的绝对迁移目录，覆盖 Hands 在 `/workspace` 启动的场景；配置与启动检查回归通过。
 - [x] 提交范围排除原有架构文档、IDE 与 Compose 无关变更；不提交环境配置、Secret 或缓存。
+
+
+## 移除 MCP Tool 前缀配置（Issue #91，2026-09-03）
+
+实现与隔离验证完成；交付涉及 AuraClaw、AuraX 和 AuraMCP 文档。
+部署步骤见 [MCP Tool 前缀移除升级](../operations/mcp-tool-prefix-upgrade.md)。
+
+- [x] 删除 AuraX 表单、SDK 输入/输出类型、配置契约和 materialize 字段。
+- [x] 删除 Catalog Tool 前缀过滤及 Egress 前缀判定、Java API 适配赋值；无替代配置。
+- [x] 非空 Tool 名称、tenant、Policy/Approval、Schema、来源归属和网络出站控制继续生效；Resource/Prompt 范围过滤独立保留。
+- [x] MCP 新建/更新的契约校验错误返回 422，旧字段不再进入 API 响应或新配置 revision。
+- [x] 0058 删除派生列；历史 JSON/digest 不变，读取时剥离退休字段；up/down/up 在临时 PostgreSQL 实际验证。
+- [x] 回滚恢复 active revision 的前缀，缺少可恢复数据时停用 Server；部署默认目标同步至 0058。
+- [x] 覆盖不同前缀及无点号 Tool 的发现/调用、旧过滤目录重新发布、两个独立 Registry/Router 加载新工具。
+- [x] 覆盖非空/空/空字符串/缺失的历史配置、SQL Store 往返、重启快照、非法名称和 Resource/Prompt 拒绝路径。
+- [x] 全量隔离 Pytest：571 passed、51 skipped；Ruff、Mypy（244 文件）及 10 条 import-linter 合同通过。
+- [x] AuraX：51 SDK tests、desktop typecheck、3 项 MCP/主视图 Playwright 测试通过；lint 无错误，保留 5 条既有 ChatView hook warnings。
+- [x] 架构、接入示例、数据库参考及升级/回滚文档同步；暂存排除既有 IDE/样式/视觉文档、docs/tmp、秘密配置和缓存。
+
+隔离命令使用 `AURACLAW_DISABLE_ENV_FILE=1 AURACLAW_POSTGRESQL_ENV_FILE=/dev/null`，
+51 项需外部服务的测试跳过；临时 PostgreSQL 和 loopback MCP 测试实际执行。
+早期使用本地 SQL 配置的运行另发现 Catalog 连续失败计数断言（4 vs 3）及 Skill lifecycle
+旧 `source_id` 非空列问题，未作为本 issue 的修复范围或通过证据。真实 KingBase 发布及逐副本
+生产验证尚未执行，属于维护窗口发布步骤。Git 提交/推送状态以实际仓库和交付记录为准。

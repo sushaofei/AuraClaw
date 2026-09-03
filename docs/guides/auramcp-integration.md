@@ -37,7 +37,6 @@ X-Expected-Revision: 0
   "network_mode": "public",
   "auth_strategy": "workload_trusted_context",
   "credential_ref": "vault/auramcp#workload",
-  "allowed_tool_prefixes": ["auramcp."],
   "allowed_resource_schemes": ["auramcp"],
   "allowed_prompt_prefixes": ["auramcp."]
 }

@@ -76,6 +76,7 @@ uv run auraclaw migrate up
 | `0039` | Publisher 永久撤销、Publisher/key 批量 Runtime Policy 证据与约束 |
 | `0053` | 清理已移除 Resource Provider 与非 active generation Catalog 残留 |
 | `0057` | 移除 Server / Catalog 的 `trust_level` 列及投影中的工具权限覆盖 |
+| `0058` | 移除 MCP Tool 前缀派生列；历史 revision 保留，回滚恢复旧数组或停用不可恢复条目 |
 | `0056` | 移除 Skill Source、同步/租约/来源选择表及各生命周期表的 `source_id` |
 | `0055` | Purged Skill 同版本重发、历史 Package tombstone 与可延迟 Publication FK |
 

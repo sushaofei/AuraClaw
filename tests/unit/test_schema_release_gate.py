@@ -64,7 +64,7 @@ def test_schema_check_is_read_only_and_closes_its_connection(tmp_path, monkeypat
 
 
 def test_startup_checks_database_owners_but_not_agent_runtime(monkeypatch):
-    check = AsyncMock(side_effect=MigrationError("migration 0057 is pending"))
+    check = AsyncMock(side_effect=MigrationError("migration 0058 is pending"))
     monkeypatch.setattr(cli, "create_migration_runner", lambda *_args: SimpleNamespace(check=check))
     settings = Settings(storage_backend="postgres")
     with pytest.raises(MigrationError, match="pending"):
@@ -118,7 +118,7 @@ def test_deployment_orders_stop_migrate_check_recreate_and_fails_closed(tmp_path
         "from pathlib import Path\n"
         "command=sys.argv[-1]\n"
         "with Path(os.environ['COMMAND_LOG']).open('a') as out: out.write(command+'\\n')\n"
-        "if 'migrate latest' in command: print('0057')\n"
+        "if 'migrate latest' in command: print('0058')\n"
         "if os.environ['TEST_MODE']=='migration_failure' and command.endswith('-T migrate'): "
         "sys.exit(1)\n"
     )
@@ -128,7 +128,7 @@ def test_deployment_orders_stop_migrate_check_recreate_and_fails_closed(tmp_path
          *(["--skip-up"] if mode == "build_only" else [])],
         env={**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}",
              "COMMAND_LOG": str(log), "TEST_MODE": mode,
-             "AURACLAW_MIGRATE_TARGET": "0055" if mode == "stale_target" else "0057"},
+             "AURACLAW_MIGRATE_TARGET": "0055" if mode == "stale_target" else "0058"},
         capture_output=True, text=True,
     )
     commands = log.read_text().splitlines()

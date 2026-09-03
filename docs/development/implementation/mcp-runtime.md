@@ -45,7 +45,6 @@ Canonical Session Event；目录、缓存、通知和步骤进度都可丢弃并
     "resource": "https://mcp.example/v1/mcp",
     "scopes": ["tools.read"]
   },
-  "allowed_tool_prefixes": ["github."],
   "allowed_resource_schemes": ["github"],
   "allowed_prompt_prefixes": ["github."]
 }
@@ -62,12 +61,11 @@ OAuth `client_credentials` 是**可选 Connector 策略**，不是 AuraClaw 用�
   "title": "chaintower MCP",
   "endpoint": "https://mcp.chaintower.example/mcp",
   "credential_ref": "vault/chaintower-mcp#workload",
-  "auth_strategy": "workload_trusted_context",
-  "allowed_tool_prefixes": ["order."]
+  "auth_strategy": "workload_trusted_context"
 }
 ```
 
-AuraMCP 扩展面同样走 `workload_trusted_context`，前缀锁定 `auramcp.` / `auramcp://`。
+AuraMCP 扩展面同样走 `workload_trusted_context`，Resource scheme 使用 `auramcp`，Tool 不按名称前缀过滤。
 见 [AuraMCP 接入](../../guides/auramcp-integration.md)。
 
 ```json
@@ -79,7 +77,6 @@ AuraMCP 扩展面同样走 `workload_trusted_context`，前缀锁定 `auramcp.` 
   "network_mode": "public",
   "credential_ref": "vault/auramcp#workload",
   "auth_strategy": "workload_trusted_context",
-  "allowed_tool_prefixes": ["auramcp."],
   "allowed_resource_schemes": ["auramcp"],
   "allowed_prompt_prefixes": ["auramcp."]
 }

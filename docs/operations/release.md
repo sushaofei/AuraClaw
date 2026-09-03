@@ -41,7 +41,7 @@ docker compose version
 
 在本机执行 `./scripts/dev_service_deploy.sh`。脚本在构建后核对镜像要求的迁移版本，
 再进入维护窗口，执行 stop → migrate up → migrate check → up --force-recreate。
-默认目标为 `0057`，不再要求额外传入 `--migrate`。详情见 DEV_SERVICE 部署手册。
+默认目标为 `0058`，不再要求额外传入 `--migrate`。详情见 DEV_SERVICE 部署手册。
 
 ### A3. 验收
 
@@ -121,8 +121,9 @@ Secret 目录权限：目录 `0700`，文件 `0600`。
 
 ### B3. 数据库迁移（先于应用）
 
-先准备本次不可变镜像，核对 `migrate latest` 为 `0057`。已有集群升级时先停止所有旧实例；
-`0057` 删除字段，不允许与旧实例混跑。
+先准备本次不可变镜像，核对 `migrate latest` 为 `0058`。已有集群升级时先停止所有旧实例；
+`0058` 删除字段，不允许与旧实例混跑。升级后须按
+[MCP Tool 前缀移除升级](mcp-tool-prefix-upgrade.md) 完成全量对账与各副本路由验证。
 
 KingBase（PostgreSQL 兼容模式）：
 
@@ -135,11 +136,11 @@ docker compose --env-file .env.prod -f compose.prod.yml stop
 
 docker compose --env-file .env.prod \
   -f compose.prod.yml --profile migrate run --rm migrate \
-  migrate up --target 0057 --directory /app/migrations
+  migrate up --target 0058 --directory /app/migrations
 
 docker compose --env-file .env.prod -f compose.prod.yml \
   --profile migrate run --rm migrate migrate check \
-  --target 0057 --directory /app/migrations
+  --target 0058 --directory /app/migrations
 ```
 
 迁移或校验失败时保持停服并排查，禁止跳过检查启动。进程监听前也会只读校验迁移账本的版本和 checksum；
@@ -182,7 +183,7 @@ curl --fail http://127.0.0.1:8080/health/ready
 
 ### B6. 简单回滚（非蓝绿）
 
-仅相同 schema 版本的代码回滚可以直接切回旧镜像。跨 `0057` 回滚必须先停服并执行对应 down migration，
+仅相同 schema 版本的代码回滚可以直接切回旧镜像。跨 `0058` 回滚必须先停服并执行对应 down migration，
 见 [MCP 升级与回滚](./mcp-annotation-upgrade.md)。启动检查拒绝账本与镜像不一致。
 
 ```bash

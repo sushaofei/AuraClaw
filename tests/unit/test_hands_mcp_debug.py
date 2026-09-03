@@ -127,7 +127,6 @@ def test_debug_mcp_credential_scope_matches_egress_adapter() -> None:
             network_mode=McpNetworkMode.LOOPBACK,
             auth_strategy=McpAuthStrategy.WORKLOAD_TRUSTED_CONTEXT,
             credential_ref="vault/java-mcp#client_secret",
-            allowed_tool_prefixes=("",),
         )
         proxy = CredentialProxy(
             InMemoryVault({"vault/java-mcp#client_secret": "local-java-mcp-debug"})

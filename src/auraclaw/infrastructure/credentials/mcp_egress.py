@@ -481,9 +481,9 @@ class ManagedMcpEgressAdapter:
 
     def _authorize_method(self, method: str, params: dict[str, Any]) -> None:
         if method == "tools/call":
-            name = str(params.get("name", ""))
-            if not _prefix_allowed(name, self._server.allowed_tool_prefixes):
-                raise CredentialAccessError("MCP Tool is outside server allowlist")
+            name = params.get("name")
+            if not isinstance(name, str) or not name.strip():
+                raise CredentialAccessError("MCP Tool name must be a non-empty string")
         elif method == "resources/read":
             parsed = urlsplit(str(params.get("uri", "")))
             if parsed.scheme not in self._server.allowed_resource_schemes:

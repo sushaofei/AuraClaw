@@ -141,7 +141,6 @@ def test_sql_mcp_registry_revision_idempotency_and_snapshot() -> None:
                 endpoint="http://127.0.0.1:18080/mcp",
                 network_mode="loopback",
                 auth_strategy="none",
-                allowed_tool_prefixes=("demo.",),
             )
             created = await service.create(
                 McpServerWriteCommand(
@@ -268,7 +267,6 @@ def test_lifecycle_command_is_claimed_before_runtime_side_effect() -> None:
             title="Claimed MCP",
             endpoint="https://claimed.example/mcp",
             credential_ref=f"vault/{server_id}#client_secret",
-            allowed_tool_prefixes=("demo.",),
         )
         command_id = f"enable-{suffix}"
         command = McpServerLifecycleCommand(

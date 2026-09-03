@@ -11,6 +11,11 @@
 > [MCP 开发手册](../../guides/mcp-development.md) 汇总热配置入口与接入步骤，实现由
 > [GitHub Issue #50](https://github.com/sushaofei/AuraClaw/issues/50) 跟踪。
 
+MCP Tool 名称不作为前缀准入条件：已启用 Server 的合法 Tool 经 Catalog 对账后登记，
+调用继续执行 tenant、Policy、Approval、Schema 和路由归属检查。Credential Proxy 保留
+认证、DNS/IP 与出站控制，Resource scheme 和 Prompt 前缀限制保持独立。
+升级与历史配置处理见 [MCP Tool 前缀移除升级](../../operations/mcp-tool-prefix-upgrade.md)。
+
 ## 1. 目标
 
 本文定义 AuraClaw 如何通过协议无关的 Hands Contract 为 Agent Runtime 提供数据、工具和技能。

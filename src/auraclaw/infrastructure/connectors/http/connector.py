@@ -167,7 +167,6 @@ def catalog_server_definition(server: JavaApiServerDefinition) -> McpServerDefin
         title=server.title,
         endpoint=server.base_url,
         credential_ref=server.credential_ref,
-        allowed_tool_prefixes=tuple(item.tool_name for item in server.operations),
         status=server.status,
         enabled=server.enabled,
         metadata={

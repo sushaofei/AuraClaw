@@ -469,6 +469,7 @@ def _stored_config(value: Any) -> McpServerConfig:
     # Retired trust settings are discarded only when materializing a revision.
     config = dict(json_loads(value))
     config.pop("trust_level", None)
+    config.pop("allowed_tool_prefixes", None)
     metadata = dict(config.get("metadata") or {})
     metadata.pop("tool_policy_overrides", None)
     config["metadata"] = metadata

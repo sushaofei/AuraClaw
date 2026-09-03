@@ -64,7 +64,6 @@ class McpServerDefinition(ContractModel):
     credential_ref: str | None = None
     oauth: McpOAuthConfiguration | None = None
     auth_strategy: McpAuthStrategy | None = None
-    allowed_tool_prefixes: tuple[str, ...] = ()
     allowed_resource_schemes: tuple[str, ...] = ()
     allowed_prompt_prefixes: tuple[str, ...] = ()
     allowed_private_hosts: tuple[str, ...] = ()
