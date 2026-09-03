@@ -3279,3 +3279,19 @@ active-reference barrier，并简化 AuraX 卸载入口。
 - [x] 提交范围已核对，排除既有 IDE/视觉变更及 docs/tmp、秘密与缓存。
 
 本阶段提交/推送状态以 Git 和 Issue 交付记录为准；51 项需要外部服务的测试跳过，临时 PostgreSQL 实际验证。
+
+## Skill / MCP 修复 A：实时权威查询（Issue #95）
+
+状态：代码与隔离验证完成；实际部署另行验收。完整顺序见 [修复交付计划](skill-mcp-remediation.md)。
+
+- [x] 只读权威查询不复用旧 invocation result，业务写操作保持幂等、审批与 fencing。
+- [x] Runtime 两条 Skill 执行路径每轮查询当前撤销状态，查询故障不沿用旧 continue。
+- [x] required preload / resolve / load 的调用身份按 run 与逻辑请求隔离。
+- [x] 正式 Gateway、内存与持久 invocation 缓存、跨 run、重启恢复及权限变化测试通过。
+- [x] pytest、ruff、mypy、架构检查及必要集成测试通过。
+- [x] 契约、迁移适用性、部署顺序和运维说明同步。
+- [x] 范围核对，排除无关修改；提交/推送状态以 Git 和 issue 记录为准，不提前关闭 issue。
+
+验证：608 passed / 52 skipped；独立临时 PostgreSQL 完整迁移后 5 项 invocation 集成通过。
+Ruff、Mypy（248 文件）、10 条架构合同通过。迁移不适用，部署说明见
+[实时能力查询升级](../operations/authority-query-upgrade.md)。

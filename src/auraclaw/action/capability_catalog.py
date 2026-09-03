@@ -868,6 +868,7 @@ def capability_search_tool() -> ToolCapability:
         permission=ToolPermission.READ_ONLY,
         risk_level=RiskLevel.LOW,
         runtime_location="hands",
+        cache_result=False,
         owner="platform",
     )
 
@@ -896,6 +897,7 @@ def capability_load_tool() -> ToolCapability:
         permission=ToolPermission.READ_ONLY,
         risk_level=RiskLevel.LOW,
         runtime_location="hands",
+        cache_result=False,
         owner="platform",
     )
 
@@ -925,6 +927,7 @@ def skill_resolve_tool() -> ToolCapability:
         permission=ToolPermission.READ_ONLY,
         risk_level=RiskLevel.LOW,
         runtime_location="hands",
+        cache_result=False,
         owner="platform-internal",
     )
 
@@ -954,6 +957,7 @@ def skill_binding_status_tool() -> ToolCapability:
         permission=ToolPermission.READ_ONLY,
         risk_level=RiskLevel.LOW,
         runtime_location="hands",
+        cache_result=False,
         owner="platform-internal",
     )
 

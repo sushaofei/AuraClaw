@@ -17,6 +17,7 @@ from auraclaw.contracts.errors import (
 from auraclaw.contracts.events import NewEvent
 from auraclaw.contracts.skills import SkillActivation, effective_skill_role
 from auraclaw.control.ports import RuntimeAssignment, RuntimeCheckpoint
+from auraclaw.runtime.authority_queries import authority_request_id, binding_disposition_result
 from auraclaw.runtime.clients import assignment_resource_id
 from auraclaw.runtime.ports import (
     CapabilityClient,
@@ -284,7 +285,7 @@ class SkillRunner:
         result = await execute(
             assignment,
             ToolCall(
-                tool_invocation_id=(f"binding_status_{activation.skill_activation_id}"),
+                tool_invocation_id=authority_request_id(assignment, "binding_status"),
                 name="auraclaw.skills.binding-status",
                 version="1",
                 arguments={
@@ -296,8 +297,7 @@ class SkillRunner:
                 expected_side_effect="read",
             ),
         )
-        content = result.get("content")
-        return dict(content) if isinstance(content, dict) else dict(result)
+        return binding_disposition_result(result)
 
     async def _terminal_result(
         self,

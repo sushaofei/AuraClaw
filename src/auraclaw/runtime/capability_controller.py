@@ -17,6 +17,7 @@ from auraclaw.contracts.errors import NotFoundError, SkillPromptBudgetExceededEr
 from auraclaw.contracts.events import NewEvent
 from auraclaw.contracts.skills import SkillActivation, effective_skill_role
 from auraclaw.control.ports import RuntimeAssignment
+from auraclaw.runtime.authority_queries import authority_request_id, binding_disposition_result
 from auraclaw.runtime.ports import CapabilityClient, ToolCall
 from auraclaw.runtime.skill_workflow import (
     RuntimeSkillWorkflowExecutor,
@@ -220,10 +221,7 @@ class RuntimeCapabilityController:
         result = await self._client.execute(
             assignment,
             ToolCall(
-                tool_invocation_id=(
-                    "required_capabilities_"
-                    + hashlib.sha256("\0".join(ids).encode()).hexdigest()[:24]
-                ),
+                tool_invocation_id=authority_request_id(assignment, "preload"),
                 name=CAPABILITY_LOAD,
                 version="1",
                 arguments={"capability_ids": list(ids)},
@@ -310,10 +308,7 @@ class RuntimeCapabilityController:
                 result = await self._client.execute(
                     assignment,
                     ToolCall(
-                        tool_invocation_id=(
-                            "binding_status_"
-                            + hashlib.sha256("\0".join(identity).encode()).hexdigest()[:24]
-                        ),
+                        tool_invocation_id=authority_request_id(assignment, "binding_status"),
                         name=SKILL_BINDING_STATUS,
                         version="1",
                         arguments={
@@ -325,7 +320,7 @@ class RuntimeCapabilityController:
                         expected_side_effect="read",
                     ),
                 )
-                payload = _result_content(result)
+                payload = binding_disposition_result(result)
                 action = str(payload.get("action", "cancel"))
                 if action not in precedence:
                     action = "cancel"
