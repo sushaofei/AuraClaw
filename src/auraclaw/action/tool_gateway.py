@@ -19,6 +19,7 @@ from auraclaw.action.ports import (
     CredentialAdapter,
     CredentialInvoker,
     HandsExecutor,
+    InvocationStatusRecord,
     InvocationStore,
     PolicyEvaluation,
     PolicyEvaluator,
@@ -470,6 +471,7 @@ class ToolGateway:
         self._claim_monitors: dict[tuple[str, str], asyncio.Task[None]] = {}
         self._claim_owners: dict[tuple[str, str], asyncio.Task[Any]] = {}
         self._statuses: dict[tuple[str, str], str] = {}
+        self._local_outcomes: dict[tuple[str, str], InvocationStatusRecord] = {}
         self._locks = _KeyedLocks()
         self._capacity = _ExecutionCapacity(
             instance_id=self._instance_id,
@@ -487,6 +489,11 @@ class ToolGateway:
         if task is not None:
             self._inflight.setdefault(execution_key, set()).add(task)
         self._statuses[execution_key] = "accepted"
+        self._local_outcomes[execution_key] = InvocationStatusRecord(
+            status="accepted", side_effect_status="unknown",
+            root_session_id=invocation.root_session_id, session_id=invocation.session_id,
+            run_id=invocation.run_id,
+        )
         try:
             result = await self._execute_once(invocation)
         except asyncio.CancelledError:
@@ -528,6 +535,12 @@ class ToolGateway:
                     if not tasks:
                         self._inflight.pop(execution_key, None)
         self._statuses[execution_key] = result.status.value
+        self._local_outcomes[execution_key] = InvocationStatusRecord(
+            status=result.status.value, side_effect_status=result.side_effect_status,
+            error_code=result.error_code, result=result,
+            root_session_id=invocation.root_session_id, session_id=invocation.session_id,
+            run_id=invocation.run_id,
+        )
         return result
 
     async def cancel(self, tool_invocation_id: str, *, tenant_id: str | None = None) -> bool:
@@ -556,19 +569,10 @@ class ToolGateway:
 
     async def get_authoritative_status(
         self, tenant_id: str, tool_invocation_id: str
-    ) -> tuple[str, str, str | None, bool] | None:
+    ) -> InvocationStatusRecord | None:
         if self._invocation_store is not None:
-            status = await self._invocation_store.get_status(tenant_id, tool_invocation_id)
-            if status is None:
-                return None
-            return (
-                status.status,
-                status.side_effect_status,
-                status.error_code,
-                status.cancel_requested,
-            )
-        local = self._statuses.get((tenant_id, tool_invocation_id))
-        return None if local is None else (local, "unknown", None, False)
+            return await self._invocation_store.get_status(tenant_id, tool_invocation_id)
+        return self._local_outcomes.get((tenant_id, tool_invocation_id))
 
     async def _execute_once(self, invocation: ToolInvocation) -> ToolResult:
         try:

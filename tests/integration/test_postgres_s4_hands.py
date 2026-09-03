@@ -280,6 +280,10 @@ def test_hands_approval_and_cancel_state_survive_replica_changes() -> None:
             assert status is not None
             assert status.status == "cancelled"
             assert status.cancel_requested
+            assert status.result == cancelled
+            assert (status.root_session_id, status.session_id, status.run_id) == (
+                invocation.root_session_id, invocation.session_id, invocation.run_id
+            )
 
             abandoned = replace(
                 invocation,

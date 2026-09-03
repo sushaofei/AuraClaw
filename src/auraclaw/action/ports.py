@@ -19,6 +19,7 @@ from auraclaw.contracts.tools import (
     PolicyDecision,
     ToolCapability,
     ToolInvocation,
+    ToolResult,
 )
 
 CredentialAdapter = Callable[[dict[str, Any], str], Awaitable[Any] | Any]
@@ -60,6 +61,10 @@ class InvocationStatusRecord:
     side_effect_status: str
     error_code: str | None = None
     cancel_requested: bool = False
+    result: ToolResult | None = None
+    root_session_id: str | None = None
+    session_id: str | None = None
+    run_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -182,8 +187,13 @@ class ArtifactContentReader(Protocol):
 
 class ArtifactDeleter(Protocol):
     async def purge(
-        self, *, tenant_id: str, artifact_ref: ArtifactRef, actor_id: str,
-        reason_code: str, correlation_id: str,
+        self,
+        *,
+        tenant_id: str,
+        artifact_ref: ArtifactRef,
+        actor_id: str,
+        reason_code: str,
+        correlation_id: str,
     ) -> None: ...
 
     async def delete(

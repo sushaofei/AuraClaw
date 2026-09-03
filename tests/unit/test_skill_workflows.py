@@ -463,22 +463,35 @@ def test_workflow_approval_resume_reuses_nested_invocation_id() -> None:
 
 
 def _controller_state(package: SkillPackage) -> dict[str, Any]:
-    return {"loaded": {"cap-skill": {
-        "capability_id": "cap-skill", "kind": "skill", "skill": {
-            "publisher": "platform", "name": "inventory.check", "version": "1.0.0",
-            "input_schema": package.manifest.input_schema,
-            "output_schema": package.manifest.output_schema, "required_references": [],
-        },
-    }}}
+    return {
+        "loaded": {
+            "cap-skill": {
+                "capability_id": "cap-skill",
+                "kind": "skill",
+                "skill": {
+                    "publisher": "platform",
+                    "name": "inventory.check",
+                    "version": "1.0.0",
+                    "input_schema": package.manifest.input_schema,
+                    "output_schema": package.manifest.output_schema,
+                    "required_references": [],
+                },
+            }
+        }
+    }
 
 
 def _activation_call() -> ToolCall:
-    return ToolCall(tool_invocation_id="activate-status", name=SKILL_ACTIVATE,
-                    arguments={"capability_id": "cap-skill", "inputs": {"sku": "A-1"}})
+    return ToolCall(
+        tool_invocation_id="activate-status",
+        name=SKILL_ACTIVATE,
+        arguments={"capability_id": "cap-skill", "inputs": {"sku": "A-1"}},
+    )
 
 
-@pytest.mark.parametrize("status", ["error", "denied", "failed", "timeout", "unknown",
-                                    "cancelled", "unrecognized", None])
+@pytest.mark.parametrize(
+    "status", ["error", "denied", "failed", "timeout", "unknown", "cancelled", "unrecognized", None]
+)
 def test_workflow_non_success_never_advances_or_completes_on_chat_finish(status) -> None:
     async def scenario() -> None:
         package = _package()
@@ -492,8 +505,9 @@ def test_workflow_non_success_never_advances_or_completes_on_chat_finish(status)
 
         client = FailedClient(package, _binding(package))
         controller = RuntimeCapabilityController(client)  # type: ignore[arg-type]
-        result = await controller.execute(_assignment(), _activation_call(),
-                                          _controller_state(package))
+        result = await controller.execute(
+            _assignment(), _activation_call(), _controller_state(package)
+        )
         assert result.result["status"] != "completed"
         assert client.resource_uris == []
         assert controller.terminal_events(result.state, "Chat finished") == ()
@@ -503,15 +517,21 @@ def test_workflow_non_success_never_advances_or_completes_on_chat_finish(status)
         assert again.result["status"] != "completed"
         assert len(client.calls) == before
         assert again.events == ()
+
     asyncio.run(scenario())
 
 
 def test_resource_timeout_retries_and_stops_at_step_budget() -> None:
     async def scenario() -> None:
         document = _workflow()
-        document["steps"][1].update(timeout_seconds=1, retry={
-            "max_attempts": 2, "retry_on": ["timeout"], "strategy": "none",
-        })
+        document["steps"][1].update(
+            timeout_seconds=1,
+            retry={
+                "max_attempts": 2,
+                "retry_on": ["timeout"],
+                "strategy": "none",
+            },
+        )
         package = _package(workflow=document)
 
         class SlowResource(_Client):
@@ -522,13 +542,15 @@ def test_resource_timeout_retries_and_stops_at_step_budget() -> None:
 
         client = SlowResource(package, _binding(package))
         controller = RuntimeCapabilityController(client)  # type: ignore[arg-type]
-        result = await controller.execute(_assignment(), _activation_call(),
-                                          _controller_state(package))
+        result = await controller.execute(
+            _assignment(), _activation_call(), _controller_state(package)
+        )
         assert result.result["status"] == "error"
         assert result.result["error_code"] == "timeout"
         assert client.resource_uris == ["policy://cn-east"] * 2
         assert result.state["active_skills"][0]["workflow_completed_steps"] == ["lookup"]
         assert [event.type for event in result.events] == ["skill.activated", "skill.failed"]
+
     asyncio.run(scenario())
 
 
@@ -539,8 +561,9 @@ def test_expired_persisted_deadline_does_not_restart_reference_or_tool_budget() 
         package = _package()
         client = _ApprovalClient(package, _binding(package))
         controller = RuntimeCapabilityController(client)  # type: ignore[arg-type]
-        waiting = await controller.execute(_assignment(), _activation_call(),
-                                           _controller_state(package))
+        waiting = await controller.execute(
+            _assignment(), _activation_call(), _controller_state(package)
+        )
         active = waiting.state["active_skills"][0]
         assert active["workflow_deadline"]
         active["workflow_deadline"] = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
@@ -550,6 +573,7 @@ def test_expired_persisted_deadline_does_not_restart_reference_or_tool_budget() 
         assert result.result["error_code"] == "workflow_budget_exhausted"
         assert len(client.calls) == count
         assert result.state["active_skills"][0]["workflow_status"] == "failed"
+
     asyncio.run(scenario())
 
 
@@ -557,9 +581,13 @@ def test_unknown_write_waits_for_original_invocation_without_replay() -> None:
     async def scenario() -> None:
         package = _package()
         binding = _binding(package)
-        binding = binding.model_copy(update={"resolved_tools": (
-            binding.resolved_tools[0].model_copy(update={"expected_side_effect": "write"}),
-        )})
+        binding = binding.model_copy(
+            update={
+                "resolved_tools": (
+                    binding.resolved_tools[0].model_copy(update={"expected_side_effect": "write"}),
+                )
+            }
+        )
 
         class UnknownClient(_Client):
             async def execute(self, assignment, call):
@@ -574,14 +602,16 @@ def test_unknown_write_waits_for_original_invocation_without_replay() -> None:
 
         client = UnknownClient(package, binding)
         controller = RuntimeCapabilityController(client)  # type: ignore[arg-type]
-        result = await controller.execute(_assignment(), _activation_call(),
-                                          _controller_state(package))
+        result = await controller.execute(
+            _assignment(), _activation_call(), _controller_state(package)
+        )
         assert result.result["status"] == "unknown"
         count = len(client.calls)
         resumed = await controller.execute(_assignment(), _activation_call(), result.state)
         assert resumed.result["status"] == "unknown"
         assert len(client.calls) == count
         assert resumed.events == () and not client.resource_uris
+
     asyncio.run(scenario())
 
 
@@ -599,14 +629,21 @@ def test_reference_loading_is_inside_overall_workflow_deadline() -> None:
 
         client = SlowReference(package, _binding(package))
         activation = SkillActivation(
-            skill_activation_id="ska_slow_reference", activation_key="slow",
-                                     binding=client.binding, input_digest="sha256:" + "5" * 64)
+            skill_activation_id="ska_slow_reference",
+            activation_key="slow",
+            binding=client.binding,
+            input_digest="sha256:" + "5" * 64,
+        )
         result = await RuntimeSkillWorkflowExecutor(client).execute(
-            _assignment(), activation, inputs={"sku": "A-1"}, loaded_capabilities={},
+            _assignment(),
+            activation,
+            inputs={"sku": "A-1"},
+            loaded_capabilities={},
             deadline=datetime.now(UTC) + timedelta(milliseconds=30),
         )
         assert result.status == "failed" and result.error_code == "workflow_budget_exhausted"
         assert not client.calls and not client.resource_uris
+
     asyncio.run(scenario())
 
 
@@ -620,19 +657,27 @@ def test_workflow_observes_revocation_between_steps(action: str) -> None:
             async def execute(self, assignment, call):
                 if call.name == "auraclaw.skills.binding-status":
                     identities.append(call.tool_invocation_id)
-                    return {"status": "success", "content": {
-                        "action": "continue" if len(identities) == 1 else action,
-                        "reason_code": "fixture_revocation"}}
+                    return {
+                        "status": "success",
+                        "content": {
+                            "action": "continue" if len(identities) == 1 else action,
+                            "reason_code": "fixture_revocation",
+                        },
+                    }
                 return await super().execute(assignment, call)
+
         client = RevokedClient(package, _binding(package))
         controller = RuntimeCapabilityController(client)  # type: ignore[arg-type]
-        result = await controller.execute(_assignment(), _activation_call(),
-                                          _controller_state(package))
+        result = await controller.execute(
+            _assignment(), _activation_call(), _controller_state(package)
+        )
         assert result.state["active_skills"][0]["workflow_status"] == (
-            "paused" if action == "pause" else "cancelled")
+            "paused" if action == "pause" else "cancelled"
+        )
         assert len(identities) == 2 and len(set(identities)) == 2
         assert not client.resource_uris
         assert not any(event.type == "skill.completed" for event in result.events)
+
     asyncio.run(scenario())
 
 
@@ -650,13 +695,21 @@ def test_pending_write_is_queried_after_workflow_deadline_without_dispatch() -> 
                 assert invocation_id == "original-write"
                 self.queried += 1
                 return {"found": True, "status": self.observed, "side_effect_status": "unknown"}
+
         client = SettledClient(package, _binding(package))
         executor = RuntimeSkillWorkflowExecutor(client)  # type: ignore[arg-type]
-        activation = SkillActivation(skill_activation_id="ska_wait", activation_key="activate",
-            binding=client.binding, input_digest="sha256:" + "5" * 64)
-        arguments = dict(inputs={}, loaded_capabilities={},
-                         deadline=datetime.now(UTC) - timedelta(seconds=1),
-                         pending_invocation_id="original-write")
+        activation = SkillActivation(
+            skill_activation_id="ska_wait",
+            activation_key="activate",
+            binding=client.binding,
+            input_digest="sha256:" + "5" * 64,
+        )
+        arguments = dict(
+            inputs={},
+            loaded_capabilities={},
+            deadline=datetime.now(UTC) - timedelta(seconds=1),
+            pending_invocation_id="original-write",
+        )
         pending = await executor.execute(_assignment(), activation, **arguments)
         assert pending.status == "unknown" and pending.pending_invocation_id == "original-write"
         client.observed = "success"
@@ -664,4 +717,57 @@ def test_pending_write_is_queried_after_workflow_deadline_without_dispatch() -> 
         assert settled.status == "failed" and settled.error_code == "workflow_budget_exhausted"
         assert settled.pending_invocation_id is None and client.queried == 2
         assert not client.calls and not client.resource_uris
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("with_result", [False, True])
+def test_settled_write_uses_authoritative_result_without_execution_reentry(
+    with_result: bool,
+) -> None:
+    async def scenario() -> None:
+        package = _package()
+        binding = _binding(package)
+        binding = binding.model_copy(
+            update={
+                "resolved_tools": (
+                    binding.resolved_tools[0].model_copy(update={"expected_side_effect": "write"}),
+                )
+            }
+        )
+
+        class Client(_Client):
+            async def execute(self, assignment, call):
+                if call.name in {CAPABILITY_LOAD, "auraclaw.skills.binding-status"}:
+                    return await super().execute(assignment, call)
+                self.calls.append(call)
+                return {"status": "unknown", "side_effect_status": "unknown"}
+
+            async def invocation_status(self, assignment, invocation_id):
+                assert invocation_id == self.calls[-1].tool_invocation_id
+                return {
+                    "found": True,
+                    "status": "success",
+                    "side_effect_status": "completed",
+                    "result": {"status": "success", "content": {"sku": "persisted"}}
+                    if with_result
+                    else None,
+                }
+
+        client = Client(package, binding)
+        controller = RuntimeCapabilityController(client)  # type: ignore[arg-type]
+        pending = await controller.execute(
+            _assignment(), _activation_call(), _controller_state(package)
+        )
+        assert pending.result["status"] == "unknown"
+        count = len(client.calls)
+        resumed = await controller.execute(_assignment(), _activation_call(), pending.state)
+        assert len(client.calls) == count
+        if with_result:
+            assert resumed.result["status"] == "completed"
+            assert resumed.result["workflow_output"] == {"item": {"sku": "persisted"}}
+        else:
+            assert resumed.result["status"] == "unknown"
+            assert not client.resource_uris
+
     asyncio.run(scenario())

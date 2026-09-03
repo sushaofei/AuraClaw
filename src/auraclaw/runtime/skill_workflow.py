@@ -79,8 +79,11 @@ class RuntimeSkillWorkflowExecutor:
             if pending_invocation_id:
                 lookup = getattr(self._client, "invocation_status", None)
                 try:
-                    observed = (await asyncio.wait_for(lookup(assignment, pending_invocation_id), 5)
-                                if callable(lookup) else {})
+                    observed = (
+                        await asyncio.wait_for(lookup(assignment, pending_invocation_id), 5)
+                        if callable(lookup)
+                        else {}
+                    )
                 except Exception:
                     observed = {}
                 if observed.get("status") == "success" or (
@@ -89,30 +92,42 @@ class RuntimeSkillWorkflowExecutor:
                 ):
                     pending_invocation_id = None
             return WorkflowExecutionResult(
-                status="unknown" if pending_invocation_id else "failed", output={},
-                completed_steps=completed_steps, pending_invocation_id=pending_invocation_id,
+                status="unknown" if pending_invocation_id else "failed",
+                output={},
+                completed_steps=completed_steps,
+                pending_invocation_id=pending_invocation_id,
                 error_code="workflow_budget_exhausted",
             )
         try:
             async with asyncio.timeout(remaining):
                 return await self._execute(
-                    assignment, activation, inputs=inputs, loaded_capabilities=loaded_capabilities,
-                    approval_id=approval_id, approval_step_id=approval_step_id,
-                    resume_state=resume_state, start_step_index=start_step_index,
-                    on_progress=on_progress, context=context,
-                    pending_invocation_id=pending_invocation_id, before_step=before_step,
+                    assignment,
+                    activation,
+                    inputs=inputs,
+                    loaded_capabilities=loaded_capabilities,
+                    approval_id=approval_id,
+                    approval_step_id=approval_step_id,
+                    resume_state=resume_state,
+                    start_step_index=start_step_index,
+                    on_progress=on_progress,
+                    context=context,
+                    pending_invocation_id=pending_invocation_id,
+                    before_step=before_step,
                 )
         except TimeoutError:
             return WorkflowExecutionResult(
                 status="unknown" if context.get("write_in_flight") else "failed",
-                output={}, completed_steps=tuple(context["completed"]),
+                output={},
+                completed_steps=tuple(context["completed"]),
                 pending_step_id=context.get("step_id"),
                 pending_invocation_id=context.get("invocation_id"),
                 error_code="workflow_budget_exhausted",
             )
         except SchemaValidationError as exc:
             return WorkflowExecutionResult(
-                status="failed", output={}, completed_steps=tuple(context["completed"]),
+                status="failed",
+                output={},
+                completed_steps=tuple(context["completed"]),
                 error_code=exc.code,
             )
 
@@ -134,9 +149,7 @@ class RuntimeSkillWorkflowExecutor:
     ) -> WorkflowExecutionResult:
         resolved = activation.binding.resolved_workflow
         if resolved is None:
-            return WorkflowExecutionResult(
-                status="not_configured", output={}, completed_steps=()
-            )
+            return WorkflowExecutionResult(status="not_configured", output={}, completed_steps=())
         document = await self._load_workflow(assignment, activation)
         references = await self._load_references(assignment, activation, document)
         if start_step_index < 0 or start_step_index > len(document.steps):
@@ -144,12 +157,8 @@ class RuntimeSkillWorkflowExecutor:
         state: dict[str, Any] = _copy_object(resume_state or {})
         completed: list[str] = [step.id for step in document.steps[:start_step_index]]
         context["completed"] = completed
-        tools = {
-            item.canonical_name: item for item in activation.binding.resolved_tools
-        }
-        resources = {
-            item.uri_template: item for item in activation.binding.resolved_resources
-        }
+        tools = {item.canonical_name: item for item in activation.binding.resolved_tools}
+        resources = {item.uri_template: item for item in activation.binding.resolved_resources}
         for step_index, step in enumerate(
             document.steps[start_step_index:], start=start_step_index
         ):
@@ -158,7 +167,9 @@ class RuntimeSkillWorkflowExecutor:
                 if disposition is not None and disposition.get("action") != "continue":
                     return WorkflowExecutionResult(
                         status="cancelled" if disposition.get("action") == "cancel" else "paused",
-                        output={}, completed_steps=tuple(completed), pending_step_id=step.id,
+                        output={},
+                        completed_steps=tuple(completed),
+                        pending_step_id=step.id,
                         error_code="skill_binding_revoked",
                     )
             arguments = {
@@ -187,38 +198,62 @@ class RuntimeSkillWorkflowExecutor:
                     or ref.get("content_digest") != tool_dependency.schema_digest
                 ):
                     return WorkflowExecutionResult(
-                        status="failed", output={}, completed_steps=tuple(completed),
+                        status="failed",
+                        output={},
+                        completed_steps=tuple(completed),
                         error_code="stale_capability",
                     )
-                target_name = (loaded_tool.get("model_tool", {}).get("function", {}).get("name")
-                               or step.capability)
+                target_name = (
+                    loaded_tool.get("model_tool", {}).get("function", {}).get("name")
+                    or step.capability
+                )
                 context["write_in_flight"] = tool_dependency.expected_side_effect != "read"
                 if pending_invocation_id == invocation_id:
                     lookup = getattr(self._client, "invocation_status", None)
                     observed = await lookup(assignment, invocation_id) if callable(lookup) else {}
-                    if (observed.get("status") in {"error", "denied", "cancelled"}
-                            and observed.get("side_effect_status") != "unknown"):
+                    if observed.get("status") in {"error", "denied", "cancelled"} and observed.get(
+                        "side_effect_status"
+                    ) not in {None, "unknown"}:
                         return WorkflowExecutionResult(
                             status="cancelled" if observed["status"] == "cancelled" else "failed",
-                            output={}, completed_steps=tuple(completed),
+                            output={},
+                            completed_steps=tuple(completed),
                             error_code=observed.get("error_code") or "workflow_step_failed",
                         )
                     if observed.get("status") != "success":
                         return WorkflowExecutionResult(
-                            status="unknown", output={}, completed_steps=tuple(completed),
-                            pending_step_id=step.id, pending_invocation_id=invocation_id,
+                            status="unknown",
+                            output={},
+                            completed_steps=tuple(completed),
+                            pending_step_id=step.id,
+                            pending_invocation_id=invocation_id,
                             error_code="workflow_result_pending",
                         )
-                result = await self._call_tool(
-                    assignment,
-                    step,
-                    invocation_id=invocation_id,
-                    name=target_name,
-                    arguments=arguments,
-                    version=tool_dependency.version,
-                    expected_side_effect=tool_dependency.expected_side_effect,
-                    approval_id=step_approval,
-                )
+                    recorded_result = observed.get("result")
+                    if (
+                        not isinstance(recorded_result, dict)
+                        or recorded_result.get("status") != "success"
+                    ):
+                        return WorkflowExecutionResult(
+                            status="unknown",
+                            output={},
+                            completed_steps=tuple(completed),
+                            pending_step_id=step.id,
+                            pending_invocation_id=invocation_id,
+                            error_code="workflow_result_unavailable",
+                        )
+                    result = recorded_result
+                else:
+                    result = await self._call_tool(
+                        assignment,
+                        step,
+                        invocation_id=invocation_id,
+                        name=target_name,
+                        arguments=arguments,
+                        version=tool_dependency.version,
+                        expected_side_effect=tool_dependency.expected_side_effect,
+                        approval_id=step_approval,
+                    )
             else:
                 resource_dependency = resources[step.capability]
                 loaded = loaded_capabilities.get(resource_dependency.capability_id)
@@ -247,20 +282,27 @@ class RuntimeSkillWorkflowExecutor:
                 )
             context["write_in_flight"] = False
             status = result.get("status")
-            if (status in {"timeout", "cancelled"} and step.operation == "tool.call"
-                    and tools[step.capability].expected_side_effect != "read"
-                    and result.get("side_effect_status") != "not_started"):
+            if (
+                status in {"timeout", "cancelled"}
+                and step.operation == "tool.call"
+                and tools[step.capability].expected_side_effect != "read"
+                and result.get("side_effect_status") != "not_started"
+            ):
                 status = "unknown"
             if status != "success":
                 return WorkflowExecutionResult(
-                    status=("unknown" if status == "unknown" else
-                            "cancelled" if status == "cancelled" else "failed"),
+                    status=(
+                        "unknown"
+                        if status == "unknown"
+                        else "cancelled"
+                        if status == "cancelled"
+                        else "failed"
+                    ),
                     output={},
                     completed_steps=tuple(completed),
                     pending_step_id=step.id,
                     pending_invocation_id=invocation_id,
-                    error_code=_optional_string(result.get("error_code"))
-                    or "workflow_step_failed",
+                    error_code=_optional_string(result.get("error_code")) or "workflow_step_failed",
                 )
             pending_invocation_id = None
             state[step.result] = _result_content(result)
@@ -361,20 +403,25 @@ class RuntimeSkillWorkflowExecutor:
                     result = await self._client.execute(
                         assignment,
                         ToolCall(
-                            tool_invocation_id=(invocation_id if attempt == 1
-                                                else f"{invocation_id}_r{attempt}"),
+                            tool_invocation_id=(
+                                invocation_id if attempt == 1 else f"{invocation_id}_r{attempt}"
+                            ),
                             name=name,
                             version=version,
                             arguments=arguments,
                             expected_side_effect=expected_side_effect,
                             approval_id=approval_id,
-                            idempotency_key=(invocation_id if attempt == 1
-                                             else f"{invocation_id}_r{attempt}"),
+                            idempotency_key=(
+                                invocation_id if attempt == 1 else f"{invocation_id}_r{attempt}"
+                            ),
                         ),
                     )
             except TimeoutError:
-                result = {"status": "unknown" if expected_side_effect != "read" else "timeout",
-                          "error_code": "timeout", "side_effect_status": "unknown"}
+                result = {
+                    "status": "unknown" if expected_side_effect != "read" else "timeout",
+                    "error_code": "timeout",
+                    "side_effect_status": "unknown",
+                }
             error_code = _optional_string(result.get("error_code"))
             if (
                 expected_side_effect != "read"

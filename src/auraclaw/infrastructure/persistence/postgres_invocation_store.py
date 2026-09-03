@@ -169,9 +169,7 @@ class PostgresInvocationStore(LazyPool):
             )
             return InvocationBegin(acquired=True, claim_token=claim_token)
 
-    async def mark_executing(
-        self, invocation: ToolInvocation, *, claim_token: str
-    ) -> bool:
+    async def mark_executing(self, invocation: ToolInvocation, *, claim_token: str) -> bool:
         return await self._set_claimed_status(invocation, "executing", claim_token=claim_token)
 
     async def wait_for_approval(
@@ -253,9 +251,7 @@ class PostgresInvocationStore(LazyPool):
                 )
             return True
 
-    async def is_cancel_requested(
-        self, invocation: ToolInvocation, *, claim_token: str
-    ) -> bool:
+    async def is_cancel_requested(self, invocation: ToolInvocation, *, claim_token: str) -> bool:
         pool = await self.pool()
         value = await pool.fetchval(
             """SELECT cancel_requested_at IS NOT NULL
@@ -274,7 +270,8 @@ class PostgresInvocationStore(LazyPool):
         row = await pool.fetchrow(
             """SELECT invocation.status,invocation.side_effect_status,
                       invocation.cancel_requested_at IS NOT NULL AS cancel_requested,
-                      attempt.error_code
+                      attempt.error_code,invocation.normalized_result,
+                      invocation.root_session_id,invocation.session_id,invocation.run_id
             FROM hands.invocation AS invocation
             LEFT JOIN hands.invocation_attempt AS attempt
               ON attempt.tenant_id=invocation.tenant_id
@@ -291,11 +288,17 @@ class PostgresInvocationStore(LazyPool):
             side_effect_status=str(row["side_effect_status"]),
             error_code=(str(row["error_code"]) if row["error_code"] is not None else None),
             cancel_requested=bool(row["cancel_requested"]),
+            result=(
+                _tool_result(json_loads(row["normalized_result"]))
+                if row["normalized_result"] is not None
+                else None
+            ),
+            root_session_id=str(row["root_session_id"]),
+            session_id=str(row["session_id"]),
+            run_id=str(row["run_id"]),
         )
 
-    async def complete(
-        self, invocation: ToolInvocation, result: Any, *, claim_token: str
-    ) -> bool:
+    async def complete(self, invocation: ToolInvocation, result: Any, *, claim_token: str) -> bool:
         if not isinstance(result, ToolResult):
             raise TypeError("Invocation result must be ToolResult")
         pool = await self.pool()
