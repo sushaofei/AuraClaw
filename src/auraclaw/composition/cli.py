@@ -32,7 +32,12 @@ from auraclaw.composition.local_ingress import (
     create_local_ingress_app,
     loopback_connect_host,
 )
-from auraclaw.composition.services import SERVICE_BY_COMMAND, create_service_app, service_spec
+from auraclaw.composition.services import (
+    DATABASE_SERVICES,
+    SERVICE_BY_COMMAND,
+    create_service_app,
+    service_spec,
+)
 from auraclaw.config import Settings, get_settings
 from auraclaw.contracts.errors import SkillContentRejectedError
 from auraclaw.contracts.internal import ServiceIdentity
@@ -163,6 +168,13 @@ async def _run_migration_command(
         settings.resolved_migration_database_url,
         migration_dir,
     )
+    if action == "latest":
+        print(runner.latest_version)
+        return
+    if action == "check":
+        await runner.check(target)
+        print(f"schema ready: {runner.latest_version}")
+        return
     if action == "status":
         for item in await runner.status():
             print(f"{item.version} {item.state} {item.name} sha256={item.checksum[:12]}")
@@ -507,7 +519,7 @@ def build_parser() -> argparse.ArgumentParser:
     operations.add_argument("--queue", choices=("projection", "delivery"))
     operations.add_argument("--item-id")
     migrate = subcommands.add_parser("migrate")
-    migrate.add_argument("action", choices=("status", "up", "baseline"))
+    migrate.add_argument("action", choices=("status", "up", "baseline", "check", "latest"))
     migrate.add_argument("--target")
     migrate.add_argument(
         "--directory",
@@ -556,6 +568,15 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _check_service_schema(command: str, settings: Settings) -> None:
+    name = SERVICE_BY_COMMAND[command]
+    if not settings.sql_storage_enabled or name not in {*DATABASE_SERVICES, "task-api"}:
+        return
+    directory = Path(os.environ.get("AURACLAW_MIGRATIONS_DIRECTORY", "migrations"))
+    runner = create_migration_runner(settings.resolved_database_url, directory)
+    asyncio.run(runner.check())
+
+
 def _run_service_process(
     command: str,
     host: str,
@@ -564,6 +585,7 @@ def _run_service_process(
     worker_interval: float | None,
 ) -> None:
     settings = get_settings()
+    _check_service_schema(command, settings)
     app = (
         create_service_app(command, settings, worker_interval=worker_interval)
         if command == "projection" and worker_interval is not None
@@ -673,6 +695,7 @@ def main(
                     "compose. Use `auraclaw serve` for local development."
                 )
             spec = service_spec("projection", settings)
+            _check_service_schema("projection", settings)
             interval = (
                 args.interval
                 if args.interval is not None
@@ -738,6 +761,7 @@ def main(
                 "compose. Use `auraclaw serve` for local development."
             )
         spec = service_spec(args.command, settings)
+        _check_service_schema(args.command, settings)
         uvicorn_runner(
             create_service_app(args.command, settings),
             host=args.host or settings.host,

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One-shot DEV_SERVICE deploy: rsync → docker build → compose up.
+# Maintenance deployment: build → stop → migrate/check → recreate all services.
 # Usage (from repo root):
 #   ./scripts/dev_service_deploy.sh
 #   ./scripts/dev_service_deploy.sh --migrate
@@ -14,16 +14,15 @@ COMPOSE_ENV_FILE="${AURACLAW_COMPOSE_ENV_FILE:-.env.test}"
 DO_SYNC=1
 DO_BUILD=1
 DO_UP=1
-DO_MIGRATE=0
 DO_HEALTH=1
-MIGRATE_TARGET="${AURACLAW_MIGRATE_TARGET:-0055}"
+MIGRATE_TARGET="${AURACLAW_MIGRATE_TARGET:-0057}"
 
 usage() {
   cat <<'EOF'
 Usage: ./scripts/dev_service_deploy.sh [options]
 
-  (default)     rsync code → docker build → compose up -d --wait
-  --migrate     also run DB migrate before up
+  (default)     sync/build → stop services → migrate/check → recreate/start
+  --migrate     compatibility alias; migrations are now mandatory before up
   --skip-sync   do not rsync (build/up remote tree only)
   --skip-build  do not docker build
   --skip-up     stop after sync/build
@@ -37,7 +36,7 @@ EOF
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --migrate) DO_MIGRATE=1 ;;
+    --migrate) : ;;
     --skip-sync) DO_SYNC=0 ;;
     --skip-build) DO_BUILD=0 ;;
     --skip-up) DO_UP=0 ;;
@@ -98,6 +97,8 @@ if [[ "${DO_SYNC}" -eq 1 ]]; then
     --exclude '.env.test' \
     --exclude '.env.prod' \
     --exclude '.host.env' \
+    --exclude 'compose.kafka-fix.yml' \
+    --exclude 'compose.hotfix-errors.yml' \
     --exclude '.chaintower' \
     --exclude '.DS_Store' \
     --exclude '__pycache__/' \
@@ -117,11 +118,6 @@ remote "test -f ${COMPOSE_ENV_FILE}" || {
   exit 1
 }
 
-if ! remote "grep -E '^AURACLAW_IMAGE=${IMAGE_TAG}\$' ${COMPOSE_ENV_FILE} >/dev/null || grep -E '^AURACLAW_IMAGE=\"${IMAGE_TAG}\"\$' ${COMPOSE_ENV_FILE} >/dev/null"; then
-  echo "warning: ${COMPOSE_ENV_FILE} AURACLAW_IMAGE is not ${IMAGE_TAG}" >&2
-  echo "         set AURACLAW_IMAGE=${IMAGE_TAG} on the server or this deploy may run an old image" >&2
-fi
-
 remote "docker network inspect auraclaw-platform >/dev/null 2>&1 || docker network create auraclaw-platform"
 
 if [[ "${DO_BUILD}" -eq 1 ]]; then
@@ -137,18 +133,24 @@ if [[ "${COMPOSE_ENV_FILE}" == ".env.test" ]]; then
 fi
 # Optional hotfix overlay files stay on the server if present.
 # Keep $(...) literal so the remote shell expands them (same as remote_compose.sh).
-COMPOSE_CMD="docker compose --env-file ${COMPOSE_ENV_FILE} -f ${COMPOSE_FILE}"
+COMPOSE_CMD="AURACLAW_IMAGE=$(printf '%q' "${IMAGE_TAG}") AURACLAW_MIGRATE_TARGET=$(printf '%q' "${MIGRATE_TARGET}") docker compose --env-file ${COMPOSE_ENV_FILE} -f ${COMPOSE_FILE}"
 COMPOSE_CMD+=' $(test -f compose.kafka-fix.yml && echo -f compose.kafka-fix.yml)'
 COMPOSE_CMD+=' $(test -f compose.hotfix-errors.yml && echo -f compose.hotfix-errors.yml)'
 
-if [[ "${DO_MIGRATE}" -eq 1 ]]; then
-  echo "==> migrate target ${MIGRATE_TARGET}"
-  remote "AURACLAW_MIGRATE_TARGET=$(printf '%q' "${MIGRATE_TARGET}") ${COMPOSE_CMD} --profile migrate run --rm migrate"
-fi
-
 if [[ "${DO_UP}" -eq 1 ]]; then
-  echo "==> compose up"
-  remote "${COMPOSE_CMD} up -d --wait --remove-orphans"
+  # Read the required version from the selected image before stopping anything.
+  REQUIRED_TARGET="$(remote "${COMPOSE_CMD} --profile migrate run --rm --no-deps -T migrate migrate latest --directory /app/migrations")"
+  if [[ "${MIGRATE_TARGET}" != "${REQUIRED_TARGET}" ]]; then
+    echo "migration target ${MIGRATE_TARGET} does not match image schema ${REQUIRED_TARGET}; deploy aborted before stop" >&2
+    exit 1
+  fi
+  echo "==> maintenance stop (rebuild all database connection pools after DDL)"
+  remote "${COMPOSE_CMD} stop"
+  echo "==> migrate target ${MIGRATE_TARGET}"
+  remote "${COMPOSE_CMD} --profile migrate run --rm --no-deps -T migrate"
+  remote "${COMPOSE_CMD} --profile migrate run --rm --no-deps -T migrate migrate check --target ${MIGRATE_TARGET} --directory /app/migrations"
+  echo "==> recreate/start all services"
+  remote "${COMPOSE_CMD} up -d --force-recreate --wait --remove-orphans"
   echo "==> compose ps"
   remote "${COMPOSE_CMD} ps"
 else

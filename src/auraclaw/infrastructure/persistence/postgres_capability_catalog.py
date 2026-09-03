@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import asyncpg  # type: ignore[import-untyped]
+
 from auraclaw.action.ports import (
     CatalogCommitResult,
     CatalogReconcileLease,
@@ -80,10 +82,17 @@ class PostgresCapabilityCatalogStore(LazyPool):
 
     async def get_server(self, server_id: str) -> McpServerDefinition | None:
         pool = await self.pool()
-        row = await pool.fetchrow(
-            "SELECT * FROM hands.downstream_mcp_server WHERE server_id=$1",
-            server_id,
-        )
+        query = "SELECT * FROM hands.downstream_mcp_server WHERE server_id=$1"
+        try:
+            row = await pool.fetchrow(query, server_id)
+        except asyncpg.FeatureNotSupportedError as exc:
+            # KingBase reports a cached SELECT * invalidated by DDL as 0A000.
+            # The failed pooled read has released its connection; renew the pool
+            # and retry this read once. Writes and unrelated errors are not retried.
+            if "cached plan must not change result type" not in str(exc):
+                raise
+            await pool.expire_connections()
+            row = await pool.fetchrow(query, server_id)
         return _server(row) if row is not None else None
 
     async def list_servers(self, tenant_id: str) -> tuple[McpServerDefinition, ...]:

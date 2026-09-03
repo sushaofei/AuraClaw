@@ -157,6 +157,8 @@ def test_migration_runner_is_locked_idempotent_and_detects_drift(tmp_path: Path)
                 await connection.close()
                 break
 
+        with pytest.raises(MigrationError, match="ledger is missing"):
+            await PostgresMigrationRunner(database_url, migration_dir).check()
         first, second = await asyncio.gather(
             PostgresMigrationRunner(database_url, migration_dir).apply(),
             PostgresMigrationRunner(database_url, migration_dir).apply(),
@@ -166,9 +168,19 @@ def test_migration_runner_is_locked_idempotent_and_detects_drift(tmp_path: Path)
         runner = PostgresMigrationRunner(database_url, migration_dir)
         assert await runner.apply() == ()
         assert {item.state for item in await runner.status()} == {"applied"}
+        await runner.check()
 
         connection = await asyncpg.connect(database_url)
         try:
+            await connection.execute((ROOT / "deploy/postgres/roles.sql").read_text())
+            readonly_url = database_url.replace("postgres@", "auraclaw_task_query_ro@")
+            await PostgresMigrationRunner(readonly_url, migration_dir).check()
+            readonly = await asyncpg.connect(readonly_url)
+            try:
+                with pytest.raises(asyncpg.InsufficientPrivilegeError):
+                    await readonly.execute("DELETE FROM auraclaw_meta.schema_migration")
+            finally:
+                await readonly.close()
             await _check_mcp_trust_migration(connection, database_url, migration_dir)
             await connection.execute(
                 """INSERT INTO hands.downstream_mcp_server
@@ -248,6 +260,8 @@ def test_migration_runner_is_locked_idempotent_and_detects_drift(tmp_path: Path)
         assert next(item for item in status if item.version == "0014").state == "drifted"
         with pytest.raises(MigrationError, match="checksum mismatch"):
             await drifted.apply()
+        with pytest.raises(MigrationError, match="checksum mismatch"):
+            await drifted.check()
 
     with tempfile.TemporaryDirectory(prefix="auraclaw-s5-pg-") as cluster_dir:
         subprocess.run(

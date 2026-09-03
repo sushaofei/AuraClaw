@@ -12,14 +12,20 @@
 ./scripts/dev_service_deploy.sh
 ```
 
-等价于：上传代码 → 在 131 上 `docker build -t auraclaw:dev` → `compose.test.yml up`。
+默认执行：上传代码 → 构建镜像 → 核对镜像所需迁移目标 → 停止服务 → 迁移并校验 → 强制重建全部服务 → 健康检查。
+这是维护窗口发布，会短暂中断服务。迁移不再需要额外参数。
+
+当前目标为 `0057`。脚本使用 `AURACLAW_DEV_IMAGE`（默认 `auraclaw:dev`）和
+`AURACLAW_MIGRATE_TARGET`（默认 `0057`）覆盖 Compose 的同名配置，保证迁移与应用使用
+本次选择的同一镜像。目标不等于镜像内 `migrate latest` 时，在停服前拒绝发布；
+迁移或 `migrate check` 失败时不会启动应用。`--force-recreate` 保证所有副本重新建立数据库连接池。
 
 常用参数：
 
 ```bash
-./scripts/dev_service_deploy.sh --migrate      # 顺带跑 DB 迁移
-./scripts/dev_service_deploy.sh --skip-sync    # 不上传，只远程 build/up
-./scripts/dev_service_deploy.sh --skip-build   # 不重建镜像，只重启
+./scripts/dev_service_deploy.sh --migrate      # 兼容旧命令；迁移已默认强制执行
+./scripts/dev_service_deploy.sh --skip-sync    # 不上传，执行远程构建和完整发布流程
+./scripts/dev_service_deploy.sh --skip-build   # 使用已有镜像，仍执行停服、迁移、校验、重建
 ./scripts/dev_service_deploy.sh --help
 ```
 
@@ -40,6 +46,7 @@
 
 ```dotenv
 AURACLAW_IMAGE=auraclaw:dev
+AURACLAW_MIGRATE_TARGET=0057
 KAFKA_HOST=10.244.16.132
 AURACLAW_ARTIFACT_BACKEND=obs
 OBS_ENDPOINT=obsv3.example.com
@@ -58,8 +65,8 @@ OBS_REGION=replace-with-obs-region
 |------|--------|
 | rsync 代码到 131 | 覆盖远程 `.env.test` |
 | `docker build -t auraclaw:dev` | 覆盖 `.runtime/compose-secrets/` |
-| `compose up -d --wait` | 上传 `.host.env` / 本机密码 |
-| 检查 `http://131:8080/health/ready` | 默认跑 migrate（需加 `--migrate`） |
+| 默认执行 stop → migrate → check → up --force-recreate | 上传 `.host.env` / 本机密码 |
+| 检查 `http://131:8080/health/ready` | 迁移失败后继续启动应用 |
 
 ---
 

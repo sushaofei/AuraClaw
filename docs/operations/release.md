@@ -37,13 +37,11 @@ docker compose version
 - 主库：统一 `AURACLAW_DATABASE_URL`（Compose 共享 `database_url` secret）+ 可选 `AURACLAW_MIGRATION_DATABASE_URL`
 - Runtime → Hands：`AURACLAW_HANDS_URL=http://action-hands:8006`（Compose 里已写死给 runtime）
 
-### A2. 构建并启动
+### A2. 构建、迁移并启动
 
-```bash
-docker compose --env-file .env.test -f compose.test.yml up --build -d
-# 需要统一入口时：
-docker compose --env-file .env.test -f compose.test.yml up --build -d
-```
+在本机执行 `./scripts/dev_service_deploy.sh`。脚本在构建后核对镜像要求的迁移版本，
+再进入维护窗口，执行 stop → migrate up → migrate check → up --force-recreate。
+默认目标为 `0057`，不再要求额外传入 `--migrate`。详情见 DEV_SERVICE 部署手册。
 
 ### A3. 验收
 
@@ -68,6 +66,8 @@ docker compose --env-file .env.test -f compose.test.yml logs --tail 100 action-h
 Runtime 应指向 `http://action-hands:8006`，不要把 Hands 入口改到 runtime 容器。
 
 ### A4. 更新单个服务（热修）
+
+仅用于数据库版本未变化的代码热修。涉及 DDL 时必须走 A2 完整发布，重建所有副本连接池。
 
 ```bash
 docker compose --env-file .env.test -f compose.test.yml up -d --build --no-deps action-hands
@@ -121,6 +121,9 @@ Secret 目录权限：目录 `0700`，文件 `0600`。
 
 ### B3. 数据库迁移（先于应用）
 
+先准备本次不可变镜像，核对 `migrate latest` 为 `0057`。已有集群升级时先停止所有旧实例；
+`0057` 删除字段，不允许与旧实例混跑。
+
 KingBase（PostgreSQL 兼容模式）：
 
 ```bash
@@ -128,12 +131,19 @@ docker compose --env-file .env.prod \
   -f compose.prod.yml --profile migrate run --rm migrate \
   migrate status --directory /app/migrations
 
+docker compose --env-file .env.prod -f compose.prod.yml stop
+
 docker compose --env-file .env.prod \
   -f compose.prod.yml --profile migrate run --rm migrate \
-  migrate up --target 0055 --directory /app/migrations
+  migrate up --target 0057 --directory /app/migrations
+
+docker compose --env-file .env.prod -f compose.prod.yml \
+  --profile migrate run --rm migrate migrate check \
+  --target 0057 --directory /app/migrations
 ```
 
-规则：只做 expand 迁移；发布窗口内不删 N-1 仍依赖的列/事件字段。
+迁移或校验失败时保持停服并排查，禁止跳过检查启动。进程监听前也会只读校验迁移账本的版本和 checksum；
+应用账号使用分角色授权时，迁移完成后执行更新后的 `deploy/postgres/roles.sql`，授予账本只读权限。
 
 ### B4. 启动应用
 
@@ -142,7 +152,7 @@ docker compose --env-file .env.prod \
   -f compose.prod.yml pull
 
 docker compose --env-file .env.prod \
-  -f compose.prod.yml up -d --wait --remove-orphans
+  -f compose.prod.yml up -d --force-recreate --wait --remove-orphans
 
 docker compose --env-file .env.prod \
   -f compose.prod.yml ps
@@ -172,18 +182,19 @@ curl --fail http://127.0.0.1:8080/health/ready
 
 ### B6. 简单回滚（非蓝绿）
 
-数据库不 down migration。应用回滚到上一镜像：
+仅相同 schema 版本的代码回滚可以直接切回旧镜像。跨 `0057` 回滚必须先停服并执行对应 down migration，
+见 [MCP 升级与回滚](./mcp-annotation-upgrade.md)。启动检查拒绝账本与镜像不一致。
 
 ```bash
 # 1. 把 .env.prod 里 AURACLAW_IMAGE 指回上一 digest/tag
 # 2. 重新拉起
 docker compose --env-file .env.prod \
-  -f compose.prod.yml up -d --wait --remove-orphans
+  -f compose.prod.yml up -d --force-recreate --wait --remove-orphans
 
 curl --fail http://127.0.0.1:8080/health/ready
 ```
 
-需要零停机切流时，走 S5 蓝绿流程（另起 `auraclaw-green` project → canary → 切流 → 停 blue）。
+相同 schema 版本的零停机切流可走 S5 蓝绿流程；当前跨 schema 升级采用维护窗口。
 
 ---
 
@@ -221,21 +232,5 @@ curl --fail http://127.0.0.1:8080/health/ready
 
 ## E. 一页命令速查
 
-```bash
-# --- 本地 ---
-docker compose --env-file .env.test -f compose.test.yml up --build -d
-curl -sf http://127.0.0.1:8006/health/ready
-
-# --- 生产 ---
-docker network create auraclaw-platform   # 已存在可忽略
-uv run python scripts/sync_kingbase_env.py
-uv run python scripts/materialize_compose_secrets.py \
-  --env-file .env.prod --output-dir .runtime/compose-secrets
-uv run python scripts/compose_preflight.py --env-file .env.prod
-docker compose --env-file .env.prod -f compose.prod.yml \
-  --profile migrate run --rm migrate migrate up \
-  --target 0055 --directory /app/migrations
-docker compose --env-file .env.prod -f compose.prod.yml \
-  up -d --wait --remove-orphans
-curl --fail http://127.0.0.1:8080/health/ready
-```
+测试环境完整发布：`./scripts/dev_service_deploy.sh`。
+生产按 B1–B5 执行，不能省略 B3 的停服、迁移与校验步骤。

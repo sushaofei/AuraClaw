@@ -20,6 +20,7 @@ x-auraclaw-service: &auraclaw-service
       max-file: "5"
 
 x-common-environment: &common-environment
+  AURACLAW_MIGRATIONS_DIRECTORY: ${AURACLAW_MIGRATIONS_DIRECTORY:-/app/migrations}
   AURACLAW_DEPLOYMENT_PROFILE: production
   AURACLAW_HOST: 0.0.0.0
   AURACLAW_LOG_LEVEL: ${AURACLAW_LOG_LEVEL:-INFO}
@@ -81,7 +82,7 @@ services:
         "migrate",
         "up",
         "--target",
-        "${AURACLAW_MIGRATE_TARGET:-0055}",
+        "${AURACLAW_MIGRATE_TARGET:-0057}",
         "--directory",
         "${AURACLAW_MIGRATIONS_DIRECTORY:-/app/migrations}",
       ]
