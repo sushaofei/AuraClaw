@@ -123,6 +123,8 @@ class SkillPublicationInternalService:
                 for item in await self._management.list_installations(tenant_id)
             ),
             publishers=publisher_rows,
+            upgrades=tuple(item.model_dump(mode="json")
+                           for item in await self._management.list_upgrade_states(tenant_id)),
         )
 
     async def list_admissions(
@@ -188,6 +190,7 @@ class SkillPublicationInternalService:
                 tenant_id=request.context.tenant_id,
                 actor_id=request.actor_id,
                 activate=request.activate,
+                expected_installation_revision=request.expected_installation_revision,
                 command_id=request.command_id,
                 expected_revision=request.expected_revision,
                 correlation_id=request.context.correlation_id,
@@ -211,6 +214,7 @@ class SkillPublicationInternalService:
                 tenant_id=request.context.tenant_id,
                 actor_id=request.actor_id,
                 activate=request.activate,
+                expected_installation_revision=request.expected_installation_revision,
                 command_id=request.command_id,
                 expected_revision=request.expected_revision,
                 correlation_id=request.context.correlation_id,

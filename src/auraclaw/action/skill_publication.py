@@ -220,10 +220,11 @@ class SkillPublicationService:
         existing_installation = await self._lifecycle.get_installation(
             command.tenant_id, manifest.publisher, manifest.name
         )
-        if command.activate and existing_installation is not None:
+        if command.activate:
+            installation_revision = existing_installation.revision if existing_installation else 0
             if (
                 command.expected_installation_revision is not None
-                and command.expected_installation_revision != existing_installation.revision
+                and command.expected_installation_revision != installation_revision
             ):
                 replay_digest = await self._lifecycle.get_publish_command_digest(
                     command.tenant_id, command.command_id

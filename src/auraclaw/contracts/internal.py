@@ -689,6 +689,7 @@ class SkillPublishInternalRequest(ContractModel):
     context: InternalRequestContext
     actor_id: str = Field(min_length=1, max_length=256)
     activate: bool = True
+    expected_installation_revision: int | None = Field(default=None, ge=0)
     command_id: str = Field(min_length=1, max_length=256)
     expected_revision: int = Field(default=0, ge=0)
     files: dict[str, str] = Field(min_length=1, max_length=512)
@@ -703,6 +704,7 @@ class SkillPublishArtifactInternalRequest(ContractModel):
     context: InternalRequestContext
     actor_id: str = Field(min_length=1, max_length=256)
     activate: bool = True
+    expected_installation_revision: int | None = Field(default=None, ge=0)
     command_id: str = Field(min_length=1, max_length=256)
     expected_revision: int = Field(default=0, ge=0)
     expected_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
@@ -890,6 +892,7 @@ class SkillAdminSnapshotInternalRequest(ContractModel):
 
 
 class SkillAdminSnapshotInternalResponse(ContractModel):
+    upgrades: tuple[dict[str, Any], ...] = ()
     api_version: str = INTERNAL_API_VERSION
     packages: tuple[dict[str, Any], ...] = ()
     publications: tuple[dict[str, Any], ...] = ()
