@@ -4,8 +4,12 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from auraclaw.contracts.approval_mode import ApprovalConfiguration, ApprovalMode, InteractionMode
+
 
 class CreateTaskRequest(BaseModel):
+    interaction_mode: InteractionMode | None = None
+    approval_mode: ApprovalMode | None = None
     goal: str = Field(min_length=1, max_length=100_000)
     source: Literal["chat", "schedule"] = "chat"
     schedule_id: str | None = Field(default=None, min_length=1, max_length=128)
@@ -13,9 +17,7 @@ class CreateTaskRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_schedule_source(self) -> CreateTaskRequest:
-        if self.source == "schedule" and (
-            not self.schedule_id or not self.occurrence_id
-        ):
+        if self.source == "schedule" and (not self.schedule_id or not self.occurrence_id):
             raise ValueError("schedule source requires schedule_id and occurrence_id")
         if self.source == "chat":
             self.schedule_id = None
@@ -23,7 +25,13 @@ class CreateTaskRequest(BaseModel):
         return self
 
 
+class RequestRunRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    approval_mode: ApprovalMode | None = None
+
+
 class SyncCreateTaskRequest(BaseModel):
+    approval_mode: ApprovalMode | None = None
     model_config = ConfigDict(extra="forbid")
 
     goal: str = Field(min_length=1, max_length=100_000)
@@ -47,7 +55,8 @@ class ApprovalResponseRequest(BaseModel):
     feedback: str | None = Field(default=None, max_length=10_000)
 
 
-class TaskAcceptedResponse(BaseModel):
+class TaskAcceptedResponse(ApprovalConfiguration):
+    model_config = ConfigDict(extra="ignore")
     session_id: str
     run_id: str
     status: str
@@ -56,7 +65,8 @@ class TaskAcceptedResponse(BaseModel):
     stream_url: str
 
 
-class CommandResponse(BaseModel):
+class CommandResponse(ApprovalConfiguration):
+    model_config = ConfigDict(extra="ignore")
     session_id: str
     run_id: str | None
     status: str
@@ -68,7 +78,8 @@ class ApprovalCommandResponse(CommandResponse):
     decision: str
 
 
-class TaskView(BaseModel):
+class TaskView(ApprovalConfiguration):
+    model_config = ConfigDict(extra="ignore")
     tenant_id: str
     session_id: str
     root_session_id: str

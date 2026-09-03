@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import time
 from typing import Any
 from uuid import uuid4
 
+from auraclaw.contracts.approval_mode import ApprovalConfiguration, ApprovalMode, InteractionMode
 from auraclaw.contracts.commands import CommandContext
-from auraclaw.contracts.errors import NotFoundError
+from auraclaw.contracts.errors import NotFoundError, VersionConflictError
 from auraclaw.domain.approval import ApprovalAggregate
 from auraclaw.domain.session import SessionAggregate
 from auraclaw.projection.ports import ApprovalViewReader, TaskReader
@@ -48,7 +51,13 @@ class TaskService:
         source: str = "chat",
         schedule_id: str | None = None,
         occurrence_id: str | None = None,
+        interaction_mode: InteractionMode | None = None,
+        approval_mode: ApprovalMode | None = None,
     ) -> dict[str, Any]:
+        interaction = interaction_mode or (
+            InteractionMode.NON_STREAMING if source == "schedule" else InteractionMode.STREAMING
+        )
+        approval = ApprovalConfiguration.resolve(interaction, approval_mode)
         started = time.perf_counter()
         await self._admission.admit(goal=goal, context=context)
         session_id = f"ses_{uuid4().hex}"
@@ -61,11 +70,25 @@ class TaskService:
             source=source,
             schedule_id=schedule_id,
             occurrence_id=occurrence_id,
+            approval=approval,
         )
         response = {
             "session_id": session_id,
             "run_id": run_id,
             "status": "pending",
+            "_request_fingerprint": hashlib.sha256(
+                json.dumps(
+                    {
+                        "goal": goal,
+                        "source": source,
+                        "schedule_id": schedule_id,
+                        "occurrence_id": occurrence_id,
+                        **approval.public_dict(),
+                    },
+                    sort_keys=True,
+                ).encode()
+            ).hexdigest(),
+            **approval.public_dict(),
             "status_url": f"/v1/tasks/{session_id}",
             "result_url": f"/v1/tasks/{session_id}/result",
             "stream_url": f"/v1/streams/{session_id}",
@@ -85,7 +108,7 @@ class TaskService:
             run_id,
             (time.perf_counter() - started) * 1_000,
         )
-        return result.command_result
+        return {k: v for k, v in result.command_result.items() if k != "_request_fingerprint"}
 
     async def append_message(
         self, *, session_id: str, message: str, context: CommandContext
@@ -109,15 +132,41 @@ class TaskService:
         await self._after_append(session, result)
         return result.command_result
 
-    async def request_run(self, *, session_id: str, context: CommandContext) -> dict[str, Any]:
+    async def request_run(
+        self, *, session_id: str, context: CommandContext, approval_mode: ApprovalMode | None = None
+    ) -> dict[str, Any]:
+        fingerprint = hashlib.sha256(
+            json.dumps(
+                {"session_id": session_id, "approval_mode": approval_mode}, sort_keys=True
+            ).encode()
+        ).hexdigest()
+        for event in await self._event_store.load(
+            context.tenant_id, session_id, event_types=("run.requested",)
+        ):
+            if event.payload.get("command_id") == context.command_id:
+                if event.payload.get("request_fingerprint") != fingerprint:
+                    raise VersionConflictError(
+                        "Run command was reused with a different approval mode"
+                    )
+                return {
+                    "session_id": session_id,
+                    "run_id": event.payload["run_id"],
+                    "status": "pending",
+                    "run_status": "pending",
+                    **event.payload.get("approval", {}),
+                }
         session = await self._load(context.tenant_id, session_id)
         run_id = f"run_{uuid4().hex}"
-        session.request_run(run_id)
+        session.request_run(
+            run_id, approval_mode, command_id=context.command_id, request_fingerprint=fingerprint
+        )
         response = {
             "session_id": session_id,
             "run_id": run_id,
             "status": "pending",
             "run_status": "pending",
+            "_request_fingerprint": fingerprint,
+            **session.approval.public_dict(),
         }
         result = await self._event_store.append(
             root_session_id=session.root_session_id,
@@ -128,7 +177,7 @@ class TaskService:
             command_result=response,
         )
         await self._after_append(session, result)
-        return result.command_result
+        return {k: v for k, v in result.command_result.items() if k != "_request_fingerprint"}
 
     async def cancel_task(
         self,

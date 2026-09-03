@@ -55,7 +55,7 @@ class PostgresEventStore(LazyPool):
             clauses.append(f"event_type = ANY(${len(params)}::text[])")
         query = f"""
             SELECT * FROM session_core.canonical_event
-            WHERE {' AND '.join(clauses)}
+            WHERE {" AND ".join(clauses)}
             ORDER BY aggregate_version
         """
         if limit is not None:
@@ -79,9 +79,7 @@ class PostgresEventStore(LazyPool):
             )
         return [event_from_record(row) for row in rows]
 
-    async def has_skill_package_reference(
-        self, tenant_id: str, package_digest: str
-    ) -> bool:
+    async def has_skill_package_reference(self, tenant_id: str, package_digest: str) -> bool:
         pool = await self.pool()
         query = """SELECT EXISTS(SELECT 1 FROM session_core.canonical_event
             WHERE tenant_id=$1 AND event_type='skill.activated'
@@ -145,7 +143,7 @@ class PostgresEventStore(LazyPool):
             clauses.append(f"event_type = ANY(${len(params)}::text[])")
         query = f"""
             SELECT * FROM session_core.canonical_event
-            WHERE {' AND '.join(clauses)}
+            WHERE {" AND ".join(clauses)}
             ORDER BY occurred_at, session_id, aggregate_version
         """
         if limit is not None:
@@ -214,6 +212,11 @@ class PostgresEventStore(LazyPool):
                     context.command_id,
                 )
                 if previous is not None:
+                    saved_response = dict(json_loads(previous["response"]))
+                    if command_result.get("_request_fingerprint") != saved_response.get(
+                        "_request_fingerprint"
+                    ):
+                        raise VersionConflictError("command was reused with a different request")
                     return AppendResult(
                         events=[],
                         command_result=dict(json_loads(previous["response"])),

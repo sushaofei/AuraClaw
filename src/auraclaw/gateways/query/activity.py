@@ -14,6 +14,10 @@ from auraclaw.observability.redaction import redact_sensitive
 ACTIVITY_EVENT_TYPES = frozenset(
     {
         "session.created",
+        "session.approval_mode_changed",
+        "policy.review.requested",
+        "policy.review.completed",
+        "policy.mode.resolved",
         "user.message.appended",
         "run.requested",
         "run.scheduled",
@@ -79,9 +83,7 @@ def build_activity(events: Sequence[CanonicalEvent]) -> list[dict[str, Any]]:
         _apply_event(nodes, event)
     result = list(nodes.values())
     for node in result:
-        node["duration_ms"] = _duration_ms(
-            node.get("started_at"), node.get("completed_at")
-        )
+        node["duration_ms"] = _duration_ms(node.get("started_at"), node.get("completed_at"))
     return sorted(result, key=lambda item: (int(item["sequence"]), str(item["id"])))
 
 
@@ -91,21 +93,13 @@ def page_activity(
     """Page node updates without losing requested→terminal lifecycle changes."""
 
     candidates = sorted(
-        (
-            dict(node)
-            for node in nodes
-            if int(node.get("updated_version", 0)) > after_version
-        ),
+        (dict(node) for node in nodes if int(node.get("updated_version", 0)) > after_version),
         key=lambda item: (int(item["updated_version"]), int(item["sequence"])),
     )
     selected = candidates[:limit]
-    next_after = max(
-        (int(node["updated_version"]) for node in selected), default=after_version
-    )
+    next_after = max((int(node["updated_version"]) for node in selected), default=after_version)
     return {
-        "nodes": sorted(
-            selected, key=lambda item: (int(item["sequence"]), str(item["id"]))
-        ),
+        "nodes": sorted(selected, key=lambda item: (int(item["sequence"]), str(item["id"]))),
         "next_after_version": next_after,
         "has_more": len(candidates) > len(selected),
     }
@@ -261,6 +255,33 @@ def _apply_event(nodes: dict[str, dict[str, Any]], event: CanonicalEvent) -> Non
         )
         return
 
+    if event.type.startswith("policy."):
+        reviewing = event.type == "policy.review.requested"
+        full_access = event.type == "policy.mode.resolved"
+        approved = payload.get("approved") is True
+        node = _upsert(
+            nodes,
+            f"policy:{run_id}:{payload.get('action_digest', event.event_id)}",
+            event,
+            node_type="approval",
+            run_id=run_id,
+            status="running" if reviewing else ("completed" if approved else "waiting"),
+            title=(
+                "完全访问权限"
+                if full_access
+                else "正在自动审核"
+                if reviewing
+                else "自动审核通过"
+                if approved
+                else "需要你确认"
+            ),
+        )
+        node["summary"] = _text(payload.get("reason")) or _text(payload.get("action_label"))
+        node["detail"] = _bounded_detail(payload)
+        if not reviewing:
+            node["completed_at"] = timestamp
+        return
+
     if event.type.startswith("approval.") or event.type == "human.response.recorded":
         approval_id = _text(payload.get("approval_id")) or event.event_id
         node = _upsert(
@@ -273,9 +294,10 @@ def _apply_event(nodes: dict[str, dict[str, Any]], event: CanonicalEvent) -> Non
             run_id=run_id,
             correlation={"approval_id": approval_id},
         )
-        node["summary"] = _text(
-            payload.get("reason") or payload.get("feedback") or payload.get("decision")
-        ) or event.type
+        node["summary"] = (
+            _text(payload.get("reason") or payload.get("feedback") or payload.get("decision"))
+            or event.type
+        )
         node["detail"] = _bounded_detail(payload)
         if event.type in _TERMINAL_APPROVAL or event.type == "human.response.recorded":
             node["completed_at"] = timestamp
@@ -413,11 +435,10 @@ def _run_status(event_type: str) -> str:
 
 def _run_summary(event: CanonicalEvent) -> str:
     payload = event.payload
-    return _text(
-        payload.get("result_summary")
-        or payload.get("reason")
-        or payload.get("error")
-    ) or event.type
+    return (
+        _text(payload.get("result_summary") or payload.get("reason") or payload.get("error"))
+        or event.type
+    )
 
 
 def _model_input_summary(payload: dict[str, Any]) -> str:

@@ -70,12 +70,18 @@ class InMemoryApprovalProjection:
         return self._records.get((tenant_id, approval_id))
 
     async def find_approved(
-        self, tenant_id: str, session_id: str, digest: str, policy_version: str
+        self,
+        tenant_id: str,
+        session_id: str,
+        digest: str,
+        policy_version: str,
+        run_id: str | None = None,
     ) -> ApprovalRecord | None:
         for (record_tenant, _), record in self._records.items():
             if (
                 record_tenant == tenant_id
                 and record.session_id == session_id
+                and (run_id is None or record.run_id == run_id)
                 and record.action_digest == digest
                 and record.policy_version == policy_version
                 and record.status is ApprovalStatus.APPROVED

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from auraclaw.contracts.approval_mode import ApprovalMode, InteractionMode
 from auraclaw.contracts.commands import CommandContext
 from auraclaw.gateways.query.waiter import TaskResultWaiter, WaitedResult
 from auraclaw.gateways.task.commands import TaskCommandGateway
@@ -24,11 +25,14 @@ class SyncInvocationGateway:
         goal: str,
         context: CommandContext,
         timeout_seconds: int | None = None,
+        approval_mode: ApprovalMode | None = None,
     ) -> tuple[dict[str, Any], WaitedResult]:
         accepted = await self._commands.create_task(
             goal=goal,
             context=context,
             source="chat",
+            interaction_mode=InteractionMode.NON_STREAMING,
+            approval_mode=approval_mode,
         )
         session_id = str(accepted["session_id"])
         waited = await self._waiter.wait(

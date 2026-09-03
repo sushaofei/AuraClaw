@@ -142,3 +142,16 @@ budget_exceeded
 - Budget、数据驻留、模型选择、Artifact 分享等执行点的策略输入/约束尚未统一到同等成熟度。
 - Approval 通知渠道、升级、委托、多人会签和组织目录集成未实现。
 - 待补：策略包签名/发布/回滚、决策 explain、属性来源可信度、审批 SLA 与过期扫描 worker。
+
+## 三档审批模式（#92）
+
+Policy 的动作决策与人工审批处理偏好分层：基础规则产生 require_approval 后，由
+`policy/approval_modes.py` 按 Canonical Run 中的 request_approval / auto_review / full_access 处理。
+范围覆盖所有 require_approval，不限于 write；deny 始终生效。
+
+非流式默认 full_access、流式默认 request_approval；入口显式声明交互类型，SSE 连接状态不参与授权。
+自动审核经独立 POLICY workload 调用 Model Gateway，保留独立的 Canonical policy.review.* 事实；
+不伪造人工批准，也不直接改变 Session 业务状态。审核不确定/失败时交回现有人工审批闭环。
+
+状态继承、有效期、HTTP 契约、已接入执行点和发布限制见
+[审批模式与升级](../../operations/approval-modes.md)。

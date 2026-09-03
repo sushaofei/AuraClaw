@@ -322,7 +322,7 @@ def test_write_requires_approval_and_argument_change_invalidates_it() -> None:
     asyncio.run(scenario())
 
 
-def test_find_approved_reuses_session_approval_on_later_run_without_approval_id() -> None:
+def test_prior_run_approval_does_not_authorize_new_run() -> None:
     async def scenario() -> None:
         hands = RecordingHands({"resource_id": "external-1"})
         approvals = InMemoryApprovalProjection()
@@ -357,8 +357,9 @@ def test_find_approved_reuses_session_approval_on_later_run_without_approval_id(
             | {"run_id": "run-later", "tool_invocation_id": "tool-later"}
         )
         result = await gateway.execute(later)
-        assert result.status.value == "success"
-        assert hands.calls == 1
+        assert result.error_code == "approval_required"
+        assert result.metadata["approval_request"]["run_id"] == "run-later"
+        assert hands.calls == 0
 
     asyncio.run(scenario())
 
@@ -756,6 +757,7 @@ def test_slow_approval_lookup_does_not_block_another_tenant() -> None:
             session_id: str,
             digest: str,
             policy_version: str,
+            run_id: str | None = None,
         ) -> ApprovalRecord | None:
             del session_id, digest, policy_version
             if tenant_id == "tenant-slow":

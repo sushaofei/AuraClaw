@@ -164,6 +164,7 @@ class _NoApprovals:
         session_id: str,
         digest: str,
         policy_version: str,
+        run_id: str | None = None,
     ) -> None:
         del tenant_id, session_id, digest, policy_version
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Protocol
 
@@ -29,12 +29,11 @@ class PolicyEvaluation:
     decision: PolicyDecision
     decision_id: str
     policy_version: str
+    constraints: dict[str, Any] = field(default_factory=dict)
 
 
 class HandsExecutor(Protocol):
-    async def execute(
-        self, invocation: ToolInvocation, capability: ToolCapability
-    ) -> Any: ...
+    async def execute(self, invocation: ToolInvocation, capability: ToolCapability) -> Any: ...
 
 
 class PolicyEvaluator(Protocol):
@@ -44,9 +43,7 @@ class PolicyEvaluator(Protocol):
         self,
         capability: ToolCapability,
         invocation: ToolInvocation | None = None,
-    ) -> (
-        PolicyDecision | PolicyEvaluation | Awaitable[PolicyDecision | PolicyEvaluation]
-    ): ...
+    ) -> PolicyDecision | PolicyEvaluation | Awaitable[PolicyDecision | PolicyEvaluation]: ...
 
 
 @dataclass(frozen=True)
@@ -99,9 +96,7 @@ class InvocationStore(Protocol):
         claim_ttl: timedelta,
     ) -> InvocationBegin: ...
 
-    async def mark_executing(
-        self, invocation: ToolInvocation, *, claim_token: str
-    ) -> bool: ...
+    async def mark_executing(self, invocation: ToolInvocation, *, claim_token: str) -> bool: ...
 
     async def wait_for_approval(
         self, invocation: ToolInvocation, result: Any, *, claim_token: str
@@ -304,9 +299,7 @@ class CapabilityCatalogStore(Protocol):
 
     async def remove_server(self, server_id: str) -> None: ...
 
-    async def list_capabilities(
-        self, tenant_id: str
-    ) -> tuple[CapabilityDescriptor, ...]: ...
+    async def list_capabilities(self, tenant_id: str) -> tuple[CapabilityDescriptor, ...]: ...
 
     async def list_server_capabilities(
         self, tenant_id: str, server_id: str
@@ -331,9 +324,7 @@ McpResourceReader = ResourceReader
 class CapabilityConnector(Protocol):
     connector_id: str
 
-    async def snapshot(
-        self, trusted: HandsTrustedContext
-    ) -> CapabilitySnapshot: ...
+    async def snapshot(self, trusted: HandsTrustedContext) -> CapabilitySnapshot: ...
 
     async def read_resource(
         self,

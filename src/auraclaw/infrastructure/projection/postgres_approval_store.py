@@ -85,18 +85,25 @@ class PostgresApprovalProjection(LazyPool):
         return self._record(row) if row is not None else None
 
     async def find_approved(
-        self, tenant_id: str, session_id: str, digest: str, policy_version: str
+        self,
+        tenant_id: str,
+        session_id: str,
+        digest: str,
+        policy_version: str,
+        run_id: str | None = None,
     ) -> ApprovalRecord | None:
         pool = await self.pool()
         row = await pool.fetchrow(
             """SELECT * FROM projection.approval_view
             WHERE tenant_id=$1 AND session_id=$2 AND action_digest=$3
-              AND policy_version=$4 AND status='approved' AND expires_at > now()
+              AND policy_version=$4 AND ($5::text IS NULL OR run_id=$5)
+              AND status='approved' AND expires_at > now()
             ORDER BY projected_at DESC LIMIT 1""",
             tenant_id,
             session_id,
             digest,
             policy_version,
+            run_id,
         )
         return self._record(row) if row is not None else None
 

@@ -377,6 +377,7 @@ class AssignmentAbandonResponse(ContractModel):
 
 
 class ModelGenerateRequest(ContractModel):
+    purpose: Literal["execution", "approval_review"] = "execution"
     context: InternalRequestContext
     model_call_id: str
     run_id: str
@@ -437,6 +438,8 @@ class RuntimeServiceConfig(ContractModel):
 
 
 class PolicyEvaluateRequest(ContractModel):
+    session_id: str | None = None
+    run_id: str | None = None
     context: InternalRequestContext
     subject: str
     action: str
@@ -672,9 +675,7 @@ class ArtifactSkillOrphanResolveRequest(ContractModel):
     version: int = Field(ge=1)
     claim_token: str = Field(min_length=1, max_length=256)
     referenced: bool
-    package_digest: str | None = Field(
-        default=None, pattern=r"^sha256:[0-9a-f]{64}$"
-    )
+    package_digest: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
     policy_decision_id: str | None = Field(default=None, max_length=256)
 
 
@@ -711,9 +712,7 @@ class SkillAdmissionListInternalRequest(ContractModel):
     context: InternalRequestContext
     outcome: Literal["accepted", "rejected", "quarantined"] | None = None
     stage: str | None = Field(default=None, min_length=1, max_length=128)
-    content_policy_version: str | None = Field(
-        default=None, min_length=1, max_length=128
-    )
+    content_policy_version: str | None = Field(default=None, min_length=1, max_length=128)
     since: AwareDatetime | None = None
     cursor: str | None = Field(default=None, min_length=1, max_length=2048)
     limit: int = Field(default=100, ge=1, le=500)
@@ -760,9 +759,7 @@ class SkillRevokeInternalRequest(ContractModel):
     version: str = Field(min_length=1, max_length=128)
     reason_code: str = Field(min_length=1, max_length=128)
     revocation_action: Literal["continue", "pause", "cancel"] = "cancel"
-    policy_version: str = Field(
-        default="skill-revocation-v1", min_length=1, max_length=128
-    )
+    policy_version: str = Field(default="skill-revocation-v1", min_length=1, max_length=128)
     policy_decision_id: str | None = Field(default=None, max_length=256)
     command_id: str = Field(min_length=1, max_length=256)
     expected_revision: int = Field(ge=1)

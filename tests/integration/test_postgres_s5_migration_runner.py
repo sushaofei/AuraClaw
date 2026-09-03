@@ -10,6 +10,7 @@ from pathlib import Path
 
 import asyncpg
 import pytest
+from approval_mode_checks import check_approval_modes
 
 from auraclaw.action.capability_catalog import CapabilityCatalog
 from auraclaw.contracts.capabilities import CapabilityDescriptor, CapabilityKind
@@ -261,6 +262,7 @@ def test_migration_runner_is_locked_idempotent_and_detects_drift(tmp_path: Path)
                     await readonly.execute("DELETE FROM auraclaw_meta.schema_migration")
             finally:
                 await readonly.close()
+            await check_approval_modes(connection, database_url, migration_dir)
             await _check_mcp_trust_migration(connection, database_url, migration_dir)
             await _check_mcp_tool_prefix_migration(connection, database_url, migration_dir)
             await connection.execute(

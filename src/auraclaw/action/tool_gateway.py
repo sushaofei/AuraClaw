@@ -51,7 +51,12 @@ class ApprovalReader(Protocol):
     async def get(self, tenant_id: str, approval_id: str) -> ApprovalRecord | None: ...
 
     async def find_approved(
-        self, tenant_id: str, session_id: str, digest: str, policy_version: str
+        self,
+        tenant_id: str,
+        session_id: str,
+        digest: str,
+        policy_version: str,
+        run_id: str | None = None,
     ) -> ApprovalRecord | None: ...
 
 
@@ -85,9 +90,7 @@ class ToolRegistry:
         capabilities: tuple[ToolCapability, ...],
     ) -> None:
         self._discoverable.difference_update(
-            key
-            for key, capability in self._capabilities.items()
-            if capability.owner == owner
+            key for key, capability in self._capabilities.items() if capability.owner == owner
         )
         for capability in capabilities:
             key = (capability.name, capability.version)
@@ -103,14 +106,10 @@ class ToolRegistry:
 
     def revoke_owner(self, owner: str) -> None:
         removed = {
-            key
-            for key, capability in self._capabilities.items()
-            if capability.owner == owner
+            key for key, capability in self._capabilities.items() if capability.owner == owner
         }
         self._capabilities = {
-            key: capability
-            for key, capability in self._capabilities.items()
-            if key not in removed
+            key: capability for key, capability in self._capabilities.items() if key not in removed
         }
         self._discoverable.difference_update(removed)
 
@@ -175,7 +174,6 @@ class JsonSchemaValidator:
             "boolean": isinstance(value, bool),
             "null": value is None,
         }.get(expected, False)
-
 
 
 class _KeyedLocks:
@@ -297,20 +295,14 @@ class _ExecutionCapacity:
         tenant_acquired = False
         global_acquired = False
         try:
-            await asyncio.wait_for(
-                tenant_slot.acquire(), timeout=self.remaining(ticket)
-            )
+            await asyncio.wait_for(tenant_slot.acquire(), timeout=self.remaining(ticket))
             tenant_acquired = True
-            await asyncio.wait_for(
-                self._global.acquire(), timeout=self.remaining(ticket)
-            )
+            await asyncio.wait_for(self._global.acquire(), timeout=self.remaining(ticket))
             global_acquired = True
             latency = asyncio.get_running_loop().time() - ticket.queued_at
             snapshot = await self._mark_started(ticket)
             await self._emit_snapshot(ticket.tenant_id, snapshot)
-            await self._emit(
-                "tool.gateway.queue.latency.seconds", latency, ticket.tenant_id
-            )
+            await self._emit("tool.gateway.queue.latency.seconds", latency, ticket.tenant_id)
             yield
         except TimeoutError as exc:
             await self._emit(
@@ -343,9 +335,7 @@ class _ExecutionCapacity:
         return max(0.0, self._queue_timeout - elapsed)
 
     async def rejected(self, ticket: _CapacityTicket, reason: str) -> None:
-        await self._emit(
-            "tool.gateway.backpressure.count", 1.0, ticket.tenant_id, reason=reason
-        )
+        await self._emit("tool.gateway.backpressure.count", 1.0, ticket.tenant_id, reason=reason)
 
     async def _mark_started(self, ticket: _CapacityTicket) -> _CapacitySnapshot:
         async with self._guard:
@@ -391,9 +381,7 @@ class _ExecutionCapacity:
         if tenant_id not in self._queued_by_tenant and tenant_id not in self._inflight_by_tenant:
             self._tenant_slots.pop(tenant_id, None)
 
-    async def _emit_snapshot(
-        self, tenant_id: str, snapshot: _CapacitySnapshot
-    ) -> None:
+    async def _emit_snapshot(self, tenant_id: str, snapshot: _CapacitySnapshot) -> None:
         await asyncio.gather(
             self._emit(
                 "tool.gateway.queue.depth",
@@ -493,7 +481,7 @@ class ToolGateway:
         self._cancellation_poll_interval = cancellation_poll_interval
         self._metrics = metric_writer
         self._results: dict[tuple[str, str], tuple[str, ToolResult]] = {}
-        self._pending_approvals: dict[tuple[str, str, str], ApprovalRecord] = {}
+        self._pending_approvals: dict[tuple[str, str, str, str], ApprovalRecord] = {}
         self._inflight: dict[tuple[str, str], set[asyncio.Task[Any]]] = {}
         self._claim_tokens: dict[tuple[str, str], str] = {}
         self._claim_monitors: dict[tuple[str, str], asyncio.Task[None]] = {}
@@ -559,14 +547,10 @@ class ToolGateway:
         self._statuses[execution_key] = result.status.value
         return result
 
-    async def cancel(
-        self, tool_invocation_id: str, *, tenant_id: str | None = None
-    ) -> bool:
+    async def cancel(self, tool_invocation_id: str, *, tenant_id: str | None = None) -> bool:
         persisted = False
         if self._invocation_store is not None and tenant_id is not None:
-            persisted = await self._invocation_store.request_cancel(
-                tenant_id, tool_invocation_id
-            )
+            persisted = await self._invocation_store.request_cancel(tenant_id, tool_invocation_id)
         tasks = [
             task
             for (candidate_tenant, candidate_id), candidates in self._inflight.items()
@@ -591,9 +575,7 @@ class ToolGateway:
         self, tenant_id: str, tool_invocation_id: str
     ) -> tuple[str, str, str | None, bool] | None:
         if self._invocation_store is not None:
-            status = await self._invocation_store.get_status(
-                tenant_id, tool_invocation_id
-            )
+            status = await self._invocation_store.get_status(tenant_id, tool_invocation_id)
             if status is None:
                 return None
             return (
@@ -642,18 +624,14 @@ class ToolGateway:
                 error_code=exc.code,
                 side_effect_status="not_started",
             )
-        digest = action_digest(
-            invocation.tool_name, invocation.tool_version, invocation.arguments
-        )
+        digest = action_digest(invocation.tool_name, invocation.tool_version, invocation.arguments)
         cache_key = (invocation.tenant_id, invocation.idempotency_key)
         try:
             ticket = await self._capacity.admit(invocation.tenant_id)
         except _CapacityRejected as exc:
             return self._capacity_result(exc.reason)
         try:
-            async with self._locks.hold(
-                cache_key, wait_seconds=self._capacity.remaining(ticket)
-            ):
+            async with self._locks.hold(cache_key, wait_seconds=self._capacity.remaining(ticket)):
                 previous = self._results.get(cache_key)
                 if previous is not None:
                     previous_digest, previous_result = previous
@@ -719,7 +697,9 @@ class ToolGateway:
 
         evaluated = self._policy.evaluate(capability, invocation)
         evaluation = await evaluated if inspect.isawaitable(evaluated) else evaluated
+        approval_evidence: dict[str, Any] = {}
         if isinstance(evaluation, PolicyEvaluation):
+            approval_evidence = evaluation.constraints
             decision = evaluation.decision
             decision_id = evaluation.decision_id
             policy_version = evaluation.policy_version
@@ -738,23 +718,17 @@ class ToolGateway:
                     return self._claim_lost_result("before policy result was committed")
             self._results[cache_key] = (digest, result)
             return result
-        if decision is PolicyDecision.REQUIRE_APPROVAL and not (
-            capability.runtime_location == "remote-mcp"
-            and capability.permission is ToolPermission.READ_ONLY
-        ):
-            approval = await self._resolve_approval(
-                invocation, capability, digest, policy_version
-            )
+        if decision is PolicyDecision.REQUIRE_APPROVAL:
+            approval = await self._resolve_approval(invocation, capability, digest, policy_version)
             if not approval:
                 pending_key = (
                     invocation.tenant_id,
                     invocation.session_id,
+                    invocation.run_id,
                     digest,
                 )
                 pending = self._pending_approvals.get(pending_key)
-                if pending is not None and not await self._pending_approval_is_waiting(
-                    pending
-                ):
+                if pending is not None and not await self._pending_approval_is_waiting(pending):
                     self._pending_approvals.pop(pending_key, None)
                     pending = None
                 if pending is None:
@@ -766,7 +740,10 @@ class ToolGateway:
                         tool_name=invocation.tool_name,
                         redacted_arguments=self._redact(invocation.arguments),
                         risk=capability.risk_level,
-                        reason=f"{capability.permission.value} action requires human approval",
+                        reason=str(
+                            approval_evidence.get("reason")
+                            or f"{capability.permission.value} action requires human approval"
+                        ),
                         expected_effect=invocation.expected_side_effect,
                         policy_version=policy_version,
                         ttl=self._approval_ttl,
@@ -786,20 +763,14 @@ class ToolGateway:
                         invocation, result, claim_token=claim_token
                     )
                     if not parked:
-                        return self._claim_lost_result(
-                            "before approval state was committed"
-                        )
+                        return self._claim_lost_result("before approval state was committed")
                 return result
 
         if self._invocation_store is not None:
             claim_token = self._claim_token(invocation)
-            if not await self._invocation_store.mark_executing(
-                invocation, claim_token=claim_token
-            ):
+            if not await self._invocation_store.mark_executing(invocation, claim_token=claim_token):
                 return self._claim_lost_result("before dispatch")
-        result = await self._dispatch(
-            invocation, capability, policy_decision_id=decision_id
-        )
+        result = await self._dispatch(invocation, capability, policy_decision_id=decision_id)
         if self._invocation_store is not None:
             if not await self._complete_claimed(invocation, result):
                 return ToolResult(
@@ -833,9 +804,7 @@ class ToolGateway:
             side_effect_status="not_started",
         )
 
-    async def _complete_claimed(
-        self, invocation: ToolInvocation, result: ToolResult
-    ) -> bool:
+    async def _complete_claimed(self, invocation: ToolInvocation, result: ToolResult) -> bool:
         assert self._invocation_store is not None
         return await self._invocation_store.complete(
             invocation, result, claim_token=self._claim_token(invocation)
@@ -870,9 +839,7 @@ class ToolGateway:
                         if parent is not None and not parent.done():
                             parent.cancel()
                         return
-                    next_renewal = (
-                        loop.time() + self._execution_claim_ttl.total_seconds() / 3
-                    )
+                    next_renewal = loop.time() + self._execution_claim_ttl.total_seconds() / 3
         except Exception:
             if parent is not None and not parent.done():
                 parent.cancel()
@@ -895,9 +862,7 @@ class ToolGateway:
                     action_digest=digest,
                     policy_version=policy_version,
                 )
-            record = await self._approvals.get(
-                invocation.tenant_id, invocation.approval_id
-            )
+            record = await self._approvals.get(invocation.tenant_id, invocation.approval_id)
             if record is None:
                 raise ApprovalValidationError("approval does not exist")
         else:
@@ -906,9 +871,12 @@ class ToolGateway:
                 invocation.session_id,
                 digest,
                 policy_version,
+                run_id=invocation.run_id,
             )
-            if record is None:
+            if record is None or record.run_id != invocation.run_id:
                 return False
+        if record.run_id != invocation.run_id:
+            raise ApprovalValidationError("approval belongs to a different Run")
         ApprovalAggregate.validate(
             record,
             tenant_id=invocation.tenant_id,

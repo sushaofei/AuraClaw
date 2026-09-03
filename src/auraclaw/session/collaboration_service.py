@@ -17,6 +17,7 @@ from auraclaw.contracts.errors import AuthorizationError, CollaborationValidatio
 from auraclaw.contracts.events import NewEvent
 from auraclaw.contracts.state import Visibility
 from auraclaw.domain.collaboration import CollaborationAggregate, CollaborationNode
+from auraclaw.domain.session import SessionAggregate
 from auraclaw.session.ports import EventStore, OutboxRelayPort
 
 
@@ -76,8 +77,15 @@ class CollaborationService:
             spec=spec,
             limits=self._limits,
         )
+        parent = SessionAggregate.from_events(
+            await self._events.load(context.tenant_id, parent_session_id)
+        )
+        inherited = parent.approval.model_copy(
+            update={"approval_mode_source": "inherited"}
+        ).public_dict()
         target_session_id = spec.metadata.get("target_session_id")
         payload = {
+            "approval": inherited,
             "task_key": spec.task_key,
             "root_session_id": root_session_id,
             "parent_session_id": parent_session_id,
@@ -109,7 +117,7 @@ class CollaborationService:
                 NewEvent(
                     type="run.requested",
                     visibility=Visibility.INTERNAL,
-                    payload={"run_id": f"run_{child_session_id[4:]}"},
+                    payload={"run_id": f"run_{child_session_id[4:]}", "approval": inherited},
                 ),
             ],
             command_result=response,
@@ -405,9 +413,7 @@ class CollaborationService:
                     payload={
                         "result_summary": result_summary,
                         "result_ref": result_ref,
-                        "artifact_refs": [
-                            item["artifact_ref"] for item in artifact_lineage
-                        ],
+                        "artifact_refs": [item["artifact_ref"] for item in artifact_lineage],
                         "lineage": lineage,
                     },
                 ),
@@ -438,7 +444,6 @@ class CollaborationService:
         await self._relay.relay_once()
         return result.command_result
 
-
     @staticmethod
     def child_id(tenant_id: str, root_session_id: str, task_key: str) -> str:
         value = uuid5(NAMESPACE_URL, f"auraclaw:{tenant_id}:{root_session_id}:{task_key}")
@@ -450,9 +455,7 @@ class CollaborationService:
             raise AuthorizationError("only a Coordinator can change the Task DAG")
 
     @staticmethod
-    def _require_child(
-        graph: CollaborationAggregate, child_session_id: str
-    ) -> CollaborationNode:
+    def _require_child(graph: CollaborationAggregate, child_session_id: str) -> CollaborationNode:
         node = graph.nodes.get(child_session_id)
         if node is None or node.role is CollaborationRole.ROOT:
             raise CollaborationValidationError("Child must belong to the same Root and tenant")

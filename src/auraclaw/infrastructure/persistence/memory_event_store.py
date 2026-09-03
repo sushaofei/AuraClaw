@@ -88,22 +88,14 @@ class InMemoryEventStore:
             key=lambda event: (event.tenant_id, event.session_id, event.aggregate_version),
         )
 
-    async def has_skill_package_reference(
-        self, tenant_id: str, package_digest: str
-    ) -> bool:
+    async def has_skill_package_reference(self, tenant_id: str, package_digest: str) -> bool:
         for event in await self.load_all(tenant_id):
             if event.type != "skill.activated":
                 continue
             direct = event.payload.get("package_digest")
             activation = event.payload.get("activation")
-            binding = (
-                activation.get("binding")
-                if isinstance(activation, dict)
-                else None
-            )
-            nested = (
-                binding.get("package_digest") if isinstance(binding, dict) else None
-            )
+            binding = activation.get("binding") if isinstance(activation, dict) else None
+            nested = binding.get("package_digest") if isinstance(binding, dict) else None
             if direct == package_digest or nested == package_digest:
                 return True
         return False
@@ -130,23 +122,18 @@ class InMemoryEventStore:
             binding = activation.get("binding") if isinstance(activation, dict) else None
             if not isinstance(binding, dict):
                 continue
-            references = (binding, *(
-                item
-                for item in binding.get("resolved_skills", ())
-                if isinstance(item, dict)
-            ))
+            references = (
+                binding,
+                *(item for item in binding.get("resolved_skills", ()) if isinstance(item, dict)),
+            )
             if package_digest is not None:
                 matches = any(
-                    reference.get("package_digest") == package_digest
-                    for reference in references
+                    reference.get("package_digest") == package_digest for reference in references
                 )
             else:
                 matches = any(
                     reference.get("publisher") == publisher
-                    and (
-                        reference.get("skill_name") == name
-                        or reference.get("name") == name
-                    )
+                    and (reference.get("skill_name") == name or reference.get("name") == name)
                     for reference in references
                 )
             if matches:
@@ -203,6 +190,10 @@ class InMemoryEventStore:
         async with self._lock:
             previous = self._commands.get(command_key)
             if previous is not None:
+                if command_result.get("_request_fingerprint") != previous.get(
+                    "_request_fingerprint"
+                ):
+                    raise VersionConflictError("command was reused with a different request")
                 return AppendResult(events=[], command_result=dict(previous), deduplicated=True)
 
             stream = self._streams.setdefault(stream_key, [])
@@ -336,8 +327,7 @@ class InMemoryEventStore:
                 # A live claim or poison record must block later events.
                 blocked_sessions.add(session_key)
                 claim_expired = (
-                    record.claim_expires_at is not None
-                    and record.claim_expires_at <= now
+                    record.claim_expires_at is not None and record.claim_expires_at <= now
                 )
                 available = record.claimed_by is None or claim_expired
                 if record.poisoned or not available:
