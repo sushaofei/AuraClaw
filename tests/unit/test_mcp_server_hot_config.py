@@ -146,7 +146,7 @@ class _FakeEgress:
         self.events.append(("apply", entry.server_id))
         self.loaded.add(entry.server_id)
 
-    async def revoke(self, server_id: str) -> None:
+    async def revoke(self, server_id: str, *, expected_revision: int | None = None) -> None:
         self.events.append(("revoke", server_id))
         self.loaded.discard(server_id)
 
@@ -193,9 +193,7 @@ def test_registry_create_is_idempotent_and_conflicts_on_revision() -> None:
         )
         assert updated.result["latest_revision"] == 2
         with pytest.raises(VersionConflictError):
-            await service.update(
-                _write(_config(), command_id="cmd-4", expected_revision=1)
-            )
+            await service.update(_write(_config(), command_id="cmd-4", expected_revision=1))
         with pytest.raises(AuthorizationError):
             await service.get_server(
                 tenant_id="tenant-b",
@@ -310,13 +308,9 @@ def test_failed_enable_persists_intent_for_reconciliation() -> None:
         assert record.desired_state is McpDesiredState.ENABLED
 
         service.bind_runtime(Ok())
-        enabled = await service.enable(
-            "local-order-mcp", _life(command_id="cmd-enable-2")
-        )
+        enabled = await service.enable("local-order-mcp", _life(command_id="cmd-enable-2"))
         assert enabled.status.value == "succeeded"
-        await service.update(
-            _write(_config(title="v2"), command_id="cmd-5", expected_revision=1)
-        )
+        await service.update(_write(_config(title="v2"), command_id="cmd-5", expected_revision=1))
         service.bind_runtime(Boom())
         failed_promote = await service.enable(
             "local-order-mcp",
@@ -519,9 +513,7 @@ def test_connection_manager_test_records_last_test_at() -> None:
         )
         service.bind_runtime(manager)
         await service.create(_write(_config()))
-        result = await service.test(
-            "local-order-mcp", _life(command_id="cmd-test")
-        )
+        result = await service.test("local-order-mcp", _life(command_id="cmd-test"))
         assert result.status.value == "succeeded"
         record = await service.get_server(
             tenant_id="tenant-a",
@@ -550,9 +542,7 @@ def test_connection_manager_test_loads_then_revokes_egress() -> None:
         )
         service.bind_runtime(manager)
         await service.create(_write(_config()))
-        result = await service.test(
-            "local-order-mcp", _life(command_id="cmd-test-egress")
-        )
+        result = await service.test("local-order-mcp", _life(command_id="cmd-test-egress"))
         assert result.status.value == "succeeded"
         assert egress.events == [
             ("apply", "local-order-mcp"),
@@ -635,12 +625,12 @@ def test_egress_manager_reconcile_keeps_unlisted_adapter() -> None:
             observed_state=McpObservedState.PENDING,
         )
         await manager.apply(entry)
-        assert "mcp:auramcp" in adapters
+        assert "mcp:auramcp:probe:2" in adapters
         changed = await manager.reconcile(())
         assert changed == 0
-        assert "mcp:auramcp" in adapters
+        assert "mcp:auramcp:probe:2" in adapters
         await manager.revoke("auramcp")
-        assert "mcp:auramcp" not in adapters
+        assert "mcp:auramcp:probe:2" not in adapters
 
     asyncio.run(scenario())
 
@@ -659,9 +649,7 @@ def test_connection_manager_test_revokes_egress_after_probe_failure() -> None:
         )
         service.bind_runtime(manager)
         await service.create(_write(_config()))
-        result = await service.test(
-            "local-order-mcp", _life(command_id="cmd-test-boom")
-        )
+        result = await service.test("local-order-mcp", _life(command_id="cmd-test-boom"))
         assert result.status.value == "failed"
         assert result.result["error_type"] == "RuntimeError"
         assert egress.events == [
@@ -936,3 +924,220 @@ def test_retired_tool_prefixes_are_read_only_history(prefixes: list[str] | None)
     if prefixes is not None:
         with pytest.raises(ValidationError, match="allowed_tool_prefixes"):
             McpServerConfig.model_validate(legacy)
+
+
+def test_failed_revoke_retains_pending_work_and_retries_next_reconciliation() -> None:
+    async def scenario() -> None:
+        store = InMemoryMcpServerRegistryStore()
+        service = McpServerRegistryService(store)
+        await service.create(_write(_config()))
+
+        class FailOnce(_FakeEgress):
+            failures = 1
+
+            async def revoke(self, server_id, *, expected_revision=None):
+                if self.failures:
+                    self.failures -= 1
+                    raise RuntimeError("injected egress failure")
+                await super().revoke(server_id, expected_revision=expected_revision)
+
+        egress = FailOnce()
+        # Initial probe cleanup is permitted; inject failure only on disable.
+        egress.failures = 0
+        connectors = {}
+        manager = McpConnectionManager(
+            registry=service,
+            connectors=connectors,
+            factory=lambda server: _FakeConnector(),
+            egress=egress,
+            drain_seconds=0,
+        )
+        service.bind_runtime(manager)
+        assert (await service.enable("local-order-mcp", _life())).status.value == "succeeded"
+        egress.failures = 1
+        operation = await service.disable("local-order-mcp", _life(command_id="disable-retry"))
+        assert operation.status.value == "reconciling"
+        assert not connectors
+        assert "local-order-mcp" in manager._pending_revokes
+        assert await manager.reconcile_loaded() == 1
+        assert not manager._pending_revokes and not manager._generations
+        assert "local-order-mcp" not in egress.loaded
+
+    asyncio.run(scenario())
+
+
+def test_egress_revision_fence_and_authoritative_removal() -> None:
+    from auraclaw.infrastructure.credentials.mcp_egress_manager import McpEgressManager
+    from auraclaw.infrastructure.credentials.proxy import CredentialProxy, InMemoryVault
+
+    async def scenario() -> None:
+        entry = McpActiveSnapshotEntry(
+            server_id="auramcp",
+            tenant_id="platform",
+            revision=1,
+            config=_config(server_id="auramcp", tenant_id="platform"),
+            desired_state=McpDesiredState.ENABLED,
+            observed_state=McpObservedState.ACTIVE,
+        )
+        desired = (entry,)
+
+        async def authority():
+            return desired
+
+        adapters = {}
+        manager = McpEgressManager(
+            adapters=adapters,
+            proxy=CredentialProxy(InMemoryVault({})),
+            snapshot_provider=authority,
+            drain_seconds=0,
+        )
+        await manager.apply(entry)
+        desired = (entry.model_copy(update={"revision": 2}),)
+        await manager.apply(desired[0])
+        await manager.revoke("auramcp", expected_revision=1)
+        assert manager.loaded_revision("auramcp") == 2
+        await manager.revoke("auramcp", expected_revision=2)
+        assert "mcp:auramcp" in adapters  # Still enabled by authority.
+        desired = ()
+        assert await manager.reconcile(desired) == 1
+        assert "mcp:auramcp" not in adapters
+        with pytest.raises(Exception, match="stale MCP"):
+            await manager.apply(entry)
+
+    asyncio.run(scenario())
+
+
+def test_failed_delete_keeps_retired_intent_and_finishes_after_service_restart() -> None:
+    async def scenario() -> None:
+        store = InMemoryMcpServerRegistryStore()
+        service = McpServerRegistryService(store)
+        await service.create(_write(_config()))
+
+        class Fails:
+            async def revoke(self, server_id):
+                raise RuntimeError("injected cleanup failure")
+
+        service.bind_runtime(Fails())
+        pending = await service.delete("local-order-mcp", _life(command_id="delete-pending"))
+        assert pending.status.value == "reconciling"
+        record = await store.get_server("local-order-mcp")
+        assert record.desired_state is McpDesiredState.RETIRED
+        assert await service.active_snapshot() == ()
+
+        class RecoveredRuntime:
+            revoked = []
+
+            async def revoke(self, server_id):
+                self.revoked.append(server_id)
+
+        recovered_runtime = RecoveredRuntime()
+        recovered = McpServerRegistryService(store)
+        recovered.bind_runtime(recovered_runtime)
+        assert await recovered.reconcile_pending_deletes() == 1
+        assert await store.get_server("local-order-mcp") is None
+        assert recovered_runtime.revoked == ["local-order-mcp"]
+        operation = await store.get_operation(pending.operation_id)
+        assert operation.status.value == "succeeded"
+
+    asyncio.run(scenario())
+
+
+def test_probe_revision_does_not_replace_active_and_expires() -> None:
+    from auraclaw.infrastructure.credentials.mcp_egress_manager import McpEgressManager
+    from auraclaw.infrastructure.credentials.proxy import CredentialProxy, InMemoryVault
+
+    async def scenario() -> None:
+        entry = McpActiveSnapshotEntry(
+            server_id="auramcp",
+            tenant_id="platform",
+            revision=1,
+            config=_config(server_id="auramcp", tenant_id="platform"),
+            desired_state=McpDesiredState.ENABLED,
+            observed_state=McpObservedState.ACTIVE,
+        )
+        adapters = {}
+        manager = McpEgressManager(
+            adapters=adapters,
+            proxy=CredentialProxy(InMemoryVault({})),
+            drain_seconds=0,
+            probe_ttl_seconds=0,
+        )
+        await manager.apply(entry)
+        active = adapters["mcp:auramcp"]
+        await manager.apply(
+            entry.model_copy(update={"revision": 2, "desired_state": McpDesiredState.DISABLED})
+        )
+        probe = adapters["mcp:auramcp:probe:2"]
+        assert adapters["mcp:auramcp"] is active
+        assert manager.loaded_revision("auramcp") == 1
+        with pytest.raises(CredentialAccessError, match="probe cannot"):
+            await probe({"method": "tools/call"}, "")
+        await manager.reconcile((entry,))
+        assert "mcp:auramcp:probe:2" not in adapters
+        assert adapters["mcp:auramcp"] is active
+        await manager.revoke("auramcp")
+
+    asyncio.run(scenario())
+
+
+def test_egress_close_failure_is_retried_without_blocking_other_servers() -> None:
+    from auraclaw.infrastructure.credentials.mcp_egress_manager import McpEgressManager
+    from auraclaw.infrastructure.credentials.proxy import CredentialProxy, InMemoryVault
+
+    async def scenario() -> None:
+        adapters = {}
+        manager = McpEgressManager(
+            adapters=adapters, proxy=CredentialProxy(InMemoryVault({})), drain_seconds=0
+        )
+        for server_id in ("one", "two"):
+            await manager.apply(
+                McpActiveSnapshotEntry(
+                    server_id=server_id,
+                    tenant_id="platform",
+                    revision=1,
+                    config=_config(server_id=server_id, tenant_id="platform"),
+                    desired_state=McpDesiredState.ENABLED,
+                    observed_state=McpObservedState.ACTIVE,
+                )
+            )
+        captured = adapters["mcp:one"]
+        attempts = 0
+
+        async def flaky_close():
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise RuntimeError("injected close failure")
+
+        captured.aclose = flaky_close
+        await manager.reconcile(())
+        assert adapters == {}
+        with pytest.raises(CredentialAccessError, match="revoked"):
+            await captured({}, "")
+        assert manager.loaded_revision("one") is None
+        await manager.reconcile(())
+        assert attempts == 2
+        assert manager._closing == {}
+
+    asyncio.run(scenario())
+
+
+def test_late_delete_cannot_remove_recreated_configuration() -> None:
+    async def scenario() -> None:
+        store = InMemoryMcpServerRegistryStore()
+        service = McpServerRegistryService(store)
+        await service.create(_write(_config()))
+
+        class RacingRuntime:
+            async def revoke(self, server_id):
+                await service.create(_write(_config(), command_id="recreate"))
+
+        service.bind_runtime(RacingRuntime())
+        result = await service.delete("local-order-mcp", _life(command_id="old-delete"))
+        assert result.status.value == "reconciling"
+        record = await store.get_server("local-order-mcp")
+        assert record.latest_revision == 2
+        assert record.desired_state is McpDesiredState.DISABLED
+        assert await service.reconcile_pending_deletes() == 0
+
+    asyncio.run(scenario())

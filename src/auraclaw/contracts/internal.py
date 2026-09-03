@@ -966,6 +966,7 @@ class McpEgressCommandRequest(ContractModel):
     context: InternalRequestContext
     operation: Literal["apply", "revoke"]
     server_id: str
+    expected_revision: int | None = Field(default=None, ge=1)
     entry: dict[str, Any] | None = None
 
 

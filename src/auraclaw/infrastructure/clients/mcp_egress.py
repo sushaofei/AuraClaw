@@ -36,8 +36,8 @@ class RemoteMcpEgressClient:
     async def apply(self, entry: McpActiveSnapshotEntry) -> None:
         await self._command("apply", entry.server_id, entry=entry)
 
-    async def revoke(self, server_id: str) -> None:
-        await self._command("revoke", server_id)
+    async def revoke(self, server_id: str, *, expected_revision: int | None = None) -> None:
+        await self._command("revoke", server_id, expected_revision=expected_revision)
 
     async def _command(
         self,
@@ -45,6 +45,7 @@ class RemoteMcpEgressClient:
         server_id: str,
         *,
         entry: McpActiveSnapshotEntry | None = None,
+        expected_revision: int | None = None,
     ) -> McpEgressCommandResponse:
         request_id = str(uuid.uuid4())
         return await self._contract.call(
@@ -63,6 +64,7 @@ class RemoteMcpEgressClient:
                 ),
                 operation=operation,
                 server_id=server_id,
+                expected_revision=expected_revision,
                 entry=None if entry is None else entry.model_dump(mode="json"),
             ),
             McpEgressCommandResponse,

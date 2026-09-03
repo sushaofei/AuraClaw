@@ -3339,3 +3339,16 @@ Ruff、Mypy（248 文件）、10 条架构合同通过。迁移不适用，部�
 目录/热更新/审批 80 passed；两个真实 HTTP MCP 与 PostgreSQL invocation 联合 7 passed。
 全量回归 628 passed / 54 skipped，原活动元数据断言暴露的兼容变化修复后专项再验证。
 参见 [MCP 目标路由](../operations/mcp-target-routing.md)。
+
+## Skill / MCP 修复 E：撤销与隔离恢复（Issue #98）
+
+- [x] 撤销先禁用本地入口，清理失败保留待处理 generation；共享目录缺失仍删除本机路由和快照。
+- [x] 超时达到 quarantine 阈值后 Tool/Resource/Prompt 旧引用不能开始执行。
+- [x] Egress 修订 fencing、权威启用校验、孤儿撤销和关闭失败重试通过。
+- [x] 临时探测隔离正式 adapter，发现用途及 TTL 清理回归通过。
+- [x] 删除意图持久化并在重启后重试；最终删除校验修订/创建身份，不能误删重建配置。
+- [x] PostgreSQL 集成 4 passed，全量 637 passed / 55 skipped；Ruff、Mypy（248 文件）、10 条架构合同通过。
+- [x] 无 DDL 迁移；严格 DTO 升级顺序、旧 failed 操作恢复、在途语义及联合部署验收说明已同步。
+- [x] 提交不含秘密/无关修改；实际双副本时限和 #99 恢复联合验收前保持 issue 开放。
+
+参见 [MCP 撤销恢复](../operations/mcp-revocation-recovery.md)。

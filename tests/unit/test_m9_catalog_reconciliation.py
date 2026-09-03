@@ -1121,3 +1121,57 @@ def test_failed_route_install_does_not_publish_local_readiness(failure_window, m
         generation = await store.get_active_generation(server.server_id)
         assert bool(generation) == (failure_window == "after_commit")
     asyncio.run(scenario())
+
+
+def test_timeout_quarantine_blocks_loaded_tools_resources_and_prompts(monkeypatch) -> None:
+    async def scenario() -> None:
+        store = InMemoryCapabilityCatalogStore()
+        catalog = CapabilityCatalog(store)
+        server = _server()
+        await catalog.register_server(server)
+        connector = ManagedMcpConnector(
+            server, credentials=_RemoteCredentials(), policy=_AllowPolicy())
+        registry = ToolRegistry()
+        reconciler = CapabilityCatalogReconciler(catalog=catalog, store=store,
+            connectors={server.server_id: connector}, tool_registry=registry,
+            hands_router=RoutedHandsExecutor(_UnexpectedHands(), {}),
+            quarantine_after_failures=2, server_timeout_seconds=0.01)
+        assert (await reconciler.reconcile_server(server)).status == CapabilityStatus.ACTIVE
+
+        async def slow_snapshot(trusted):
+            await asyncio.sleep(1)
+
+        monkeypatch.setattr(connector, "snapshot", slow_snapshot)
+        await reconciler.reconcile_all_results()
+        result = (await reconciler.reconcile_all_results())[0]
+        assert result.status == CapabilityStatus.QUARANTINED
+        assert registry.discover() == []
+        for operation in (
+            connector.read_resource(_hands_trusted(), "github://issue/21"),
+            connector.get_prompt(_hands_trusted(), "github.review"),
+            connector.call_tool(_hands_trusted(), name="github.issue.get", arguments={"number": 21},
+                                invocation_id="blocked"),
+        ):
+            with pytest.raises(PolicyDeniedError, match="blocked"):
+                await operation
+    asyncio.run(scenario())
+
+
+def test_drop_missing_shared_server_still_removes_local_routes_and_snapshot() -> None:
+    async def scenario() -> None:
+        store = InMemoryCapabilityCatalogStore()
+        catalog = CapabilityCatalog(store)
+        server = _server()
+        await catalog.register_server(server)
+        connector = ManagedMcpConnector(
+            server, credentials=_RemoteCredentials(), policy=_AllowPolicy())
+        registry = ToolRegistry()
+        reconciler = CapabilityCatalogReconciler(catalog=catalog, store=store,
+            connectors={server.server_id: connector}, tool_registry=registry,
+            hands_router=RoutedHandsExecutor(_UnexpectedHands(), {}))
+        await reconciler.reconcile_server(server)
+        assert registry.discover() and reconciler.snapshot_for(server.server_id)
+        await catalog.remove_server(server.server_id)
+        await reconciler.drop_server(server.server_id)
+        assert registry.discover() == [] and reconciler.snapshot_for(server.server_id) is None
+    asyncio.run(scenario())

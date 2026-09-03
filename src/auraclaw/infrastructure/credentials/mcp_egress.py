@@ -164,6 +164,7 @@ class ManagedMcpEgressAdapter:
         *,
         resolver: McpDnsResolver | None = None,
         sender: McpPinnedSender | None = None,
+        probe_only: bool = False,
         max_response_bytes: int = 8 * 1024 * 1024,
     ) -> None:
         if not server.enabled:
@@ -187,6 +188,8 @@ class ManagedMcpEgressAdapter:
         self._server = server
         self._resolver = resolver or SystemMcpDnsResolver()
         self._sender = sender or HttpxPinnedMcpSender()
+        self._admitted = True
+        self._probe_only = probe_only
         self._max_response_bytes = max_response_bytes
         self._token: _CachedToken | None = None
         self._token_lock = asyncio.Lock()
@@ -201,6 +204,10 @@ class ManagedMcpEgressAdapter:
         return self._server.config_revision
 
     @property
+    def credential_ref(self) -> str | None:
+        return self._server.credential_ref
+
+    @property
     def credential_provider(self) -> str:
         return self._server.server_id
 
@@ -211,11 +218,22 @@ class ManagedMcpEgressAdapter:
             return oauth.resource
         return _origin(self._server.endpoint)
 
+    def set_admission(self, admitted: bool) -> None:
+        self._admitted = admitted
+
     async def __call__(
         self,
         request: dict[str, Any],
         client_secret: str,
     ) -> dict[str, Any]:
+        if not self._admitted:
+            raise CredentialAccessError("MCP egress is revoked")
+        if self._probe_only and request.get("method") in {
+            "tools/call",
+            "resources/read",
+            "prompts/get",
+        }:
+            raise CredentialAccessError("MCP probe cannot execute business capabilities")
         payload = dict(request)
         if payload.keys() - {
             "id",
@@ -247,15 +265,10 @@ class ManagedMcpEgressAdapter:
         if self._server.protocol_revision == MCP_PROTOCOL_VERSION:
             raw_meta = params.get("_meta")
             meta = raw_meta if isinstance(raw_meta, dict) else {}
-            if (
-                meta.get(MCP_PROTOCOL_VERSION_META_KEY) != MCP_PROTOCOL_VERSION
-                or not isinstance(
-                    meta.get(MCP_CLIENT_CAPABILITIES_META_KEY), dict
-                )
+            if meta.get(MCP_PROTOCOL_VERSION_META_KEY) != MCP_PROTOCOL_VERSION or not isinstance(
+                meta.get(MCP_CLIENT_CAPABILITIES_META_KEY), dict
             ):
-                raise CredentialAccessError(
-                    "modern MCP request metadata is missing or invalid"
-                )
+                raise CredentialAccessError("modern MCP request metadata is missing or invalid")
         self._authorize_method(method, params)
         token = await self._access_token(client_secret)
         headers = {
@@ -273,8 +286,7 @@ class ManagedMcpEgressAdapter:
         if token:
             headers["Authorization"] = f"Bearer {token}"
         if (
-            self._server.resolved_auth_strategy
-            is McpAuthStrategy.WORKLOAD_TRUSTED_CONTEXT
+            self._server.resolved_auth_strategy is McpAuthStrategy.WORKLOAD_TRUSTED_CONTEXT
             and isinstance(identity, dict)
         ):
             tenant_id = identity.get("tenant_id")
@@ -315,10 +327,7 @@ class ManagedMcpEgressAdapter:
     async def _access_token(self, client_secret: str) -> str:
         if self._server.resolved_auth_strategy is McpAuthStrategy.NONE:
             return ""
-        if (
-            self._server.resolved_auth_strategy
-            is McpAuthStrategy.WORKLOAD_TRUSTED_CONTEXT
-        ):
+        if self._server.resolved_auth_strategy is McpAuthStrategy.WORKLOAD_TRUSTED_CONTEXT:
             if not client_secret:
                 raise CredentialAccessError("MCP workload credential is unavailable")
             return client_secret
@@ -397,16 +406,12 @@ class ManagedMcpEgressAdapter:
                 raise CredentialAccessError(
                     "MCP protected Resource metadata does not match resource"
                 )
-            authorization_servers = protected_payload.get(
-                "authorization_servers", []
-            )
+            authorization_servers = protected_payload.get("authorization_servers", [])
             if (
                 not isinstance(authorization_servers, list)
                 or oauth.issuer not in authorization_servers
             ):
-                raise CredentialAccessError(
-                    "MCP protected Resource metadata does not trust issuer"
-                )
+                raise CredentialAccessError("MCP protected Resource metadata does not trust issuer")
             authorization = await self._send_pinned(
                 "GET",
                 oauth.authorization_server_metadata_url,
@@ -421,17 +426,13 @@ class ManagedMcpEgressAdapter:
             if authorization_payload.get("issuer") != oauth.issuer:
                 raise CredentialAccessError("MCP OAuth issuer metadata does not match")
             if authorization_payload.get("token_endpoint") != oauth.token_endpoint:
-                raise CredentialAccessError(
-                    "MCP OAuth token endpoint metadata does not match"
-                )
+                raise CredentialAccessError("MCP OAuth token endpoint metadata does not match")
             grants = authorization_payload.get(
                 "grant_types_supported",
                 ["client_credentials"],
             )
             if not isinstance(grants, list) or "client_credentials" not in grants:
-                raise CredentialAccessError(
-                    "MCP OAuth server does not support client credentials"
-                )
+                raise CredentialAccessError("MCP OAuth server does not support client credentials")
             self._discovery_complete = True
 
     async def _send_pinned(
@@ -446,9 +447,7 @@ class ManagedMcpEgressAdapter:
         host = parsed.hostname
         if host is None:
             raise CredentialAccessError("MCP egress URL has no host")
-        addresses = await self._resolver.resolve(
-            host, parsed.port or _default_port(parsed.scheme)
-        )
+        addresses = await self._resolver.resolve(host, parsed.port or _default_port(parsed.scheme))
         if self._server.network_mode is None:
             approved = _legacy_approved_addresses(
                 addresses,
@@ -603,15 +602,9 @@ def _decode_mcp_response(
                 and isinstance(event.get("method"), str)
                 and str(event["method"]).startswith("notifications/")
             ]
-            responses = [
-                event
-                for event in events
-                if isinstance(event, dict) and "id" in event
-            ]
+            responses = [event for event in events if isinstance(event, dict) and "id" in event]
             if len(responses) != 1:
-                raise CredentialAccessError(
-                    "MCP event stream must contain exactly one response"
-                )
+                raise CredentialAccessError("MCP event stream must contain exactly one response")
             payload = dict(responses[0])
             if notifications:
                 payload["_auraclaw_notifications"] = notifications
@@ -643,9 +636,7 @@ def _oauth_metadata(
     try:
         payload = json.loads(response.content)
     except json.JSONDecodeError as exc:
-        raise CredentialAccessError(
-            f"MCP OAuth {kind} metadata is invalid"
-        ) from exc
+        raise CredentialAccessError(f"MCP OAuth {kind} metadata is invalid") from exc
     if not isinstance(payload, dict):
         raise CredentialAccessError(f"MCP OAuth {kind} metadata is not an object")
     return dict(payload)
@@ -654,8 +645,7 @@ def _oauth_metadata(
 def _contains_forbidden_key(value: Any) -> bool:
     if isinstance(value, dict):
         return any(
-            str(key).casefold() in _FORBIDDEN_REQUEST_KEYS
-            or _contains_forbidden_key(item)
+            str(key).casefold() in _FORBIDDEN_REQUEST_KEYS or _contains_forbidden_key(item)
             for key, item in value.items()
         )
     if isinstance(value, (list, tuple)):

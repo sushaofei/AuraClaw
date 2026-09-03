@@ -196,9 +196,20 @@ class CapabilityCatalogReconciler:
                 safe_error_code="TimeoutError",
                 quarantine_after_failures=self._quarantine_after_failures,
             )
+            status = (CapabilityStatus.QUARANTINED if health.quarantined
+                      else CapabilityStatus.DEGRADED)
+            if health.quarantined:
+                self._remove_remote_tools(server)
+                self._snapshots.pop(server.server_id, None)
+                await self._catalog.register_server(server.model_copy(update={
+                    "status": status,
+                    "metadata": {**server.metadata,
+                                 "consecutive_sync_failures": health.consecutive_failures,
+                                 "last_sync_error": "TimeoutError"},
+                }))
             return McpReconcileResult(
                 server.server_id,
-                CapabilityStatus.DEGRADED,
+                status,
                 0,
                 error="TimeoutError",
                 consecutive_failures=health.consecutive_failures,
@@ -486,28 +497,35 @@ class CapabilityCatalogReconciler:
             {capability.invocation_ref.model_name: executor for capability in capabilities
              if capability.invocation_ref is not None},
         )
+        admission = getattr(connector, "set_admission", None)
+        if callable(admission):
+            admission(True)
 
     async def drop_server(self, server_id: str) -> None:
-        server = await self._store.get_server(server_id)
-        if server is None:
-            await self._catalog.remove_server(server_id)
-            self._dirty.discard(server_id)
-            return
-        self._remove_remote_tools(server)
-        await self._catalog.replace_server_capabilities(server_id, ())
+        # Local cleanup must not depend on a shared record another replica deleted.
+        self.block_server(server_id)
         self._dirty.discard(server_id)
         self._snapshots.pop(server_id, None)
         self._pending_invalidations.pop(server_id, None)
+        server = await self._store.get_server(server_id)
+        if server is None:
+            await self._catalog.remove_server(server_id)
+        else:
+            await self._catalog.replace_server_capabilities(server_id, ())
+
+    def block_server(self, server_id: str) -> None:
+        connector = self._connectors.get(server_id)
+        admission = getattr(connector, "set_admission", None)
+        if callable(admission):
+            admission(False)
+        owner = connector.connector_id if connector is not None else f"mcp:{server_id}"
+        if self._tool_registry is not None:
+            self._tool_registry.revoke_owner(owner)
+        if self._hands_router is not None:
+            self._hands_router.replace_owner_routes(owner, {})
 
     def _remove_remote_tools(self, server: McpServerDefinition) -> None:
-        if self._tool_registry is None or self._hands_router is None:
-            return
-        owner = f"mcp:{server.server_id}"
-        connector = self._connectors.get(server.server_id)
-        if connector is not None:
-            owner = connector.connector_id
-        self._tool_registry.revoke_owner(owner)
-        self._hands_router.replace_owner_routes(owner, {})
+        self.block_server(server.server_id)
 
 
 McpCatalogReconciler = CapabilityCatalogReconciler
