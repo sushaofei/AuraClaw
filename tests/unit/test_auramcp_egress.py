@@ -199,10 +199,19 @@ async def _exercise(port: int) -> None:
         desired_state=McpDesiredState.ENABLED,
         observed_state=McpObservedState.ACTIVE,
     )
+    class IdentityCheckingSender(HttpxPinnedMcpSender):
+        async def send(self, **kwargs: Any) -> Any:
+            headers = kwargs["headers"]
+            if headers.get("Mcp-Method") == "tools/call":
+                assert headers["X-CT-Tenant-ID"] == "tenant-a"
+                assert headers["X-CT-User-ID"] == "user-a"
+                assert headers["X-CT-Dept-ID"] == "9"
+            return await super().send(**kwargs)
+
     adapter = ManagedMcpEgressAdapter(
         server,
         resolver=SystemMcpDnsResolver(),
-        sender=HttpxPinnedMcpSender(timeout_seconds=5.0),
+        sender=IdentityCheckingSender(timeout_seconds=5.0),
     )
     proxy = CredentialProxy(InMemoryVault({server.credential_ref: _WORKLOAD}))
     assert server.credential_ref is not None
@@ -247,6 +256,48 @@ async def _exercise(port: int) -> None:
         )
         assert echo.status == "success"
         assert echo.content == {"echo": "hello-auramcp", "tenant": "tenant-a"}
+        # Exercise the production HTTP Hands boundary, gateway and connector,
+        # rather than asserting only on a direct connector call.
+        from auraclaw.action.catalog_reconciler import ConnectorToolExecutor
+        from auraclaw.action.hands import HandsGateway
+        from auraclaw.action.hands_http import StaticHandsAuthenticator, create_hands_http_app
+        from auraclaw.action.policy import PolicyEngine
+        from auraclaw.action.tool_gateway import ToolGateway, ToolRegistry
+        from auraclaw.contracts.hands import HandsToolCall
+        from auraclaw.contracts.tools import RiskLevel, ToolCapability, ToolPermission
+        from auraclaw.control.ports import RuntimeAssignment
+        from auraclaw.infrastructure.artifacts.store import ArtifactStore, InMemoryObjectStorage
+        from auraclaw.projection.approval.projector import InMemoryApprovalProjection
+        from auraclaw.runtime.hands_client import HttpHandsClient
+
+        registry = ToolRegistry((ToolCapability(
+            name="auramcp.example.echo", version="1", description="echo",
+            input_schema={"type": "object"}, output_schema={"type": "object"},
+            permission=ToolPermission.READ_ONLY, risk_level=RiskLevel.LOW,
+        ),))
+        gateway = HandsGateway(registry=registry, gateway=ToolGateway(
+            registry=registry, policy=PolicyEngine(),
+            hands=ConnectorToolExecutor(connector), approvals=InMemoryApprovalProjection(),
+            artifacts=ArtifactStore(InMemoryObjectStorage(), signing_key=b"identity-test-key"),
+        ))
+        app = create_hands_http_app(gateway, authenticator=StaticHandsAuthenticator({
+            "test-runtime-token": trusted,
+        }))
+        assignment = RuntimeAssignment(
+            tenant_id=trusted.tenant_id, root_session_id=trusted.root_session_id,
+            session_id=trusted.session_id, run_id=trusted.run_id, runtime_id=trusted.runtime_id,
+            lease_id=trusted.lease_id, fencing_token=trusted.fencing_token,
+            role="worker", resource_profile={}, user_id=trusted.user_id, dept_id=trusted.dept_id,
+        )
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                     base_url="http://hands") as raw:
+            client = HttpHandsClient(raw, bearer_tokens={trusted.runtime_id: "test-runtime-token"})
+            formal = await client.call_tool(assignment, HandsToolCall(
+                tool_invocation_id="inv-formal-echo", name="auramcp.example.echo",
+                arguments={"message": "formal-chat"},
+            ))
+            assert formal.status == "success"
+            assert formal.content == {"echo": "formal-chat", "tenant": "tenant-a"}
         about = await connector.read_resource(trusted, "auramcp://builtin/about")
         assert about[0].text is not None and about[0].text.startswith("AuraMCP")
         prompt = await connector.get_prompt(

@@ -33,6 +33,8 @@ class GatewayToolClient:
                 approval_id=call.approval_id,
                 credential_ref=call.credential_ref,
                 user_id=assignment.user_id,
+                dept_id=assignment.dept_id,
+                actor_role=assignment.role,
             )
         )
         return result.as_dict()

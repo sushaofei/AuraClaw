@@ -42,7 +42,7 @@ from auraclaw.contracts.tools import (
     ToolResult,
     ToolResultStatus,
 )
-from auraclaw.domain.approval import ApprovalAggregate, action_digest
+from auraclaw.domain.approval import ApprovalAggregate, invocation_action_digest
 
 logger = logging.getLogger(__name__)
 
@@ -624,7 +624,7 @@ class ToolGateway:
                 error_code=exc.code,
                 side_effect_status="not_started",
             )
-        digest = action_digest(invocation.tool_name, invocation.tool_version, invocation.arguments)
+        digest = invocation_action_digest(invocation)
         cache_key = (invocation.tenant_id, invocation.idempotency_key)
         try:
             ticket = await self._capacity.admit(invocation.tenant_id)

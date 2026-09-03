@@ -96,6 +96,7 @@ class ConnectorToolExecutor:
                 fencing_token=invocation.fencing_token,
                 deadline=invocation.deadline,
                 user_id=invocation.user_id,
+                dept_id=invocation.dept_id,
             ),
             name=invocation.tool_name,
             arguments=invocation.arguments,

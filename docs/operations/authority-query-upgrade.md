@@ -22,3 +22,13 @@ Runtime 主循环与 Skill Runner 为每次逻辑读取生成新的 run-scoped r
 引用释放以及事件。独立 SQL 回归会预置旧 continue，重建两个 Gateway 并验证其分别取得
 当前 pause/cancel，同时证明旧数据库结果未被清除。查询失败的暂停需要通过既有恢复入口
 重试，不能以读取失败作为旧包已无引用的证明。
+
+
+## 可信 MCP 身份（#100）
+
+Hands 将已验证 lease 的 user_id / dept_id 写入 ToolInvocation，Connector 重建可信上下文时保持这两个值；模型 arguments 不是身份来源。开发用 GatewayToolClient 同步透传。
+已有 PostgresControlStore 的 resource_profile JSON 保存可信身份并在分配恢复时解码，signed lease 承载到 HTTP Hands；invocation store 不反序列化运行上下文，而是校验新请求及持久 argument_digest。因此本变更不新增数据库列或迁移。
+
+有用户或部门的调用使用 v2 身份绑定摘要（tenant、root/session、user、dept、role 与原 action digest），同时保护内存/数据库结果重放和审批。Runtime ID 与 run ID 不进入该摘要，允许同一可信业务身份在恢复分配后使用原幂等键；审批仍有独立 run 范围校验。无用户及部门的旧服务调用保留旧摘要。
+
+升级时先更新 Hands，随后 Runtime。旧用户调用的摘要不兼容时返回 idempotency_conflict；保留其执行证据，不能清空记录、换幂等键重发未知写入或从模型参数补填部门。需查明原调用结果并重新授权后才能发起新业务操作。合法无部门保持 None。该策略不改变 #92 的审批模式。

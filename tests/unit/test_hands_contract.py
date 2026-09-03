@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -103,6 +104,7 @@ def _assignment(
     tenant_id: str = "tenant-a",
     runtime_id: str = "runtime-a",
     user_id: str | None = "user-101",
+    dept_id: str | None = "dept-9",
 ) -> RuntimeAssignment:
     return RuntimeAssignment(
         tenant_id=tenant_id,
@@ -116,6 +118,7 @@ def _assignment(
         resource_profile={},
         deadline=datetime.now(UTC) + timedelta(minutes=1),
         user_id=user_id,
+        dept_id=dept_id,
     )
 
 
@@ -130,6 +133,7 @@ def _trusted(assignment: RuntimeAssignment) -> HandsTrustedContext:
         fencing_token=assignment.fencing_token,
         deadline=assignment.deadline,
         user_id=assignment.user_id,
+        dept_id=assignment.dept_id,
     )
 
 
@@ -279,6 +283,7 @@ def test_hands_list_call_resource_prompt_and_idempotency(kind: str) -> None:
             assert status.status == "success"
             assert recorder.invocations[0].tenant_id == "tenant-a"
             assert recorder.invocations[0].user_id == "user-101"
+            assert recorder.invocations[0].dept_id == "dept-9"
             repeated = await client.call_tool(
                 assignment,
                 HandsToolCall(
@@ -736,4 +741,23 @@ def test_hands_large_result_returns_artifact_reference() -> None:
         assert isinstance(result.content, dict)
         assert "artifact_ref" in result.content
 
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("changed", [{"user_id": "other"}, {"dept_id": "other"},
+                                      {"dept_id": None}])
+def test_hands_replay_is_bound_to_trusted_identity(changed: dict[str, Any]) -> None:
+    async def scenario() -> None:
+        gateway, recorder = _gateway()
+        assignment = _assignment()
+        client = InProcessHandsClient(gateway)
+        call = HandsToolCall(tool_invocation_id="identity-replay", name="lookup")
+        assert (await client.call_tool(assignment, call)).status == "success"
+        rejected = await client.call_tool(replace(assignment, **changed), call)
+        assert rejected.status == "denied"
+        assert rejected.error_code == "idempotency_conflict"
+        assert len(recorder.invocations) == 1
+        recovered = await client.call_tool(replace(assignment, runtime_id="replica-b"), call)
+        assert recovered.status == "success"
+        assert len(recorder.invocations) == 1
     asyncio.run(scenario())
