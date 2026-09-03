@@ -142,3 +142,18 @@ tenant_id + approval_id + session_id + run_id + action_digest + policy_version
 - Event Schema 只能向后兼容增加可选字段；破坏性修改升级 `schema_version`。
 - Projector 必须能识别未知事件并进入隔离队列，不能静默跳过关键事件。
 - Artifact、Approval 和 Tool Schema 都需要独立版本。
+
+## 当前实现对照
+
+- 共享 DTO 位于 `contracts/`；Canonical/Runtime Event、Command Context、Identity、Tool、Hands、Skill、MCP、
+  Delivery 和内部 HTTP 契约使用 Pydantic 模型或稳定 Protocol。
+- Session aggregate version、command dedup、lease/fencing、approval CAS、invocation claim 等关键一致性规则均有
+  PostgreSQL 迁移和测试支撑。
+- 内部客户端统一封装 workload bearer、request/correlation/causation、timeout 和有限瞬时故障重试。
+
+## 现有缺陷与待完善
+
+- 尚无独立 schema registry 和生成式跨语言 SDK；Python 模型仍是主要契约发布载体。
+- 文档示例字段与具体事件 payload 可能随实现增长，缺少自动从模型生成文档和 drift 检查。
+- Error code/category 尚未在全部边界完全枚举，部分内部异常仍依赖 HTTP 映射。
+- 待补：兼容性 CI、golden payload、未知字段/事件策略、跨版本滚动升级矩阵和契约弃用流程。

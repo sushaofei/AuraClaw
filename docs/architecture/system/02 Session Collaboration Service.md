@@ -139,3 +139,18 @@ Outbox 至少包含：`event_id`、目标通道、payload_ref、created_at、pub
 - Task DAG 无环，跨租户依赖被拒绝。
 - Runtime 全部死亡后仍能恢复 Root/Child 状态。
 - Projection 全部删除后可以从 Event Log 重建。
+
+## 当前实现对照
+
+- 归属：`domain/session.py`、`domain/collaboration.py`、`session/task_service.py`、
+  `session/collaboration_service.py` 和 `session/internal_service.py`，生产事实存于 `session_core.*`。
+- PostgreSQL Event Store 已实现 optimistic version、command dedup、Canonical Event 与 Outbox 同事务追加；
+  内部 API 对允许调用方、lease assertion 与 fencing 做边界校验。
+- Root/Child、依赖、delegate、join、review、handoff、publish result 和多 Run 语义已有领域与契约测试。
+
+## 现有缺陷与待完善
+
+- Snapshot 表和端口已经存在，但自动快照策略、压缩阈值、校验与从损坏 Snapshot 回退的运维闭环不完整。
+- Event schema 演进主要依赖代码兼容和迁移，尚无集中 schema registry、兼容性流水线与冷归档恢复演练。
+- Collaboration 写模型功能较丰富，但大 DAG 的增量环检测、扇出限制和长期 Session 重放成本仍需容量基线。
+- 待补：租户级 retention/legal hold、跨区域备份恢复、Outbox 堆积治理和灾难恢复 RPO/RTO 验证。

@@ -139,3 +139,17 @@ Session Outbox 保证“需要投递”不会丢；Delivery Job Store 保证“�
 - 相同 Outbox Event 不会产生重复业务交付。
 - 投递成功、失败和 DLQ 均能通过 Query API 查询。
 - Runtime Event Bus 丢失不影响结果主动交付。
+
+## 当前实现对照
+
+- 归属：`delivery/worker.py`、`infrastructure/delivery/`，部署在 `delivery-worker`。
+- 已实现 Session Delivery Outbox claim、持久 Job/Attempt、tenant 并发限制、lease heartbeat/fencing、重试、
+  DLQ、跨副本 Sink Circuit 和 probe claim。
+- 当前 Sink 适配包括经 Credential Proxy 的 Webhook 与 Parent Session；delivery_id 由 event/sink 稳定生成。
+
+## 现有缺陷与待完善
+
+- Kafka、Email/Notification 和 Artifact-only Sink 仍是契约目标，未形成生产适配器。
+- Webhook 的接收方 ACK 语义以 HTTP 状态为主，缺少异步回执、业务级去重证明和目标能力协商。
+- Delivery 状态回写 Session 的失败恢复虽可重试，但跨服务最终一致性的对账和运维视图仍需强化。
+- 待补：每 Sink 独立配额/重试策略、签名轮换、payload 大小策略、redrive 审批和外部故障压测。

@@ -114,3 +114,17 @@ unknown_side_effect
 - Tool Result 和日志不出现真实 Token。
 - 凭证撤销后新调用立即失效。
 - 每次凭证使用可以追溯到 Session、Tool、Actor 和策略决策。
+
+## 当前实现对照
+
+- 归属：`credential_proxy/internal_service.py`、`infrastructure/credentials/`，部署在 `credential-proxy`。
+- 已实现 Credential Reference/Usage Audit、Policy decision 复核、目标 allowlist、请求代调用、Secret 脱敏、
+  Vault KV 适配、Webhook、Java API 与远端 MCP egress manager。
+- 生产装配要求外部 Vault 地址/token 和 workload identity；内存 Vault/debug secret 仅允许开发环境。
+
+## 现有缺陷与待完善
+
+- 当前 Vault 适配集中于静态 KV 读取；OAuth refresh、动态数据库凭证、PKI/signing 和自动 rotation 多为目标设计。
+- Egress allowlist 与 DNS/IP 复核已有 connector 级实现，但没有独立网络层强制代理/防火墙证明。
+- 返回体 Secret/DLP 检测以规则脱敏为主，复杂编码和二进制内容仍可能需要专用扫描。
+- 待补：Vault HA/lease renew、轮换撤销传播、网络强制层、break-glass 流程和 Secret 泄漏自动化测试。

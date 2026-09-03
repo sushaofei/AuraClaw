@@ -100,3 +100,17 @@ reconciliation_repairs
 - Lease 重新分配后 Fencing Token 单调递增。
 - 显式关闭或 Child 终态 Session 不会再次被 Runnable Queue 调度；Root Session 的 Run 终态会释放执行租约，后续 Run 可再次入队。
 - 数据库恢复后 Reconciler 能消除僵尸 Assignment。
+
+## 当前实现对照
+
+- 归属：`control/ports.py` 与 `infrastructure/persistence/postgres_control_store.py`；表包括 runtime lease、
+  runnable、assignment、instance、capacity reservation、checkpoint、cancellation 和 fencing watermark。
+- Claim/renew/release/complete 使用数据库条件更新、租约期限和 token 校验，支持多副本 worker 接管。
+- 内存实现只用于开发与测试，生产装配要求 SQL 后端。
+
+## 现有缺陷与待完善
+
+- Retry/Timer Manager 不是独立完整子系统；延迟重试与 deadline 的索引、批量扫描和时钟语义需要统一。
+- Runtime Instance Registry 缺少跨区域拓扑、维护/drain 状态和容量预测字段。
+- Store 可从 Canonical/Runnable Feed 部分恢复，但尚无一键全量重建、差异校验和恢复期间的调度隔离流程。
+- 待补：表膨胀清理、热点租户分区、锁等待监控、故障注入与恢复工具。

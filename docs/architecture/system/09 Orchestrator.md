@@ -108,3 +108,18 @@ Orchestrator 不读取自然语言任务后自行创建 Child Session。
 - 旧 Runtime 使用过期 Fencing Token 时被执行端拒绝。
 - Orchestrator 重启后能够通过 Reconciliation 恢复。
 - 调度不需要扫描完整 Session 对话历史。
+
+## 当前实现对照
+
+- 归属：`control/orchestrator.py`、`control/runnable_feed.py`、`control/internal_service.py`，部署在
+  `orchestrator`。
+- 已实现 Runnable claim、Runtime 注册/容量、Reservation、Lease、Assignment、Checkpoint、取消、续租、
+  reconcile、签名 lease assertion 与持久 fencing high-watermark。
+- `LocalRuntimeProvisioner` 用于开发；生产 `RegisteredRuntimeProvisioner` 只向已注册 Runtime 分配，不在进程内启动 Agent。
+
+## 现有缺陷与待完善
+
+- 调度策略当前以可用容量和基础 profile 匹配为主，缺少多集群/多区域 placement、亲和反亲和、成本与数据驻留优化。
+- 自动扩缩容只暴露容量事实，没有完整 provisioner/controller 对接 Kubernetes 或云资源 API。
+- Retry/Timer 主要由事件与 runnable 恢复驱动，尚无统一持久 timer wheel 和 deadline scheduler。
+- 待补：公平性/饥饿测试、容量碎片指标、跨副本 reconcile 压测、租约时钟偏差和区域故障演练。

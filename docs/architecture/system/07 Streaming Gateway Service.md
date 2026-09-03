@@ -103,3 +103,18 @@ token_coalesce_ratio
 - 未授权连接无法猜测 session_id 订阅。
 - 慢客户端不会拖慢 Kafka 分区和其他用户。
 - Human Response 不通过本服务写入 Session。
+
+## 当前实现对照
+
+- 归属：`gateways/streaming/gateway.py`、`api/routes/streams.py` 和 Kafka Streaming Ingestor，部署在
+  `streaming-gateway`。
+- 已实现 SSE、公开 cursor/Last-Event-ID replay、tenant/session 过滤、连接队列上限、delta 合并节流和
+  PostgreSQL connection registry。
+- 网关没有 Session 写依赖；客户端上行命令仍回到 Task API。
+
+## 现有缺陷与待完善
+
+- 当前公开协议只有 SSE，没有 WebSocket；连接迁移、跨实例定向路由主要依赖共享 ingest/replay，不是专用 router。
+- 慢消费者处理以有界队列和断连为主，缺少面向客户端的细粒度 backpressure/优先级协议。
+- Connection Registry 已持久化但更多用于可见性，尚未形成完整的 drain、接管和孤儿连接治理。
+- 待补：代理/LB 缓冲配置验证、百万级连接容量基线、断线风暴演练和 cursor 兼容策略。

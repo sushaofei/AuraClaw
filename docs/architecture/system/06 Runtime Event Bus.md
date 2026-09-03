@@ -107,3 +107,17 @@ Producer 的有序范围是 `(tenant_id, session_id)`：同一 Session 的 seque
 - 同一 Root Stream 可保持可解释顺序。
 - 慢网页不会阻塞 Agent Runtime。
 - 删除短期事件后仍能查询任务最终结果。
+
+## 当前实现对照
+
+- 归属：`infrastructure/kafka/runtime_events.py`；生产 Runtime 写 Kafka，Streaming Ingestor 写
+  `streaming.runtime_event` 短期 replay store，并维护 `streaming.session_sequence`。
+- Producer SDK 已实现安全 payload、按 Session 有序 sequence、并发/排队/超时边界和指标；开发环境可用内存实现。
+- Bus 只承载可见增量与运行状态，最终模型输出、工具结果和生命周期仍提交 Canonical Event。
+
+## 现有缺陷与待完善
+
+- Kafka topic 分区数、保留、复制因子和跨 AZ 故障域由部署环境提供，仓库尚无完整容量规划与自动校验。
+- Replay Store 有事件数量边界，但租户级 retention、磁盘水位、批量清理和 Kafka/DB offset 对账仍需完善。
+- Skill lifecycle 使用独立 Kafka topic，尚未与 Runtime Event 的运维模型、DLQ 和可观测规范完全统一。
+- 待补：broker 故障注入、乱序/重复/大消息压测、schema 兼容验证和明确的丢弃/降采样策略。

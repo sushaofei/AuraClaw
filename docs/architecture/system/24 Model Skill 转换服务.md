@@ -398,21 +398,19 @@ model_skill_sync_state(
 当前 `ct_model_event_outbox` 描述的是模型结果事件，不能直接假定它也承载定义发布事件。实现前需由
 源平台新增明确事件类型和快照发布事务，或先只启用周期只读对账。
 
-### 8.1 当前实现（Issue #30）
+### 8.1 当前仓库状态
 
-当前先启用周期只读全量对账，Outbox/CDC 尚未接入：
+Issue #30 所描述的 Model Source Adapter 尚未进入当前仓库实现。以下关键构件不存在：
 
-- `action-hands` 启动前执行一次同步，随后按
-  `AURACLAW_MODEL_SKILL_RECONCILE_INTERVAL_SECONDS`（默认 60 秒）扫描；
-- 每次扫描使用 PostgreSQL `REPEATABLE READ READ ONLY` 事务装载完整聚合配置；
-- 相同 Skill 版本和 package digest 为幂等 no-op，不重复生成 Artifact；
-- 新出现的合格版本被发布；上一轮存在、本轮不再返回的版本被撤销 MCP 可见性；
-- 暂时失败保留上一份可用发布并在下一轮重试，单个无效快照不会阻断其他模型；
-- 进程内 `asyncio.Lock` 防止重叠扫描；多副本 lease 和持久 Sync State 仍属于 Phase 2。
+- `contracts/model_skills.py` 中的模型快照契约；
+- `action/model_skill_compiler.py` 与 `action/model_skill_publisher.py`；
+- `infrastructure/model_sources/postgres.py`；
+- `AURACLAW_MODEL_SKILL_RECONCILE_INTERVAL_SECONDS` 配置和 `action-hands` 生命周期装配；
+- `ct_model_*` Source 的读取、快照、编译与端到端测试。
 
-生产读取必须设置 `include_drafts=false`，此时仅
-`definition=ENABLED + version=PUBLISHED + current_version_id` 进入 Catalog。开发预览允许读取
-非删除 Draft，因此 Draft 状态变化不等同于生产撤销语义。
+仓库已经具备可复用的通用基础：Publisher 信任、Package/Publication/Installation、Artifact、
+MCP Capability Catalog 和 Runtime Skill Binding。它们不能证明模型转换器已实现；本节其余同步流程均为待实现
+设计。首个实现应优先采用周期只读全量对账，并在契约和数据质量稳定后再接入 Outbox/CDC。
 
 ## 9. 端口与代码归属
 
@@ -540,3 +538,19 @@ model_skill_reconcile_lag
 - action-hands 多副本/重启后 Publication 与 Skill Resource 不丢失；
 - 发布、激活、执行、结果和撤销能追溯到 tenant、模型版本、source/package digest 和策略证据；
 - Outbox 丢失、重复、乱序或 PostgreSQL Source 短暂不可用不会造成静默覆盖或错误发布。
+
+## 13. 当前实现摘要
+
+本文件中的阶段描述是特定 Model Source Adapter 的演进设计，不代表通用 Skill 控制面缺失；通用生命周期见
+[Skill 生命周期与发布控制平面](./25%20Skill%20生命周期与发布控制平面.md)。
+
+- 已实现的是通用 Source record/lease/sync state、受管 Skill 发布、Artifact、Capability Catalog 与 Runtime binding。
+- Model Source snapshot、确定性 compiler、周期扫描和模型公式 Tool 尚未实现；本文给出的是它们应复用的边界。
+- 未来编译产物必须复用通用 Skill 生命周期，且公式 DSL 未结构化时必须拒绝不安全执行。
+
+## 14. 现有缺陷与待完善
+
+- Model Source Adapter 整体未落地，尚不能进行生产扫描、发布或撤销。
+- 源系统 Outbox/CDC、只读全量扫描、差异快照和失败 item checkpoint 均待实现。
+- 源 schema 的版本兼容、公式 DSL、样本数据质量和生成 Skill 的语义评估仍是主要阻断项。
+- 待补：源发布契约、增量游标、编译 golden cases、数据质量门禁、回滚/退役对账与端到端生产验收。

@@ -123,3 +123,19 @@ tokens 才算命中。
 - 完整模型输出最终进入 Session，Token Delta 只进入 Runtime Bus。
 - 租户预算耗尽时产生可解释的 Policy/Failure Event。
 - 跨副本取消由持久 owner/heartbeat 协作完成；断线和未知 Provider 结果不会被误记为 cancelled 或自动重放。
+
+## 当前实现对照
+
+- 归属：`model_gateway/internal_service.py`、`model_gateway/ports.py`、
+  `infrastructure/model/openai_compatible.py`，部署在 `model-gateway`。
+- 已实现 OpenAI-compatible provider、流式 chunk、usage、租户小时 token budget、模型调用持久生命周期、
+  多副本 execution claim/heartbeat、取消与不确定状态保护。
+- Runtime 通过内部契约调用，provider key 只在 Model Gateway 装配。
+
+## 现有缺陷与待完善
+
+- 当前只有一个通用 OpenAI-compatible 适配器和静态首选模型；多 Provider 路由、健康评分、fallback、hedging
+  和区域/数据驻留策略尚未实现。
+- Budget 主要按 token 窗口控制，缺少价格版本、金额预算、预留/结算和组织级配额层次。
+- Provider 的 prompt cache key、thinking 等能力以配置开关为主，缺少能力协商和标准化 feature matrix。
+- 待补：provider 错误分类、限流反馈、模型目录、成本核算、内容策略和多 Provider 故障演练。

@@ -97,3 +97,17 @@ large_response_total
 - Timer 不需要轮询；历史任务仍可通过本服务查询。
 - 无权限用户无法通过 Child 或 Artifact 接口绕过 Root 权限。
 - 查询接口不会改变任务状态。
+
+## 当前实现对照
+
+- 归属：`api/routes/tasks.py` 与 `gateways/query/`，作为 `task-api` 的只读逻辑组件部署。
+- 已实现任务列表/详情、Children、Result、有界等待、Transcript 与 Activity；普通 Task/Result 从 Projection 读取，
+  Transcript/Activity 明确从 Canonical Events 构建解释性视图。
+- 同步结果等待支持完成、失败、取消、等待审批、超时与容量耗尽的明确响应语义。
+
+## 现有缺陷与待完善
+
+- `min_version`/read-your-writes 的统一 HTTP 契约尚未覆盖所有查询；不同 endpoint 的 lag 表达仍需收敛。
+- Artifact 当前主要返回引用；面向外部用户的统一下载、范围读取、预览和授权 URL 契约不完整。
+- Transcript/Activity 按事件读取并即时构建，超长 Session 的分页成本、缓存与预计算策略仍需验证。
+- 待补：ETag/条件请求、跨副本等待容量治理、结果 schema 版本协商和大 Session 性能测试。

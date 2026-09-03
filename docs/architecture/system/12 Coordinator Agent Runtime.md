@@ -120,3 +120,18 @@ aggregation_latency
 - 等待 Child 时 Root Run 释放 Lease，恢复后不重复已提交工具调用。
 - 模型无法调用 `delegate` / `handoff`，也不能提交 actor、owner、tenant 或 fencing token。
 - Root Result 能追溯到所有 Child Result 和 Artifact。
+
+## 当前实现对照
+
+- 归属：`runtime/collaboration_controller.py`、`runtime/execution_engine.py` 与
+  `session/collaboration_service.py`；通过 Capability-Aware Agent Loop 暴露受控协作动作。
+- 已实现 create child、dependencies、delegate、join、review、handoff、publish result 等契约，所有变化经
+  Session Service 成为 Canonical Events。
+- Coordinator role 与 Worker/Reviewer 共用模型和执行引擎，Orchestrator 仅调度资源。
+
+## 现有缺陷与待完善
+
+- “是否拆分、如何拆分”的质量由模型与 Prompt/Skill 决定，尚无独立 Planner 评估、成本预测或 DAG 优化器。
+- 大规模 DAG 的并发窗口、失败传播、部分结果接受和动态重规划策略仍较基础。
+- 缺少针对多 Agent 语义质量的离线 eval、可重复 benchmark 和策略回归门禁。
+- 待补：DAG 规模/深度限制、预算分配、child 取消传播矩阵、review gate 策略与协调质量指标。

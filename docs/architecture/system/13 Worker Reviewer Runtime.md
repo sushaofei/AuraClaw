@@ -116,3 +116,17 @@ tool_side_effect_unknown
 - Child 结果只有通过规定合同后才进入 completed。
 - Worker / Reviewer 不能调用 Coordinator DAG 工具；签名 Lease 中的角色被篡改会验签失败。
 - Child 发布结果和 Run 完成是一个原子事实提交，不存在“结果已发布但 Run 未完成”的恢复窗口。
+
+## 当前实现对照
+
+- Worker 与 Reviewer 由 `AgentHarness` 的 role-aware profile 执行，所有权、输入依赖和发布通过
+  Collaboration Client/Session Service 约束。
+- Reviewer 能读取绑定的输入与证据并发布独立 review 结果；角色边界已有 harness/协作测试。
+- Artifact 版本和 Session result reference 分离，Reviewer 不应原地覆盖 Worker 产物。
+
+## 现有缺陷与待完善
+
+- 当前 Reviewer 没有独立的模型路由、评分 rubric registry 或强制质量门；多数差异来自角色指令。
+- Worker/Reviewer 的文件工作区和进程级资源隔离取决于下游 Hands，实现中没有专用每角色 Sandbox 调度器。
+- 缺少 review disagreement、仲裁、多 Reviewer quorum 和自动返工次数治理。
+- 待补：结构化 review schema、证据完整性校验、角色专属预算/模型策略和质量评估数据集。

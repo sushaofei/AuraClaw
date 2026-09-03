@@ -115,3 +115,18 @@ run_steps / budget_exhausted
 - Runtime 无法直接读取 Vault Secret。
 - Coordinator、Worker 和 Reviewer 的权限、输出契约可独立配置。
 - Runtime 不直接创建进程或 Sandbox，资源生命周期由 Orchestrator 管理。
+
+## 当前实现对照
+
+- 归属：`runtime/execution_engine.py`、`runtime/harness.py`、`runtime/execution_state.py`、
+  `runtime/progress_store.py` 与受控远端 clients，部署在 `agent-runtime`。
+- 已实现 assignment claim、可恢复 phase、canonical commit、model/tool/skill round、provider cancellation、
+  lease/fencing guard、checkpoint 和 execution claim。
+- Coordinator/Worker/Reviewer 是同一 Runtime 引擎上的角色 profile，不是三种生产进程。
+
+## 现有缺陷与待完善
+
+- Runtime 进程隔离不等于代码执行 Sandbox；真正的命令/浏览器工作负载隔离应由 Hands 执行面提供。
+- Progress/Checkpoint 能恢复控制阶段，但不能透明恢复进行中的模型 provider stream 或任意外部副作用。
+- 角色容量当前较静态，缺少基于队列、模型等待和工具等待的弹性伸缩/抢占策略。
+- 待补：长 Run 内存上限、上下文压缩、进程崩溃矩阵、滚动升级兼容和 provider/tool 卡死演练。

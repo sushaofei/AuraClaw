@@ -117,3 +117,18 @@ Approval notification latency
 - 审计员不需要访问生产数据库即可还原高风险动作。
 - 任何日志和 Trace 中都检测不到真实 Secret。
 - Projection Lag、Lease 丢失和 Delivery DLQ 有主动告警。
+
+## 当前实现对照
+
+- 归属：`observability/service.py`、`observability/redaction.py`、
+  `infrastructure/observability/stores.py` 与 `observability.*` 表。
+- 已实现 span、metric、audit、alert 持久化，敏感字段递归脱敏，Session timeline，metric snapshot/summary，
+  以及 Projection lag、lease lost、unknown side effect、Delivery DLQ 的内建告警规则。
+- Task API 提供 operations timeline 与 metrics 查询；Skill admission 另有专用审计/指标状态。
+
+## 现有缺陷与待完善
+
+- 当前是数据库内建观测实现，不等同于 OpenTelemetry Collector、Prometheus、日志平台或外部 Pager 集成。
+- Alert 规则固定在代码中，缺少持续评估、resolved 状态、去抖、路由、静默和升级策略。
+- 并非所有关键路径都生成完整 span/metric；跨进程 trace propagation 的覆盖率需要审计。
+- 待补：OTel 导出、仪表盘、告警路由、SLO burn-rate、审计防篡改/归档和遥测成本治理。
