@@ -11,6 +11,7 @@ from auraclaw.action.capability_catalog import skill_binding_status_tool
 from auraclaw.action.policy import PolicyEngine
 from auraclaw.action.tool_gateway import ToolGateway, ToolRegistry
 from auraclaw.config import get_settings
+from auraclaw.contracts.capabilities import CapabilityInvocationRef
 from auraclaw.contracts.tools import (
     RiskLevel,
     ToolCapability,
@@ -489,6 +490,13 @@ def test_identity_digest_survives_hands_restart_and_rejects_other_department() -
             input_schema={"type": "object"}, output_schema={"type": "object"},
             permission=ToolPermission.READ_ONLY, risk_level=RiskLevel.LOW,
         )
+        ref = CapabilityInvocationRef(capability_id="cap-one", server_id="one", version="1",
+                                      content_digest="sha256:contract",
+                                      tenant_id=invocation.tenant_id)
+        other_ref = ref.model_copy(update={"capability_id": "cap-two", "server_id": "two"})
+        capability = replace(capability, invocation_ref=ref)
+        other_capability = replace(capability, invocation_ref=other_ref)
+        invocation = replace(invocation, tool_name=ref.model_name)
         calls = []
 
         class Executor:
@@ -499,12 +507,14 @@ def test_identity_digest_survives_hands_restart_and_rejects_other_department() -
         try:
             for changes, expected in (({}, "success"), ({"actor_id": "runtime-b"}, "success"),
                                       ({"dept_id": "dept-b"}, "denied"),
-                                      ({"user_id": "user-b"}, "denied")):
+                                      ({"user_id": "user-b"}, "denied"),
+                                      ({"tool_name": other_ref.model_name}, "denied")):
                 # Each call uses new store and gateway objects: no process cache.
                 store = PostgresInvocationStore(DATABASE_URL)
                 try:
                     gateway = ToolGateway(
-                        registry=ToolRegistry((capability,)), policy=PolicyEngine(),
+                        registry=ToolRegistry((capability, other_capability)),
+                        policy=PolicyEngine(),
                         hands=Executor(), approvals=InMemoryApprovalProjection(),
                         invocation_store=store, artifacts=ArtifactStore(
                             InMemoryObjectStorage(), signing_key=b"identity-store-test"

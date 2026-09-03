@@ -1237,11 +1237,17 @@ class RuntimeExecutionEngine:
         for capability_id, item in dict(capability_state.get("loaded", {})).items():
             if not isinstance(item, dict):
                 continue
-            if item.get("kind") != "tool" or item.get("canonical_name") != call.name:
+            if item.get("kind") != "tool":
+                continue
+            model_name = item.get("model_tool", {}).get("function", {}).get("name")
+            if call.name not in {model_name, item.get("canonical_name")}:
                 continue
             server_id = str(item.get("server_id", ""))
             return {
                 "source": "mcp" if server_id else "catalog",
+                **({"canonical_name": item.get("canonical_name"),
+                    "invocation_ref": item["invocation_ref"]}
+                   if isinstance(item.get("invocation_ref"), dict) else {}),
                 "capability_id": str(item.get("capability_id") or capability_id),
                 "kind": "tool",
                 "server_id": server_id or None,

@@ -19,6 +19,7 @@ from auraclaw.action.ports import (
 )
 from auraclaw.contracts.capabilities import (
     CapabilityDescriptor,
+    CapabilityInvocationRef,
     CapabilityKind,
     CapabilityStatus,
     McpServerDefinition,
@@ -801,7 +802,11 @@ class RoutedHandsExecutor:
         invocation: ToolInvocation,
         capability: ToolCapability,
     ) -> object:
-        executor = self._routes.get(invocation.tool_name, self._default)
+        target = capability.invocation_ref
+        route = target.model_name if target is not None else invocation.tool_name
+        executor = self._routes.get(route, self._default)
+        if target is not None and route not in self._routes:
+            raise AuthorizationError("stale_capability: execution route is unavailable")
         return await executor.execute(invocation, capability)
 
     def replace_owner_routes(
@@ -967,10 +972,14 @@ def _load_result(descriptor: CapabilityDescriptor) -> dict[str, Any]:
     raw_source = descriptor.metadata.get("source", {})
     source = dict(raw_source) if isinstance(raw_source, dict) else {}
     if descriptor.kind == CapabilityKind.TOOL:
+        ref = (CapabilityInvocationRef.from_descriptor(descriptor)
+               if descriptor.metadata.get("source_type") == "mcp" else None)
+        if ref is not None:
+            result["invocation_ref"] = ref.model_dump(mode="json")
         result["model_tool"] = {
             "type": "function",
             "function": {
-                "name": descriptor.canonical_name,
+                "name": ref.model_name if ref is not None else descriptor.canonical_name,
                 "description": descriptor.description,
                 "parameters": source.get("inputSchema", {"type": "object"}),
             },

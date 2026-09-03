@@ -7,7 +7,7 @@ import logging
 import secrets
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
@@ -72,37 +72,56 @@ class ToolRegistry:
             self.register(capability)
 
     def register(self, capability: ToolCapability) -> None:
-        key = (capability.name, capability.version)
+        key = self._key(capability)
         if key in self._capabilities:
             raise ValueError(f"Tool already registered: {capability.name}@{capability.version}")
         self._capabilities[key] = capability
         self._discoverable.add(key)
 
-    def get(self, name: str, version: str) -> ToolCapability:
-        try:
-            return self._capabilities[(name, version)]
-        except KeyError as exc:
-            raise PolicyDeniedError(f"Tool is not registered: {name}@{version}") from exc
+    @staticmethod
+    def _key(capability: ToolCapability) -> tuple[str, str]:
+        name = (capability.invocation_ref.model_name
+                if capability.invocation_ref else capability.name)
+        return name, capability.version
 
-    def replace_owner(
-        self,
-        owner: str,
-        capabilities: tuple[ToolCapability, ...],
-    ) -> None:
-        self._discoverable.difference_update(
-            key for key, capability in self._capabilities.items() if capability.owner == owner
-        )
+    def get(self, name: str, version: str, *, tenant_id: str | None = None) -> ToolCapability:
+        def visible(item: ToolCapability) -> bool:
+            ref = item.invocation_ref
+            return (tenant_id is None or ref is None or ref.tenant_id is None
+                    or ref.tenant_id == tenant_id)
+
+        direct = self._capabilities.get((name, version))
+        if direct is not None and visible(direct):
+            return direct
+        matches = [item for item in self._capabilities.values()
+                   if item.name == name and item.version == version and visible(item)]
+        if len(matches) > 1:
+            raise PolicyDeniedError("ambiguous_capability: load an explicit capability target")
+        if matches:
+            return matches[0]
+        raise PolicyDeniedError(f"Tool is not registered or is stale: {name}@{version}")
+
+    def prepare_owner(
+        self, owner: str, capabilities: tuple[ToolCapability, ...],
+    ) -> dict[tuple[str, str], ToolCapability]:
+        prepared = {key: item for key, item in self._capabilities.items() if item.owner != owner}
         for capability in capabilities:
-            key = (capability.name, capability.version)
-            existing = self._capabilities.get(key)
-            if existing is not None and existing != capability:
-                raise ValueError(
-                    f"Tool version changed without version bump: "
-                    f"{capability.name}@{capability.version}"
-                )
-            if existing is None:
-                self._capabilities[key] = capability
-            self._discoverable.add(key)
+            if capability.owner != owner:
+                raise ValueError("Tool owner does not match registry update")
+            key = self._key(capability)
+            if key in prepared:
+                raise ValueError("Tool alias or ownership collision")
+            previous = self._capabilities.get(key)
+            if previous is not None and previous != capability:
+                raise ValueError("Tool version changed without version bump")
+            prepared[key] = capability
+        return prepared
+
+    def replace_owner(self, owner: str, capabilities: tuple[ToolCapability, ...]) -> None:
+        # Validate before touching either execution or discovery state.
+        prepared = self.prepare_owner(owner, capabilities)
+        self._capabilities = prepared
+        self._discoverable = set(prepared)
 
     def revoke_owner(self, owner: str) -> None:
         removed = {
@@ -588,7 +607,22 @@ class ToolGateway:
         return None if local is None else (local, "unknown", None, False)
 
     async def _execute_once(self, invocation: ToolInvocation) -> ToolResult:
-        capability = self._registry.get(invocation.tool_name, invocation.tool_version)
+        try:
+            capability = self._registry.get(
+                invocation.tool_name, invocation.tool_version, tenant_id=invocation.tenant_id
+            )
+        except PolicyDeniedError as exc:
+            return ToolResult(
+                status=ToolResultStatus.DENIED, summary=exc.message,
+                error_code=("ambiguous_capability" if "ambiguous_capability" in exc.message
+                            else "stale_capability"), side_effect_status="not_started",
+            )
+        if (invocation.capability_ref is not None
+                and invocation.capability_ref != capability.invocation_ref):
+            return ToolResult(status=ToolResultStatus.DENIED, error_code="stale_capability",
+                              side_effect_status="not_started")
+        invocation = replace(invocation, tool_name=capability.name,
+                             capability_ref=capability.invocation_ref)
         try:
             JsonSchemaValidator.validate(invocation.arguments, capability.input_schema)
         except SchemaValidationError as exc:

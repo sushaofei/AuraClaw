@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import datetime
 from enum import StrEnum
 from typing import Any, Literal
@@ -270,3 +272,29 @@ def _validate_mcp_endpoint(
         raise ValueError("HTTP MCP endpoints require an allowlisted private host")
     if parsed.scheme == "http" and network_mode is McpNetworkMode.PUBLIC:
         raise ValueError("public MCP endpoints require HTTPS")
+
+
+class CapabilityInvocationRef(ContractModel):
+    """Immutable execution target; its alias crosses existing ToolCall/Hands DTOs."""
+
+    capability_id: str
+    server_id: str
+    version: str
+    content_digest: str
+    tenant_id: str | None = None
+    config_revision: int = 0
+
+    @property
+    def model_name(self) -> str:
+        encoded = json.dumps(self.model_dump(mode="json"), sort_keys=True,
+                             separators=(",", ":")).encode()
+        return "mcp_" + hashlib.sha256(encoded).hexdigest()[:48]
+
+    @classmethod
+    def from_descriptor(cls, descriptor: CapabilityDescriptor) -> CapabilityInvocationRef:
+        return cls(
+            capability_id=descriptor.capability_id, server_id=descriptor.server_id,
+            version=descriptor.version, content_digest=descriptor.content_digest,
+            tenant_id=descriptor.tenant_id,
+            config_revision=int(descriptor.metadata.get("config_revision", 0)),
+        )

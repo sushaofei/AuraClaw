@@ -52,7 +52,6 @@ class HandsGateway:
         *,
         cursor: str | None = None,
     ) -> HandsPage[HandsToolDescriptor]:
-        del trusted
         tools = tuple(
             HandsToolDescriptor(
                 name=capability.name,
@@ -65,6 +64,8 @@ class HandsGateway:
                 risk_level=capability.risk_level.value,
             )
             for capability in self._registry.discover()
+            if (capability.invocation_ref is None
+                or capability.invocation_ref.tenant_id in {None, trusted.tenant_id})
         )
         return _page(tools, cursor, self._page_size)
 

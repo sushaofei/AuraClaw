@@ -155,6 +155,19 @@ class RuntimeSkillWorkflowExecutor:
             step_approval = approval_id if approval_step_id == step.id else None
             if step.operation == "tool.call":
                 tool_dependency = tools[step.capability]
+                loaded_tool = loaded_capabilities.get(tool_dependency.capability_id, {})
+                ref = loaded_tool.get("invocation_ref")
+                if isinstance(ref, dict) and (
+                    ref.get("capability_id") != tool_dependency.capability_id
+                    or ref.get("version") != tool_dependency.version
+                    or ref.get("content_digest") != tool_dependency.schema_digest
+                ):
+                    return WorkflowExecutionResult(
+                        status="failed", output={}, completed_steps=tuple(completed),
+                        error_code="stale_capability",
+                    )
+                target_name = (loaded_tool.get("model_tool", {}).get("function", {}).get("name")
+                               or step.capability)
                 context["write_in_flight"] = tool_dependency.expected_side_effect != "read"
                 if pending_invocation_id == invocation_id:
                     lookup = getattr(self._client, "invocation_status", None)
@@ -176,6 +189,7 @@ class RuntimeSkillWorkflowExecutor:
                     assignment,
                     step,
                     invocation_id=invocation_id,
+                    name=target_name,
                     arguments=arguments,
                     version=tool_dependency.version,
                     expected_side_effect=tool_dependency.expected_side_effect,
@@ -309,6 +323,7 @@ class RuntimeSkillWorkflowExecutor:
         step: WorkflowStep,
         *,
         invocation_id: str,
+        name: str,
         arguments: dict[str, Any],
         version: str,
         expected_side_effect: str,
@@ -323,7 +338,7 @@ class RuntimeSkillWorkflowExecutor:
                         ToolCall(
                             tool_invocation_id=(invocation_id if attempt == 1
                                                 else f"{invocation_id}_r{attempt}"),
-                            name=step.capability,
+                            name=name,
                             version=version,
                             arguments=arguments,
                             expected_side_effect=expected_side_effect,
