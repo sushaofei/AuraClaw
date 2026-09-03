@@ -92,3 +92,11 @@ Task API → Hands 内部 DTO 同样传递 expected_installation_revision；不�
 部署顺序是新 Hands/内部消费者，再 Task API，再 AuraX/SDK；字段可选不代表可以与 strict 旧 DTO 混跑。
 无新增 DDL。跨 HTTP 契约验证 inline/artifact 过期 revision 拒绝、实际升级和租户隔离；
 浏览器验证各 phase 与当前版本展示。完整测试 697 passed / 62 skipped，PostgreSQL/真实 MCP 联合 12 passed。
+
+## 修复已发布新版但旧安装未切换
+
+对存量 active v2 / revoked v1 / pin v1，读取当前两个 revision 后，以新的 command id 重发同一
+签名 v2 包即可通过正式 publication 流程原子修复安装并创建自动清理操作。摘要一致时复用现有
+Artifact，无需重新签名。不要复用旧发布命令的幂等键，也不要直接改数据库。专项回归已覆盖。
+测试环境只读核验确认 price-insight-deviation 2.0 本地签名有效、已发布摘要相同，但安装仍为 1.0；
+本轮未在部署前切换安装，实际迁移由 #89/#94 发布验收跟踪。

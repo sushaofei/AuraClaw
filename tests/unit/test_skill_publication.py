@@ -532,3 +532,40 @@ def test_explicit_upgrade_pin_preserves_disabled_installation_state() -> None:
         assert not service._registry.candidates("tenant-a", "release.prepare", publisher="acme")
 
     asyncio.run(scenario())
+
+
+def test_republish_current_signed_version_repairs_legacy_installation_pin() -> None:
+    async def scenario() -> None:
+        service, lifecycle = _service()
+        old = await service.publish(_command(), _package())
+        current_package = _package(version="2.0.0")
+        current = await service.publish(_command(command_id="legacy-publish"), current_package)
+        # Reproduce the old server's active v2 / revoked v1 / installation pinned v1 state.
+        installed = await lifecycle.get_installation("tenant-a", "acme", "release.prepare")
+        await lifecycle.put_installation(
+            installed.model_copy(
+                update={
+                    "pinned_package_digest": old.package_digest,
+                    "version_constraint": "=1.0.0",
+                    "revision": installed.revision + 1,
+                }
+            ),
+            expected_revision=installed.revision,
+        )
+        command = _command(command_id="repair-legacy-pin", expected_revision=1).model_copy(
+            update={"expected_installation_revision": installed.revision + 1},
+        )
+        repaired = await service.publish(command, current_package)
+        installation = await lifecycle.get_installation("tenant-a", "acme", "release.prepare")
+        assert repaired.package_digest == current.package_digest
+        assert repaired.artifact_ref == current.artifact_ref  # No re-signing or duplicate object.
+        assert installation.version_constraint == "=2.0.0"
+        assert installation.pinned_package_digest == current.package_digest
+        assert repaired.upgrade is not None and repaired.upgrade.phase == "draining"
+        assert repaired.upgrade.command_id == "repair-legacy-pin"
+        assert await service.publish(command, current_package) == repaired
+        assert (
+            await lifecycle.get_installation("tenant-a", "acme", "release.prepare")
+        ).revision == installation.revision
+
+    asyncio.run(scenario())
