@@ -53,7 +53,7 @@ class McpJsonRpcRequest(ContractModel):
 class McpJsonRpcError(ContractModel):
     code: int
     message: str
-    data: dict[str, Any] = Field(default_factory=dict)
+    data: Any = None
 
 
 class McpJsonRpcResponse(ContractModel):

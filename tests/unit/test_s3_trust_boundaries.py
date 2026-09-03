@@ -285,9 +285,7 @@ async def test_runtime_claims_signed_assignment_only_through_control_api() -> No
         resource_profile={},
         lease_expires_at=lease.expires_at,
     )
-    assert await store.assign(
-        "task-a", assignment, claim_token=runnable_claim.claim_token
-    )
+    assert await store.assign("task-a", assignment, claim_token=runnable_claim.claim_token)
     service = ControlInternalService(
         store,
         lease_verifier=LeaseAssertionVerifier(
@@ -346,12 +344,10 @@ async def test_runtime_claims_signed_assignment_only_through_control_api() -> No
                 task_id="task-a",
                 runtime_id="runtime-a",
                 lease_id=lease.lease_id,
-                    fencing_token=lease.fencing_token,
-                    disposition="finish",
-                    execution_claim_token=claimed.assignments[
-                        0
-                    ].execution_claim_token,
-                ),
+                fencing_token=lease.fencing_token,
+                disposition="finish",
+                execution_claim_token=claimed.assignments[0].execution_claim_token,
+            ),
             AssignmentDispositionResponse,
         )
         assert completed.accepted
@@ -423,9 +419,7 @@ async def test_remote_runtime_executes_with_no_control_or_session_store() -> Non
     assignment = assignments[0]
     assert assignment.lease_assertion is not None
     assert assignment.lease_assertion.audience == "runtime"
-    await control.assert_fencing(
-        "session:tenant-a:session-b", assignment.fencing_token
-    )
+    await control.assert_fencing("session:tenant-a:session-b", assignment.fencing_token)
 
     session_store = InMemoryEventStore()
     session_service = SessionInternalService(
@@ -843,3 +837,51 @@ def test_s3_database_roles_and_ops_clients_preserve_owner_boundaries() -> None:
     cli = (ROOT / "src/auraclaw/composition/cli.py").read_text()
     assert "RemoteAdminClient" in cli
     assert "PostgresOperationsStore" not in cli
+
+
+@pytest.mark.asyncio
+async def test_mcp_error_classification_survives_credential_http_boundary() -> None:
+    from auraclaw.contracts.errors import ConnectorExecutionError, McpTransportError
+
+    class Allow:
+        async def validate_decision(self, **kwargs):
+            return True
+
+    class FailedNetwork:
+        secret_required = False
+        config_revision = 1
+
+        async def __call__(self, request, secret):
+            raise McpTransportError(
+                "MCP server returned HTTP 503", code="mcp_http_error", remote_code=503
+            )
+
+    proxy = CredentialProxy(InMemoryVault({}))
+    service = CredentialProxyInternalService(
+        proxy, adapters={"mcp:fixture": FailedNetwork()}, policy=Allow()
+    )
+    app = create_contract_app(
+        "credential-proxy",
+        credential_routes(service),
+        workload_identities={"hands-token": ServiceIdentity.ACTION_HANDS},
+    )
+    client = RemoteCredentialProxy(
+        "http://credential.test", bearer_token="hands-token", transport=httpx.ASGITransport(app=app)
+    )
+    try:
+        with pytest.raises(ConnectorExecutionError) as caught:
+            await client.invoke(
+                tenant_id="tenant-a",
+                session_id="session-a",
+                tool_name="mcp:fixture",
+                credential_ref="none",
+                operation="mcp.invoke",
+                request={"config_revision": 1},
+                policy_decision_id="fixture-policy",
+            )
+        assert caught.value.code == "mcp_http_error"
+        assert caught.value.side_effect_status == "unknown"
+        assert caught.value.metadata["error_details"]["remote_code"] == 503
+        assert proxy.usage_audit()[0]["status"] == "failed"
+    finally:
+        await client.aclose()

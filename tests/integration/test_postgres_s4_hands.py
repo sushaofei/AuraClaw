@@ -50,46 +50,71 @@ def test_authority_query_ignores_legacy_persisted_continue_across_replicas() -> 
         suffix = uuid4().hex
         capability = skill_binding_status_tool()
         invocation = ToolInvocation(
-            tool_invocation_id=f"query-{suffix}", tenant_id=f"query-tenant-{suffix}",
-            root_session_id="root", session_id="session", run_id="run",
-            tool_name=capability.name, tool_version=capability.version,
-            arguments={"publisher": "platform", "name": "check", "version": "1.0.0",
-                       "package_digest": "sha256:" + "1" * 64},
-            expected_side_effect="read", idempotency_key=f"query-{suffix}", deadline=None,
-            fencing_token=1, actor_id="runtime",
+            tool_invocation_id=f"query-{suffix}",
+            tenant_id=f"query-tenant-{suffix}",
+            root_session_id="root",
+            session_id="session",
+            run_id="run",
+            tool_name=capability.name,
+            tool_version=capability.version,
+            arguments={
+                "publisher": "platform",
+                "name": "check",
+                "version": "1.0.0",
+                "package_digest": "sha256:" + "1" * 64,
+            },
+            expected_side_effect="read",
+            idempotency_key=f"query-{suffix}",
+            deadline=None,
+            fencing_token=1,
+            actor_id="runtime",
         )
         store = PostgresInvocationStore(DATABASE_URL)
         try:
             digest = action_digest(capability.name, capability.version, invocation.arguments)
-            await store.begin(invocation, digest, owner="old", claim_token="old",
-                              claim_ttl=timedelta(seconds=30))
-            assert await store.complete(invocation, ToolResult(
-                status=ToolResultStatus.SUCCESS, content={"action": "continue"}
-            ), claim_token="old")
+            await store.begin(
+                invocation, digest, owner="old", claim_token="old", claim_ttl=timedelta(seconds=30)
+            )
+            assert await store.complete(
+                invocation,
+                ToolResult(status=ToolResultStatus.SUCCESS, content={"action": "continue"}),
+                claim_token="old",
+            )
             for action in ("pause", "cancel"):
                 hands = LocalHandsService(
                     workspace_root=ROOT,
                     handlers={capability.name: lambda _args, action=action: {"action": action}},
                 )
                 gateway = ToolGateway(
-                    registry=ToolRegistry((capability,)), policy=PolicyEngine(), hands=hands,
-                    approvals=InMemoryApprovalProjection(), invocation_store=store,
+                    registry=ToolRegistry((capability,)),
+                    policy=PolicyEngine(),
+                    hands=hands,
+                    approvals=InMemoryApprovalProjection(),
+                    invocation_store=store,
                     artifacts=ArtifactStore(
                         InMemoryObjectStorage(), signing_key=b"query-test-key-123"
                     ),
                 )
                 assert (await gateway.execute(invocation)).content == {"action": action}
             # Fresh reads leave old execution evidence intact; no global purge.
-            old = await store.begin(invocation, digest, owner="reader", claim_token="reader",
-                                    claim_ttl=timedelta(seconds=30))
+            old = await store.begin(
+                invocation,
+                digest,
+                owner="reader",
+                claim_token="reader",
+                claim_ttl=timedelta(seconds=30),
+            )
             assert old.cached_result.content == {"action": "continue"}
         finally:
             await store.close()
-            await connection.execute("DELETE FROM hands.invocation_attempt WHERE tenant_id=$1",
-                                     invocation.tenant_id)
-            await connection.execute("DELETE FROM hands.invocation WHERE tenant_id=$1",
-                                     invocation.tenant_id)
+            await connection.execute(
+                "DELETE FROM hands.invocation_attempt WHERE tenant_id=$1", invocation.tenant_id
+            )
+            await connection.execute(
+                "DELETE FROM hands.invocation WHERE tenant_id=$1", invocation.tenant_id
+            )
             await connection.close()
+
     asyncio.run(scenario())
 
 
@@ -139,7 +164,15 @@ def test_hands_replicas_atomically_deduplicate_and_recover_invocation() -> None:
             assert recovered.error_code == "invocation_in_progress"
 
             completed = ToolResult(
-                status=ToolResultStatus.SUCCESS,
+                status=ToolResultStatus.ERROR,
+                error_code="mcp_tool_error",
+                metadata={
+                    "error_details": {
+                        "stage": "remote_tool",
+                        "origin": "downstream",
+                        "validation_errors": [{"instance_path": "/input/limit", "keyword": "type"}],
+                    }
+                },
                 content={"replica": "winner"},
                 side_effect_status="completed",
             )
@@ -157,9 +190,7 @@ def test_hands_replicas_atomically_deduplicate_and_recover_invocation() -> None:
                 claim_ttl=timedelta(seconds=30),
             )
             assert cached.cached_result == completed
-            colliding = replace(
-                invocation, idempotency_key=f"different-idempotency-{suffix}"
-            )
+            colliding = replace(invocation, idempotency_key=f"different-idempotency-{suffix}")
             collision = await store_b.begin(
                 colliding,
                 "digest-s4",
@@ -171,9 +202,7 @@ def test_hands_replicas_atomically_deduplicate_and_recover_invocation() -> None:
         finally:
             await store_a.close()
             await store_b.close()
-            await connection.execute(
-                "DELETE FROM hands.invocation WHERE tenant_id=$1", tenant_id
-            )
+            await connection.execute("DELETE FROM hands.invocation WHERE tenant_id=$1", tenant_id)
             await connection.close()
 
     asyncio.run(scenario())
@@ -218,9 +247,7 @@ def test_hands_approval_and_cancel_state_survive_replica_changes() -> None:
                 metadata={"approval_request": {"approval_id": "approval-1"}},
                 error_code="approval_required",
             )
-            assert await store_a.wait_for_approval(
-                invocation, waiting, claim_token="claim-waiting"
-            )
+            assert await store_a.wait_for_approval(invocation, waiting, claim_token="claim-waiting")
             replay = await store_b.begin(
                 invocation,
                 "digest-approval",
@@ -239,27 +266,17 @@ def test_hands_approval_and_cancel_state_survive_replica_changes() -> None:
                 claim_ttl=timedelta(seconds=30),
             )
             assert resumed.acquired
-            assert await store_a.request_cancel(
-                tenant_id, invocation.tool_invocation_id
-            )
-            assert await store_a.request_cancel(
-                tenant_id, invocation.tool_invocation_id
-            )
-            assert await store_b.is_cancel_requested(
-                approved, claim_token="claim-approved"
-            )
+            assert await store_a.request_cancel(tenant_id, invocation.tool_invocation_id)
+            assert await store_a.request_cancel(tenant_id, invocation.tool_invocation_id)
+            assert await store_b.is_cancel_requested(approved, claim_token="claim-approved")
             cancelled = ToolResult(
                 status=ToolResultStatus.CANCELLED,
                 summary="cancelled across replicas",
                 error_code="tool_cancelled",
                 side_effect_status="unknown",
             )
-            assert await store_b.complete(
-                approved, cancelled, claim_token="claim-approved"
-            )
-            status = await store_a.get_status(
-                tenant_id, invocation.tool_invocation_id
-            )
+            assert await store_b.complete(approved, cancelled, claim_token="claim-approved")
+            status = await store_a.get_status(tenant_id, invocation.tool_invocation_id)
             assert status is not None
             assert status.status == "cancelled"
             assert status.cancel_requested
@@ -298,9 +315,7 @@ def test_hands_approval_and_cancel_state_survive_replica_changes() -> None:
         finally:
             await store_a.close()
             await store_b.close()
-            await connection.execute(
-                "DELETE FROM hands.invocation WHERE tenant_id=$1", tenant_id
-            )
+            await connection.execute("DELETE FROM hands.invocation WHERE tenant_id=$1", tenant_id)
             await connection.close()
 
     asyncio.run(scenario())
@@ -352,9 +367,7 @@ def test_cancel_sent_to_another_hands_replica_stops_the_owner() -> None:
                 registry=ToolRegistry((capability,)),
                 policy=PolicyEngine(),
                 approvals=InMemoryApprovalProjection(),
-                hands=LocalHandsService(
-                    workspace_root=ROOT, handlers={"managed": slow}
-                ),
+                hands=LocalHandsService(workspace_root=ROOT, handlers={"managed": slow}),
                 artifacts=ArtifactStore(
                     InMemoryObjectStorage(), signing_key=b"hands-cross-replica-key"
                 ),
@@ -369,9 +382,7 @@ def test_cancel_sent_to_another_hands_replica_stops_the_owner() -> None:
         try:
             running = asyncio.create_task(owner.execute(invocation))
             await asyncio.wait_for(started.wait(), timeout=2)
-            assert await other.cancel(
-                invocation.tool_invocation_id, tenant_id=tenant_id
-            )
+            assert await other.cancel(invocation.tool_invocation_id, tenant_id=tenant_id)
             result = await asyncio.wait_for(running, timeout=2)
             assert result.status is ToolResultStatus.CANCELLED
             status = await store_b.get_status(tenant_id, invocation.tool_invocation_id)
@@ -381,9 +392,7 @@ def test_cancel_sent_to_another_hands_replica_stops_the_owner() -> None:
         finally:
             await store_a.close()
             await store_b.close()
-            await connection.execute(
-                "DELETE FROM hands.invocation WHERE tenant_id=$1", tenant_id
-            )
+            await connection.execute("DELETE FROM hands.invocation WHERE tenant_id=$1", tenant_id)
             await connection.close()
 
     asyncio.run(scenario())
@@ -466,9 +475,7 @@ def test_same_key_waiter_timeout_does_not_stop_owner_heartbeat() -> None:
                 owner.cancel()
                 await asyncio.gather(owner, return_exceptions=True)
             await store.close()
-            await connection.execute(
-                "DELETE FROM hands.invocation WHERE tenant_id=$1", tenant_id
-            )
+            await connection.execute("DELETE FROM hands.invocation WHERE tenant_id=$1", tenant_id)
             await connection.close()
 
     asyncio.run(scenario())
@@ -479,20 +486,38 @@ def test_identity_digest_survives_hands_restart_and_rejects_other_department() -
         assert DATABASE_URL is not None
         suffix = uuid4().hex
         invocation = ToolInvocation(
-            tool_invocation_id=f"identity-{suffix}", tenant_id=f"identity-{suffix}",
-            root_session_id="root", session_id="session", run_id="run",
-            tool_name="identity-check", tool_version="1", arguments={},
-            expected_side_effect="read", idempotency_key=f"identity-{suffix}", deadline=None,
-            fencing_token=1, actor_id="runtime-a", user_id="user-a", dept_id="dept-a",
+            tool_invocation_id=f"identity-{suffix}",
+            tenant_id=f"identity-{suffix}",
+            root_session_id="root",
+            session_id="session",
+            run_id="run",
+            tool_name="identity-check",
+            tool_version="1",
+            arguments={},
+            expected_side_effect="read",
+            idempotency_key=f"identity-{suffix}",
+            deadline=None,
+            fencing_token=1,
+            actor_id="runtime-a",
+            user_id="user-a",
+            dept_id="dept-a",
         )
         capability = ToolCapability(
-            name=invocation.tool_name, version="1", description="identity check",
-            input_schema={"type": "object"}, output_schema={"type": "object"},
-            permission=ToolPermission.READ_ONLY, risk_level=RiskLevel.LOW,
+            name=invocation.tool_name,
+            version="1",
+            description="identity check",
+            input_schema={"type": "object"},
+            output_schema={"type": "object"},
+            permission=ToolPermission.READ_ONLY,
+            risk_level=RiskLevel.LOW,
         )
-        ref = CapabilityInvocationRef(capability_id="cap-one", server_id="one", version="1",
-                                      content_digest="sha256:contract",
-                                      tenant_id=invocation.tenant_id)
+        ref = CapabilityInvocationRef(
+            capability_id="cap-one",
+            server_id="one",
+            version="1",
+            content_digest="sha256:contract",
+            tenant_id=invocation.tenant_id,
+        )
         other_ref = ref.model_copy(update={"capability_id": "cap-two", "server_id": "two"})
         capability = replace(capability, invocation_ref=ref)
         other_capability = replace(capability, invocation_ref=other_ref)
@@ -505,18 +530,23 @@ def test_identity_digest_survives_hands_restart_and_rejects_other_department() -
                 return {"dept": call.dept_id}
 
         try:
-            for changes, expected in (({}, "success"), ({"actor_id": "runtime-b"}, "success"),
-                                      ({"dept_id": "dept-b"}, "denied"),
-                                      ({"user_id": "user-b"}, "denied"),
-                                      ({"tool_name": other_ref.model_name}, "denied")):
+            for changes, expected in (
+                ({}, "success"),
+                ({"actor_id": "runtime-b"}, "success"),
+                ({"dept_id": "dept-b"}, "denied"),
+                ({"user_id": "user-b"}, "denied"),
+                ({"tool_name": other_ref.model_name}, "denied"),
+            ):
                 # Each call uses new store and gateway objects: no process cache.
                 store = PostgresInvocationStore(DATABASE_URL)
                 try:
                     gateway = ToolGateway(
                         registry=ToolRegistry((capability, other_capability)),
                         policy=PolicyEngine(),
-                        hands=Executor(), approvals=InMemoryApprovalProjection(),
-                        invocation_store=store, artifacts=ArtifactStore(
+                        hands=Executor(),
+                        approvals=InMemoryApprovalProjection(),
+                        invocation_store=store,
+                        artifacts=ArtifactStore(
                             InMemoryObjectStorage(), signing_key=b"identity-store-test"
                         ),
                     )
@@ -531,9 +561,12 @@ def test_identity_digest_survives_hands_restart_and_rejects_other_department() -
             assert len(calls) == 1
         finally:
             connection = await asyncpg.connect(DATABASE_URL)
-            await connection.execute("DELETE FROM hands.invocation_attempt WHERE tenant_id=$1",
-                                     invocation.tenant_id)
-            await connection.execute("DELETE FROM hands.invocation WHERE tenant_id=$1",
-                                     invocation.tenant_id)
+            await connection.execute(
+                "DELETE FROM hands.invocation_attempt WHERE tenant_id=$1", invocation.tenant_id
+            )
+            await connection.execute(
+                "DELETE FROM hands.invocation WHERE tenant_id=$1", invocation.tenant_id
+            )
             await connection.close()
+
     asyncio.run(scenario())

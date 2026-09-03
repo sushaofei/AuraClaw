@@ -14,7 +14,7 @@ from auraclaw.contracts.capabilities import (
     McpOAuthConfiguration,
     McpServerDefinition,
 )
-from auraclaw.contracts.errors import CredentialAccessError, PolicyDeniedError
+from auraclaw.contracts.errors import CredentialAccessError, McpTransportError, PolicyDeniedError
 from auraclaw.contracts.tools import CredentialReference, PolicyDecision
 from auraclaw.infrastructure.connectors.mcp.transport import ManagedRemoteMcpTransport
 from auraclaw.infrastructure.connectors.mcp.wire import (
@@ -102,8 +102,7 @@ class _Sender:
             status_code=200,
             headers={"content-type": "application/json"},
             content=(
-                b'{"jsonrpc":"2.0","id":1,"result":'
-                b'{"value":"remote-access-token must not escape"}}'
+                b'{"jsonrpc":"2.0","id":1,"result":{"value":"remote-access-token must not escape"}}'
             ),
         )
 
@@ -228,9 +227,7 @@ def test_mcp_egress_uses_resource_indicator_pins_dns_and_hides_tokens() -> None:
             sender=sender,
         )
         proxy = CredentialProxy(
-            InMemoryVault(
-                {"vault/github-mcp#client_secret": "oauth-client-secret"}
-            )
+            InMemoryVault({"vault/github-mcp#client_secret": "oauth-client-secret"})
         )
         proxy.register_reference(
             "tenant-a",
@@ -285,13 +282,12 @@ def test_mcp_egress_uses_resource_indicator_pins_dns_and_hides_tokens() -> None:
             request=_request(),
             adapter=adapter,
         )
-        assert len(
-            [
-                call
-                for call in sender.calls
-                if call["url"] == "https://auth.example/oauth/token"
-            ]
-        ) == 1
+        assert (
+            len(
+                [call for call in sender.calls if call["url"] == "https://auth.example/oauth/token"]
+            )
+            == 1
+        )
         sender.sse = True
         streamed = await adapter(_request(), "oauth-client-secret")
         assert streamed["result"] == {"tools": []}
@@ -309,9 +305,7 @@ def test_mcp_egress_uses_resource_indicator_pins_dns_and_hides_tokens() -> None:
                 adapter=adapter,
             )
         wrong_scope_proxy = CredentialProxy(
-            InMemoryVault(
-                {"vault/github-mcp#client_secret": "oauth-client-secret"}
-            )
+            InMemoryVault({"vault/github-mcp#client_secret": "oauth-client-secret"})
         )
         wrong_scope_proxy.register_reference(
             "tenant-a",
@@ -441,10 +435,7 @@ def test_mcp_egress_allows_loopback_http_when_private_host_allowlisted() -> None
             "local-java-mcp-debug",
         )
         assert sender.calls
-        assert (
-            sender.calls[0]["url"]
-            == "http://127.0.0.1:48080/rpc-api/agent-runtime/mcp"
-        )
+        assert sender.calls[0]["url"] == "http://127.0.0.1:48080/rpc-api/agent-runtime/mcp"
         assert sender.calls[0]["approved_ip"] == "127.0.0.1"
 
     asyncio.run(scenario())
@@ -508,9 +499,7 @@ def test_hands_remote_transport_passes_only_reference_and_policy_evidence() -> N
         assert call["policy_decision_id"] == "policy-remote-1"
         assert call["tool_name"] == "mcp:github-mcp"
         assert "oauth-client-secret" not in repr(call)
-        assert notifications == [
-            ("github-mcp", "notifications/tools/list_changed")
-        ]
+        assert notifications == [("github-mcp", "notifications/tools/list_changed")]
 
         with pytest.raises(PolicyDeniedError, match="tenant scope"):
             await transport.send(
@@ -533,7 +522,7 @@ def test_hands_remote_transport_rejects_mismatched_response_id() -> None:
             credentials=MismatchedCredentials(),
             policy=_AllowPolicy(),
         )
-        with pytest.raises(ValueError, match="response id"):
+        with pytest.raises(McpTransportError, match="response id"):
             await transport.send(
                 McpJsonRpcRequest(id="expected", method="tools/list"),
                 trusted_context=_trusted(),
@@ -666,10 +655,13 @@ def test_mcp_egress_rejects_invalid_tool_name_before_network(name: object) -> No
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("method,params", [
-    ("resources/read", {"uri": "https://outside.example/data"}),
-    ("prompts/get", {"name": "outside.review"}),
-])
+@pytest.mark.parametrize(
+    "method,params",
+    [
+        ("resources/read", {"uri": "https://outside.example/data"}),
+        ("prompts/get", {"name": "outside.review"}),
+    ],
+)
 def test_mcp_egress_keeps_resource_and_prompt_filters(method: str, params: dict) -> None:
     async def scenario() -> None:
         sender = _Sender()

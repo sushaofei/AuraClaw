@@ -644,7 +644,7 @@ def test_legacy_connector_uses_initialize_and_preserves_invocation_id() -> None:
     asyncio.run(scenario())
 
 
-def test_connector_applies_configured_java_tool_alias_and_input_wrapper() -> None:
+def test_connector_applies_java_alias_and_preserves_schema_shaped_input() -> None:
     async def scenario() -> None:
         server = _server(
             protocol_revision=MCP_LEGACY_PROTOCOL_VERSION,
@@ -703,7 +703,7 @@ def test_connector_applies_configured_java_tool_alias_and_input_wrapper() -> Non
         result = await connector.call_tool(
             _hands_trusted(),
             name="procurement.price.dataset.profile",
-            arguments={"filter": {"anchor": "market"}},
+            arguments={"input": {"filter": {"anchor": "market"}}},
             invocation_id="java-profile-1",
         )
         assert result.status == "success"

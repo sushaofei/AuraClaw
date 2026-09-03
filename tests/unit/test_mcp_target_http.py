@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import threading
 from datetime import timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -32,11 +33,18 @@ from auraclaw.control.ports import RuntimeAssignment
 from auraclaw.infrastructure.artifacts.store import ArtifactStore, InMemoryObjectStorage
 from auraclaw.infrastructure.connectors.mcp.connector import ManagedMcpConnector
 from auraclaw.infrastructure.credentials.mcp_egress import ManagedMcpEgressAdapter
+from auraclaw.infrastructure.model.openai_compatible import OpenAICompatibleProvider
 from auraclaw.projection.approval.projector import InMemoryApprovalProjection
 from auraclaw.runtime.capability_controller import RuntimeCapabilityController
 from auraclaw.runtime.hands_adapter import HandsRuntimeAdapter
 from auraclaw.runtime.hands_client import HttpHandsClient
-from auraclaw.runtime.ports import ToolCall
+from auraclaw.runtime.ports import ModelRequest, ToolCall
+
+TEST_DATABASE_URL = (
+    os.environ.get("AURACLAW_DATABASE_URL")
+    if os.environ.get("AURACLAW_STORAGE_BACKEND") == "postgres"
+    else None
+)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -62,11 +70,15 @@ class Handler(BaseHTTPRequestHandler):
                     {
                         "name": "lookup",
                         "description": "Read a value",
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {"value": {"type": "integer"}},
-                            "required": ["value"],
-                        },
+                        "inputSchema": getattr(
+                            self,
+                            "input_schema",
+                            {
+                                "type": "object",
+                                "properties": {"value": {"type": "integer"}},
+                                "required": ["value"],
+                            },
+                        ),
                         "annotations": {"readOnlyHint": True},
                     }
                 ]
@@ -76,7 +88,10 @@ class Handler(BaseHTTPRequestHandler):
             result = {
                 "structuredContent": {
                     "server": self.marker,
-                    "value": request["params"]["arguments"]["value"],
+                    "value": request["params"]["arguments"][
+                        "input" if getattr(self, "nested", False) else "value"
+                    ],
+                    **({"status": "error"} if getattr(self, "nested", False) else {}),
                 }
             }
         else:
@@ -118,19 +133,52 @@ def test_runtime_hands_targets_two_real_http_servers_with_same_tool_name(cold: b
 
 
 def test_postgres_cold_replica_targets_real_http_servers() -> None:
-    from auraclaw.config import get_settings
-
-    settings = get_settings()
-    if not settings.postgres_enabled:
-        pytest.skip("PostgreSQL test URL not configured")
-    _exercise_two_servers(cold=True, database_url=settings.resolved_database_url)
+    if TEST_DATABASE_URL is None:
+        pytest.skip("explicit PostgreSQL test URL not configured")
+    _exercise_two_servers(cold=True, database_url=TEST_DATABASE_URL)
 
 
-def _exercise_two_servers(*, cold: bool, database_url: str | None = None) -> None:
+def test_provider_streamed_nested_arguments_match_actual_mcp_schema_and_wire() -> None:
+    _exercise_two_servers(cold=True, nested=True)
+
+
+def _exercise_two_servers(
+    *, cold: bool, database_url: str | None = None, nested: bool = False
+) -> None:
+    arguments = (
+        {"input": {"name": "中文", "items": [3, True, None], "limit": 10}}
+        if nested
+        else {"value": 42}
+    )
+    nested_schema = {
+        "type": "object",
+        "$defs": {"item": {"type": ["integer", "boolean", "null"]}},
+        "properties": {
+            "input": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "items": {"type": "array", "items": {"$ref": "#/$defs/item"}},
+                    "limit": {
+                        "anyOf": [{"type": "integer"}, {"type": "null"}],
+                        "description": "Result limit",
+                        "default": 20,
+                    },
+                },
+                "required": ["limit"],
+                "additionalProperties": False,
+            }
+        },
+        "required": ["input"],
+    }
+
     servers = []
     suffix = uuid4().hex[:10] if database_url else ""
     for marker in ("one" + suffix, "two" + suffix):
         handler = type(f"Handler_{marker}", (Handler,), {"marker": marker, "requests": []})
+        if nested:
+            handler.input_schema = nested_schema
+            handler.nested = True
         server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         servers.append((marker, server))
@@ -283,16 +331,93 @@ def _exercise_two_servers(*, cold: bool, database_url: str | None = None) -> Non
                 }
                 controller = RuntimeCapabilityController(client)
                 for index, item in enumerate(state["loaded"].values()):
-                    result = await controller.execute(
-                        assignment,
-                        ToolCall(
-                            tool_invocation_id=f"call-{index}",
-                            arguments={"value": 42},
-                            name=item["model_tool"]["function"]["name"],
-                        ),
-                        state,
+                    call = ToolCall(
+                        tool_invocation_id=f"call-{index}",
+                        arguments=arguments,
+                        name=item["model_tool"]["function"]["name"],
                     )
-                    assert result.result["content"] == {"server": item["server_id"], "value": 42}
+                    if nested:
+
+                        def model_handler(request, call=call):
+                            body = json.loads(request.content)
+                            exposed = next(
+                                tool
+                                for tool in body["tools"]
+                                if tool["function"]["name"] == call.name
+                            )
+                            assert exposed["function"]["parameters"] == nested_schema
+                            encoded = json.dumps(arguments, ensure_ascii=False)
+                            chunks = []
+                            for offset in range(0, len(encoded), 3):
+                                chunks.append(
+                                    "data: "
+                                    + json.dumps(
+                                        {
+                                            "choices": [
+                                                {
+                                                    "delta": {
+                                                        "tool_calls": [
+                                                            {
+                                                                "index": 0,
+                                                                **(
+                                                                    {"id": call.tool_invocation_id}
+                                                                    if offset == 0
+                                                                    else {}
+                                                                ),
+                                                                "function": {
+                                                                    **(
+                                                                        {"name": call.name}
+                                                                        if offset == 0
+                                                                        else {}
+                                                                    ),
+                                                                    "arguments": encoded[
+                                                                        offset : offset + 3
+                                                                    ],
+                                                                },
+                                                            }
+                                                        ]
+                                                    }
+                                                }
+                                            ]
+                                        },
+                                        ensure_ascii=False,
+                                    )
+                                    + "\n\n"
+                                )
+                            return httpx.Response(
+                                200,
+                                text="".join(chunks) + "data: [DONE]\n\n",
+                                headers={"content-type": "text/event-stream"},
+                            )
+
+                        async with httpx.AsyncClient(
+                            transport=httpx.MockTransport(model_handler)
+                        ) as model_http:
+                            provider = OpenAICompatibleProvider(
+                                base_url="https://model.test/v1", model="fixture", client=model_http
+                            )
+                            response = await provider.generate(
+                                ModelRequest(
+                                    model_call_id=f"model-{index}",
+                                    tenant_id="tenant-a",
+                                    run_id="run",
+                                    messages=(
+                                        {"role": "user", "content": "查询中文库存，limit 10"},
+                                    ),
+                                    tools=controller.model_tools(state),
+                                ),
+                                credential="fixture",
+                            )
+                            call = response.tool_calls[0]
+                            assert call.arguments == arguments
+                    result = await controller.execute(assignment, call, state)
+                    expected = {
+                        "server": item["server_id"],
+                        "value": arguments["input"] if nested else 42,
+                        **({"status": "error"} if nested else {}),
+                    }
+                    assert result.result["status"] == "success"
+                    assert result.result["content"] == expected
                 ambiguous = await controller.execute(
                     assignment,
                     ToolCall(
@@ -307,7 +432,7 @@ def _exercise_two_servers(*, cold: bool, database_url: str | None = None) -> Non
                     for req in server.RequestHandlerClass.requests
                     if req["method"] == "tools/call"
                 ]
-                assert len(calls) == 1 and calls[0]["params"]["arguments"] == {"value": 42}
+                assert len(calls) == 1 and calls[0]["params"]["arguments"] == arguments
         finally:
             for lease in leases:
                 await store.release_catalog_reconcile(lease)
