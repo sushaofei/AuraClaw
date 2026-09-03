@@ -535,7 +535,10 @@ class CapabilitySearchExecutor:
         )
         limit = int(arguments.get("limit", 10))
         page = [descriptor.as_search_result() for descriptor in results[:limit]]
-        payload: dict[str, object] = {"capabilities": page}
+        payload: dict[str, object] = {
+            "capabilities": page,
+            "truncated": len(results) > limit or len(results) == 50,
+        }
         if not page:
             browse = await self.catalog.search(tenant_id=invocation.tenant_id, limit=50)
             domains = sorted(
@@ -545,7 +548,11 @@ class CapabilitySearchExecutor:
             payload["available_domains"] = domains
             payload["hint"] = (
                 "No matching capabilities were found. Retry once with a broader query, "
-                "an exact capability_id/canonical_name/server_id, or an empty query to browse."
+                "an exact capability_id/canonical_name/server_id, or an empty query to browse. "
+                "To list Skills use kinds=[\"skill\"] and query=\"\". "
+                "No executable match does not mean no Skill is installed or registered; "
+                "an installation may be disabled, version-mismatched, or missing dependencies. "
+                "An administrator can inspect Skill availability in the management catalog."
             )
         logger.info(
             "capability_search tenant=%s query=%r kinds=%s permissions=%s hits=%s "
@@ -882,6 +889,7 @@ def capability_search_tool() -> ToolCapability:
                 },
                 "hint": {"type": "string"},
                 "empty_reason": {"type": "string"},
+                "truncated": {"type": "boolean"},
                 "available_domains": {
                     "type": "array",
                     "items": {"type": "string"},

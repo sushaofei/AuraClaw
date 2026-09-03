@@ -10,6 +10,7 @@ from typing import Protocol
 
 from auraclaw.action.capability_catalog import CapabilityCatalog
 from auraclaw.action.ports import ArtifactContentReader
+from auraclaw.action.skill_availability import installation_availability
 from auraclaw.action.skill_content_cache import SkillPackageContentCache
 from auraclaw.action.skill_lifecycle import SkillLifecycleStore
 from auraclaw.action.skill_packages import (
@@ -17,7 +18,6 @@ from auraclaw.action.skill_packages import (
     SkillPackageRegistry,
     skill_capability_descriptor,
     skill_package_digest,
-    version_satisfies,
 )
 from auraclaw.action.skill_publishers import SkillPublisherTrustService
 from auraclaw.contracts.capabilities import (
@@ -315,12 +315,7 @@ def _installation_allows(
     version: str,
     package_digest: str,
 ) -> bool:
-    if (
-        installation.pinned_package_digest is not None
-        and installation.pinned_package_digest != package_digest
-    ):
-        return False
-    return version_satisfies(version, installation.version_constraint)
+    return installation_availability(installation, version, package_digest) == "available"
 
 
 def _skill_server(tenant_id: str) -> McpServerDefinition:

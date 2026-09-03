@@ -40,9 +40,7 @@ class _Snapshot:
 
 
 class _UnavailableDependencies:
-    async def is_available(
-        self, tenant_id: str, capability: CapabilityDescriptor
-    ) -> bool:
+    async def is_available(self, tenant_id: str, capability: CapabilityDescriptor) -> bool:
         assert tenant_id == "tenant-a"
         assert capability.metadata["model_contract"]["publisher"] == "platform"
         assert capability.canonical_name == "release.prepare"
@@ -148,5 +146,51 @@ def test_catalog_query_excludes_skills_that_do_not_match_filters() -> None:
         )
 
         assert items == ()
+
+    asyncio.run(scenario())
+
+
+def test_catalog_and_runtime_reject_active_new_publication_pinned_to_old_package() -> None:
+    from auraclaw.action.skill_admin_catalog import published_skill, skill_availability
+    from auraclaw.action.skill_rebuild import _installation_allows
+
+    async def scenario() -> None:
+        old, new = _package("1.0.0", "a"), _package("2.0.0", "b")
+        now = datetime.now(UTC)
+        installation = SkillInstallationRecord(
+            installation_id="ski_release_prepare",
+            tenant_id="tenant-a",
+            publisher="platform",
+            name="release.prepare",
+            status=SkillInstallationStatus.ACTIVE,
+            version_constraint="==1.0.0",
+            auto_upgrade=False,
+            pinned_package_digest=old.package_digest,
+            created_by="admin",
+            updated_by="admin",
+            created_at=now,
+            updated_at=now,
+        )
+        service = SkillAdminCatalogQueryService(
+            _Snapshot(
+                (old, new),
+                (
+                    _publication(old).model_copy(update={"status": SkillPublicationStatus.REVOKED}),
+                    _publication(new),
+                ),
+                (installation,),
+            )
+        )
+        assert (await service.list_latest("tenant-a", SkillCatalogQuery()))[0].availability == (
+            "installation_version_mismatch"
+        )
+        publication = published_skill(new, _publication(new))
+        assert not _installation_allows(installation, "2.0.0", new.package_digest)
+        digest_mismatch = installation.model_copy(update={"version_constraint": "==2.0.0"})
+        assert skill_availability(publication, digest_mismatch) == "installation_digest_mismatch"
+        assert not _installation_allows(digest_mismatch, "2.0.0", new.package_digest)
+        upgraded = digest_mismatch.model_copy(update={"pinned_package_digest": new.package_digest})
+        assert skill_availability(publication, upgraded) == "available"
+        assert _installation_allows(upgraded, "2.0.0", new.package_digest)
 
     asyncio.run(scenario())

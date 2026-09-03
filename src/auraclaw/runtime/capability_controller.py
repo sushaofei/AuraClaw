@@ -120,7 +120,11 @@ class RuntimeCapabilityController:
             _function_tool(
                 CAPABILITY_SEARCH,
                 "Search the policy-visible capability catalog when the task needs "
-                "external data, an action, or a governed Skill.",
+                "external data, an action, or a governed Skill. "
+                "To list Skills use kinds=[\"skill\"] "
+                "and query=\"\"; use canonical_name for a known exact name. An empty result "
+                "does not prove no Skill is installed; "
+                "only currently executable matches are listed.",
                 {
                     "type": "object",
                     "properties": {
