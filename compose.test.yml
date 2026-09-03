@@ -1,5 +1,5 @@
-# Server test Compose (DEV_SERVICE). Same 12-service topology as prod, with
-# replicas=1, auraclaw:dev image, host.docker.internal, and Kafka localhost proxy.
+# Server test Compose (DEV_SERVICE). Same 12-service topology and replica counts
+# as prod, with the auraclaw:dev image, host.docker.internal, and Kafka localhost proxy.
 name: auraclaw-test
 
 x-auraclaw-service: &auraclaw-service
@@ -123,12 +123,11 @@ services:
       ]
     command: ["api", "run", "--host", "0.0.0.0", "--port", "8000"]
     expose: ["8000"]
-    ports: ["${AURACLAW_TASK_API_PORT:-8000}:8000"]
     healthcheck: *healthcheck
     labels:
       auraclaw.service-identity: task-api
     deploy:
-      replicas: 1
+      replicas: 3
       update_config: *update-policy
       rollback_config: *rollback-policy
       restart_policy: {condition: on-failure, delay: 5s, max_attempts: 5, window: 60s}
@@ -169,7 +168,7 @@ services:
     labels:
       auraclaw.service-identity: session
     deploy:
-      replicas: 1
+      replicas: 3
       update_config: *update-policy
       rollback_config: *rollback-policy
       restart_policy: {condition: on-failure, delay: 5s, max_attempts: 5, window: 60s}
@@ -196,7 +195,7 @@ services:
     labels:
       auraclaw.service-identity: projection-worker
     deploy:
-      replicas: 1
+      replicas: 2
       update_config: *update-policy
       rollback_config: *rollback-policy
       restart_policy: {condition: on-failure, delay: 5s, max_attempts: 5, window: 60s}
@@ -228,7 +227,7 @@ services:
     labels:
       auraclaw.service-identity: orchestrator
     deploy:
-      replicas: 1
+      replicas: 3
       update_config: *update-policy
       rollback_config: *rollback-policy
       restart_policy: {condition: on-failure, delay: 5s, max_attempts: 5, window: 60s}
@@ -264,7 +263,7 @@ services:
     labels:
       auraclaw.service-identity: agent-runtime
     deploy:
-      replicas: 1
+      replicas: 3
       update_config: *update-policy
       rollback_config: *rollback-policy
       restart_policy: {condition: on-failure, delay: 5s, max_attempts: 5, window: 60s}
@@ -298,7 +297,7 @@ services:
     labels:
       auraclaw.service-identity: model-gateway
     deploy:
-      replicas: 1
+      replicas: 2
       update_config: *update-policy
       rollback_config: *rollback-policy
       restart_policy: {condition: on-failure, delay: 5s, max_attempts: 5, window: 60s}
@@ -357,7 +356,7 @@ services:
     labels:
       auraclaw.service-identity: action-hands
     deploy:
-      replicas: 1
+      replicas: 2
       update_config: *update-policy
       rollback_config: *rollback-policy
       restart_policy: {condition: on-failure, delay: 5s, max_attempts: 5, window: 60s}
@@ -396,7 +395,7 @@ services:
     labels:
       auraclaw.service-identity: policy
     deploy:
-      replicas: 1
+      replicas: 2
       update_config: *update-policy
       rollback_config: *rollback-policy
       restart_policy: {condition: on-failure, delay: 5s, max_attempts: 5, window: 60s}
@@ -432,7 +431,7 @@ services:
     labels:
       auraclaw.service-identity: credential-proxy
     deploy:
-      replicas: 1
+      replicas: 2
       update_config: *update-policy
       rollback_config: *rollback-policy
       restart_policy: {condition: on-failure, delay: 5s, max_attempts: 5, window: 60s}
@@ -475,7 +474,7 @@ services:
     labels:
       auraclaw.service-identity: artifact-service
     deploy:
-      replicas: 1
+      replicas: 2
       update_config: *update-policy
       rollback_config: *rollback-policy
       restart_policy: {condition: on-failure, delay: 5s, max_attempts: 5, window: 60s}
@@ -503,7 +502,7 @@ services:
     labels:
       auraclaw.service-identity: streaming-gateway
     deploy:
-      replicas: 1
+      replicas: 3
       update_config: *update-policy
       rollback_config: *rollback-policy
       restart_policy: {condition: on-failure, delay: 5s, max_attempts: 5, window: 60s}
@@ -533,7 +532,7 @@ services:
     labels:
       auraclaw.service-identity: delivery-worker
     deploy:
-      replicas: 1
+      replicas: 2
       update_config: *update-policy
       rollback_config: *rollback-policy
       restart_policy: {condition: on-failure, delay: 5s, max_attempts: 5, window: 60s}
@@ -556,7 +555,11 @@ services:
     depends_on:
       task-api: {condition: service_healthy}
       streaming-gateway: {condition: service_healthy}
-    ports: ["${AURACLAW_INGRESS_PORT:-8080}:8080"]
+    ports:
+      - "${AURACLAW_INGRESS_PORT:-8080}:8080"
+      # Compatibility endpoint for DEV_WEB admin traffic; it still reaches
+      # the multi-replica task-api pool through this ingress.
+      - "${AURACLAW_TASK_API_PORT:-8000}:8080"
     volumes:
       - ./deploy/nginx.conf:/etc/nginx/conf.d/default.conf:ro
     networks: [auraclaw, edge]
