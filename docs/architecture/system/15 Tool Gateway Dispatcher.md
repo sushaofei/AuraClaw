@@ -152,3 +152,18 @@ schema_validation_failure
 - Agent 无法绕过 Gateway 直接调用受控外部系统。
 - 相同幂等键不会重复产生外部副作用。
 - Secret 不进入 Tool Result、Session 或 Runtime Event。
+
+## 当前实现对照
+
+- 归属：`action/tool_gateway.py`、`action/hands.py`、`action/resource_gateway.py`、
+  `action/mcp_primitives.py` 和 `infrastructure/persistence/postgres_invocation_store.py`，部署在 `action-hands`。
+- 已实现 Catalog 查找、参数校验、Policy/Approval、Invocation/Attempt 持久化、claim heartbeat/fencing、
+  幂等恢复、MCP/Java API connector 路由和标准 ToolResult。
+- Runtime 只依赖 Hands Contract；MCP 协议、外部认证和网络出站留在 Action/Credential 边界。
+
+## 现有缺陷与待完善
+
+- Connector 类型当前集中于 Managed MCP 和声明式 Java HTTP API；数据库、消息、浏览器等尚未形成同等成熟适配器。
+- 长调用没有通用异步 operation/callback 协议；超时后的 unknown side effect 依赖人工/专用 reconciliation。
+- Tool schema 兼容、版本弃用和 tenant override 的治理界面仍不完整。
+- 待补：Connector conformance suite、side-effect reconciliation API、每能力熔断/限流和大结果 Artifact 自动外置。

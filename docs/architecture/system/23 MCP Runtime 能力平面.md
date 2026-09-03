@@ -417,8 +417,8 @@ Publication、Publisher、key 与强制卸载策略，因此跨副本不会出�
 提交不可变 Package、Publication、首个 Installation、成功命令账本和 `skill.publication.committed`
 Outbox。相同 command id 与 request digest 可跨副本重放；相同 command id 的不同可信请求冲突并
 fail closed。事务提交后的即时 Artifact bind 或 Catalog 重建即使失败，也由 Action Hands 启动及周期
-Reliability Worker 重新消费持久 Outbox 修复。Source bootstrap 仍是发布事务之前的独立幂等步骤；命令
-账本记录成功写命令，不替代后续完整的拒绝/安全审计流水。
+Reliability Worker 重新消费持久 Outbox 修复。命令账本记录成功写命令，不替代后续完整的
+拒绝/安全审计流水。
 
 finalized 后未提交 Publication 的 ready Artifact 由 Artifact Service 和 Action Hands 协同回收。Artifact
 Service 只 claim retention 已到期、无 legal hold、未绑定且 publication claim 已过期的 `skill-upload:*`
@@ -427,21 +427,9 @@ Service 只 claim retention 已到期、无 legal hold、未绑定且 publicatio
 决策并删除对象及 metadata。删除租约可过期接管，失败仅记录安全错误类型并退避重试，不记录包正文。
 这套 fencing 避免“先查无引用、后并发发布”的误删窗口，也不让 Artifact Service 反向读取 Hands 数据库。
 
-MCP Skill Source 对账按 `(tenant_id, source_id)` 获取 PostgreSQL 持久租约。每次过期接管都会递增
-`fencing_token`；远端 snapshot 返回后、每个包下载后都必须续租，Publication 事务和
-`SkillSourceSyncState` 写入则在数据库事务内再次验证相同 owner/token/expiry。旧副本即使在网络调用
-结束后迟到，也不能提交 Package、Publication、Installation 或覆盖新一代同步证据。完整快照成功时
-记录 source revision、成功时间并清零失败次数；失败时只记录异常类型，保留上次成功证据且不保存远端
-响应正文。部分包已经提交但快照尚未完成时保持 `complete_snapshot=false`，下一轮依靠不可变版本和
-command digest 幂等补齐。Source disabled/retired 时不再取得租约或拉取内容。
-
-Source 配置由 task-api 管理面经内部工作负载契约写入 Action Hands，写命令包含 actor、command id、
-expected revision、correlation/causation；退役还必须包含 reason。`skill_publication_source` 保存同一
-不可变 Publication 的多来源引用和 available 状态，Publication 上的 `source_id` 只是当前选中来源。
-选择规则是 enabled、available 来源中 priority 最高者，同优先级按 source id 稳定排序。来源优先级
-变化、禁用、退役或完整快照确认缺失时都在 Lifecycle 事务内重选；存在备用来源时 Publication 保持
-原状态，只更新选中来源和 revision。没有备用来源时才进入普通 `retired`，且来源重新出现不会自动
-恢复。Installation 仍是独立 tenant 抑制事实，多来源重新发现不能绕过 disabled/uninstalled。
+Skill 不通过 MCP Source 自动发现。Package 只通过管理上传进入统一发布准入；同名版本以 tenant 隔离，
+可信性由 Publisher 公钥、签名、digest、内容扫描和 Admission 决策证明。MCP Runtime 仍只负责 Tool、
+Resource 与 Prompt 的受治理发现和调用，不承担 Skill 发布身份或来源选择。
 
 Installation uninstall 使用两种显式语义。默认命令事务化进入 `draining`，同时从 Catalog/Resolver 移除，
 但 `auraclaw.skills.binding-status` 对既有固定 binding 返回 `continue`。Action Hands drainer 通过 Session
@@ -451,13 +439,6 @@ Installation uninstall 使用两种显式语义。默认命令事务化进入 `d
 `uninstalled` 并持久化 `cancel`、policy version 和 decision id；Runtime 沿用安全撤销检查点取消活动
 assignment。普通 disable/uninstall 不改变 Publication，也不借此物理删除 Package。
 
-完整快照还在同一 fenced 事务内维护 Source inventory。首次缺失只记录
-`missing_complete_snapshots=1`；连续第二个、且 generation 严格递增的完整快照仍缺失时，才写入
-`skill_source_retirement_command` 并把 Publication 原子转为 `retired`。任一中间完整快照重新观察到
-该版本都会清零计数；失败/不完整快照、相同 generation 重放和旧 lease 都不能推进计数。退役命令记录
-actor、correlation、causation、fencing token、前后 revision 与固定 reason code；重新出现的同一不可变
-版本不会自动恢复，必须由显式管理流程处理。
-
 `retired` 与安全 `revoked` 不同：两者都不进入 Catalog/Resolver 新候选，但 rebuilder 仍装载 retained
 的 retired Package，按既有 binding 的固定 digest 允许读取；revoked 则继续 fail closed。这样来源下架
 不会悄悄改变既有执行，而密钥泄露等安全撤销仍可立即停止。
@@ -465,21 +446,21 @@ actor、correlation、causation、fencing token、前后 revision 与固定 reas
 显式恢复使用两阶段 `retired -> restoring -> active`：第一阶段在 Lifecycle 事务内校验 expected revision，
 写入 `skill_publication_restore_command` 的 reviewer、reason、correlation/causation 与前后 revision，并把
 Publication 置为不可发现的 `restoring`；第二阶段从原 Artifact 重读内容，重新校验 Artifact/package digest、
-Source allowlist/状态、Publisher suspension、签名 key 状态和签名，再复用发布准入转换为 `active`。
+Publisher suspension、签名 key 状态和签名，再复用发布准入转换为 `active`。
 任一复验失败都不会回滚审计证据或误激活；状态保持 `restoring`，既有固定 digest 内容仍可读，同一恢复
 命令可在信任条件修复后幂等重试。`revoked` 不允许进入该路径。平台 HMAC 仅保留为兼容入口，不作为
 外部 publisher 信任根。
 
 统一发布服务在 `publish` 与 `publish_artifact` 边界记录追加式准入审计。审计阶段限定为 Artifact
-元数据校验/claim/read、Archive 校验、签名校验、Source 授权和 Lifecycle commit；结果只保存
-`accepted|rejected|quarantined`、稳定 `safe_error_code`、耗时、内容策略版本，以及 tenant、actor、Source、command/correlation/
+元数据校验/claim/read、Archive 校验、签名校验、Publisher 信任和 Lifecycle commit；结果只保存
+`accepted|rejected|quarantined`、稳定 `safe_error_code`、耗时、内容策略版本，以及 tenant、actor、command/correlation/
 causation 和当时已安全解析出的 publisher/name/version/digest/Artifact id。未知异常统一折叠为
 `internal_error`，异常消息、响应正文、Skill 文件、Secret 与私钥一律不落表。审计写失败会使准入请求
 fail closed；若业务提交已成功但审计暂时失败，原 command 的幂等重试负责恢复响应并补写新的 attempt
 审计。审计表按 tenant/time、失败 stage/code 和内容策略版本建索引。Action Hands 是唯一读取所有者；
 task-api 只能经工作负载鉴权的内部契约读取当前 tenant，并向安全运维角色提供受限管理查询。
 
-签名校验完成后、Source 授权与任何 Package/Publication 写入前，`SkillPackageContentScanner` 对规范包做
+签名校验完成后、任何 Package/Publication 写入前，`SkillPackageContentScanner` 对规范包做
 有界确定性扫描。扫描器暴露符合稳定标识约束的 `policy_version`，服务启动时校验并冻结，且每次 admission
 记录实际版本；V1 `skill-content-v1` 拒绝脚本/可执行扩展、ELF/PE/Mach-O/WASM magic、高置信 private key/云凭据/token、
 Secret 赋值与 Prompt Injection 模式；赋值和指令规则只作用于无 NUL 的合法 UTF-8 内容，避免二进制
@@ -1004,3 +985,22 @@ Artifact 引用。
 - [MCP Authorization](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization)
 - [MCP Tasks Extension](https://modelcontextprotocol.io/extensions/tasks/overview)
 - [MCP Security Best Practices](https://modelcontextprotocol.io/docs/tutorials/security/security_best_practices)
+
+## 12. 当前实现摘要
+
+- MCP Server Registry、revision/runtime/operation、删除操作、active snapshot 与多副本 operation claim 已持久化。
+- Managed MCP Connector 支持 initialize、tools/resources/resource templates/prompts 发现与调用；远端出站经
+  Credential Proxy 的 egress manager，Runtime 不直连 MCP Server。
+- Capability Catalog 具有 generation/snapshot、一致性状态、reconcile fencing 与资源 backing 校验；Runtime
+  支持 browse/load/call/activate 的 capability-aware loop。
+- Tool Invocation、Resource Gateway 和 Skill Runtime 均有 bounded concurrency、Policy/Approval、审计证据和
+  Canonical Activity 来源。
+
+## 13. 现有缺陷与待完善
+
+- MCP notifications、sampling、roots、elicitation、长调用 progress/cancel 的支持不完整，当前核心集中于
+  discovery 与 tools/resources/prompts 调用。
+- Catalog reconcile 采用周期对账与快照切换，尚缺大规模增量通知、全局 lag SLO 和独立 DLQ 运维界面。
+- 远端传输、认证类型和协议版本组合仍需更广的 conformance matrix；对第三方 annotation 默认不信任。
+- Capability 搜索以结构化目录和有界 browse 为主，语义检索、排序质量和租户规模压测仍待完善。
+- 待补：官方/第三方 MCP server 契约套件、通知与长调用协议、目录容量基线、网络隔离证明和协议升级流程。

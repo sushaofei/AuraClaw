@@ -127,3 +127,18 @@ budget_exceeded
 - Human Response 必须经过 Task Gateway 鉴权和幂等处理。
 - 高风险工具无法绕过 Policy/Approval。
 - 每个决策可追溯到策略版本和输入摘要。
+
+## 当前实现对照
+
+- 归属：`action/policy.py`、`policy/internal_service.py`、`domain/approval.py` 和
+  `infrastructure/persistence/postgres_policy_store.py`，部署在 `policy`。
+- 已实现确定性 permission/risk 决策、active bundle version、Decision Evidence、5 分钟有效期、Approval
+  request digest、数据库时间、CAS 终态、transition audit 和决策复核。
+- Human Response 仅允许 Task API 身份提交，并由 Task API 先写 Canonical Event 再通知 Policy。
+
+## 现有缺陷与待完善
+
+- Policy Engine 目前是基于 ToolPermission 的简单内建规则，不是通用策略 DSL/OPA，也没有租户级版本化规则编辑闭环。
+- Budget、数据驻留、模型选择、Artifact 分享等执行点的策略输入/约束尚未统一到同等成熟度。
+- Approval 通知渠道、升级、委托、多人会签和组织目录集成未实现。
+- 待补：策略包签名/发布/回滚、决策 explain、属性来源可信度、审批 SLA 与过期扫描 worker。

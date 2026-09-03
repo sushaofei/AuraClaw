@@ -95,3 +95,17 @@ MVP 可使用 PostgreSQL：
 - 外部调用方不能直接访问数据库。
 - Query Service 与 Orchestrator 无需扫描 Canonical Event Log。
 - 过期 Projection 可被调用方通过版本识别。
+
+## 当前实现对照
+
+- 当前实现固定使用 PostgreSQL/Kingbase 兼容 SQL：`projection.task_view`、
+  `projection.collaboration_view`、`projection.approval_view`、checkpoint、processed event 与 poison event。
+- `PostgresTaskProjection` 同时承担 Task/Result 查询视图；列表支持稳定 cursor、source/kind/status 等过滤。
+- Query、Orchestrator 和管理接口分别使用受限读路径，不把投影视图作为 Canonical 写入口。
+
+## 现有缺陷与待完善
+
+- 文中的文档数据库、搜索引擎和缓存组合是可选目标，不是当前实现；尚无全文检索、向量检索或专用 Search View。
+- Control 短期状态实际位于 `control.*`，不属于 Read Model；应避免继续把 lease/assignment 字段扩入投影表。
+- 缺少投影 schema 版本切换、索引容量基线、冷数据分区和只读副本延迟治理。
+- 待补：查询计划/索引回归测试、数据新鲜度 SLO、重建前后校验摘要和租户级容量/保留策略。

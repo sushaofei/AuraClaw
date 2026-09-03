@@ -121,3 +121,18 @@ external_error_rate
 - Sandbox 死亡后 Session 和 Artifact 不丢失。
 - Tool Gateway 可以取消长时间执行。
 - 外部系统响应通过 Hands → Tool Gateway → Agent Runtime 返回。
+
+## 当前实现对照
+
+- 当前 `action-hands` 将受控 Hands Gateway、Resource Gateway、MCP/Java Connector、Skill 控制面与后台
+  reconciliation 装配在同一进程；`internal/hands.py` 定义协议无关的内部 HTTP 契约。
+- 已实现全局/租户并发和队列上限、持久 invocation claim、取消/fencing、Credential Proxy 出站与 Artifact 引用。
+- `infrastructure/hands/local.py` 是本地参考执行器，不代表生产级通用 Sandbox 平台。
+
+## 现有缺陷与待完善
+
+- 尚无容器/微虚机级通用 Sandbox provisioner、文件系统快照、网络命名空间和资源计量闭环；文中的 Sandbox
+  恢复属于目标态，不能据此声明可运行任意不可信代码。
+- Action Hands 同时承担在线调用和多个控制面 worker，隔离依赖内部 bounded executor，仍可能发生资源争用。
+- 浏览器、终端和长驻交互会话没有统一 lease/checkpoint 协议。
+- 待补：Sandbox contract 与实现、出站网络强制层、资源账单、会话恢复及恶意负载安全测试。

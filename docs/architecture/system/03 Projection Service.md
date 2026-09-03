@@ -113,3 +113,19 @@ projection_write_latency
 - 删除任一 Projection 后能够完整重建。
 - 不同 Session 可以并行，同一 Session 保持顺序。
 - Projector 失败不会修改 Canonical Event。
+
+## 当前实现对照
+
+- 归属：`projection/task/`、`projection/collaboration/`、`projection/approval/`、`projection/relay.py` 与
+  `projection/maintenance.py`，部署在 `projection-worker`。
+- 当前持久投影覆盖 Task/Result、Collaboration、Approval；支持 event dedup、aggregate version gap、
+  poison event、checkpoint、outbox claim/renew 和按租户 rebuild。
+- Worker Wake 是延迟优化，Session Outbox 长轮询/周期扫描仍是漏通知后的正确性兜底。
+
+## 现有缺陷与待完善
+
+- 文中 Control Projector 的逻辑输出当前主要通过 runnable outbox/feed 落入 Control Store，并非一个可独立
+  查询的完整 Control Projection；Audit/Search Projector 尚未实现。
+- Shadow Projection、双写、schema 原子切换、按分区暂停/恢复仍属于目标态。
+- Rebuild 以现有 Task Projection 为主，缺少所有投影的一致维护协议、进度持久化和线上限速/取消控制。
+- 待补：poison event 管理 API、自动 redrive 策略、全量重建演练和 lag/错误预算告警闭环。

@@ -1,6 +1,34 @@
 # Managed Agent 系统架构总览
 
-本文档集将 [[Managed Agent 架构]] 的设计原则和系统架构图拆分为可落地的组件详细设计。系统把长期任务视为由持久事实、派生视图、运行时控制、Agent Runtime、工具执行和交付平面共同组成的分布式系统，而不是一个常驻 Agent 进程。
+本文档集以当前仓库实现、数据库迁移和生产装配为基线，将 Managed Agent 拆分为可核验的逻辑组件。
+系统把长期任务视为由持久事实、派生视图、运行时控制、Agent Runtime、能力执行和交付平面共同组成的
+分布式系统，而不是一个常驻 Agent 进程。文中的“当前实现”表示代码和迁移已经存在；“目标态”与
+“待完善”不应被用作上线能力承诺。
+
+## 阅读与维护规则
+
+- 逻辑组件不等于进程：Query 与 Admission 同属 `task-api`；Coordinator、Worker、Reviewer 共用
+  `agent-runtime`；Tool、Hands、MCP 与 Skill 控制面共用 `action-hands`。
+- 事实以 `src/auraclaw/`、`migrations/`、`composition/builders/` 和生产配置的交集为准；测试只证明
+  被覆盖的行为，不自动证明生产能力完整。
+- 每份模块文档均给出实现归属、已实现基线、现有缺陷和待完善项。目标设计必须与当前实现分栏描述。
+- 包与部署映射的维护入口是 [代码组织与部署映射](../code-organization.md)。
+
+## 架构分层与实现映射
+
+| 平面 | 逻辑组件 | 生产进程 | 主要代码与存储 |
+|---|---|---|---|
+| 接入与读取 | Admission、Command、Query、Transcript、Activity | `task-api` | `api/`、`gateways/task/`、`gateways/query/`、Projection 只读表 |
+| 持久事实 | Session、Run、Collaboration、Canonical Outbox | `session` | `session/`、`domain/`、`session_core.*` |
+| 派生状态 | Task/Collaboration/Approval Projection | `projection-worker` | `projection/`、`projection.*` |
+| 调度控制 | Runnable、Lease、Assignment、Fencing | `orchestrator` | `control/`、`control.*` |
+| 语义执行 | Coordinator/Worker/Reviewer、Model/Tool/Skill Loop | `agent-runtime` | `runtime/`；运行事件写 Kafka/Streaming Store |
+| 推理 | Provider 调用、流式响应、预算、调用生命周期 | `model-gateway` | `model_gateway/`、`infrastructure/model/`、`model_gateway.*` |
+| 能力与行动 | Tool、Resource、Prompt、MCP、Skill、Invocation | `action-hands` | `action/`、`infrastructure/connectors/`、`hands.*` |
+| 安全信任域 | Policy/Approval、Credential/Vault | `policy`、`credential-proxy` | `policy/`、`credential_proxy/`、`policy.*`、`credential.*` |
+| 内容存储 | Artifact 元数据与对象生命周期 | `artifact-service` | `artifact/`、`infrastructure/artifacts/`、`artifact.*`、S3 |
+| 实时与交付 | SSE Replay、Delivery Job/Sink | `streaming-gateway`、`delivery-worker` | `gateways/streaming/`、`delivery/`、`streaming.*`、`delivery.*` |
+| 横切治理 | Contracts、Identity、Observability、Admin Ops | 多进程 | `contracts/`、`internal/`、`observability/`、`composition/` |
 
 ## 总体原则
 
@@ -24,11 +52,10 @@ flowchart TD
     RM --> OR[Orchestrator]
     OR --> AR[Agent Runtime Pool]
     AR --> MG[Model Gateway]
-    AR --> TOOL[Action Hands MCP Gateway]
-    TOOL --> HANDS[Hands Executor / Sandbox]
-    HANDS --> ART[Artifact Service]
+    AR --> TOOL[Action Hands / Capability Gateway]
+    TOOL --> ART[Artifact Service]
     ART --> SW[SeaweedFS S3]
-    HANDS --> CP[Credential Proxy]
+    TOOL --> CP[Credential Proxy]
     CP --> EXT[External Systems]
     AR --> EB[Runtime Event Bus]
     TOOL --> EB
@@ -56,6 +83,7 @@ flowchart TD
 - [[07 Streaming Gateway Service]]
 - [[08 Result Delivery Service]]
 - [[21 External Integration Contracts]]
+- [[26 对话执行轨迹]]
 
 ### 持久事实与派生状态
 
@@ -74,10 +102,16 @@ flowchart TD
 - [[13 Worker Reviewer Runtime]]
 - [[14 Model Gateway Inference Service]]
 
-### 行动与安全
+### 能力与行动
 
 - [[15 Tool Gateway Dispatcher]]
 - [[16 Hands Service]]
+- [[23 MCP Runtime 能力平面]]
+- [[25 Skill 生命周期与发布控制平面]]
+- [[24 Model Skill 转换服务]]
+
+### 安全与治理
+
 - [[18 Policy Approval Service]]
 - [[19 Credential Proxy Vault]]
 - [[20 Observability Audit]]
@@ -85,8 +119,6 @@ flowchart TD
 ### 公共契约
 
 - [[22 Shared Event and State Contracts]]
-- [[23 MCP Runtime 能力平面]]
-- [[24 Model Skill 转换服务]]
 
 ## 事实与状态归属
 
@@ -152,3 +184,17 @@ service identity、数据库角色、健康检查和最小 Secret 文件挂载�
 - Result Delivery 重启后不会丢失完成通知。
 - 审批与具体 action digest 绑定，不能跨动作复用。
 - Sandbox 和 Agent Runtime 无法读取真实凭证。
+
+## 当前系统级缺陷与演进重点
+
+1. **目标态与实现成熟度不均衡。** Canonical Event、Projection、Control、MCP/Skill 和可靠性账本已经
+   有较完整持久实现；多 Provider 路由、真正的隔离 Sandbox、通用 Timer、更多 Delivery Sink 和搜索型
+   Read Model 仍不完整。
+2. **控制面集中于 Action Hands。** MCP 注册、能力目录、Skill 发布与运行时调用共享同一部署单元，隔离
+   主要依赖端口、数据库所有权和 workload identity；规模扩大后需要评估独立控制面进程。
+3. **跨组件唤醒仍带轮询兜底。** Worker Wake 已降低空转，但 Projection、Orchestrator、Delivery、Skill
+   对账仍需要周期扫描恢复漏通知，尚未形成统一的持久调度/通知机制。
+4. **运维与 SLO 仍偏内建。** 已有 trace、metric、audit、alert 表和查询接口，但外部采集、告警路由、
+   仪表盘、容量基线与演练证据不属于当前闭环。
+5. **生产能力声明需要环境验证。** Compose、角色、Secret 文件、Kafka、PostgreSQL/Kingbase、S3/Vault
+   适配均已存在；跨 AZ、灾备、备份恢复、滚动升级和真实第三方故障场景仍需独立验收。

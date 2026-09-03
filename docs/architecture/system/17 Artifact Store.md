@@ -104,3 +104,18 @@ PostgreSQL metadata 是 ready、deleted、quarantined、retention、legal hold �
 - 相同内容可以去重，但 ACL 和引用仍独立校验。
 - Worker 无法覆盖不属于自己的不可变版本。
 - Result Delivery 链接到期后不可继续访问。
+
+## 当前实现对照
+
+- 归属：`artifact/internal_service.py`、`infrastructure/persistence/postgres_artifact_repository.py` 和
+  `infrastructure/artifacts/`，部署在 `artifact-service`。
+- 已实现 pending upload、单段/分段预签名、checksum/size 验证、finalize claim heartbeat、ready/quarantine、
+  retention/legal hold、删除/GC reconciliation、访问审计和 Skill publication/orphan 绑定。
+- 对象后端支持本地开发、SeaweedFS S3 与 OBS/S3 兼容实现；业务元数据由 PostgreSQL 权威保存。
+
+## 现有缺陷与待完善
+
+- `scan_status` 和 quarantine 状态已存在，但通用病毒/恶意内容/DLP 扫描器与异步扫描队列尚未形成完整闭环。
+- 当前主要通过内部 API 使用，面向用户的下载/预览、range、内容处置与 CDN 策略不完整。
+- 对象存储跨区域复制、版本化、WORM 和备份恢复由环境负责，仓库缺少端到端验证。
+- 待补：扫描插件、生命周期批处理容量、孤儿对象对账、密钥轮换和大文件/多段故障演练。

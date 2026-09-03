@@ -108,3 +108,19 @@ configure_result_delivery
 - Gateway 重启不影响已接纳任务。
 - Human Response 不经过 Streaming Gateway。
 - Task Gateway 无法直接创建 Child Session 或启动 Runtime。
+
+## 当前实现对照
+
+- 归属：`api/routes/tasks.py`、`api/dependencies.py`、`gateways/task/`，部署在 `task-api`。
+- 已实现创建、同步调用、追加消息、请求新 Run、取消、恢复、关闭 Session 和审批响应；写入通过
+  `TaskCommandGateway`/远端 Session Client，不直接写 Session 表。
+- 生产身份支持签名 Agent Context、workload bearer、租户/声明一致性校验和 replay guard；命令上下文携带
+  command、actor、correlation 与 causation。
+
+## 现有缺陷与待完善
+
+- `AllowAllAdmissionController` 仍是开发参考实现；生产接纳依赖远端 Policy，但尚无完整的租户并发、成本、
+  Deadline 与优先级联合 admission 算法。
+- 当前公开入口以任务 HTTP API 为主，通用 Webhook/Timer 适配器和附件预检没有形成独立受管入口。
+- 同步调用只是异步任务之上的有界等待，容量限制为进程级；需要跨副本总量治理与更明确的超时预算传播。
+- 待补：外部契约兼容测试、请求体/附件配额矩阵、限流拒绝审计以及真实身份提供方的轮换/撤销演练。

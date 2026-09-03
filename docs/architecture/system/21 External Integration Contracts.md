@@ -89,3 +89,17 @@ Artifact-only Destination
 - Human 审批不能通过 SSE 上行修改状态。
 - Result Sink 重复收到相同 delivery_id 时不会重复处理。
 - Agent 和 Sandbox 不能绕过 Gateway 直接访问受控外部系统。
+
+## 当前实现对照
+
+- 已落地的外部契约包括 Task HTTP/SSE、Webhook Result Sink、Parent Session Sink、OpenAI-compatible Model、
+  Managed MCP、Java HTTP API、S3/OBS 与 Vault。
+- 外部调用统一经过内部身份、Policy decision、Credential Reference、allowlist、timeout、幂等/调用账本和脱敏边界。
+- Connector 与 Result Sink 的具体选择在 `composition/builders/`，业务包不直接绑定第三方 SDK。
+
+## 现有缺陷与待完善
+
+- Timer/Scheduler、Email/Notification、Kafka Result Sink、浏览器和数据库 Connector 仍是接口目标，尚无完整生产适配器。
+- 各外部系统对 ETag、幂等键、异步 operation 与 unknown side effect 的支持差异较大，缺少统一 conformance 分级。
+- 外部内容的 prompt injection/恶意内容治理仍以 schema、大小、目录边界为主，缺少集中内容安全平面。
+- 待补：Connector 认证矩阵、版本/弃用策略、契约测试套件、沙箱网络证明和第三方故障演练。
