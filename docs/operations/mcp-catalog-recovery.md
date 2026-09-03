@@ -1,5 +1,9 @@
 # MCP 目录隔离恢复记录（2026-09-03）
 
+> 本文记录历史故障。当时的 Tool 前缀过滤已在 #91 移除；当前目录以全部合法远端 Tool
+> 对账，升级见 [MCP Tool 前缀移除升级](mcp-tool-prefix-upgrade.md)。
+
+
 ## 根因
 
 ChainTowerMCP 的 `dashboard.chart.preview` 描述约 8 KB、深度 17，超过原 16 层限制。

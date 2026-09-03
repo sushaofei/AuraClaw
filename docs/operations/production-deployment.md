@@ -19,7 +19,7 @@ Docker Compose 不提供 Kubernetes HPA、PDB 或 NetworkPolicy。本方案以�
   `postgresql+asyncpg://` DSN；`deploy/postgres/roles.sql` 为可选硬化参考；
 - `.host.env` 保存 `KINGBASE_HOST/PORT/USER/PWD`，运行
   `scripts/sync_kingbase_env.py` 后再物化 Compose Secret；
-- Compose `migrate` 使用 `/app/migrations`，当前目标 `0057`；
+- Compose `migrate` 使用 `/app/migrations`，当前目标 `0058`；
 - Kafka/Replay Router、华为 OBS、Vault 和模型出口可从 `auraclaw-platform` 网络访问；
 - 部署机存在被 `.gitignore` 排除的 `.env.prod`，从 `.env.prod.example` 复制后填真实密钥；
 - Secret 不写入 Compose、镜像、命令参数或日志。
@@ -63,16 +63,16 @@ docker compose --env-file .env.prod -f compose.prod.yml stop
 
 docker compose --env-file .env.prod \
   -f compose.prod.yml run --rm migrate migrate up \
-  --target 0057 --directory /app/migrations
+  --target 0058 --directory /app/migrations
 
 docker compose --env-file .env.prod -f compose.prod.yml \
-  run --rm migrate migrate check --target 0057 --directory /app/migrations
+  run --rm migrate migrate check --target 0058 --directory /app/migrations
 ```
 
 迁移进程只挂载 migration admin DSN。KingBase 使用 PostgreSQL advisory lock 防止并发迁移，
-checksum ledger 阻止已执行文件漂移；重复运行是幂等的。`0057` 删除 MCP 信任字段，必须
+checksum ledger 阻止已执行文件漂移；重复运行是幂等的。`0058` 删除 MCP Tool 前缀字段，必须
 先停止所有旧实例，在维护窗口内迁移，再强制重建全部服务，不能滚动混跑。
-运行迁移前应已准备好同一不可变镜像，并核对其 `migrate latest` 为 `0057`。
+运行迁移前应已准备好同一不可变镜像，并核对其 `migrate latest` 为 `0058`。
 迁移或 `migrate check` 失败时禁止继续启动。
 
 数据库服务在开始监听前会只读校验完整迁移账本，缺失、checksum 漂移、版本不匹配均拒绝启动。
@@ -86,7 +86,7 @@ Secret 生成目录必须与 `.env.prod` 的 `AURACLAW_SECRET_DIR` 一致；目�
 ```bash
 docker compose --env-file .env.prod -f compose.prod.yml \
   --profile migrate run --rm migrate migrate baseline \
-  --target 0057 --confirm-existing-schema --directory /app/migrations
+  --target 0058 --confirm-existing-schema --directory /app/migrations
 ```
 
 全新库、未知来源库、部分迁移库或 checksum 不一致时禁止 baseline。
@@ -115,7 +115,8 @@ Ingress 使用 Docker DNS 动态重解析 Task API 与 Streaming Gateway；副�
 ## 5. 蓝绿发布与回滚
 
 当前启动检查要求镜像与数据库 schema 完全一致。本节仅用于相同 schema 的代码更新；
-跨 schema（尤其 `0057`）采用第 3 节维护窗口发布及 MCP 升级手册中的回滚流程。
+跨 schema（尤其 `0058`）采用第 3 节维护窗口发布及
+[MCP Tool 前缀移除升级](mcp-tool-prefix-upgrade.md) 中的对账和回滚流程。
 
 运行中的颜色假设为 blue。green 使用不同的 project、内部、edge、platform 网络和临时
 ingress 端口。先创建 green platform 网络，并将 PostgreSQL、Kafka、OBS、Vault、模型

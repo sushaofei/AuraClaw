@@ -30,16 +30,15 @@ class PostgresCapabilityCatalogStore(LazyPool):
         await pool.execute(
             """INSERT INTO hands.downstream_mcp_server
             (server_id,tenant_id,title,endpoint,protocol_revision,credential_ref,
-             allowed_tool_prefixes,allowed_resource_schemes,
+             allowed_resource_schemes,
              allowed_prompt_prefixes,status,enabled,metadata,updated_at,
              config_revision)
-            VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9::jsonb,$10,$11,
-                    $12::jsonb,now(),$13)
+            VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9,$10,
+                    $11::jsonb,now(),$12)
             ON CONFLICT (server_id) DO UPDATE SET
               tenant_id=EXCLUDED.tenant_id,title=EXCLUDED.title,
               endpoint=EXCLUDED.endpoint,protocol_revision=EXCLUDED.protocol_revision,
               credential_ref=EXCLUDED.credential_ref,
-              allowed_tool_prefixes=EXCLUDED.allowed_tool_prefixes,
               allowed_resource_schemes=EXCLUDED.allowed_resource_schemes,
               allowed_prompt_prefixes=EXCLUDED.allowed_prompt_prefixes,
               status=EXCLUDED.status,enabled=EXCLUDED.enabled,
@@ -53,7 +52,6 @@ class PostgresCapabilityCatalogStore(LazyPool):
             server.endpoint,
             server.protocol_revision,
             server.credential_ref,
-            json_dumps(server.allowed_tool_prefixes),
             json_dumps(server.allowed_resource_schemes),
             json_dumps(server.allowed_prompt_prefixes),
             server.status.value,
@@ -400,9 +398,6 @@ def _server(row: object) -> McpServerDefinition:
             McpOAuthConfiguration.model_validate(oauth_payload)
             if oauth_payload is not None
             else None
-        ),
-        allowed_tool_prefixes=tuple(
-            json_loads(row["allowed_tool_prefixes"])  # type: ignore[index]
         ),
         allowed_resource_schemes=tuple(
             json_loads(row["allowed_resource_schemes"])  # type: ignore[index]

@@ -59,7 +59,6 @@ def _config(**overrides: object) -> McpServerConfig:
         "endpoint": "http://127.0.0.1:48080/mcp",
         "network_mode": "loopback",
         "auth_strategy": "none",
-        "allowed_tool_prefixes": ("order.",),
     }
     payload.update(overrides)
     return McpServerConfig.model_validate(payload)
@@ -917,3 +916,23 @@ def test_historical_mcp_config_load_discards_retired_trust_without_mutation() ->
     assert "trust_level" not in loaded.model_dump()
     assert loaded.metadata == {"tool_name_aliases": {"order.old": "order.list"}}
     assert "trust_level" not in McpServerConfig.model_json_schema()["properties"]
+
+
+@pytest.mark.parametrize("prefixes", [["old."], [], [""], None])
+def test_retired_tool_prefixes_are_read_only_history(prefixes: list[str] | None) -> None:
+    from copy import deepcopy
+
+    from auraclaw.infrastructure.persistence.postgres_mcp_registry import _stored_config
+
+    legacy = _config().model_dump(mode="json")
+    if prefixes is not None:
+        legacy["allowed_tool_prefixes"] = prefixes
+    original = deepcopy(legacy)
+    loaded = _stored_config(legacy)
+    assert legacy == original
+    assert "allowed_tool_prefixes" not in loaded.model_dump()
+    assert "allowed_tool_prefixes" not in McpServerConfig.model_json_schema()["properties"]
+    assert loaded.config_digest() == _config().config_digest()
+    if prefixes is not None:
+        with pytest.raises(ValidationError, match="allowed_tool_prefixes"):
+            McpServerConfig.model_validate(legacy)

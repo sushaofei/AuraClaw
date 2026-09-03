@@ -1,5 +1,10 @@
 # Credential Proxy / Vault
 
+MCP Tool 名称不作为前缀准入条件：已启用 Server 的合法 Tool 经 Catalog 对账后登记，
+调用继续执行 tenant、Policy、Approval、Schema 和路由归属检查。Credential Proxy 保留
+认证、DNS/IP 与出站控制，Resource scheme 和 Prompt 前缀限制保持独立。
+升级与历史配置处理见 [MCP Tool 前缀移除升级](../../operations/mcp-tool-prefix-upgrade.md)。
+
 ## 定位
 
 Credential Proxy 代 Agent 使用凭证调用外部系统；Vault 保存 Secret、OAuth Token 和密钥。Agent Runtime、Sandbox、Prompt、Tool Result 和 Session Event 均不得接触真实凭证。

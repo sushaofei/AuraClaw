@@ -15,8 +15,8 @@
 默认执行：上传代码 → 构建镜像 → 核对镜像所需迁移目标 → 停止服务 → 迁移并校验 → 强制重建全部服务 → 健康检查。
 这是维护窗口发布，会短暂中断服务。迁移不再需要额外参数。
 
-当前目标为 `0057`。脚本使用 `AURACLAW_DEV_IMAGE`（默认 `auraclaw:dev`）和
-`AURACLAW_MIGRATE_TARGET`（默认 `0057`）覆盖 Compose 的同名配置，保证迁移与应用使用
+当前目标为 `0058`。脚本使用 `AURACLAW_DEV_IMAGE`（默认 `auraclaw:dev`）和
+`AURACLAW_MIGRATE_TARGET`（默认 `0058`）覆盖 Compose 的同名配置，保证迁移与应用使用
 本次选择的同一镜像。目标不等于镜像内 `migrate latest` 时，在停服前拒绝发布；
 迁移或 `migrate check` 失败时不会启动应用。`--force-recreate` 保证所有副本重新建立数据库连接池。
 
@@ -46,7 +46,7 @@
 
 ```dotenv
 AURACLAW_IMAGE=auraclaw:dev
-AURACLAW_MIGRATE_TARGET=0057
+AURACLAW_MIGRATE_TARGET=0058
 KAFKA_HOST=10.244.16.132
 AURACLAW_ARTIFACT_BACKEND=obs
 OBS_ENDPOINT=obsv3.example.com

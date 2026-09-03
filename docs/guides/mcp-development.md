@@ -58,7 +58,7 @@ Runtime **只连** `AURACLAW_HANDS_URL`（默认 `http://127.0.0.1:8006`）。�
 1. 把业务意图映射成 MCP Tool（不要一对一映射 Controller）
 2. 在 Java 进程或独立 Adapter 暴露 `POST /mcp`
 3. 实现 `server/discover`、`tools/list`、`tools/call`
-4. 准备 HTTPS、受管认证（chaintower：workload + trusted context；第三方：可选 OAuth）、名称前缀
+4. 准备 HTTPS、受管认证（chaintower：workload + trusted context；第三方：可选 OAuth）和稳定的工具名
 5. 交给 AuraClaw 运维通过 `POST /v1/admin/mcp-servers` 热配置登记 + Vault `credential_ref`
 6. 用对账结果确认 Catalog / Registry 里出现了你的 Tool
 
@@ -301,7 +301,7 @@ routed_hands = RoutedHandsExecutor(
 
 ```text
 Java 拥有：Tool 名、JSON Schema、业务权限、幂等、application service
-AuraClaw 拥有：Server 登记、前缀白名单、Policy/审批、OAuth/Egress、目录对账、Invocation Store
+AuraClaw 拥有：Server 登记、Policy/审批、OAuth/Egress、目录对账、Invocation Store
 ```
 
 AuraClaw **启动时登记的是 Server，不是单个 Tool 名字。** 名字来自 Java 的 `tools/list`，对账成功后才写入 Registry / Router。
@@ -358,7 +358,7 @@ var getOrderTool = SyncToolSpecification.builder()
 
 每个 Tool 必须有：
 
-- 带命名空间的稳定名字，且命中稍后登记的 `allowed_tool_prefixes`（如 `order.`）
+- 稳定、非空的工具名；建议使用命名空间方便辨识，但不按名称前缀限制接入
 - 根类型为 `object` 的 `inputSchema`，默认 `additionalProperties: false`，含长度/枚举/数组上限
 - 与 `structuredContent` 一致的 `outputSchema`
 - 业务错误：`isError=true` + 安全摘要；禁止返回堆栈、Secret、内部枚举
@@ -421,7 +421,6 @@ revision 写入 Hands Registry，Action Hands 与 Credential Proxy **无需重�
     "resource": "https://order.example/mcp",
     "scopes": ["tools.read"]
   },
-  "allowed_tool_prefixes": ["order."],
   "allowed_resource_schemes": ["order"],
   "allowed_prompt_prefixes": ["order."]
 }
@@ -434,7 +433,6 @@ revision 写入 Hands Registry，Action Hands 与 Credential Proxy **无需重�
 | `server_id` | Hands 与 Credential Proxy 共用的内部键 |
 | `endpoint` | Java MCP 的绝对 HTTPS URL；OAuth `resource` 的 origin 必须与它一致 |
 | `credential_ref` | Vault 中 client secret / workload 的引用 |
-| `allowed_tool_prefixes` | 对账和出站都会过滤；`order.create` 能进，`admin.delete` 会被丢掉 |
 | `auth_strategy` + `credential_ref` | workload 路径必填 credential_ref；OAuth 路径还要 `oauth` |
 
 本地联调若 Java MCP 仍发布旧工具名，可在 Server 的 `metadata.tool_name_aliases` 中配置
@@ -454,7 +452,6 @@ MCP 边界做名称转换；若远端 schema 要求单一 `input` 参数，也�
   "network_mode": "loopback",
   "credential_ref": "vault/java-mcp#client_secret",
   "auth_strategy": "workload_trusted_context",
-  "allowed_tool_prefixes": ["procurement.price.", "price_insight."],
   "metadata": {
     "tool_name_aliases": {
       "price_insight.dataset.profile": "procurement.price.dataset.profile",
@@ -485,7 +482,7 @@ Server 定义。`order.order.get` **还不在** Registry / Router 里。
 
 1. 对 2026 Server 发 `server/discover`（legacy Server 才发 `initialize`），协议版本必须一致  
 2. 分页 `tools/list`（以及 resources/prompts）  
-3. 名字必须匹配 `allowed_tool_prefixes`，否则丢弃  
+3. 校验 Tool 描述与 Schema，保留全部合法 Tool；Resource/Prompt 仍执行各自的范围过滤
 4. 写入 Capability Catalog（给 `auraclaw.capabilities.search` 用）  
 5. 动态填 Registry 和 Router：
 
@@ -548,7 +545,7 @@ Hands 侧：
 4. Executor 原样转发 `tools/call`，**不再按名字选 URL**  
 5. Transport 向 Policy 申请 `mcp.remote.invoke`，资源为 `mcp:order-mcp`  
 6. Credential Proxy 用适配器名 `mcp:order-mcp` 找到 `ManagedMcpEgressAdapter`  
-7. Adapter 再查一次前缀白名单，走 OAuth、DNS 公网校验、钉 IP、禁止重定向  
+7. Adapter 校验非空 Tool 名称，走受管认证、DNS/IP 校验、钉 IP、禁止重定向
 8. `POST https://order.example/mcp`  
 9. Java MCP 按名字调 `orderApplicationService.getOrder`
 
@@ -587,7 +584,7 @@ AuraClaw 从不把 `order.order.get` 解析成 REST 路径。换一台 Java 服�
 - [ ] `server/discover` 返回 `supportedVersions` 含 `2026-07-28`、capabilities、
   `resultType`、私有缓存提示与 `_meta.io.modelcontextprotocol/serverInfo`
 - [ ] 每请求校验 `_meta` 和 `MCP-Protocol-Version` / `Mcp-Method` / `Mcp-Name`
-- [ ] `tools/list` 名称稳定、带前缀、顺序确定，含 `inputSchema`
+- [ ] `tools/list` 名称稳定、非空、顺序确定，含 `inputSchema`
 - [ ] `tools/call` 的 `structuredContent` 满足 `outputSchema`
 - [ ] 未知字段、缺必填、越权、业务失败均有明确 `isError` 或协议错误
 - [ ] 写操作幂等；超时后副作用视为 unknown，不盲目重试
@@ -600,7 +597,7 @@ AuraClaw 从不把 `order.order.get` 解析成 REST 路径。换一台 Java 服�
 - [ ] `POST /v1/admin/mcp-servers` 创建后 `:test` / `:enable` 成功
 - [ ] Vault 与 Credential Registry 的 provider / scope / `mcp.invoke` 匹配
 - [ ] Hands 启动后 Catalog 中该 `server_id` 进入 `active`
-- [ ] 只出现 allowlist 内的 Tool
+- [ ] 全部合法 Tool 经对账进入目录，目录可见性继续受 tenant 和 Policy 控制
 - [ ] `tools/list`（Hands 内部）能看到 `order.order.get`
 - [ ] 一次真实 `tools/call` 打到 Java application service，且只一次
 - [ ] 禁用 Server 或对账隔离后，路由被撤销，模型不能再调

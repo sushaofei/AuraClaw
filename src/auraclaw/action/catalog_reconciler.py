@@ -548,8 +548,6 @@ def _normalize_tools(
 ) -> tuple[CapabilityDescriptor, ...]:
     normalized: list[CapabilityDescriptor] = []
     for tool in tools:
-        if not _prefix_allowed(tool.name, server.allowed_tool_prefixes):
-            continue
         source = {
             "name": tool.name,
             "description": tool.description,

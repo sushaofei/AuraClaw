@@ -90,7 +90,6 @@ def test_loopback_auth_none_reaches_real_local_mcp(host: str) -> None:
                 endpoint=endpoint,
                 network_mode=McpNetworkMode.LOOPBACK,
                 auth_strategy=McpAuthStrategy.NONE,
-                allowed_tool_prefixes=("demo.",),
             ).materialize(
                 revision=1,
                 desired_state=McpDesiredState.ENABLED,
@@ -167,7 +166,6 @@ def test_unreachable_loopback_mcp_is_credential_access_error() -> None:
             endpoint=endpoint,
             network_mode=McpNetworkMode.LOOPBACK,
             auth_strategy=McpAuthStrategy.NONE,
-            allowed_tool_prefixes=("demo.",),
         ).materialize(
             revision=1,
             desired_state=McpDesiredState.ENABLED,
@@ -219,6 +217,5 @@ def test_localhost_and_ipv6_loopback_configs_are_accepted() -> None:
             endpoint=endpoint,
             network_mode=McpNetworkMode.LOOPBACK,
             auth_strategy=McpAuthStrategy.NONE,
-            allowed_tool_prefixes=("demo.",),
         )
         assert config.network_mode is McpNetworkMode.LOOPBACK

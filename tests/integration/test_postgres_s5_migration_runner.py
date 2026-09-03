@@ -136,6 +136,86 @@ async def _check_mcp_trust_migration(
         await registry.close()
 
 
+async def _check_mcp_tool_prefix_migration(
+    connection: asyncpg.Connection, database_url: str, migration_dir: Path
+) -> None:
+    originals = {}
+    for index, prefixes in enumerate((["old."], [], [""], None)):
+        server_id = f"prefix-migration-{index}"
+        legacy = {
+            "server_id": server_id,
+            "title": "Prefix migration",
+            "endpoint": "https://managed.example/mcp",
+            "credential_ref": "vault/test",
+        }
+        if prefixes is not None:
+            legacy["allowed_tool_prefixes"] = prefixes
+        originals[server_id] = legacy
+        await connection.execute(
+            """INSERT INTO hands.mcp_server
+            (server_id,desired_state,latest_revision,active_revision,created_by)
+            VALUES ($1,'enabled',1,1,'admin')""", server_id,
+        )
+        await connection.execute(
+            """INSERT INTO hands.mcp_server_revision
+            (server_id,revision,config_json,config_digest,created_by)
+            VALUES ($1,1,$2::jsonb,'archived-digest','admin')""",
+            server_id, json.dumps(legacy),
+        )
+        await connection.execute(
+            """INSERT INTO hands.downstream_mcp_server
+            (server_id,title,endpoint,credential_ref,enabled,status,config_revision)
+            VALUES ($1,'Prefix migration','https://managed.example/mcp',
+                    'vault/test',true,'active',1)""", server_id,
+        )
+    down = (migration_dir / "0058_remove_mcp_tool_prefixes.down.sql").read_text()
+    up = (migration_dir / "0058_remove_mcp_tool_prefixes.sql").read_text()
+    await connection.execute(down)
+    for server_id, legacy in originals.items():
+        row = await connection.fetchrow(
+            "SELECT allowed_tool_prefixes,enabled FROM hands.downstream_mcp_server "
+            "WHERE server_id=$1", server_id,
+        )
+        assert json.loads(row["allowed_tool_prefixes"]) == legacy.get("allowed_tool_prefixes", [])
+        recoverable = "allowed_tool_prefixes" in legacy
+        assert row["enabled"] is recoverable
+        assert await connection.fetchval(
+            "SELECT desired_state FROM hands.mcp_server WHERE server_id=$1", server_id
+        ) == ("enabled" if recoverable else "disabled")
+    await connection.execute(up)
+    assert not await connection.fetchval(
+        """SELECT EXISTS(SELECT 1 FROM information_schema.columns
+        WHERE table_schema='hands' AND table_name='downstream_mcp_server'
+          AND column_name='allowed_tool_prefixes')"""
+    )
+    registry = PostgresMcpServerRegistryStore(database_url)
+    store = PostgresCapabilityCatalogStore(database_url)
+    try:
+        for server_id, legacy in originals.items():
+            revision = await registry.get_revision(server_id, 1)
+            assert revision is not None
+            assert revision.config_digest == "archived-digest"
+            assert "allowed_tool_prefixes" not in revision.config.model_dump()
+            server = await store.get_server(server_id)
+            assert server is not None
+            assert "allowed_tool_prefixes" not in server.model_dump()
+            await store.upsert_server(server)
+            assert await store.get_server(server_id) == server
+            row = await connection.fetchrow(
+                "SELECT config_json,config_digest FROM hands.mcp_server_revision "
+                "WHERE server_id=$1", server_id,
+            )
+            assert json.loads(row["config_json"]) == legacy
+            assert row["config_digest"] == "archived-digest"
+        # The same SQL-backed startup snapshot used by a fresh Hands instance.
+        snapshot = await registry.list_active_snapshot()
+        assert {item.server_id for item in snapshot} >= set(originals) - {"prefix-migration-3"}
+        assert all("allowed_tool_prefixes" not in item.config.model_dump() for item in snapshot)
+    finally:
+        await registry.close()
+        await store.close()
+
+
 def test_migration_runner_is_locked_idempotent_and_detects_drift(tmp_path: Path) -> None:
     initdb = shutil.which("initdb")
     postgres = shutil.which("postgres")
@@ -182,6 +262,7 @@ def test_migration_runner_is_locked_idempotent_and_detects_drift(tmp_path: Path)
             finally:
                 await readonly.close()
             await _check_mcp_trust_migration(connection, database_url, migration_dir)
+            await _check_mcp_tool_prefix_migration(connection, database_url, migration_dir)
             await connection.execute(
                 """INSERT INTO hands.downstream_mcp_server
                    (server_id,title,endpoint,enabled,status,active_catalog_generation)

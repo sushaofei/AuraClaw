@@ -3,6 +3,8 @@ from __future__ import annotations
 from typing import Annotated, Any, Protocol
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi.exceptions import RequestValidationError
+from pydantic import ValidationError
 
 from auraclaw.action.mcp_registry import McpServerRegistryService
 from auraclaw.api.dependencies import RequestIdentity, request_identity
@@ -15,6 +17,16 @@ from auraclaw.contracts.mcp_registry import (
 )
 
 Identity = Annotated[RequestIdentity, Depends(request_identity)]
+
+
+def _server_config(payload: dict[str, Any]) -> McpServerConfig:
+    try:
+        return McpServerConfig.model_validate(payload)
+    except ValidationError as exc:
+        errors = exc.errors(include_url=False, include_context=False, include_input=False)
+        for error in errors:
+            error["loc"] = ("body", *error["loc"])
+        raise RequestValidationError(errors) from exc
 
 
 class McpServerLifecycleOps(Protocol):
@@ -159,7 +171,7 @@ def create_mcp_admin_router(
                 expected_revision=expected_revision,
                 operation=lifecycle,
             )
-        config = McpServerConfig.model_validate(payload)
+        config = _server_config(payload)
         record = await registry.create(
             _write(identity, command_id, expected_revision, config)
         )
@@ -340,7 +352,7 @@ def create_mcp_admin_router(
                 expected_revision=expected_revision,
                 operation=lifecycle,
             )
-        config = McpServerConfig.model_validate({**payload, "server_id": server_id})
+        config = _server_config({**payload, "server_id": server_id})
         record = await registry.update(
             _write(identity, command_id, expected_revision, config)
         )

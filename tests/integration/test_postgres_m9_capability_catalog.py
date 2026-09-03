@@ -48,6 +48,9 @@ def test_postgres_capability_catalog_is_shared_and_tenant_scoped() -> None:
         await connection.execute(HEALTH_MIGRATION)
         await connection.execute(FENCING_MIGRATION)
         await connection.execute((ROOT / "migrations/0057_remove_capability_trust.sql").read_text())
+        await connection.execute(
+            (ROOT / "migrations/0058_remove_mcp_tool_prefixes.sql").read_text()
+        )
         suffix = uuid4().hex
         tenant_id = f"tenant-capability-{suffix}"
         server_id = f"server-{suffix}"

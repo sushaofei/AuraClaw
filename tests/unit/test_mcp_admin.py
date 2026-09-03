@@ -64,7 +64,6 @@ def _seed() -> tuple[McpServerRegistryService, CapabilityCatalog]:
                         "endpoint": "http://127.0.0.1:48080/mcp",
                         "network_mode": "loopback",
                         "auth_strategy": "none",
-                        "allowed_tool_prefixes": ("order.",),
                     }
                 ),
             )
@@ -341,3 +340,30 @@ def test_task_api_exposes_mcp_tools_route() -> None:
     )
     paths = set(create_service_app("api", settings).openapi()["paths"])
     assert "/v1/admin/mcp-servers/{server_id}/tools" in paths
+
+
+def test_mcp_admin_rejects_retired_tool_prefix_write_and_omits_it_on_read() -> None:
+    registry, catalog = _seed()
+    app = _task_app()
+    app.include_router(create_mcp_admin_router(registry, catalog=catalog))
+    app.state.config_ready = True
+    headers = {
+        "X-Tenant-ID": "tenant-a", "X-Actor-ID": "admin-1",
+        "Idempotency-Key": "create-retired-field", "X-Expected-Revision": "0",
+    }
+    with TestClient(app) as client:
+        response = client.get("/v1/admin/mcp-servers/local-order-mcp", headers=headers)
+        assert response.status_code == 200
+        config = response.json()["latest_config"]
+        assert "allowed_tool_prefixes" not in config
+        assert "allowed_tool_prefixes" not in str(app.openapi())
+        config["server_id"] = "new-server"
+        config["allowed_tool_prefixes"] = ["old."]
+        rejected = client.post("/v1/admin/mcp-servers", headers=headers, json=config)
+        assert rejected.status_code == 422, rejected.text
+        assert "allowed_tool_prefixes" in rejected.text
+        headers["X-Expected-Revision"] = "1"
+        rejected_update = client.put(
+            "/v1/admin/mcp-servers/local-order-mcp", headers=headers, json=config
+        )
+        assert rejected_update.status_code == 422, rejected_update.text

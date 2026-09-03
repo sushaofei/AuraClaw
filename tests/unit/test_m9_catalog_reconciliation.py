@@ -17,6 +17,7 @@ from auraclaw.action.catalog_reconciler import (
     CapabilityDescriptorDepthError,
     CapabilityDescriptorSizeError,
     _digest,
+    _normalize_snapshot,
 )
 from auraclaw.action.ports import PolicyEvaluation
 from auraclaw.action.tool_gateway import ToolRegistry
@@ -65,7 +66,6 @@ def _server(*, protocol_revision: str = "2026-07-28") -> McpServerDefinition:
             client_id="auraclaw-hands",
             resource="https://mcp.example/v1/mcp",
         ),
-        allowed_tool_prefixes=("github.",),
         allowed_resource_schemes=("github",),
         allowed_prompt_prefixes=("github.",),
         status=CapabilityStatus.ACTIVE,
@@ -107,6 +107,7 @@ class _RemoteCredentials:
         self.failed = False
         self.tool_version = "2.1.0"
         self.tool_error = False
+        self.include_tools = True
 
     async def invoke(self, **arguments: object) -> dict[str, object]:
         self.calls.append(arguments)
@@ -136,6 +137,8 @@ class _RemoteCredentials:
                 },
             }
         if method == "tools/list":
+            if not self.include_tools:
+                return self._result(request, "tools", [])
             return self._result(
                 request,
                 "tools",
@@ -160,6 +163,7 @@ class _RemoteCredentials:
                         "name": "outside.issue.get",
                         "inputSchema": {"type": "object"},
                     },
+                    {"name": "lookup", "inputSchema": {"type": "object"}},
                 ],
             )
         if method == "resources/list":
@@ -354,7 +358,7 @@ def test_catalog_reconciliation_filters_routes_invalidates_and_recovers() -> Non
 
         result = await reconciler.reconcile_server(server)
         assert result.status == CapabilityStatus.ACTIVE
-        assert result.capability_count == 4
+        assert result.capability_count == 6
         snapshot = await connector.snapshot(_hands_trusted())
         assert snapshot.extra["server_info"] == {
             "name": "test-mcp",
@@ -367,7 +371,14 @@ def test_catalog_reconciliation_filters_routes_invalidates_and_recovers() -> Non
             CapabilityKind.RESOURCE_TEMPLATE,
             CapabilityKind.PROMPT,
         }
-        assert all("outside" not in item.canonical_name for item in discovered)
+        assert {item.canonical_name for item in discovered if item.kind is CapabilityKind.TOOL} == {
+            "github.issue.get", "outside.issue.get", "lookup"
+        }
+        for name in ("outside.issue.get", "lookup"):
+            extra = next(item for item in tools.discover() if item.name == name)
+            assert await router.execute(_invocation(extra), extra) == {
+                "number": 21, "state": "open"
+            }
         capability = tools.get("github.issue.get", "2.1.0")
         assert capability.permission.value == "write-with-approval"
         assert capability.risk_level.value == "high"
@@ -414,7 +425,9 @@ def test_catalog_reconciliation_filters_routes_invalidates_and_recovers() -> Non
         assert cache.invalidated == [("github://issue/21", "tenant-a")]
         assert tools.get("github.issue.get", "2.2.0").version == "2.2.0"
         assert tools.get("github.issue.get", "2.1.0").version == "2.1.0"
-        assert [item.version for item in tools.discover()] == ["2.2.0"]
+        assert {item.name: item.version for item in tools.discover()} == {
+            "github.issue.get": "2.2.0", "outside.issue.get": "1.0.0", "lookup": "1.0.0"
+        }
 
         credentials.failed = True
         current = await store.get_server(server.server_id)
@@ -516,21 +529,23 @@ def test_mcp_connector_marks_tool_resource_and_prompt_reads_as_read_only() -> No
     asyncio.run(scenario())
 
 
-def test_reconcile_rejects_configuration_that_filters_every_remote_capability() -> None:
+@pytest.mark.parametrize("include_tools", [True, False])
+def test_resource_prompt_filters_do_not_filter_tools(include_tools: bool) -> None:
     async def scenario() -> None:
         store = InMemoryCapabilityCatalogStore()
         catalog = CapabilityCatalog(store)
         server = _server().model_copy(
             update={
-                "allowed_tool_prefixes": ("missing.",),
                 "allowed_prompt_prefixes": ("missing.",),
                 "allowed_resource_schemes": ("missing",),
             }
         )
         await catalog.register_server(server)
+        credentials = _RemoteCredentials()
+        credentials.include_tools = include_tools
         connector = ManagedMcpConnector(
             server,
-            credentials=_RemoteCredentials(),
+            credentials=credentials,
             policy=_AllowPolicy(),
         )
         result = await CapabilityCatalogReconciler(
@@ -538,10 +553,15 @@ def test_reconcile_rejects_configuration_that_filters_every_remote_capability() 
             store=store,
             connectors={server.server_id: connector},
         ).reconcile_server(server)
-        assert result.status is CapabilityStatus.DEGRADED
-        assert result.error == "CapabilityAllowlistError"
-        assert result.capability_count == 0
-        assert await store.get_active_generation(server.server_id) is None
+        if include_tools:
+            assert result.status is CapabilityStatus.ACTIVE
+            assert result.error is None
+            assert result.capability_count == 3
+        else:
+            assert result.status is CapabilityStatus.DEGRADED
+            assert result.error == "CapabilityAllowlistError"
+            assert result.capability_count == 0
+            assert await store.get_active_generation(server.server_id) is None
 
     asyncio.run(scenario())
 
@@ -580,7 +600,7 @@ def test_unreachable_replica_restores_last_known_good_catalog_routes() -> None:
         )
         result = await second.reconcile_server(server)
         assert result.status is CapabilityStatus.DEGRADED
-        assert result.capability_count == 4
+        assert result.capability_count == 6
         assert await store.get_active_generation(server.server_id) == generation
         assert tools.get("github.issue.get", "2.1.0")
         assert [
@@ -603,7 +623,7 @@ def test_legacy_connector_uses_initialize_and_preserves_invocation_id() -> None:
 
         snapshot = await connector.snapshot(_hands_trusted())
         assert snapshot.extra["server_info"]["name"] == "test-mcp"
-        assert len(snapshot.tools) == 2
+        assert len(snapshot.tools) == 3
         assert snapshot.resources == ()
         assert snapshot.resource_templates == ()
         assert snapshot.prompts == ()
@@ -711,7 +731,6 @@ def test_remote_price_insight_tools_get_search_tags_and_semver() -> None:
         update={
             "server_id": "java-mcp",
             "tenant_id": "1",
-            "allowed_tool_prefixes": ("",),
             "metadata": {
                 "search_tags": ["价格洞察"],
                 "tool_name_aliases": {
@@ -752,7 +771,6 @@ def test_connector_tool_executor_forwards_trusted_user_id() -> None:
             protocol_revision=MCP_LEGACY_PROTOCOL_VERSION,
             credential_ref="vault/java-mcp#client_secret",
             auth_strategy=McpAuthStrategy.WORKLOAD_TRUSTED_CONTEXT,
-            allowed_tool_prefixes=("github.",),
             status=CapabilityStatus.ACTIVE,
             enabled=True,
         )
@@ -951,5 +969,44 @@ def test_reconciliation_refreshes_legacy_permissions_without_schema_version_bump
         current = await store.list_server_capabilities("tenant-a", server.server_id)
         tool = next(item for item in current if item.kind == CapabilityKind.TOOL)
         assert (tool.permission, tool.risk_level) == ("read-only", "low")
+
+    asyncio.run(scenario())
+
+
+def test_upgrade_republishes_previously_filtered_tools_to_each_replica() -> None:
+    async def scenario() -> None:
+        store = InMemoryCapabilityCatalogStore()
+        catalog = CapabilityCatalog(store)
+        server = _server()
+        await catalog.register_server(server)
+        connector = ManagedMcpConnector(
+            server, credentials=_RemoteCredentials(), policy=_AllowPolicy()
+        )
+        snapshot = await connector.snapshot(_hands_trusted())
+        old_snapshot = snapshot.model_copy(update={"tools": snapshot.tools[:1]})
+        await catalog.replace_server_capabilities(
+            server.server_id, _normalize_snapshot(server, old_snapshot, 100),
+            snapshot_digest="legacy-prefix-filtered",
+        )
+        old_generation = await store.get_active_generation(server.server_id)
+        generations = []
+        for _ in range(2):
+            tools = ToolRegistry()
+            router = RoutedHandsExecutor(_UnexpectedHands(), {})
+            reconciler = CapabilityCatalogReconciler(
+                catalog=catalog, store=store, connectors={server.server_id: connector},
+                tool_registry=tools, hands_router=router,
+            )
+            result = await reconciler.reconcile_server(server)
+            assert result.status is CapabilityStatus.ACTIVE
+            assert result.capability_count == 6
+            generations.append(await store.get_active_generation(server.server_id))
+            for name in ("outside.issue.get", "lookup"):
+                capability = tools.get(name, "1.0.0")
+                assert await router.execute(_invocation(capability), capability) == {
+                    "number": 21, "state": "open"
+                }
+        assert generations[0] != old_generation
+        assert all(generation > old_generation for generation in generations)
 
     asyncio.run(scenario())

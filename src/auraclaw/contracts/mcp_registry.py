@@ -66,7 +66,6 @@ class McpServerConfig(ContractModel):
     auth_strategy: McpAuthStrategy = McpAuthStrategy.WORKLOAD_TRUSTED_CONTEXT
     credential_ref: str | None = None
     oauth: McpOAuthConfiguration | None = None
-    allowed_tool_prefixes: tuple[str, ...] = ()
     allowed_resource_schemes: tuple[str, ...] = ()
     allowed_prompt_prefixes: tuple[str, ...] = ()
     allowed_cidrs: tuple[str, ...] = ()
@@ -140,7 +139,6 @@ class McpServerConfig(ContractModel):
             credential_ref=credential_ref,
             oauth=self.oauth,
             auth_strategy=self.auth_strategy,
-            allowed_tool_prefixes=self.allowed_tool_prefixes,
             allowed_resource_schemes=self.allowed_resource_schemes,
             allowed_prompt_prefixes=self.allowed_prompt_prefixes,
             allowed_private_hosts=private_hosts,

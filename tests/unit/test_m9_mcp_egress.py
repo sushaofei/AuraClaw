@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import UTC, datetime, timedelta
 from urllib.parse import parse_qs
 
@@ -127,7 +128,6 @@ def _server() -> McpServerDefinition:
             resource="https://mcp.example/v1/mcp",
             scopes=("tools.read", "tools.write"),
         ),
-        allowed_tool_prefixes=("github.",),
         allowed_resource_schemes=("github",),
         allowed_prompt_prefixes=("github.",),
         status=CapabilityStatus.ACTIVE,
@@ -416,7 +416,6 @@ def test_mcp_egress_allows_loopback_http_when_private_host_allowlisted() -> None
                 title="Java Agent Runtime MCP Gateway",
                 endpoint="http://127.0.0.1:48080/rpc-api/agent-runtime/mcp",
                 credential_ref="vault/java-mcp#client_secret",
-                allowed_tool_prefixes=("",),
                 allowed_private_hosts=("127.0.0.1",),
                 status=CapabilityStatus.ACTIVE,
                 enabled=True,
@@ -461,7 +460,6 @@ def test_mcp_egress_rejects_public_http_even_when_host_allowlisted() -> None:
             endpoint="http://mcp.example.com/mcp",
             credential_ref="vault/github-mcp#client_secret",
             auth_strategy=McpAuthStrategy.WORKLOAD_TRUSTED_CONTEXT,
-            allowed_tool_prefixes=("github.",),
             allowed_private_hosts=("mcp.example.com",),
             status=CapabilityStatus.ACTIVE,
             enabled=True,
@@ -585,7 +583,6 @@ def test_mcp_egress_sends_department_snapshot_headers() -> None:
             endpoint="https://mcp.example/v1/mcp",
             credential_ref="vault/chaintower-mcp#workload",
             auth_strategy=McpAuthStrategy.WORKLOAD_TRUSTED_CONTEXT,
-            allowed_tool_prefixes=("github.",),
             status=CapabilityStatus.ACTIVE,
             enabled=True,
         )
@@ -639,3 +636,49 @@ def test_mcp_server_configuration_is_typed_and_secret_free() -> None:
     serialized = server.model_dump_json()
     assert "oauth-client-secret" not in serialized
     assert "vault/github-mcp#client_secret" in serialized
+
+
+@pytest.mark.parametrize("name", ["github.issue.get", "outside.issue.get", "lookup"])
+def test_mcp_egress_does_not_restrict_tool_name_prefix(name: str) -> None:
+    async def scenario() -> None:
+        sender = _Sender()
+        adapter = ManagedMcpEgressAdapter(_server(), resolver=_Resolver(), sender=sender)
+        request = _request()
+        request["params"]["name"] = name
+        await adapter(request, "oauth-client-secret")
+        assert json.loads(sender.calls[-1]["content"])["params"]["name"] == name
+        assert sender.calls[-1]["headers"]["Mcp-Name"] == name
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("name", [None, "", "   ", 42, [], {}])
+def test_mcp_egress_rejects_invalid_tool_name_before_network(name: object) -> None:
+    async def scenario() -> None:
+        sender = _Sender()
+        adapter = ManagedMcpEgressAdapter(_server(), resolver=_Resolver(), sender=sender)
+        request = _request()
+        request["params"]["name"] = name
+        with pytest.raises(CredentialAccessError, match="non-empty string"):
+            await adapter(request, "oauth-client-secret")
+        assert sender.calls == []
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("method,params", [
+    ("resources/read", {"uri": "https://outside.example/data"}),
+    ("prompts/get", {"name": "outside.review"}),
+])
+def test_mcp_egress_keeps_resource_and_prompt_filters(method: str, params: dict) -> None:
+    async def scenario() -> None:
+        sender = _Sender()
+        adapter = ManagedMcpEgressAdapter(_server(), resolver=_Resolver(), sender=sender)
+        request = _request()
+        request["method"] = method
+        request["params"].update(params)
+        with pytest.raises(CredentialAccessError, match="outside .*allowlist"):
+            await adapter(request, "oauth-client-secret")
+        assert sender.calls == []
+
+    asyncio.run(scenario())
