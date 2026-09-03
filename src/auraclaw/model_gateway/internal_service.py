@@ -119,7 +119,17 @@ class ModelGatewayInternalService:
     async def generate_stream(
         self, request: ModelGenerateRequest
     ) -> AsyncIterator[ModelStreamEvent]:
-        self._require_runtime(request.context.service_identity)
+        if request.context.service_identity is ServiceIdentity.POLICY:
+            if (
+                request.purpose != "approval_review"
+                or request.tools
+                or request.max_output_tokens > 512
+            ):
+                raise AuthorizationError("Policy may only make bounded, tool-free approval reviews")
+        else:
+            self._require_runtime(request.context.service_identity)
+            if request.purpose != "execution":
+                raise AuthorizationError("Runtime cannot impersonate an approval reviewer")
         request_digest = self._request_digest(request)
         reservation = await self._prepare_stream(request, request_digest)
         if reservation is not None:
@@ -472,6 +482,9 @@ class ModelGatewayInternalService:
             input_digest=hashlib.sha256(encoded).hexdigest(),
             correlation_id=request.run_id,
             attributes={
+                "session_id": request.session_id or "",
+                "run_id": request.run_id,
+                "purpose": request.purpose,
                 "permission": "read-only",
                 "risk_level": "medium",
                 "data_classification": request.data_classification,
@@ -488,15 +501,11 @@ class ModelGatewayInternalService:
             *(
                 self._emit_metric(name, float(value), request)
                 for name, value in request.runtime_metrics.items()
-                if name in _RUNTIME_METRICS
-                and math.isfinite(float(value))
-                and float(value) >= 0
+                if name in _RUNTIME_METRICS and math.isfinite(float(value)) and float(value) >= 0
             )
         )
 
-    async def _emit_metric(
-        self, name: str, value: float, request: ModelGenerateRequest
-    ) -> None:
+    async def _emit_metric(self, name: str, value: float, request: ModelGenerateRequest) -> None:
         if self._metric_writer is None:
             return
         try:
@@ -510,8 +519,7 @@ class ModelGatewayInternalService:
                         session_id=request.session_id,
                         run_id=request.run_id,
                         deduplication_key=(
-                            f"{request.context.tenant_id}:"
-                            f"{request.model_call_id}:{name}"
+                            f"{request.context.tenant_id}:{request.model_call_id}:{name}"
                         ),
                     )
                 ),
@@ -547,6 +555,8 @@ class ModelGatewayInternalService:
                     "run_id": request.run_id,
                     "session_id": request.session_id,
                     "messages": request.messages,
+                    "purpose": request.purpose,
+                    "caller": request.context.service_identity.value,
                     "tools": request.tools,
                     "capability": request.capability,
                     "preferred_model": request.preferred_model,

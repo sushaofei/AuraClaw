@@ -482,7 +482,8 @@ class _ApprovalReader:
         return None
 
     async def find_approved(
-        self, tenant_id: str, session_id: str, digest: str, policy_version: str
+        self, tenant_id: str, session_id: str, digest: str, policy_version: str,
+        run_id: str | None = None,
     ) -> None:
         del tenant_id, session_id, digest, policy_version
         return None

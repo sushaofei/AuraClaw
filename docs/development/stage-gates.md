@@ -3264,3 +3264,18 @@ active-reference barrier，并简化 AuraX 卸载入口。
 早期使用本地 SQL 配置的运行另发现 Catalog 连续失败计数断言（4 vs 3）及 Skill lifecycle
 旧 `source_id` 非空列问题，未作为本 issue 的修复范围或通过证据。真实 KingBase 发布及逐副本
 生产验证尚未执行，属于维护窗口发布步骤。Git 提交/推送状态以实际仓库和交付记录为准。
+
+## 三档统一审批模式（Issue #92，2026-09-03）
+
+- [x] 三档作用于所有 Policy require_approval；deny 和身份/凭据边界保持生效。
+- [x] 流式/非流式默认、显式覆盖、schedule 默认、下一 Run 继承与原子变更接入契约和服务。
+- [x] Canonical / snapshot / 子任务继承 / 可重建投影保存模式；旧事件保留 legacy，Runtime 不能自授权限。
+- [x] 自动审核通过受限 POLICY workload 调用 Model Gateway；限制时间、次数、输出和有效期，失败转人工。
+- [x] 审核结果持久化与跨副本复用、人工接管与迟到结果仲裁、命令重试与模式冲突有回归覆盖。
+- [x] 0059 down/up、真实 PostgreSQL 持久读取、snapshot 和 Canonical 投影重建通过。
+- [x] API 能力协商、SDK 及 AuraX 三档选择器接入；执行轨迹区分自动审核和模式放行。
+- [x] 架构说明、操作文档与迁移目标同步；真实环境发布另按维护窗口执行。
+- [x] 最终完整 Pytest 599 passed / 51 skipped；审批跨 Run 隔离、子任务继承、同步默认及 PostgreSQL 查询回归通过。Ruff、Mypy、10 条架构合同、AuraX 54 SDK tests/typecheck/lint 和 24 项 UI 回归（22 + 修正后 2）通过。
+- [x] 提交范围已核对，排除既有 IDE/视觉变更及 docs/tmp、秘密与缓存。
+
+本阶段提交/推送状态以 Git 和 Issue 交付记录为准；51 项需要外部服务的测试跳过，临时 PostgreSQL 实际验证。

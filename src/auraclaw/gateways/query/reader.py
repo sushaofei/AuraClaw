@@ -1,5 +1,6 @@
 from typing import Any, Protocol
 
+from auraclaw.contracts.approval_mode import ApprovalConfiguration
 from auraclaw.contracts.errors import NotFoundError
 from auraclaw.contracts.events import CanonicalEvent
 from auraclaw.gateways.query.activity import (
@@ -70,6 +71,10 @@ class TaskQueryService:
     async def get_result(self, tenant_id: str, session_id: str) -> dict[str, Any]:
         task = await self.get_task(tenant_id, session_id)
         return {
+            **{
+                key: task.get(key, value)
+                for key, value in ApprovalConfiguration().public_dict().items()
+            },
             "session_id": session_id,
             "run_id": task["run_id"],
             "status": task["run_status"],
@@ -94,6 +99,10 @@ class TaskQueryService:
         )
         transcript = build_transcript(events)
         return {
+            **{
+                key: task.get(key, value)
+                for key, value in ApprovalConfiguration().public_dict().items()
+            },
             "session_id": session_id,
             "projection_version": task["projection_version"],
             "status": task["status"],
@@ -120,10 +129,12 @@ class TaskQueryService:
             (event.aggregate_version for event in events),
             default=int(task["projection_version"]),
         )
-        page = page_activity(
-            build_activity(events), after_version=after_version, limit=limit
-        )
+        page = page_activity(build_activity(events), after_version=after_version, limit=limit)
         return {
+            **{
+                key: task.get(key, value)
+                for key, value in ApprovalConfiguration().public_dict().items()
+            },
             "session_id": session_id,
             "projection_version": int(task["projection_version"]),
             "source_version": source_version,

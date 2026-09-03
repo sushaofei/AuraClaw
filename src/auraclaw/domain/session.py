@@ -4,6 +4,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
+from auraclaw.contracts.approval_mode import ApprovalConfiguration, ApprovalMode
 from auraclaw.contracts.errors import InvalidTransitionError
 from auraclaw.contracts.events import CanonicalEvent, NewEvent
 from auraclaw.contracts.state import (
@@ -34,6 +35,7 @@ class SessionAggregate:
     output_contract: dict[str, Any] = field(default_factory=dict)
     owner: str | None = None
     dept_id: str | None = None
+    approval: ApprovalConfiguration = field(default_factory=ApprovalConfiguration)
     _pending: list[NewEvent] = field(default_factory=list, repr=False)
 
     @classmethod
@@ -74,6 +76,7 @@ class SessionAggregate:
             root_session_id=str(state["root_session_id"]),
             tenant_id=str(state["tenant_id"]),
             version=version,
+            approval=ApprovalConfiguration.model_validate(state.get("approval", {})),
             status=stored_status,
             run_status=RunStatus(str(stored_run_status)) if stored_run_status else None,
             goal=str(state["goal"]),
@@ -108,6 +111,7 @@ class SessionAggregate:
             "session_id": self.session_id,
             "root_session_id": self.root_session_id,
             "tenant_id": self.tenant_id,
+            "approval": self.approval.public_dict(),
             "status": status.value,
             "run_status": self.run_status.value if self.run_status else None,
             "goal": self.goal,
@@ -132,16 +136,19 @@ class SessionAggregate:
         source: str = "chat",
         schedule_id: str | None = None,
         occurrence_id: str | None = None,
+        approval: ApprovalConfiguration | None = None,
     ) -> None:
         if self.version or self.status is not None:
             raise InvalidTransitionError("Session already exists")
         self.dept_id = dept_id
+        self.approval = approval or ApprovalConfiguration()
         created_payload: dict[str, Any] = {
             "goal": goal,
             "role": "root",
             "root_session_id": self.session_id,
             "parent_session_id": None,
             "source": source,
+            "approval": self.approval.public_dict(),
         }
         if dept_id:
             created_payload["dept_id"] = dept_id
@@ -191,17 +198,43 @@ class SessionAggregate:
             )
         )
 
-    def request_run(self, run_id: str) -> None:
+    def request_run(
+        self,
+        run_id: str,
+        approval_mode: ApprovalMode | None = None,
+        *,
+        command_id: str | None = None,
+        request_fingerprint: str | None = None,
+    ) -> None:
         self._require_existing()
         status = self.status
         assert status is not None
         if status not in {SessionStatus.CREATED, SessionStatus.READY, SessionStatus.PAUSED}:
             raise InvalidTransitionError(f"cannot request run for Session in {status.value}")
+        if approval_mode is not None:
+            self._raise(
+                NewEvent(
+                    type="session.approval_mode_changed",
+                    visibility=Visibility.USER,
+                    payload={
+                        "approval": ApprovalConfiguration(
+                            effective_approval_mode=approval_mode,
+                            interaction_mode=self.approval.interaction_mode,
+                            approval_mode_source="explicit",
+                            approval_mode_revision=self.approval.approval_mode_revision + 1,
+                        ).public_dict()
+                    },
+                )
+            )
         self._raise(
             NewEvent(
                 type="run.requested",
                 visibility=Visibility.USER,
-                payload=self._run_payload(run_id),
+                payload={
+                    **self._run_payload(run_id),
+                    "command_id": command_id,
+                    "request_fingerprint": request_fingerprint,
+                },
             )
         )
 
@@ -285,6 +318,14 @@ class SessionAggregate:
         return events
 
     def apply(self, event_type: str, payload: dict[str, Any]) -> None:
+        if "approval" in payload and event_type in {
+            "session.created",
+            "child.created",
+            "run.requested",
+            "session.approval_mode_changed",
+            "session.resumed",
+        }:
+            self.approval = ApprovalConfiguration.model_validate(payload["approval"])
         if event_type == "session.created":
             self.goal = str(payload["goal"])
             self.root_session_id = str(payload["root_session_id"])
@@ -301,9 +342,7 @@ class SessionAggregate:
             self.output_contract = dict(payload.get("output_contract", {}))
             if payload.get("dept_id") is not None:
                 self.dept_id = _optional_str(payload.get("dept_id"))
-            self.status = (
-                SessionStatus.PENDING if self.dependency_ids else SessionStatus.RUNNABLE
-            )
+            self.status = SessionStatus.PENDING if self.dependency_ids else SessionStatus.RUNNABLE
         elif event_type == "run.requested":
             self.run_id = str(payload["run_id"])
             self.run_status = RunStatus.PENDING
@@ -342,14 +381,10 @@ class SessionAggregate:
             self.result_ref = payload.get("result_ref")
             self.artifact_refs = list(payload.get("artifact_refs", []))
             self.run_status = RunStatus.COMPLETED
-            self.status = (
-                SessionStatus.READY if self.role == "root" else SessionStatus.COMPLETED
-            )
+            self.status = SessionStatus.READY if self.role == "root" else SessionStatus.COMPLETED
         elif event_type == "dependency.changed":
             self.dependency_ids = list(payload["dependency_ids"])
-            self.status = (
-                SessionStatus.PENDING if self.dependency_ids else SessionStatus.RUNNABLE
-            )
+            self.status = SessionStatus.PENDING if self.dependency_ids else SessionStatus.RUNNABLE
         elif event_type in {"child.delegated", "session.handed_off"}:
             self.owner = str(payload["owner"])
         elif event_type == "child.result_published":
@@ -366,9 +401,7 @@ class SessionAggregate:
             self.status = SessionStatus.READY if self.role == "root" else SessionStatus.FAILED
         elif event_type == "run.cancelled":
             self.run_status = RunStatus.CANCELLED
-            self.status = (
-                SessionStatus.READY if self.role == "root" else SessionStatus.CANCELLED
-            )
+            self.status = SessionStatus.READY if self.role == "root" else SessionStatus.CANCELLED
         elif event_type == "runtime.failed":
             self.status = SessionStatus.RETRY_WAIT
             self.run_status = RunStatus.RETRY_WAIT
@@ -382,7 +415,7 @@ class SessionAggregate:
             self.status = SessionStatus.CLOSED
 
     def _run_payload(self, run_id: str) -> dict[str, Any]:
-        payload: dict[str, Any] = {"run_id": run_id}
+        payload: dict[str, Any] = {"run_id": run_id, "approval": self.approval.public_dict()}
         if self.dept_id:
             payload["dept_id"] = self.dept_id
         return payload

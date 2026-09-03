@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
+from auraclaw.contracts.approval_mode import ApprovalConfiguration
 from auraclaw.contracts.events import CanonicalEvent
 from auraclaw.infrastructure.persistence.postgres_common import LazyPool, json_dumps, json_loads
 from auraclaw.projection.task.projector import (
@@ -52,6 +53,7 @@ class PostgresTaskProjection(LazyPool):
                     view["result_ref"] = json_loads(row["result_ref"])
                     view["artifact_refs"] = json_loads(row["artifact_refs"])
                     view["error"] = json_loads(row["error"])
+                    view["approval"] = json_loads(row["approval"])
                     view["skill_activations"] = json_loads(row["skill_activations"])
                 current_version = int(view["projection_version"])
                 if event.aggregate_version != current_version + 1:
@@ -70,10 +72,11 @@ class PostgresTaskProjection(LazyPool):
                      result_summary, result_ref,
                      artifact_refs, error, delivery_status, delivery_id,
                      delivery_attempt_count, delivery_response_summary,
-                     skill_activations, source_version, source_event_id, projected_at)
+                     skill_activations, source_version, source_event_id, projected_at, approval)
                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16::jsonb,
-                            $17::jsonb,$18::jsonb,$19,$20,$21,$22,$23::jsonb,$24,$25,$26)
+                            $17::jsonb,$18::jsonb,$19,$20,$21,$22,$23::jsonb,$24,$25,$26,$27::jsonb)
                     ON CONFLICT (tenant_id, session_id) DO UPDATE SET
+                      approval=EXCLUDED.approval,
                       run_id=EXCLUDED.run_id, status=EXCLUDED.status, goal=EXCLUDED.goal,
                       source=EXCLUDED.source, schedule_id=EXCLUDED.schedule_id,
                       occurrence_id=EXCLUDED.occurrence_id,
@@ -116,6 +119,7 @@ class PostgresTaskProjection(LazyPool):
                     event.aggregate_version,
                     event.event_id,
                     event.occurred_at,
+                    json_dumps(view.get("approval", {})),
                 )
                 await connection.execute(
                     """INSERT INTO projection.projector_checkpoint
@@ -169,13 +173,11 @@ class PostgresTaskProjection(LazyPool):
             projected_at, session_id = decode_task_cursor(cursor)
             args.append(datetime.fromisoformat(projected_at))
             args.append(session_id)
-            clauses.append(
-                f"(projected_at, session_id) < (${len(args) - 1}, ${len(args)})"
-            )
+            clauses.append(f"(projected_at, session_id) < (${len(args) - 1}, ${len(args)})")
         args.append(limit + 1)
         sql = f"""
             SELECT * FROM projection.task_view
-            WHERE {' AND '.join(clauses)}
+            WHERE {" AND ".join(clauses)}
             ORDER BY projected_at DESC, session_id DESC
             LIMIT ${len(args)}
         """
@@ -203,6 +205,7 @@ class PostgresTaskProjection(LazyPool):
         except KeyError:
             pass
         return {
+            **ApprovalConfiguration.model_validate(json_loads(row["approval"])).public_dict(),
             "tenant_id": str(row["tenant_id"]),
             "session_id": str(row["session_id"]),
             "root_session_id": str(row["root_session_id"]),

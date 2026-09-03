@@ -1,5 +1,6 @@
 from typing import Any
 
+from auraclaw.contracts.approval_mode import ApprovalMode, InteractionMode
 from auraclaw.contracts.commands import CommandContext
 from auraclaw.session.task_service import TaskService
 
@@ -18,6 +19,8 @@ class TaskCommandGateway:
         source: str = "chat",
         schedule_id: str | None = None,
         occurrence_id: str | None = None,
+        interaction_mode: InteractionMode | None = None,
+        approval_mode: ApprovalMode | None = None,
     ) -> dict[str, Any]:
         return await self._service.create_task(
             goal=goal,
@@ -25,6 +28,8 @@ class TaskCommandGateway:
             source=source,
             schedule_id=schedule_id,
             occurrence_id=occurrence_id,
+            interaction_mode=interaction_mode,
+            approval_mode=approval_mode,
         )
 
     async def append_message(
@@ -35,9 +40,11 @@ class TaskCommandGateway:
         )
 
     async def request_run(
-        self, *, session_id: str, context: CommandContext
+        self, *, session_id: str, context: CommandContext, approval_mode: ApprovalMode | None = None
     ) -> dict[str, Any]:
-        return await self._service.request_run(session_id=session_id, context=context)
+        return await self._service.request_run(
+            session_id=session_id, context=context, approval_mode=approval_mode
+        )
 
     async def cancel_task(
         self, *, session_id: str, reason: str, context: CommandContext
@@ -53,9 +60,7 @@ class TaskCommandGateway:
             session_id=session_id, reason=reason, context=context
         )
 
-    async def resume_task(
-        self, *, session_id: str, context: CommandContext
-    ) -> dict[str, Any]:
+    async def resume_task(self, *, session_id: str, context: CommandContext) -> dict[str, Any]:
         return await self._service.resume_task(session_id=session_id, context=context)
 
     async def record_approval_response(

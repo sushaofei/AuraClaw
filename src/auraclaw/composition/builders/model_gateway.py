@@ -68,7 +68,9 @@ def build_model_gateway_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         "model-gateway",
         model_routes(model_service),
         stream_routes=model_stream_routes(model_service),
-        workload_identities=_configured_identities(settings, (ServiceIdentity.AGENT_RUNTIME,)),
+        workload_identities=_configured_identities(
+            settings, (ServiceIdentity.AGENT_RUNTIME, ServiceIdentity.POLICY)
+        ),
     )
     app.mount("/", contract_app)
     return app

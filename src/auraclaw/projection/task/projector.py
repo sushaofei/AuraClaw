@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import Sequence
 from typing import Any
 
+from auraclaw.contracts.approval_mode import ApprovalConfiguration
 from auraclaw.contracts.events import CanonicalEvent
 from auraclaw.contracts.state import RunStatus, SessionStatus
 
@@ -18,6 +19,10 @@ class UnsupportedEventError(RuntimeError):
 
 KNOWN_TASK_EVENTS = {
     "session.created",
+    "session.approval_mode_changed",
+    "policy.review.requested",
+    "policy.review.completed",
+    "policy.mode.resolved",
     "user.message.appended",
     "run.requested",
     "run.scheduled",
@@ -118,9 +123,7 @@ class InMemoryTaskProjection:
             for (view_tenant, _session_id), view in self._tasks.items()
             if view_tenant == tenant_id
         ]
-        return page_task_views(
-            views, kind=kind, status=status, cursor=cursor, limit=limit
-        )
+        return page_task_views(views, kind=kind, status=status, cursor=cursor, limit=limit)
 
     async def clear(self) -> None:
         async with self._lock:
@@ -172,12 +175,23 @@ class InMemoryTaskProjection:
             "source": "chat",
             "schedule_id": None,
             "occurrence_id": None,
+            "approval": {},
+            **ApprovalConfiguration().public_dict(),
             "projection_version": 0,
         }
 
     @staticmethod
     def _apply(view: dict[str, Any], event: CanonicalEvent) -> None:
         payload = event.payload
+        if "approval" in payload and event.type in {
+            "session.created",
+            "child.created",
+            "run.requested",
+            "session.resumed",
+            "session.approval_mode_changed",
+        }:
+            approval = ApprovalConfiguration.model_validate(payload["approval"]).public_dict()
+            view.update(approval=approval, **approval)
         if event.type == "session.created":
             view.update(
                 goal=payload["goal"],
@@ -398,8 +412,7 @@ class InMemoryTaskProjection:
                             "artifact_refs": payload.get("artifact_refs", []),
                             "output_summary": payload.get("output_summary"),
                         }
-                        if activation.get("skill_activation_id")
-                        == payload["skill_activation_id"]
+                        if activation.get("skill_activation_id") == payload["skill_activation_id"]
                         else {}
                     ),
                 }

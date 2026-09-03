@@ -65,7 +65,8 @@ class _ApprovalReader:
         return None
 
     async def find_approved(
-        self, tenant_id: str, session_id: str, digest: str, policy_version: str
+        self, tenant_id: str, session_id: str, digest: str, policy_version: str,
+        run_id: str | None = None,
     ) -> None:
         del tenant_id, session_id, digest, policy_version
         return None
@@ -348,7 +349,7 @@ def test_hands_policy_deny_and_approval_required(kind: str) -> None:
 
 
 @pytest.mark.parametrize("kind", ["in-process", "http"])
-def test_read_only_remote_mcp_tool_does_not_require_approval(kind: str) -> None:
+def test_explicit_approval_policy_also_applies_to_read_only_mcp(kind: str) -> None:
     async def scenario() -> None:
         gateway, recorder = _gateway(
             policy=_RequireApprovalPolicy(),
@@ -366,8 +367,9 @@ def test_read_only_remote_mcp_tool_does_not_require_approval(kind: str) -> None:
                     expected_side_effect="read",
                 ),
             )
-            assert result.status == "success"
-            assert len(recorder.invocations) == 1
+            assert result.status == "denied"
+            assert result.error_code == "approval_required"
+            assert len(recorder.invocations) == 0
 
     asyncio.run(scenario())
 

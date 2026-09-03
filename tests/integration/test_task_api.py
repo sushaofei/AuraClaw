@@ -319,7 +319,7 @@ def test_sync_invoke_reuses_idempotent_session_and_returns_cancelled() -> None:
             created = await client.post(
                 "/v1/tasks",
                 headers={**headers, "Idempotency-Key": "sync-same-key"},
-                json={"goal": "cancel while waiting"},
+                json={"goal": "cancel while waiting", "interaction_mode": "non_streaming"},
             )
             assert created.status_code == 202
             session_id = created.json()["session_id"]
