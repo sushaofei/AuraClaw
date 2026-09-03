@@ -7,6 +7,7 @@ from uuid import uuid4
 import asyncpg
 import pytest
 
+from auraclaw.action.capability_catalog import skill_binding_status_tool
 from auraclaw.action.policy import PolicyEngine
 from auraclaw.action.tool_gateway import ToolGateway, ToolRegistry
 from auraclaw.config import get_settings
@@ -18,6 +19,7 @@ from auraclaw.contracts.tools import (
     ToolResult,
     ToolResultStatus,
 )
+from auraclaw.domain.approval import action_digest
 from auraclaw.infrastructure.artifacts.store import ArtifactStore, InMemoryObjectStorage
 from auraclaw.infrastructure.hands.local import LocalHandsService
 from auraclaw.infrastructure.persistence.postgres_common import asyncpg_url
@@ -37,6 +39,57 @@ MIGRATION = "\n".join(
     )
 )
 pytestmark = pytest.mark.skipif(DATABASE_URL is None, reason="PostgreSQL test URL not configured")
+
+
+def test_authority_query_ignores_legacy_persisted_continue_across_replicas() -> None:
+    async def scenario() -> None:
+        assert DATABASE_URL is not None
+        connection = await asyncpg.connect(DATABASE_URL)
+        await connection.execute(MIGRATION)
+        suffix = uuid4().hex
+        capability = skill_binding_status_tool()
+        invocation = ToolInvocation(
+            tool_invocation_id=f"query-{suffix}", tenant_id=f"query-tenant-{suffix}",
+            root_session_id="root", session_id="session", run_id="run",
+            tool_name=capability.name, tool_version=capability.version,
+            arguments={"publisher": "platform", "name": "check", "version": "1.0.0",
+                       "package_digest": "sha256:" + "1" * 64},
+            expected_side_effect="read", idempotency_key=f"query-{suffix}", deadline=None,
+            fencing_token=1, actor_id="runtime",
+        )
+        store = PostgresInvocationStore(DATABASE_URL)
+        try:
+            digest = action_digest(capability.name, capability.version, invocation.arguments)
+            await store.begin(invocation, digest, owner="old", claim_token="old",
+                              claim_ttl=timedelta(seconds=30))
+            assert await store.complete(invocation, ToolResult(
+                status=ToolResultStatus.SUCCESS, content={"action": "continue"}
+            ), claim_token="old")
+            for action in ("pause", "cancel"):
+                hands = LocalHandsService(
+                    workspace_root=ROOT,
+                    handlers={capability.name: lambda _args, action=action: {"action": action}},
+                )
+                gateway = ToolGateway(
+                    registry=ToolRegistry((capability,)), policy=PolicyEngine(), hands=hands,
+                    approvals=InMemoryApprovalProjection(), invocation_store=store,
+                    artifacts=ArtifactStore(
+                        InMemoryObjectStorage(), signing_key=b"query-test-key-123"
+                    ),
+                )
+                assert (await gateway.execute(invocation)).content == {"action": action}
+            # Fresh reads leave old execution evidence intact; no global purge.
+            old = await store.begin(invocation, digest, owner="reader", claim_token="reader",
+                                    claim_ttl=timedelta(seconds=30))
+            assert old.cached_result.content == {"action": "continue"}
+        finally:
+            await store.close()
+            await connection.execute("DELETE FROM hands.invocation_attempt WHERE tenant_id=$1",
+                                     invocation.tenant_id)
+            await connection.execute("DELETE FROM hands.invocation WHERE tenant_id=$1",
+                                     invocation.tenant_id)
+            await connection.close()
+    asyncio.run(scenario())
 
 
 def test_hands_replicas_atomically_deduplicate_and_recover_invocation() -> None:

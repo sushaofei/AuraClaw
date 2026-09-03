@@ -59,6 +59,13 @@ class ToolCapability:
     timeout_seconds: float = 30.0
     owner: str = "platform"
     allowed_credential_operations: tuple[str, ...] = ()
+    # Only server-registered, read-only authority queries may opt out of replay.
+    # This is not an invocation option and is never populated from MCP metadata.
+    cache_result: bool = True
+
+    def __post_init__(self) -> None:
+        if not self.cache_result and self.permission is not ToolPermission.READ_ONLY:
+            raise ValueError("Only read-only queries may disable result replay")
 
 
 @dataclass(frozen=True)

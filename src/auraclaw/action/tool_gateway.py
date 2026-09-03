@@ -632,7 +632,7 @@ class ToolGateway:
             return self._capacity_result(exc.reason)
         try:
             async with self._locks.hold(cache_key, wait_seconds=self._capacity.remaining(ticket)):
-                previous = self._results.get(cache_key)
+                previous = self._results.get(cache_key) if capability.cache_result else None
                 if previous is not None:
                     previous_digest, previous_result = previous
                     if previous_digest != digest:
@@ -662,9 +662,12 @@ class ToolGateway:
         digest: str,
         cache_key: tuple[str, str],
     ) -> ToolResult:
-        if self._invocation_store is not None:
+        # Authority queries must observe current state, including for callers
+        # replaying an old request ID. Never consult a persisted execution result.
+        store = self._invocation_store if capability.cache_result else None
+        if store is not None:
             claim_token = secrets.token_urlsafe(24)
-            persisted = await self._invocation_store.begin(
+            persisted = await store.begin(
                 invocation,
                 digest,
                 owner=self._instance_id,
@@ -713,10 +716,11 @@ class ToolGateway:
                 summary="tool policy denied execution",
                 error_code="policy_denied",
             )
-            if self._invocation_store is not None:
+            if store is not None:
                 if not await self._complete_claimed(invocation, result):
                     return self._claim_lost_result("before policy result was committed")
-            self._results[cache_key] = (digest, result)
+            if capability.cache_result:
+                self._results[cache_key] = (digest, result)
             return result
         if decision is PolicyDecision.REQUIRE_APPROVAL:
             approval = await self._resolve_approval(invocation, capability, digest, policy_version)
@@ -757,21 +761,21 @@ class ToolGateway:
                     metadata={"approval_request": pending.as_event_payload()},
                     error_code="approval_required",
                 )
-                if self._invocation_store is not None:
+                if store is not None:
                     claim_token = self._claim_token(invocation)
-                    parked = await self._invocation_store.wait_for_approval(
+                    parked = await store.wait_for_approval(
                         invocation, result, claim_token=claim_token
                     )
                     if not parked:
                         return self._claim_lost_result("before approval state was committed")
                 return result
 
-        if self._invocation_store is not None:
+        if store is not None:
             claim_token = self._claim_token(invocation)
-            if not await self._invocation_store.mark_executing(invocation, claim_token=claim_token):
+            if not await store.mark_executing(invocation, claim_token=claim_token):
                 return self._claim_lost_result("before dispatch")
         result = await self._dispatch(invocation, capability, policy_decision_id=decision_id)
-        if self._invocation_store is not None:
+        if store is not None:
             if not await self._complete_claimed(invocation, result):
                 return ToolResult(
                     status=ToolResultStatus.UNKNOWN,
@@ -779,7 +783,8 @@ class ToolGateway:
                     error_code="invocation_completion_uncommitted",
                     side_effect_status="unknown",
                 )
-        self._results[cache_key] = (digest, result)
+        if capability.cache_result:
+            self._results[cache_key] = (digest, result)
         return result
 
     @staticmethod

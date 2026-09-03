@@ -11,6 +11,7 @@ from auraclaw.contracts.hands import (
 )
 from auraclaw.contracts.skills import SkillBinding, effective_skill_role
 from auraclaw.control.ports import RuntimeAssignment
+from auraclaw.runtime.authority_queries import authority_request_id
 from auraclaw.runtime.ports import HandsClient, SkillResolutionOutcome, ToolCall
 
 _SKILL_RESOLVE_TOOL_NAME = "auraclaw.skills.resolve"
@@ -143,7 +144,7 @@ class HandsRuntimeAdapter:
         result = await self.execute(
             assignment,
             ToolCall(
-                tool_invocation_id=(f"resolve_{assignment.run_id}_{name.replace('.', '_')}"),
+                tool_invocation_id=authority_request_id(assignment, "resolve"),
                 name=_SKILL_RESOLVE_TOOL_NAME,
                 version="1",
                 arguments={
