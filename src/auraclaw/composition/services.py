@@ -344,7 +344,8 @@ class RemoteRuntimeWorker:
             return
         except Exception as exc:
             try:
-                await self._harness.record_failure(assignment, exc)
+                if await self._harness.record_failure(assignment, exc):
+                    return
             except Exception:
                 logger.exception(
                     "failed to record run failure for %s; leaving assignment running",

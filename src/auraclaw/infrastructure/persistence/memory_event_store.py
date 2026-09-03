@@ -10,6 +10,7 @@ from uuid import uuid4
 from auraclaw.contracts.commands import CommandContext
 from auraclaw.contracts.errors import VersionConflictError
 from auraclaw.contracts.events import CanonicalEvent, NewEvent, utc_now
+from auraclaw.domain.skill_execution import has_active_skill_reference
 from auraclaw.session.ports import AppendResult, ClaimedOutboxRecord, SessionSnapshot
 
 DELIVERY_TRIGGER_EVENTS = {
@@ -20,6 +21,7 @@ DELIVERY_TRIGGER_EVENTS = {
     "child.result_published",
 }
 CONTROL_TRIGGER_EVENTS = {
+    "skill.invocation.requested",
     "run.requested",
     "session.resumed",
     "approval.approved",
@@ -107,38 +109,9 @@ class InMemoryEventStore:
         name: str,
         package_digest: str | None = None,
     ) -> bool:
-        active_runs: set[tuple[str, str]] = set()
-        terminal_runs: set[tuple[str, str]] = set()
-        for event in await self.load_all(tenant_id):
-            if event.run_id is None:
-                continue
-            run_key = (event.session_id, event.run_id)
-            if event.type in {"run.completed", "run.failed", "run.cancelled"}:
-                terminal_runs.add(run_key)
-                continue
-            if event.type != "skill.activated":
-                continue
-            activation = event.payload.get("activation")
-            binding = activation.get("binding") if isinstance(activation, dict) else None
-            if not isinstance(binding, dict):
-                continue
-            references = (
-                binding,
-                *(item for item in binding.get("resolved_skills", ()) if isinstance(item, dict)),
-            )
-            if package_digest is not None:
-                matches = any(
-                    reference.get("package_digest") == package_digest for reference in references
-                )
-            else:
-                matches = any(
-                    reference.get("publisher") == publisher
-                    and (reference.get("skill_name") == name or reference.get("name") == name)
-                    for reference in references
-                )
-            if matches:
-                active_runs.add(run_key)
-        return bool(active_runs - terminal_runs)
+        return has_active_skill_reference(
+            await self.load_all(tenant_id), publisher, name, package_digest
+        )
 
     async def load_root(
         self,

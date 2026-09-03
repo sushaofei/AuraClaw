@@ -3439,3 +3439,13 @@ Ruff、Mypy（248 文件）、10 条架构合同通过。迁移不适用，部�
 - [x] PostgreSQL、Hands 与工作流联合 47 passed，全量 686 passed / 60 skipped。
 - [x] Ruff、Mypy（251 文件）、10 条架构合同通过；无 DDL，DTO 升级顺序及限制已记录。
 - [x] 排除无关修改和秘密，阶段提交推送；Run 取消与引用 drain 联合修复继续。
+
+## Skill / MCP 修复 N：取消与未知写调用引用（Issue #95/#96）
+
+- [x] 写调用前 Canonical requested、结果确认 settled；审批循环隔离，未知副作用持续保留引用。
+- [x] Run 取消/deadline/异常进入只读恢复，无模型/业务重放，逐步骤检查取消与预算。
+- [x] Control 为待确认调用保留唤醒，故障收尾不能覆盖 waiting_for_tool。
+- [x] 内存/PostgreSQL 对 Skill 终态、Run 终态、未知写引用及再次审批的行为一致。
+- [x] 联合 54 passed，全量 691 passed / 61 skipped；新增 dispatch 前提交事件顺序回归通过。
+- [x] Ruff、Mypy（252 文件）和 10 条架构合同通过；无 DDL，旧 Runtime 排空与协调发布说明同步。
+- [x] 排除无关修改/秘密，阶段提交并推送；#94 旧包清理 worker 和真实部署联合验收继续。

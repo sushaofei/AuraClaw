@@ -14,10 +14,13 @@ class RuntimeExecutionGuard:
     def __init__(self, control: RuntimeControlClient) -> None:
         self._control = control
 
-    async def check(self, assignment: RuntimeAssignment) -> None:
+    async def fence(self, assignment: RuntimeAssignment) -> None:
         await self._control.assert_fencing(
             assignment_resource_id(assignment), assignment.fencing_token
         )
+
+    async def check(self, assignment: RuntimeAssignment) -> None:
+        await self.fence(assignment)
         if await self._control.is_cancelled(
             assignment.tenant_id, assignment.session_id, assignment.run_id
         ):
