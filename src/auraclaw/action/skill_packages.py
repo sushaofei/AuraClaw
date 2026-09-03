@@ -547,13 +547,17 @@ class SkillPackageRegistry:
         name: str,
         *,
         discoverable: bool,
+        version: str | None = None,
     ) -> None:
         keys = [
             key
             for key in self._publications
             if key[0] == tenant_id and key[1] == publisher and key[2] == name
+            and (version is None or key[3] == version)
         ]
         if not keys:
+            if version is not None:
+                return
             raise NotFoundError("Skill publication not found")
         for key in keys:
             publication = self._publications[key]
@@ -733,6 +737,8 @@ class SkillResolver:
         active_skill_names: tuple[str, ...] = (),
         _dependency_path: tuple[str, ...] = (),
     ) -> SkillBinding:
+        if self._reload_tenant is not None and not _dependency_path:
+            await self._reload_tenant(tenant_id)
         original_assignment_role = assignment_role or role
         policy_role = effective_skill_role(original_assignment_role)
         publication = next(
@@ -1010,8 +1016,10 @@ def skill_package_from_archive(
 def version_satisfies(version: str, constraint: str) -> bool:
     if constraint.strip() in {"", "*"}:
         return True
-    if constraint.strip() == version:
+    if constraint.strip() in {version, f"={version}", f"=={version}"}:
         return True
+    if "-" in constraint:
+        return False
     current = _semver(version)
     for raw_clause in constraint.split(","):
         clause = raw_clause.strip()

@@ -9,18 +9,22 @@ from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 from auraclaw.action.ports import ArtifactContentReader, SkillArtifactLifecycle
+from auraclaw.action.skill_admin_catalog import SkillCapabilityAvailability
 from auraclaw.action.skill_lifecycle import (
     SkillAdmissionAuditRecord,
     SkillLifecycleStore,
     SkillPublishCommit,
+    skill_version_key,
 )
 from auraclaw.action.skill_packages import (
     DefaultSkillPackageContentScanner,
     SkillPackage,
     SkillPackageContentScanner,
     SkillPackageRegistry,
+    skill_capability_descriptor,
     skill_package_digest,
     skill_package_from_archive,
+    version_satisfies,
 )
 from auraclaw.action.skill_publishers import SkillPublisherTrustService
 from auraclaw.contracts.errors import (
@@ -39,6 +43,7 @@ from auraclaw.contracts.skills import (
     SkillPackageRetentionStatus,
     SkillPublicationRecord,
     SkillPublicationStatus,
+    SkillUpgradeState,
 )
 from auraclaw.contracts.tools import ArtifactRef
 
@@ -79,7 +84,9 @@ class SkillPublicationService:
         artifact_lifecycle: SkillArtifactLifecycle | None = None,
         publisher_trust: SkillPublisherTrustService | None = None,
         content_scanner: SkillPackageContentScanner | None = None,
+        dependency_availability: SkillCapabilityAvailability | None = None,
     ) -> None:
+        self._dependency_availability = dependency_availability
         self._registry = registry
         self._lifecycle = lifecycle
         self._artifacts = artifacts
@@ -213,6 +220,22 @@ class SkillPublicationService:
         existing_installation = await self._lifecycle.get_installation(
             command.tenant_id, manifest.publisher, manifest.name
         )
+        if command.activate and existing_installation is not None:
+            if (
+                command.expected_installation_revision is not None
+                and command.expected_installation_revision != existing_installation.revision
+            ):
+                replay_digest = await self._lifecycle.get_publish_command_digest(
+                    command.tenant_id, command.command_id
+                )
+                if replay_digest != _publish_request_digest(command, digest, artifact_ref):
+                    raise VersionConflictError("Skill installation revision conflict")
+            for current in await self._lifecycle.list_publications(command.tenant_id):
+                if (current.publisher, current.name) == (manifest.publisher, manifest.name) and (
+                    current.status is not SkillPublicationStatus.STAGED
+                    and skill_version_key(current.version) > skill_version_key(manifest.version)
+                ):
+                    raise VersionConflictError("Skill upgrade cannot downgrade the current version")
         replace_purged = (
             existing is not None
             and persisted_package is not None
@@ -230,7 +253,8 @@ class SkillPublicationService:
             and not replace_purged
             and existing.status is not desired_status
             and not (
-                existing.status in {
+                existing.status
+                in {
                     SkillPublicationStatus.STAGED,
                     SkillPublicationStatus.RESTORING,
                 }
@@ -263,7 +287,7 @@ class SkillPublicationService:
                 publication = await self._registry.publish(
                     command.tenant_id,
                     package,
-                    status=desired_status,
+                    status=SkillPublicationStatus.STAGED,
                     signature_verified=signature_verified,
                 )
             else:
@@ -275,7 +299,7 @@ class SkillPublicationService:
                         manifest=manifest,
                         package_digest=digest,
                         artifact_ref=artifact_ref,
-                        status=desired_status,
+                        status=SkillPublicationStatus.STAGED,
                     ),
                     signature_verified=signature_verified,
                 )
@@ -292,11 +316,47 @@ class SkillPublicationService:
             )
         else:
             if persisted_package is None:
-                raise VersionConflictError(
-                    "Skill publication references a missing package"
-                )
+                raise VersionConflictError("Skill publication references a missing package")
             package_record = persisted_package
 
+        if (
+            command.activate
+            and existing_installation is not None
+            and (existing_installation.pinned_package_digest != package_record.package_digest)
+        ):
+            candidate = PublishedSkill(
+                tenant_id=command.tenant_id,
+                manifest=manifest,
+                package_digest=package_record.package_digest,
+                artifact_ref=package_record.artifact_ref,
+            )
+            if manifest.required_tools or manifest.required_resources or manifest.required_skills:
+                if (
+                    self._dependency_availability is None
+                    or not await self._dependency_availability.is_available(
+                        command.tenant_id, skill_capability_descriptor(candidate)
+                    )
+                ):
+                    raise PolicyDeniedError("Skill upgrade dependencies are unavailable")
+            installations = {
+                (item.publisher, item.name): item
+                for item in await self._lifecycle.list_installations(command.tenant_id)
+            }
+            for other in await self._lifecycle.list_packages(command.tenant_id):
+                selected = installations.get((other.manifest.publisher, other.manifest.name))
+                if selected is None or selected.status is not SkillInstallationStatus.ACTIVE:
+                    continue
+                if selected.pinned_package_digest not in {None, other.package_digest}:
+                    continue
+                for requirement in other.manifest.required_skills:
+                    if requirement.name == manifest.name and requirement.publisher in {
+                        None,
+                        manifest.publisher,
+                    }:
+                        if not version_satisfies(manifest.version, requirement.version):
+                            raise PolicyDeniedError(
+                                "Skill upgrade conflicts with an installed dependent Skill"
+                            )
         if self._artifact_lifecycle is not None and not artifact_claimed:
             await self._artifact_lifecycle.claim_publication(
                 tenant_id=command.tenant_id,
@@ -381,12 +441,26 @@ class SkillPublicationService:
                 package_record,
                 now,
             )
+        upgrade = None
+        if installation is not None and existing_installation is not None and not replace_purged:
+            upgrade = SkillUpgradeState(
+                tenant_id=command.tenant_id,
+                publisher=manifest.publisher,
+                name=manifest.name,
+                operation_id=_stable_id("sku", command.tenant_id, command.command_id),
+                command_id=command.command_id,
+                current_version=manifest.version,
+                package_digest=package_record.package_digest,
+                generation=installation.revision,
+                actor_id=command.actor_id,
+                correlation_id=command.correlation_id,
+                causation_id=command.causation_id,
+                updated_at=now,
+            )
         committed = await self._lifecycle.commit_publish(
             SkillPublishCommit(
                 command_id=command.command_id,
-                request_digest=_publish_request_digest(
-                    command, digest, artifact_ref
-                ),
+                request_digest=_publish_request_digest(command, digest, artifact_ref),
                 actor_id=command.actor_id,
                 correlation_id=command.correlation_id,
                 causation_id=command.causation_id,
@@ -396,9 +470,10 @@ class SkillPublicationService:
                 installation=installation,
                 occurred_at=now,
                 replace_purged=replace_purged,
+                upgrade=upgrade,
                 expected_installation_revision=(
                     existing_installation.revision
-                    if replace_purged and existing_installation is not None
+                    if (replace_purged or upgrade is not None) and existing_installation is not None
                     else None
                 ),
             )
@@ -420,9 +495,26 @@ class SkillPublicationService:
                 package_digest=committed.package.package_digest,
                 artifact_ref=committed.package.artifact_ref,
                 status=committed.publication.status,
+                upgrade=await self._lifecycle.get_upgrade(
+                    command.tenant_id, manifest.publisher, manifest.name
+                ),
             ),
             signature_verified=signature_verified,
         )
+        if upgrade is not None:
+            for old in await self._lifecycle.list_publications(command.tenant_id):
+                if (old.publisher, old.name) == (manifest.publisher, manifest.name):
+                    self._registry.set_skill_discoverable(
+                        command.tenant_id,
+                        old.publisher,
+                        old.name,
+                        version=old.version,
+                        discoverable=(
+                            old.version == manifest.version
+                            and installation is not None
+                            and installation.status is SkillInstallationStatus.ACTIVE
+                        ),
+                    )
         return publication
 
     async def _validate_signature(
@@ -433,9 +525,7 @@ class SkillPublicationService:
         if self._publisher_trust is None:
             raise PolicyDeniedError("External Skill Publisher Registry is unavailable")
         normalized = self._registry.validate_content(package)
-        key_id = await self._publisher_trust.verify_for_admission(
-            tenant_id, normalized
-        )
+        key_id = await self._publisher_trust.verify_for_admission(tenant_id, normalized)
         return normalized, key_id, True
 
     def _scan_content(self, package: SkillPackage) -> None:
@@ -453,9 +543,7 @@ class SkillPublicationService:
     ) -> None:
         safe_error_code = None
         if error is not None:
-            safe_error_code = (
-                error.code if isinstance(error, AuraClawError) else "internal_error"
-            )
+            safe_error_code = error.code if isinstance(error, AuraClawError) else "internal_error"
         await self._lifecycle.record_admission(
             SkillAdmissionAuditRecord(
                 admission_id=f"skad_{uuid4().hex}",
@@ -500,7 +588,21 @@ class SkillPublicationService:
             manifest.name,
         )
         if existing is not None:
-            return None
+            if (
+                existing.pinned_package_digest == package.package_digest
+                and existing.version_constraint == f"={manifest.version}"
+            ):
+                return None
+            return existing.model_copy(
+                update={
+                    "version_constraint": f"={manifest.version}",
+                    "pinned_package_digest": package.package_digest,
+                    "auto_upgrade": False,
+                    "revision": existing.revision + 1,
+                    "updated_by": command.actor_id,
+                    "updated_at": now,
+                }
+            )
         return SkillInstallationRecord(
             installation_id=_stable_id(
                 "ski",

@@ -83,9 +83,7 @@ def test_postgres_store_satisfies_shared_lifecycle_contract() -> None:
                 "skill_publication",
                 "skill_package",
             ):
-                await connection.execute(
-                    f"DELETE FROM hands.{table} WHERE tenant_id=$1", tenant_id
-                )
+                await connection.execute(f"DELETE FROM hands.{table} WHERE tenant_id=$1", tenant_id)
             await connection.close()
 
     asyncio.run(scenario())
@@ -160,9 +158,9 @@ async def _ensure_skill_lifecycle_schema(connection: asyncpg.Connection) -> None
         )"""
     )
     if not republish_schema_current:
-        await connection.execute(
-            (ROOT / "migrations/0055_skill_package_republish.sql").read_text()
-        )
+        await connection.execute((ROOT / "migrations/0055_skill_package_republish.sql").read_text())
+
+    await connection.execute((ROOT / "migrations/0061_skill_atomic_upgrade.sql").read_text())
 
 
 def test_postgres_republish_replaces_purged_coordinate_and_archives_tombstone() -> None:
@@ -353,9 +351,7 @@ def test_postgres_republish_replaces_purged_coordinate_and_archives_tombstone() 
                 "skill_package_tombstone",
                 "skill_package",
             ):
-                await connection.execute(
-                    f"DELETE FROM hands.{table} WHERE tenant_id=$1", tenant_id
-                )
+                await connection.execute(f"DELETE FROM hands.{table} WHERE tenant_id=$1", tenant_id)
             await connection.close()
 
     asyncio.run(scenario())
@@ -388,13 +384,12 @@ def test_postgres_skill_lifecycle_broadcast_outbox_is_monotonic_and_claimed_once
                 owner="relay-a", limit=10, claim_ttl=timedelta(seconds=30)
             )
             assert [record.signal.revision for record in claimed_a] == [1, 2]
-            assert await store_b.claim(
-                owner="relay-b", limit=10, claim_ttl=timedelta(seconds=30)
-            ) == ()
+            assert (
+                await store_b.claim(owner="relay-b", limit=10, claim_ttl=timedelta(seconds=30))
+                == ()
+            )
             for record in claimed_a:
-                assert await store_a.complete(
-                    outbox_id=record.outbox_id, owner="relay-a"
-                )
+                assert await store_a.complete(outbox_id=record.outbox_id, owner="relay-a")
         finally:
             await store_a.close()
             await store_b.close()
@@ -406,6 +401,104 @@ def test_postgres_skill_lifecycle_broadcast_outbox_is_monotonic_and_claimed_once
                 "DELETE FROM hands.skill_lifecycle_revision WHERE tenant_id=$1",
                 tenant_id,
             )
+            await connection.close()
+
+    asyncio.run(scenario())
+
+
+def test_postgres_upgrade_switches_installation_publication_and_operation_together() -> None:
+    from auraclaw.action.mcp_primitives import HandsResourceRegistry
+    from auraclaw.action.skill_packages import (
+        HmacSkillSignatureVerifier,
+        SkillPackage,
+        SkillPackageRegistry,
+    )
+    from auraclaw.action.skill_publication import SkillPublicationService
+    from auraclaw.contracts.errors import VersionConflictError
+    from auraclaw.contracts.skills import PublishSkillCommand
+
+    async def scenario() -> None:
+        assert DATABASE_URL is not None
+        connection = await asyncpg.connect(DATABASE_URL)
+        await _ensure_skill_lifecycle_schema(connection)
+        tenant = f"tenant-upgrade-{uuid4().hex}"
+        a, b = PostgresSkillLifecycleStore(DATABASE_URL), PostgresSkillLifecycleStore(DATABASE_URL)
+        artifacts = _SharedSkillArtifacts()
+        verifier = HmacSkillSignatureVerifier({"platform": b"upgrade-fixture-key"})
+
+        def service(store):
+            return SkillPublicationService(
+                lifecycle=store,
+                registry=SkillPackageRegistry(
+                    artifacts=artifacts,
+                    signature_verifier=verifier,
+                    resources=HandsResourceRegistry(),
+                ),
+            )
+
+        def package(version):
+            unsigned = SkillManifest(
+                name="upgrade.test",
+                publisher="platform",
+                version=version,
+                description="upgrade contract",
+                signature="hmac-sha256:" + "0" * 64,
+            )
+            files = {"SKILL.md": b"# Upgrade contract\n"}
+            manifest = unsigned.model_copy(update={"signature": verifier.sign(unsigned, files)})
+            return SkillPackage(
+                manifest=manifest,
+                files={"manifest.json": manifest.model_dump_json().encode(), **files},
+            )
+
+        def command(version, expected=None):
+            return PublishSkillCommand(
+                tenant_id=tenant,
+                actor_id="admin",
+                command_id=f"publish-{version}",
+                expected_installation_revision=expected,
+                correlation_id="upgrade",
+                causation_id="upgrade",
+            )
+
+        sa, sb = service(a), service(b)
+        try:
+            await sa.publish(command("1.0.0"), package("1.0.0"))
+            upgraded = await sb.publish(command("2.0.0", 1), package("2.0.0"))
+            assert upgraded.upgrade is not None and upgraded.upgrade.phase == "draining"
+            installed = await a.get_installation(tenant, "platform", "upgrade.test")
+            assert installed is not None and installed.revision == 2
+            assert installed.pinned_package_digest == upgraded.package_digest
+            old = await a.get_publication(tenant, "platform", "upgrade.test", "1.0.0")
+            assert old is not None and old.revocation_action is SkillRevocationAction.CONTINUE
+            assert old.status is SkillPublicationStatus.REVOKED
+            assert await a.get_upgrade(tenant, "platform", "upgrade.test") == upgraded.upgrade
+            assert await sa.publish(command("2.0.0", 1), package("2.0.0")) == upgraded
+            results = await asyncio.gather(
+                sa.publish(command("3.0.0", 2), package("3.0.0")),
+                sb.publish(command("4.0.0", 2), package("4.0.0")),
+                return_exceptions=True,
+            )
+            assert sum(not isinstance(result, Exception) for result in results) == 1
+            assert any(isinstance(result, VersionConflictError) for result in results)
+            installed = await b.get_installation(tenant, "platform", "upgrade.test")
+            assert installed is not None and installed.revision == 3
+            with pytest.raises(VersionConflictError):
+                await sa.publish(command("1.0.0"), package("1.0.0"))
+        finally:
+            await a.close()
+            await b.close()
+            for table in (
+                "skill_upgrade_current",
+                "skill_lifecycle_broadcast_outbox",
+                "skill_outbox",
+                "skill_admission_audit",
+                "skill_command",
+                "skill_installation",
+                "skill_publication",
+                "skill_package",
+            ):
+                await connection.execute(f"DELETE FROM hands.{table} WHERE tenant_id=$1", tenant)
             await connection.close()
 
     asyncio.run(scenario())

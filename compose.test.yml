@@ -89,7 +89,7 @@ services:
         "migrate",
         "up",
         "--target",
-        "${AURACLAW_MIGRATE_TARGET:-0060}",
+        "${AURACLAW_MIGRATE_TARGET:-0061}",
         "--directory",
         "${AURACLAW_MIGRATIONS_DIRECTORY:-/app/migrations}",
       ]

@@ -6,7 +6,7 @@ import binascii
 import json
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Protocol
+from typing import Any, Protocol
 
 from auraclaw.contracts.errors import (
     NotFoundError,
@@ -18,6 +18,8 @@ from auraclaw.contracts.skills import (
     SkillPackageRecord,
     SkillPublicationRecord,
     SkillPublicationStatus,
+    SkillRevocationAction,
+    SkillUpgradeState,
 )
 
 PackageKey = tuple[str, str, str, str]
@@ -39,6 +41,7 @@ class SkillPublishCommit:
     installation: SkillInstallationRecord | None
     occurred_at: datetime
     replace_purged: bool = False
+    upgrade: SkillUpgradeState | None = None
     expected_installation_revision: int | None = None
 
 
@@ -117,9 +120,7 @@ def encode_skill_admission_cursor(record: SkillAdmissionAuditRecord) -> str:
 def decode_skill_admission_cursor(cursor: str) -> tuple[datetime, str]:
     try:
         padding = "=" * (-len(cursor) % 4)
-        raw = base64.b64decode(
-            cursor + padding, altchars=b"-_", validate=True
-        ).decode()
+        raw = base64.b64decode(cursor + padding, altchars=b"-_", validate=True).decode()
         payload = json.loads(raw)
         if not isinstance(payload, list) or len(payload) != 2:
             raise ValueError
@@ -159,6 +160,14 @@ class SkillOutboxRecord:
 
 
 class SkillLifecycleStore(Protocol):
+    async def get_publish_command_digest(self, tenant_id: str, command_id: str) -> str | None: ...
+
+    async def get_upgrade(
+        self, tenant_id: str, publisher: str, name: str
+    ) -> SkillUpgradeState | None: ...
+
+    async def list_pending_upgrades(self, *, limit: int = 100) -> tuple[SkillUpgradeState, ...]: ...
+
     async def record_admission(self, record: SkillAdmissionAuditRecord) -> None: ...
 
     async def list_admissions(
@@ -187,27 +196,19 @@ class SkillLifecycleStore(Protocol):
         limit: int = 100,
     ) -> SkillAdmissionPage: ...
 
-    async def delete_admissions_before(
-        self, cutoff: datetime, *, limit: int = 1000
-    ) -> int: ...
+    async def delete_admissions_before(self, cutoff: datetime, *, limit: int = 1000) -> int: ...
 
-    async def commit_publish(
-        self, commit: SkillPublishCommit
-    ) -> SkillPublishCommitResult: ...
+    async def commit_publish(self, commit: SkillPublishCommit) -> SkillPublishCommitResult: ...
 
     async def claim_outbox(
         self, *, owner: str, limit: int = 100, claim_ttl: timedelta = timedelta(seconds=30)
     ) -> tuple[SkillOutboxRecord, ...]: ...
 
-    async def renew_outbox(
-        self, *, outbox_id: str, owner: str, claim_ttl: timedelta
-    ) -> bool: ...
+    async def renew_outbox(self, *, outbox_id: str, owner: str, claim_ttl: timedelta) -> bool: ...
 
     async def complete_outbox(self, *, outbox_id: str, owner: str) -> bool: ...
 
-    async def fail_outbox(
-        self, *, outbox_id: str, owner: str, safe_error_code: str
-    ) -> bool: ...
+    async def fail_outbox(self, *, outbox_id: str, owner: str, safe_error_code: str) -> bool: ...
 
     async def has_artifact_reference(
         self, tenant_id: str, artifact_id: str, version: int
@@ -237,9 +238,7 @@ class SkillLifecycleStore(Protocol):
         self, tenant_id: str, publisher: str, name: str, version: str
     ) -> SkillPublicationRecord | None: ...
 
-    async def list_publications(
-        self, tenant_id: str
-    ) -> tuple[SkillPublicationRecord, ...]: ...
+    async def list_publications(self, tenant_id: str) -> tuple[SkillPublicationRecord, ...]: ...
 
     async def list_tenants(self) -> tuple[str, ...]: ...
 
@@ -255,36 +254,39 @@ class SkillLifecycleStore(Protocol):
         self, tenant_id: str, publisher: str, name: str
     ) -> SkillInstallationRecord | None: ...
 
-    async def list_installations(
-        self, tenant_id: str
-    ) -> tuple[SkillInstallationRecord, ...]: ...
+    async def list_installations(self, tenant_id: str) -> tuple[SkillInstallationRecord, ...]: ...
 
-    async def commit_restore(
-        self, commit: SkillRestoreCommit
-    ) -> SkillPublicationRecord: ...
+    async def commit_restore(self, commit: SkillRestoreCommit) -> SkillPublicationRecord: ...
 
 
 @dataclass
 class InMemorySkillLifecycleStore:
     _admission_audits: list[SkillAdmissionAuditRecord] = field(default_factory=list)
+    _upgrades: dict[InstallationKey, SkillUpgradeState] = field(default_factory=dict)
     _packages: dict[PackageKey, SkillPackageRecord] = field(default_factory=dict)
     _package_tombstones: list[SkillPackageRecord] = field(default_factory=list)
-    _publications: dict[PublicationKey, SkillPublicationRecord] = field(
-        default_factory=dict
-    )
-    _installations: dict[InstallationKey, SkillInstallationRecord] = field(
-        default_factory=dict
-    )
+    _publications: dict[PublicationKey, SkillPublicationRecord] = field(default_factory=dict)
+    _installations: dict[InstallationKey, SkillInstallationRecord] = field(default_factory=dict)
     _restore_commands: dict[CommandKey, str] = field(default_factory=dict)
     _installation_commands: dict[CommandKey, tuple[str, InstallationKey]] = field(
         default_factory=dict
     )
-    _commands: dict[CommandKey, tuple[str, SkillPublishCommitResult]] = field(
-        default_factory=dict
-    )
+    _commands: dict[CommandKey, tuple[str, SkillPublishCommitResult]] = field(default_factory=dict)
     _outbox: dict[str, SkillOutboxRecord] = field(default_factory=dict)
     _claimed_outbox: dict[str, str] = field(default_factory=dict)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+    async def get_publish_command_digest(self, tenant_id: str, command_id: str) -> str | None:
+        command = self._commands.get((tenant_id, command_id))
+        return command[0] if command is not None else None
+
+    async def get_upgrade(
+        self, tenant_id: str, publisher: str, name: str
+    ) -> SkillUpgradeState | None:
+        return self._upgrades.get((tenant_id, publisher, name))
+
+    async def list_pending_upgrades(self, *, limit: int = 100) -> tuple[SkillUpgradeState, ...]:
+        return tuple(item for item in self._upgrades.values() if item.phase != "completed")[:limit]
 
     async def record_admission(self, record: SkillAdmissionAuditRecord) -> None:
         async with self._lock:
@@ -316,13 +318,11 @@ class InMemorySkillLifecycleStore:
     ) -> tuple[SkillAdmissionMetricRecord, ...]:
         grouped: dict[tuple[str, str], list[int]] = {}
         for record in self._admission_audits:
-            if record.tenant_id != tenant_id or (
-                since is not None and record.occurred_at < since
-            ):
+            if record.tenant_id != tenant_id or (since is not None and record.occurred_at < since):
                 continue
-            grouped.setdefault(
-                (record.outcome, record.content_policy_version), []
-            ).append(record.duration_ms)
+            grouped.setdefault((record.outcome, record.content_policy_version), []).append(
+                record.duration_ms
+            )
         return tuple(
             SkillAdmissionMetricRecord(
                 outcome=outcome,
@@ -357,10 +357,7 @@ class InMemorySkillLifecycleStore:
                     or record.content_policy_version == content_policy_version
                 )
                 and (since is None or record.occurred_at >= since)
-                and (
-                    cursor_key is None
-                    or (record.occurred_at, record.admission_id) < cursor_key
-                )
+                and (cursor_key is None or (record.occurred_at, record.admission_id) < cursor_key)
             ),
             key=lambda record: (record.occurred_at, record.admission_id),
             reverse=True,
@@ -374,16 +371,10 @@ class InMemorySkillLifecycleStore:
         )
         return SkillAdmissionPage(admissions=admissions, next_cursor=next_cursor)
 
-    async def delete_admissions_before(
-        self, cutoff: datetime, *, limit: int = 1000
-    ) -> int:
+    async def delete_admissions_before(self, cutoff: datetime, *, limit: int = 1000) -> int:
         async with self._lock:
             candidates = sorted(
-                (
-                    record
-                    for record in self._admission_audits
-                    if record.occurred_at < cutoff
-                ),
+                (record for record in self._admission_audits if record.occurred_at < cutoff),
                 key=lambda record: (record.occurred_at, record.admission_id),
             )[:limit]
             deleted = {record.admission_id for record in candidates}
@@ -395,9 +386,7 @@ class InMemorySkillLifecycleStore:
                 ]
             return len(deleted)
 
-    async def commit_publish(
-        self, commit: SkillPublishCommit
-    ) -> SkillPublishCommitResult:
+    async def commit_publish(self, commit: SkillPublishCommit) -> SkillPublishCommitResult:
         key = (commit.package.tenant_id, commit.command_id)
         async with self._lock:
             existing_command = self._commands.get(key)
@@ -405,14 +394,24 @@ class InMemorySkillLifecycleStore:
                 request_digest, result = existing_command
                 if request_digest != commit.request_digest:
                     raise VersionConflictError("Skill command id was reused")
-                current_publication = self._publications.get(
-                    _publication_key(result.publication)
-                )
+                current_publication = self._publications.get(_publication_key(result.publication))
                 return SkillPublishCommitResult(
                     package=result.package,
                     publication=current_publication or result.publication,
                     installation=result.installation,
                     replayed=True,
+                )
+            if commit.upgrade is not None:
+                validate_upgrade(
+                    commit,
+                    tuple(self._publications.values()),
+                    self._installations.get(
+                        (
+                            commit.package.tenant_id,
+                            commit.package.manifest.publisher,
+                            commit.package.manifest.name,
+                        )
+                    ),
                 )
             packages = dict(self._packages)
             package_tombstones = list(self._package_tombstones)
@@ -427,10 +426,8 @@ class InMemorySkillLifecycleStore:
                     current_publication = self._publications.get(publication_key)
                     if (
                         current_publication is not None
-                        and commit.publication.revision
-                        == commit.expected_publication_revision
-                        and current_publication.package_digest
-                        == commit.publication.package_digest
+                        and commit.publication.revision == commit.expected_publication_revision
+                        and current_publication.package_digest == commit.publication.package_digest
                         and current_publication.status is commit.publication.status
                     ):
                         publication = current_publication
@@ -441,21 +438,22 @@ class InMemorySkillLifecycleStore:
                         )
                     installation = None
                     if commit.installation is not None:
-                        current = self._installations.get(
-                            _installation_key(commit.installation)
-                        )
+                        current = self._installations.get(_installation_key(commit.installation))
                         if current is None:
                             installation = await self.put_installation(
                                 commit.installation, expected_revision=0
+                            )
+                        elif commit.upgrade is not None:
+                            installation = await self.put_installation(
+                                commit.installation,
+                                expected_revision=commit.expected_installation_revision or 0,
                             )
                         elif (
                             current.status is not commit.installation.status
                             or current.pinned_package_digest
                             != commit.installation.pinned_package_digest
                         ):
-                            raise VersionConflictError(
-                                "Skill installation revision conflict"
-                            )
+                            raise VersionConflictError("Skill installation revision conflict")
                         else:
                             installation = current
             except Exception:
@@ -464,6 +462,17 @@ class InMemorySkillLifecycleStore:
                 self._publications = publications
                 self._installations = installations
                 raise
+            if commit.upgrade is not None:
+                for old_key, old in tuple(self._publications.items()):
+                    if (
+                        old_key[:3] == _publication_key(publication)[:3]
+                        and old.version != publication.version
+                    ):
+                        if old.status is SkillPublicationStatus.ACTIVE:
+                            self._publications[old_key] = superseded_publication(old, commit)
+                self._upgrades[
+                    (package.tenant_id, package.manifest.publisher, package.manifest.name)
+                ] = commit.upgrade
             result = SkillPublishCommitResult(package, publication, installation)
             self._commands[key] = (commit.request_digest, result)
             outbox_id = f"{commit.package.tenant_id}:{commit.command_id}:published"
@@ -498,8 +507,7 @@ class InMemorySkillLifecycleStore:
             or commit.publication.package_digest != commit.package.package_digest
             or commit.installation is None
             or commit.installation.status.value != "active"
-            or commit.installation.pinned_package_digest
-            != commit.package.package_digest
+            or commit.installation.pinned_package_digest != commit.package.package_digest
             or existing_package is None
             or existing_package.retention_status.value != "purged"
             or existing_package.legal_hold
@@ -508,8 +516,7 @@ class InMemorySkillLifecycleStore:
             or existing_publication.revision != commit.expected_publication_revision
             or existing_installation is None
             or existing_installation.status.value != "uninstalled"
-            or existing_installation.revision
-            != commit.expected_installation_revision
+            or existing_installation.revision != commit.expected_installation_revision
         ):
             raise VersionConflictError("Purged Skill replacement preconditions changed")
         if commit.publication.revision != existing_publication.revision + 1:
@@ -537,9 +544,7 @@ class InMemorySkillLifecycleStore:
                     break
         return tuple(claimed)
 
-    async def renew_outbox(
-        self, *, outbox_id: str, owner: str, claim_ttl: timedelta
-    ) -> bool:
+    async def renew_outbox(self, *, outbox_id: str, owner: str, claim_ttl: timedelta) -> bool:
         del claim_ttl
         async with self._lock:
             return self._claimed_outbox.get(outbox_id) == owner
@@ -552,9 +557,7 @@ class InMemorySkillLifecycleStore:
                 return True
             return False
 
-    async def fail_outbox(
-        self, *, outbox_id: str, owner: str, safe_error_code: str
-    ) -> bool:
+    async def fail_outbox(self, *, outbox_id: str, owner: str, safe_error_code: str) -> bool:
         del safe_error_code
         async with self._lock:
             if self._claimed_outbox.get(outbox_id) != owner:
@@ -572,9 +575,7 @@ class InMemorySkillLifecycleStore:
             self._claimed_outbox.pop(outbox_id, None)
             return True
 
-    async def has_artifact_reference(
-        self, tenant_id: str, artifact_id: str, version: int
-    ) -> bool:
+    async def has_artifact_reference(self, tenant_id: str, artifact_id: str, version: int) -> bool:
         return any(
             package.tenant_id == tenant_id
             and package.artifact_ref.artifact_id == artifact_id
@@ -612,11 +613,7 @@ class InMemorySkillLifecycleStore:
     async def list_packages(self, tenant_id: str) -> tuple[SkillPackageRecord, ...]:
         return tuple(
             sorted(
-                (
-                    record
-                    for record in self._packages.values()
-                    if record.tenant_id == tenant_id
-                ),
+                (record for record in self._packages.values() if record.tenant_id == tenant_id),
                 key=lambda item: (
                     item.manifest.publisher,
                     item.manifest.name,
@@ -675,16 +672,10 @@ class InMemorySkillLifecycleStore:
     ) -> SkillPublicationRecord | None:
         return self._publications.get((tenant_id, publisher, name, version))
 
-    async def list_publications(
-        self, tenant_id: str
-    ) -> tuple[SkillPublicationRecord, ...]:
+    async def list_publications(self, tenant_id: str) -> tuple[SkillPublicationRecord, ...]:
         return tuple(
             sorted(
-                (
-                    record
-                    for record in self._publications.values()
-                    if record.tenant_id == tenant_id
-                ),
+                (record for record in self._publications.values() if record.tenant_id == tenant_id),
                 key=lambda item: (item.publisher, item.name, item.version),
             )
         )
@@ -693,14 +684,8 @@ class InMemorySkillLifecycleStore:
         return tuple(
             sorted(
                 {
-                    *(
-                        record.tenant_id
-                        for record in self._publications.values()
-                    ),
-                    *(
-                        record.tenant_id
-                        for record in self._installations.values()
-                    ),
+                    *(record.tenant_id for record in self._publications.values()),
+                    *(record.tenant_id for record in self._installations.values()),
                 }
             )
         )
@@ -733,9 +718,7 @@ class InMemorySkillLifecycleStore:
                     raise VersionConflictError("Skill installation command id was reused")
                 current = self._installations.get(installation_key)
                 if current is None:
-                    raise VersionConflictError(
-                        "Skill installation command result is incomplete"
-                    )
+                    raise VersionConflictError("Skill installation command result is incomplete")
                 return current
             result = await self.put_installation(
                 commit.installation,
@@ -747,9 +730,7 @@ class InMemorySkillLifecycleStore:
             )
             return result
 
-    async def list_installations(
-        self, tenant_id: str
-    ) -> tuple[SkillInstallationRecord, ...]:
+    async def list_installations(self, tenant_id: str) -> tuple[SkillInstallationRecord, ...]:
         return tuple(
             sorted(
                 (
@@ -761,9 +742,7 @@ class InMemorySkillLifecycleStore:
             )
         )
 
-    async def commit_restore(
-        self, commit: SkillRestoreCommit
-    ) -> SkillPublicationRecord:
+    async def commit_restore(self, commit: SkillRestoreCommit) -> SkillPublicationRecord:
         tenant_id = commit.publication.tenant_id
         command_key = (tenant_id, commit.command_id)
         publication_key = _publication_key(commit.publication)
@@ -771,14 +750,10 @@ class InMemorySkillLifecycleStore:
             replay = self._restore_commands.get(command_key)
             if replay is not None:
                 if replay != commit.request_digest:
-                    raise VersionConflictError(
-                        "Skill restore command id was reused"
-                    )
+                    raise VersionConflictError("Skill restore command id was reused")
                 current = self._publications.get(publication_key)
                 if current is None:
-                    raise VersionConflictError(
-                        "Skill restore command result is incomplete"
-                    )
+                    raise VersionConflictError("Skill restore command result is incomplete")
                 return current
             current = self._publications.get(publication_key)
             if current is None:
@@ -799,6 +774,7 @@ class InMemorySkillLifecycleStore:
             self._restore_commands[command_key] = commit.request_digest
             return updated
 
+
 def _package_key(record: SkillPackageRecord) -> PackageKey:
     manifest = record.manifest
     return record.tenant_id, manifest.publisher, manifest.name, manifest.version
@@ -813,9 +789,7 @@ def _installation_key(record: SkillInstallationRecord) -> InstallationKey:
 
 
 def _validate_revision(
-    existing: (
-        SkillPublicationRecord | SkillInstallationRecord | None
-    ),
+    existing: (SkillPublicationRecord | SkillInstallationRecord | None),
     revision: int,
     expected_revision: int,
     label: str,
@@ -840,3 +814,55 @@ def _publish_outbox_payload(
         "publication_status": publication.status.value,
         "artifact_ref": package.artifact_ref.as_dict(),
     }
+
+
+def skill_version_key(version: str) -> tuple[Any, ...]:
+    core, _, prerelease = version.partition("-")
+    return (
+        *tuple(int(part) for part in core.split(".")),
+        not bool(prerelease),
+        tuple(
+            (0, int(part)) if part.isdigit() else (1, part)
+            for part in prerelease.split(".")
+            if part
+        ),
+    )
+
+
+def validate_upgrade(
+    commit: SkillPublishCommit,
+    publications: tuple[SkillPublicationRecord, ...],
+    installation: SkillInstallationRecord | None,
+) -> None:
+    target = commit.package.manifest
+    if installation is None or installation.revision != commit.expected_installation_revision:
+        raise VersionConflictError("Skill installation revision conflict")
+    if commit.installation is None or commit.installation.revision != installation.revision + 1:
+        raise VersionConflictError("Skill installation next revision is invalid")
+    for current in publications:
+        if (current.tenant_id, current.publisher, current.name) != (
+            commit.package.tenant_id,
+            target.publisher,
+            target.name,
+        ):
+            continue
+        if current.status is not SkillPublicationStatus.STAGED and (
+            skill_version_key(current.version) > skill_version_key(target.version)
+        ):
+            raise VersionConflictError("Skill upgrade cannot downgrade the current version")
+
+
+def superseded_publication(
+    old: SkillPublicationRecord, commit: SkillPublishCommit
+) -> SkillPublicationRecord:
+    return old.model_copy(
+        update={
+            "status": SkillPublicationStatus.REVOKED,
+            "revocation_action": SkillRevocationAction.CONTINUE,
+            "revocation_policy_version": "skill-upgrade-v1",
+            "reason_code": "skill_version_replaced",
+            "revision": old.revision + 1,
+            "updated_by": commit.actor_id,
+            "updated_at": commit.occurred_at,
+        }
+    )
