@@ -23,6 +23,7 @@ x-auraclaw-service: &auraclaw-service
       max-file: "5"
 
 x-common-environment: &common-environment
+  AURACLAW_MIGRATIONS_DIRECTORY: ${AURACLAW_MIGRATIONS_DIRECTORY:-/app/migrations}
   AURACLAW_DEPLOYMENT_PROFILE: ${AURACLAW_DEPLOYMENT_PROFILE:-production}
   AURACLAW_TEST_UPLINK_INSECURE_IDENTITY: ${AURACLAW_TEST_UPLINK_INSECURE_IDENTITY:-false}
   AURACLAW_ALLOW_INSECURE_IDENTITY_HEADERS: ${AURACLAW_ALLOW_INSECURE_IDENTITY_HEADERS:-false}
@@ -88,7 +89,7 @@ services:
         "migrate",
         "up",
         "--target",
-        "${AURACLAW_MIGRATE_TARGET:-0055}",
+        "${AURACLAW_MIGRATE_TARGET:-0057}",
         "--directory",
         "${AURACLAW_MIGRATIONS_DIRECTORY:-/app/migrations}",
       ]

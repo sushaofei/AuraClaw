@@ -71,6 +71,42 @@ class PostgresMigrationRunner:
         self._database_url = asyncpg_url(database_url)
         self._migrations = discover_migrations(directory)
 
+    @property
+    def latest_version(self) -> str:
+        return self._migrations[-1].version
+
+    async def check(self, target: str | None = None) -> None:
+        """Verify the application's exact schema using a read-only connection."""
+        if target is not None and target != self.latest_version:
+            raise MigrationError(
+                f"migration target {target} does not match application schema {self.latest_version}"
+            )
+        connection = await asyncpg.connect(self._database_url)
+        try:
+            async with connection.transaction(readonly=True):
+                if not await connection.fetchval(
+                    "SELECT to_regclass('auraclaw_meta.schema_migration')"
+                ):
+                    raise MigrationError(
+                        "migration ledger is missing; run migrate up before startup"
+                    )
+                installed = await self._installed(connection)
+                unknown = set(installed) - {item.version for item in self._migrations}
+                if unknown:
+                    raise MigrationError("database has migrations newer than this application")
+                for migration in self._migrations:
+                    if migration.version not in installed:
+                        raise MigrationError(
+                            f"migration {migration.version} is pending; "
+                            "run migrate up before startup"
+                        )
+                    if installed[migration.version] != migration.checksum:
+                        raise MigrationError(
+                            f"checksum mismatch for applied migration {migration.version}"
+                        )
+        finally:
+            await connection.close()
+
     async def status(self) -> tuple[MigrationStatus, ...]:
         connection = await asyncpg.connect(self._database_url)
         try:

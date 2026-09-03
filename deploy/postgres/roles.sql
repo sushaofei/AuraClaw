@@ -104,3 +104,13 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA streaming
 
 ALTER DEFAULT PRIVILEGES IN SCHEMA model_gateway
     GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO auraclaw_model;
+
+-- Run after migrate up: startup checks read only the migration ledger.
+GRANT USAGE ON SCHEMA auraclaw_meta TO auraclaw_session, auraclaw_projection,
+    auraclaw_control, auraclaw_delivery, auraclaw_hands, auraclaw_policy,
+    auraclaw_credential, auraclaw_artifact, auraclaw_streaming, auraclaw_model,
+    auraclaw_task_query_ro;
+GRANT SELECT ON auraclaw_meta.schema_migration TO auraclaw_session,
+    auraclaw_projection, auraclaw_control, auraclaw_delivery, auraclaw_hands,
+    auraclaw_policy, auraclaw_credential, auraclaw_artifact, auraclaw_streaming,
+    auraclaw_model, auraclaw_task_query_ro;
