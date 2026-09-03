@@ -55,3 +55,25 @@ S3 开启或暂停版本控制时，逐个删除精确 key 的所有对象版本
 
 全量 683 passed / 60 skipped；临时 PostgreSQL 双副本重试、旧 deleted 元数据、共享对象保护与
 生命周期联合 11 passed。0062 up/down/up、Ruff、Mypy 和架构合同通过。
+
+## 自动清理 worker（#94 C2）
+
+Hands 启动恢复及周期任务自动处理 skill_upgrade_current。0063 的 generation/租约 token 隔离副本，
+续租覆盖对象 I/O；失去租约的 worker 不能提交清理结果。先检查旧包法律保留和 Canonical 在途引用，
+等待结束后关闭旧 publication 的继续执行入口，再次查询引用，随后调用物理清理接口。晚到旧 binding
+必须在下一次权威检查停止，确认结束前不删除包。当前版本、未来 staged 候选和其他 Skill 不属于清理目标。
+
+对象确认删除后，事务删除旧 publication/package、旧对象的 transient tombstone、旧 outbox 和 admission
+记录，并清除 publish command 中的旧版本/digest 及内存完整重放结果。只保留不可恢复旧包的请求摘要，
+旧命令重放不能重新生成旧包。同版本 purged 后重新发布也创建当前清理操作，旧 tombstone 仅作失败重试
+期间的清理输入，完成后必须为空；不提供旧版本恢复历史。迟到 publication outbox 先验证当前 Artifact 引用，
+不能重新绑定已删除的包。完成清理后重建并广播当前目录，移除本机旧资源和缓存。
+
+只有全量旧包清除且目录重建后才能 phase=completed；在途为 draining，错误/法律保留为 blocked，周期任务
+继续重试。blocked 不表示已经删除成功。先迁移 0063，再协调发布 Artifact、Session、Control、Hands 和 Runtime；
+旧 Runtime 的在途写调用按恢复文档排空后启用本版本 Hands。0063 down 在仍有操作或已清除旧命令材料时拒绝，
+回滚不可能恢复旧对象。历史 Canonical Session 事实与业务产物保持原有生命周期。
+
+全量 694 passed / 62 skipped；最后 PostgreSQL/晚到激活/同版本清理/管理/可靠性联合通过。
+独立数据库 0063 up/down/up、Ruff、Mypy（253 文件）、10 条架构合同通过。管理页操作状态展示与测试环境
+实际升级验收仍在后续阶段完成。

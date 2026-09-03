@@ -58,6 +58,7 @@ from auraclaw.action.skill_publishers import (
 )
 from auraclaw.action.skill_rebuild import SkillStateRebuilder
 from auraclaw.action.skill_reliability import SkillPublicationReliabilityWorker
+from auraclaw.action.skill_upgrade_cleanup import SkillUpgradeCleanupWorker
 from auraclaw.action.tool_gateway import ToolGateway, ToolRegistry
 from auraclaw.composition.services import (
     EmptyApprovalReader,
@@ -309,6 +310,11 @@ def build_action_hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         binding_references=skill_binding_references,
         retired_activator=skill_publication,
     )
+    skill_upgrade_cleanup = SkillUpgradeCleanupWorker(
+        lifecycle=skill_lifecycle, artifacts=artifact_reader,
+        references=skill_binding_references, projector=skill_state_projector,
+        claim_ttl=timedelta(seconds=settings.skill_reliability_claim_ttl_seconds),
+    )
     resources = skill_registry.resources or HandsResourceRegistry()
     capability_connectors: dict[str, Any] = {}
     resource_gateway = ManagedResourceGateway(
@@ -397,6 +403,7 @@ def build_action_hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         app.state.skill_rebuild_result = await skill_rebuilder.rebuild_all()
         app.state.skill_installation_drained = await skill_management.reconcile_draining()
         app.state.skill_reliability_result = await skill_reliability.run_once()
+        app.state.skill_upgrade_cleanup_completed = await skill_upgrade_cleanup.run_once()
         app.state.skill_admission_maintenance_result = await skill_admission_maintenance.run_once()
 
     app.state.capability_connectors = capability_connectors
@@ -478,6 +485,14 @@ def build_action_hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
             drain_skill_installations,
         )
     )
+
+    async def cleanup_replaced_skills() -> int:
+        completed = await skill_upgrade_cleanup.run_once()
+        app.state.skill_upgrade_cleanup_completed = completed
+        return completed
+
+    periodic_jobs.append(("skill-upgrade-cleanup", settings.mcp_reconcile_interval_seconds,
+                          cleanup_replaced_skills))
 
     async def cleanup_skill_admissions() -> int:
         result = await skill_admission_maintenance.run_once()

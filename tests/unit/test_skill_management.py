@@ -775,7 +775,23 @@ def test_purge_ignores_retention_and_history_but_rejects_active_bindings() -> No
         tombstones = await lifecycle.list_package_tombstones(
             "tenant-a", "platform", "release.prepare"
         )
-        assert tombstones == (purged,)
+        assert tombstones == (purged,)  # Transient cleanup input, erased by the upgrade worker.
+        from tests.unit.test_skill_upgrade_cleanup import _Artifacts as CleanupArtifacts
+
+        from auraclaw.action.skill_upgrade_cleanup import SkillUpgradeCleanupWorker
+
+        cleanup_artifacts = CleanupArtifacts()
+        worker = SkillUpgradeCleanupWorker(lifecycle=lifecycle, artifacts=cleanup_artifacts,
+            references=references, projector=projector)
+        assert republished.upgrade is not None
+        assert await worker.run_once() == 1
+        assert await lifecycle.list_package_tombstones(
+            "tenant-a", "platform", "release.prepare"
+        ) == ()
+        assert cleanup_artifacts.calls == [purged.artifact_ref]
+        assert (await lifecycle.get_package(
+            "tenant-a", "platform", "release.prepare", "1.0.0"
+        )).package_digest == republished.package_digest
 
     asyncio.run(scenario())
 

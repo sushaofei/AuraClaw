@@ -3449,3 +3449,14 @@ Ruff、Mypy（248 文件）、10 条架构合同通过。迁移不适用，部�
 - [x] 联合 54 passed，全量 691 passed / 61 skipped；新增 dispatch 前提交事件顺序回归通过。
 - [x] Ruff、Mypy（252 文件）和 10 条架构合同通过；无 DDL，旧 Runtime 排空与协调发布说明同步。
 - [x] 排除无关修改/秘密，阶段提交并推送；#94 旧包清理 worker 和真实部署联合验收继续。
+
+## Skill / MCP 修复 O：旧版本自动清理（Issue #94 C2）
+
+- [x] 启动/周期清理、跨副本租约/续租/generation fencing、阻塞重试和完成状态通过。
+- [x] Canonical 引用 drain、入口关闭后再次核对、晚到激活、当前版本和法律保留保护通过。
+- [x] 物理删除后事务移除旧 package/publication/tombstone/outbox/admission，旧命令仅保留最小摘要。
+- [x] 同版本重发创建清理操作，旧 transient tombstone 在完成后删除；迟到 outbox 不重绑定已删包。
+- [x] 全量 694 passed / 62 skipped；PostgreSQL、晚到激活、管理与可靠性联合验证通过。
+- [x] 0063 独立数据库 up/down/up、默认迁移目标、升级及不可恢复回滚说明同步。
+- [x] Ruff、Mypy（253 文件）、10 条架构合同通过；排除无关修改和秘密，阶段提交推送。
+- [x] 产品展示及测试环境验收继续，不提前关闭 #94。

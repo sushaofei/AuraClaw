@@ -5,8 +5,9 @@ import base64
 import binascii
 import json
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
+from uuid import uuid4
 
 from auraclaw.contracts.errors import (
     NotFoundError,
@@ -160,6 +161,20 @@ class SkillOutboxRecord:
 
 
 class SkillLifecycleStore(Protocol):
+    async def claim_upgrade(self, state: SkillUpgradeState, *, ttl: timedelta) -> str | None: ...
+
+    async def renew_upgrade(
+        self, state: SkillUpgradeState, token: str, *, ttl: timedelta
+    ) -> bool: ...
+
+    async def set_upgrade_phase(
+        self, state: SkillUpgradeState, token: str, *, phase: str, reason: str | None = None
+    ) -> bool: ...
+
+    async def remove_replaced_package(
+        self, state: SkillUpgradeState, token: str, package: SkillPackageRecord
+    ) -> bool: ...
+
     async def get_publish_command_digest(self, tenant_id: str, command_id: str) -> str | None: ...
 
     async def get_upgrade(
@@ -263,6 +278,7 @@ class SkillLifecycleStore(Protocol):
 class InMemorySkillLifecycleStore:
     _admission_audits: list[SkillAdmissionAuditRecord] = field(default_factory=list)
     _upgrades: dict[InstallationKey, SkillUpgradeState] = field(default_factory=dict)
+    _upgrade_claims: dict[InstallationKey, tuple[str, int, datetime]] = field(default_factory=dict)
     _packages: dict[PackageKey, SkillPackageRecord] = field(default_factory=dict)
     _package_tombstones: list[SkillPackageRecord] = field(default_factory=list)
     _publications: dict[PublicationKey, SkillPublicationRecord] = field(default_factory=dict)
@@ -271,10 +287,121 @@ class InMemorySkillLifecycleStore:
     _installation_commands: dict[CommandKey, tuple[str, InstallationKey]] = field(
         default_factory=dict
     )
-    _commands: dict[CommandKey, tuple[str, SkillPublishCommitResult]] = field(default_factory=dict)
+    _commands: dict[CommandKey, tuple[str, SkillPublishCommitResult | None]] = field(
+        default_factory=dict
+    )
     _outbox: dict[str, SkillOutboxRecord] = field(default_factory=dict)
     _claimed_outbox: dict[str, str] = field(default_factory=dict)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+    async def claim_upgrade(self, state: SkillUpgradeState, *, ttl: timedelta) -> str | None:
+        async with self._lock:
+            key = (state.tenant_id, state.publisher, state.name)
+            current = self._upgrades.get(key)
+            claim = self._upgrade_claims.get(key)
+            now = datetime.now(UTC)
+            if (
+                current is None
+                or current.generation != state.generation
+                or current.phase == "completed"
+                or (claim is not None and claim[2] > now)
+            ):
+                return None
+            token = uuid4().hex
+            self._upgrade_claims[key] = (token, state.generation, now + ttl)
+            return token
+
+    def _owns_upgrade(self, state: SkillUpgradeState, token: str) -> bool:
+        key = (state.tenant_id, state.publisher, state.name)
+        current, claim = self._upgrades.get(key), self._upgrade_claims.get(key)
+        return bool(
+            current
+            and current.generation == state.generation
+            and claim
+            and claim[:2] == (token, state.generation)
+            and claim[2] > datetime.now(UTC)
+        )
+
+    async def renew_upgrade(self, state: SkillUpgradeState, token: str, *, ttl: timedelta) -> bool:
+        async with self._lock:
+            if not self._owns_upgrade(state, token):
+                return False
+            self._upgrade_claims[(state.tenant_id, state.publisher, state.name)] = (
+                token,
+                state.generation,
+                datetime.now(UTC) + ttl,
+            )
+            return True
+
+    async def set_upgrade_phase(
+        self, state: SkillUpgradeState, token: str, *, phase: str, reason: str | None = None
+    ) -> bool:
+        if phase not in {"draining", "deleting", "completed", "blocked"}:
+            raise ValueError("Invalid Skill upgrade phase")
+        async with self._lock:
+            if not self._owns_upgrade(state, token):
+                return False
+            key = (state.tenant_id, state.publisher, state.name)
+            self._upgrades[key] = self._upgrades[key].model_copy(
+                update={"phase": phase, "reason_code": reason, "updated_at": datetime.now(UTC)}
+            )
+            if phase != "deleting":
+                self._upgrade_claims.pop(key, None)
+            return True
+
+    async def remove_replaced_package(
+        self, state: SkillUpgradeState, token: str, package: SkillPackageRecord
+    ) -> bool:
+        async with self._lock:
+            if not self._owns_upgrade(state, token) or not is_replaced_package(state, package):
+                return False
+            if package.legal_hold:
+                return False
+            key = _package_key(package)
+            current = self._packages.get(key)
+            installation = self._installations.get(key[:3])
+            if installation and installation.pinned_package_digest == package.package_digest:
+                return False
+            if current and current.package_digest == package.package_digest:
+                publication = self._publications.get(key)
+                if publication and (
+                    publication.status is not SkillPublicationStatus.REVOKED
+                    or publication.revocation_action is not SkillRevocationAction.CANCEL
+                ):
+                    return False
+                if current.legal_hold:
+                    return False
+                self._publications.pop(key, None)
+                self._packages.pop(key, None)
+            self._package_tombstones = [
+                p
+                for p in self._package_tombstones
+                if not (_package_key(p) == key and p.package_digest == package.package_digest)
+            ]
+            removed_commands = set()
+            for command_key, (digest, result) in tuple(self._commands.items()):
+                if (
+                    result
+                    and _package_key(result.package) == key
+                    and result.package.package_digest == package.package_digest
+                ):
+                    self._commands[command_key] = (digest, None)
+                    removed_commands.add(command_key)
+            for outbox_id, outbox in tuple(self._outbox.items()):
+                if (outbox.tenant_id, outbox.command_id) in removed_commands:
+                    self._outbox.pop(outbox_id, None)
+                    self._claimed_outbox.pop(outbox_id, None)
+            self._admission_audits = [
+                a
+                for a in self._admission_audits
+                if not (
+                    a.tenant_id == package.tenant_id
+                    and a.publisher == state.publisher
+                    and a.name == state.name
+                    and a.package_digest == package.package_digest
+                )
+            ]
+            return True
 
     async def get_publish_command_digest(self, tenant_id: str, command_id: str) -> str | None:
         command = self._commands.get((tenant_id, command_id))
@@ -394,6 +521,8 @@ class InMemorySkillLifecycleStore:
                 request_digest, result = existing_command
                 if request_digest != commit.request_digest:
                     raise VersionConflictError("Skill command id was reused")
+                if result is None:
+                    raise VersionConflictError("Published Skill version was removed")
                 current_publication = self._publications.get(_publication_key(result.publication))
                 return SkillPublishCommitResult(
                     package=result.package,
@@ -865,4 +994,14 @@ def superseded_publication(
             "updated_by": commit.actor_id,
             "updated_at": commit.occurred_at,
         }
+    )
+
+
+def is_replaced_package(state: SkillUpgradeState, package: SkillPackageRecord) -> bool:
+    return (
+        package.tenant_id == state.tenant_id
+        and package.manifest.publisher == state.publisher
+        and package.manifest.name == state.name
+        and package.package_digest != state.package_digest
+        and skill_version_key(package.manifest.version) <= skill_version_key(state.current_version)
     )
