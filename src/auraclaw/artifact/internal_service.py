@@ -66,9 +66,7 @@ class PendingUpload:
 
 
 class ArtifactMetadataRepository(Protocol):
-    async def save_pending(
-        self, pending: PendingUpload
-    ) -> None: ...
+    async def save_pending(self, pending: PendingUpload) -> None: ...
 
     async def get_upload(
         self, tenant_id: str, artifact_id: str, upload_id: str
@@ -106,9 +104,7 @@ class ArtifactMetadataRepository(Protocol):
         self, pending: PendingUpload, *, operation: str, reason: str
     ) -> bool: ...
 
-    async def begin_object_side_effect(
-        self, pending: PendingUpload, *, operation: str
-    ) -> bool: ...
+    async def begin_object_side_effect(self, pending: PendingUpload, *, operation: str) -> bool: ...
 
     async def get_ready(
         self, tenant_id: str, artifact_id: str, version: int
@@ -122,17 +118,20 @@ class ArtifactMetadataRepository(Protocol):
         *,
         claim_ttl: timedelta = timedelta(seconds=30),
         ignore_retention: bool = False,
+        include_deleted: bool = False,
     ) -> PendingUpload | None: ...
 
-    async def is_deleted(
-        self, tenant_id: str, artifact_id: str, version: int
-    ) -> bool: ...
+    async def is_deleted(self, tenant_id: str, artifact_id: str, version: int) -> bool: ...
 
     async def mark_ready_deleted(self, pending: PendingUpload) -> bool: ...
 
-    async def release_ready_delete(
-        self, pending: PendingUpload, error: str
-    ) -> bool: ...
+    async def mark_ready_removed(self, pending: PendingUpload) -> bool: ...
+
+    async def is_removed(self, tenant_id: str, artifact_id: str, version: int) -> bool: ...
+
+    async def has_shared_storage(self, pending: PendingUpload) -> bool: ...
+
+    async def release_ready_delete(self, pending: PendingUpload, error: str) -> bool: ...
 
     async def get_ready_delete_claim(
         self,
@@ -150,9 +149,7 @@ class ArtifactMetadataRepository(Protocol):
         command_id: str,
     ) -> PendingUpload | None: ...
 
-    async def bind_skill_publication(
-        self, pending: PendingUpload, package_digest: str
-    ) -> bool: ...
+    async def bind_skill_publication(self, pending: PendingUpload, package_digest: str) -> bool: ...
 
     async def claim_skill_orphans(
         self,
@@ -276,9 +273,7 @@ class ArtifactInternalService:
         if self._repository is None:
             return
         validate = getattr(self._repository, f"validate_{kind}", None)
-        owned = not lost.is_set() and (
-            not callable(validate) or await validate(pending)
-        )
+        owned = not lost.is_set() and (not callable(validate) or await validate(pending))
         if owned:
             return
         if side_effect_may_have_happened:
@@ -302,9 +297,7 @@ class ArtifactInternalService:
             with suppress(Exception):
                 await mark(pending, operation=operation, reason=reason)
 
-    async def _begin_side_effect(
-        self, pending: PendingUpload, *, operation: str
-    ) -> None:
+    async def _begin_side_effect(self, pending: PendingUpload, *, operation: str) -> None:
         if self._repository is None:
             return
         begin = getattr(self._repository, "begin_object_side_effect", None)
@@ -335,9 +328,7 @@ class ArtifactInternalService:
         if not valid:
             raise ArtifactAccessError("artifact policy decision is invalid or expired")
 
-    async def create_upload(
-        self, request: ArtifactCreateUploadRequest
-    ) -> ArtifactUploadResponse:
+    async def create_upload(self, request: ArtifactCreateUploadRequest) -> ArtifactUploadResponse:
         identity = request.context.service_identity
         if identity not in {
             ServiceIdentity.ACTION_HANDS,
@@ -388,13 +379,12 @@ class ArtifactInternalService:
             retention_until=request.retention_until,
             upload_mode=upload_mode,
             multipart_upload_id=multipart_upload_id,
-            multipart_part_size=(
-                self._multipart_part_size if upload_mode == "multipart" else None
-            ),
+            multipart_part_size=(self._multipart_part_size if upload_mode == "multipart" else None),
         )
         if self._repository is not None:
             try:
                 await self._repository.save_pending(self._uploads[upload_id])
+                self._uploads.pop(upload_id, None)
             except Exception:
                 self._uploads.pop(upload_id, None)
                 raise
@@ -409,9 +399,7 @@ class ArtifactInternalService:
             part_urls=part_urls,
         )
 
-    async def finalize(
-        self, request: ArtifactFinalizeRequest
-    ) -> ArtifactFinalizeResponse:
+    async def finalize(self, request: ArtifactFinalizeRequest) -> ArtifactFinalizeResponse:
         identity = request.context.service_identity
         if identity not in {
             ServiceIdentity.ACTION_HANDS,
@@ -419,8 +407,8 @@ class ArtifactInternalService:
             ServiceIdentity.TASK_API,
         }:
             raise ArtifactAccessError("workload may not finalize Artifact uploads")
-        pending = self._uploads.get(request.upload_id)
-        if pending is None and self._repository is not None:
+        pending = self._uploads.get(request.upload_id) if self._repository is None else None
+        if self._repository is not None:
             pending = await self._repository.get_upload(
                 request.context.tenant_id, request.artifact_id, request.upload_id
             )
@@ -432,9 +420,7 @@ class ArtifactInternalService:
                     if identity is ServiceIdentity.TASK_API and not _is_task_api_skill_upload(
                         ready
                     ):
-                        raise ArtifactAccessError(
-                            "Task API may only finalize Skill packages"
-                        )
+                        raise ArtifactAccessError("Task API may only finalize Skill packages")
                     return ArtifactFinalizeResponse(
                         artifact_ref={
                             "artifact_id": ready.artifact_id,
@@ -447,23 +433,16 @@ class ArtifactInternalService:
                     )
         if pending is None or pending.artifact_id != request.artifact_id:
             raise NotFoundError("artifact upload was not found")
-        if identity is ServiceIdentity.TASK_API and not _is_task_api_skill_upload(
-            pending
-        ):
+        if identity is ServiceIdentity.TASK_API and not _is_task_api_skill_upload(pending):
             raise ArtifactAccessError("Task API may only finalize Skill packages")
         if pending.tenant_id != request.context.tenant_id:
             raise ArtifactAccessError("artifact upload tenant mismatch")
         if datetime.now(UTC) >= pending.expires_at:
             raise ArtifactAccessError("artifact upload expired")
-        if (
-            pending.expected_size != request.size
-            or pending.expected_checksum != request.checksum
-        ):
+        if pending.expected_size != request.size or pending.expected_checksum != request.checksum:
             raise ArtifactAccessError("artifact upload integrity mismatch")
         if self._repository is not None:
-            claimed = await self._repository.claim_finalize(
-                pending, claim_ttl=self._claim_ttl
-            )
+            claimed = await self._repository.claim_finalize(pending, claim_ttl=self._claim_ttl)
             if claimed is None:
                 ready = await self._repository.get_ready(
                     request.context.tenant_id, request.artifact_id, request.version
@@ -472,9 +451,7 @@ class ArtifactInternalService:
                     if identity is ServiceIdentity.TASK_API and not _is_task_api_skill_upload(
                         ready
                     ):
-                        raise ArtifactAccessError(
-                            "Task API may only finalize Skill packages"
-                        )
+                        raise ArtifactAccessError("Task API may only finalize Skill packages")
                     return ArtifactFinalizeResponse(
                         artifact_ref={
                             "artifact_id": ready.artifact_id,
@@ -507,9 +484,8 @@ class ArtifactInternalService:
                         request.parts,
                     )
                 except ArtifactAccessError:
-                    if (
-                        self._object_verifier is None
-                        or not await self._object_verifier.verify(pending)
+                    if self._object_verifier is None or not await self._object_verifier.verify(
+                        pending
                     ):
                         raise
                 await self._assert_claim(
@@ -518,8 +494,9 @@ class ArtifactInternalService:
                     claim_lost,
                     side_effect_may_have_happened=True,
                 )
-                multipart_saved = self._repository is None or await (
-                    self._repository.mark_multipart_completed(pending)
+                multipart_saved = (
+                    self._repository is None
+                    or await self._repository.mark_multipart_completed(pending)
                 )
                 if not multipart_saved:
                     assert self._repository is not None
@@ -549,9 +526,7 @@ class ArtifactInternalService:
             await self._assert_claim(pending, "finalize", claim_lost)
             if self._repository is not None:
                 if not await self._repository.mark_ready(pending, request.version):
-                    self._ready.pop(
-                        (pending.tenant_id, pending.artifact_id, request.version), None
-                    )
+                    self._ready.pop((pending.tenant_id, pending.artifact_id, request.version), None)
                     self._uploads.pop(request.upload_id, None)
                     await self._record_reconciliation(
                         pending,
@@ -560,7 +535,8 @@ class ArtifactInternalService:
                     )
                     raise ArtifactAccessError("artifact finalization lease was lost")
         self._uploads.pop(request.upload_id, None)
-        self._ready[(pending.tenant_id, pending.artifact_id, request.version)] = pending
+        if self._repository is None:
+            self._ready[(pending.tenant_id, pending.artifact_id, request.version)] = pending
         return ArtifactFinalizeResponse(
             artifact_ref={
                 "artifact_id": pending.artifact_id,
@@ -578,9 +554,7 @@ class ArtifactInternalService:
         await self.reconcile_unknown(limit=min(limit, self._orphan_claim_limit))
         deleted = 0
         for _ in range(limit):
-            claimed = await self._repository.expired_uploads(
-                limit=1, claim_ttl=self._claim_ttl
-            )
+            claimed = await self._repository.expired_uploads(limit=1, claim_ttl=self._claim_ttl)
             if not claimed:
                 break
             pending = claimed[0]
@@ -624,9 +598,7 @@ class ArtifactInternalService:
                         )
                         raise ArtifactAccessError("artifact GC claim was lost")
                     deleted += 1
-                elif not await self._repository.release_gc(
-                    pending, "object deletion failed"
-                ):
+                elif not await self._repository.release_gc(pending, "object deletion failed"):
                     raise ArtifactAccessError("artifact GC claim was lost")
         return deleted
 
@@ -715,15 +687,28 @@ class ArtifactInternalService:
             action="artifact.delete",
             resource=request.artifact_id,
         )
+        if request.remove_history:
+            if request.purpose != "skill_package_purge":
+                raise ArtifactAccessError("Physical removal is only supported for Skill packages")
+            if await self._repository.is_removed(
+                request.context.tenant_id, request.artifact_id, request.version
+            ):
+                self._ready.pop(
+                    (request.context.tenant_id, request.artifact_id, request.version), None
+                )
+                return ArtifactDeleteResponse(
+                    artifact_id=request.artifact_id, version=request.version
+                )
         pending = await self._repository.claim_ready_delete(
             request.context.tenant_id,
             request.artifact_id,
             request.version,
             claim_ttl=self._claim_ttl,
             ignore_retention=request.purpose == "skill_package_purge",
+            **({"include_deleted": True} if request.remove_history else {}),
         )
         if pending is None:
-            if await self._repository.is_deleted(
+            if not request.remove_history and await self._repository.is_deleted(
                 request.context.tenant_id,
                 request.artifact_id,
                 request.version,
@@ -740,14 +725,16 @@ class ArtifactInternalService:
                     artifact_id=request.artifact_id,
                     version=request.version,
                 )
-            raise ArtifactAccessError(
-                "artifact is retained, held, missing, or already deleting"
-            )
+            raise ArtifactAccessError("artifact is retained, held, missing, or already deleting")
         async with self._maintain_claim(pending, "gc") as claim_lost:
             await self._assert_claim(pending, "gc", claim_lost)
             try:
                 await self._begin_side_effect(pending, operation="gc")
-                removed = await self._object_verifier.delete(pending)
+                if request.remove_history:
+                    shared = await self._repository.has_shared_storage(pending)
+                    removed = shared or await self._object_verifier.purge(pending)
+                else:
+                    removed = await self._object_verifier.delete(pending)
             except Exception:
                 await self._record_reconciliation(
                     pending, operation="gc", reason="object_delete_result_unknown"
@@ -760,12 +747,22 @@ class ArtifactInternalService:
                 side_effect_may_have_happened=removed,
             )
             if not removed:
+                if request.remove_history:
+                    await self._record_reconciliation(
+                        pending, operation="gc", reason="physical_removal_incomplete"
+                    )
+                    raise ArtifactAccessError("Skill package physical removal is incomplete")
                 if not await self._repository.release_ready_delete(
                     pending, "object deletion failed"
                 ):
                     raise ArtifactAccessError("artifact deletion lease was lost")
                 raise ArtifactAccessError("artifact object deletion failed")
-            if not await self._repository.mark_ready_deleted(pending):
+            committed = (
+                await self._repository.mark_ready_removed(pending)
+                if request.remove_history
+                else await self._repository.mark_ready_deleted(pending)
+            )
+            if not committed:
                 await self._record_reconciliation(
                     pending,
                     operation="gc",
@@ -795,9 +792,7 @@ class ArtifactInternalService:
             request.command_id,
         )
         if pending is None:
-            raise ArtifactAccessError(
-                "Skill Artifact is bound, expired, missing, or claimed"
-            )
+            raise ArtifactAccessError("Skill Artifact is bound, expired, missing, or claimed")
         return ArtifactSkillPublicationClaimResponse(
             artifact_ref=_artifact_ref(pending, request.version),
             claim_token=request.command_id,
@@ -818,9 +813,7 @@ class ArtifactInternalService:
             if pending is not None and pending.skill_bound_digest == request.package_digest:
                 return ArtifactSkillPublicationBindResponse()
             raise ArtifactAccessError("Skill Artifact publication claim was lost")
-        if not await self._repository.bind_skill_publication(
-            pending, request.package_digest
-        ):
+        if not await self._repository.bind_skill_publication(pending, request.package_digest):
             raise ArtifactAccessError("Skill Artifact publication claim was lost")
         return ArtifactSkillPublicationBindResponse()
 

@@ -133,6 +133,24 @@ class RemoteArtifactReader:
             raise ArtifactAccessError("Skill package Artifact digest does not match")
         return content
 
+    async def purge(
+        self,
+        *,
+        tenant_id: str,
+        artifact_ref: ArtifactRef,
+        actor_id: str,
+        reason_code: str,
+        correlation_id: str,
+    ) -> None:
+        await self.delete(
+            tenant_id=tenant_id,
+            artifact_ref=artifact_ref,
+            actor_id=actor_id,
+            reason_code=reason_code,
+            correlation_id=correlation_id,
+            remove_history=True,
+        )
+
     async def delete(
         self,
         *,
@@ -141,6 +159,7 @@ class RemoteArtifactReader:
         actor_id: str,
         reason_code: str,
         correlation_id: str,
+        remove_history: bool = False,
     ) -> None:
         evaluation = await self._policy.evaluate_action(
             tenant_id=tenant_id,
@@ -181,6 +200,7 @@ class RemoteArtifactReader:
                 reason_code=reason_code,
                 policy_decision_id=evaluation.decision_id,
                 purpose="skill_package_purge",
+                remove_history=remove_history,
             ),
             ArtifactDeleteResponse,
         )

@@ -622,6 +622,7 @@ class ArtifactDeleteRequest(ContractModel):
     reason_code: str = Field(min_length=1, max_length=128)
     policy_decision_id: str = Field(min_length=1, max_length=256)
     purpose: Literal["retention_expired", "skill_package_purge"] = "retention_expired"
+    remove_history: bool = False
 
 
 class ArtifactDeleteResponse(ContractModel):
