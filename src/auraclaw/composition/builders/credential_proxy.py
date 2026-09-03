@@ -12,6 +12,7 @@ from auraclaw.composition.services import (
 )
 from auraclaw.config import Settings
 from auraclaw.contracts.internal import ServiceIdentity
+from auraclaw.contracts.mcp_registry import McpActiveSnapshotEntry
 from auraclaw.credential_proxy.internal_service import (
     CredentialProxyInternalService,
     CredentialTargetAdapter,
@@ -91,7 +92,15 @@ def build_credential_proxy_app(spec: ServiceSpec, settings: Settings) -> FastAPI
         ),
         **java_api_adapters,
     }
-    mcp_egress = McpEgressManager(adapters=adapters, proxy=proxy)
+    async def mcp_snapshot_authority() -> tuple[McpActiveSnapshotEntry, ...]:
+        snapshot = await _hands_mcp_snapshot(settings)
+        if snapshot is None:
+            raise RuntimeError("MCP snapshot authority is unavailable")
+        return snapshot
+
+    mcp_egress = McpEgressManager(
+        adapters=adapters, proxy=proxy, snapshot_provider=mcp_snapshot_authority
+    )
     service = CredentialProxyInternalService(
         proxy,
         adapters=adapters,

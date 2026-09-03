@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 class McpEgressLoader(Protocol):
     async def apply(self, entry: McpActiveSnapshotEntry) -> None: ...
 
-    async def revoke(self, server_id: str) -> None: ...
+    async def revoke(self, server_id: str, *, expected_revision: int | None = None) -> None: ...
 
 
 class McpConnectionManager:
@@ -71,9 +71,7 @@ class McpConnectionManager:
         tenant_limit = (
             max_concurrent if max_concurrent_per_tenant is None else max_concurrent_per_tenant
         )
-        host_limit = (
-            max_concurrent if max_concurrent_per_host is None else max_concurrent_per_host
-        )
+        host_limit = max_concurrent if max_concurrent_per_host is None else max_concurrent_per_host
         if (
             max_concurrent < 1
             or not 1 <= tenant_limit <= max_concurrent
@@ -90,7 +88,10 @@ class McpConnectionManager:
         self._drain_seconds = drain_seconds
         self._instance_id = instance_id
         self._generations: dict[str, int] = {}
+        self._pending_revokes: dict[str, int | None] = {}
+        self._closing: dict[str, CapabilityConnector] = {}
         self._draining: list[CapabilityConnector] = []
+        self._drain_locks: dict[int, asyncio.Lock] = {}
         self._max_concurrent = max_concurrent
         self._max_concurrent_per_tenant = tenant_limit
         self._max_concurrent_per_host = host_limit
@@ -109,18 +110,15 @@ class McpConnectionManager:
                     self._max_concurrent_per_tenant,
                 ),
                 (
-                    lambda entry: urlsplit(entry.config.endpoint).hostname
-                    or entry.server_id,
+                    lambda entry: urlsplit(entry.config.endpoint).hostname or entry.server_id,
                     self._max_concurrent_per_host,
                 ),
             ),
         )
         return sum(results)
 
-    async def test(
-        self, entry: McpActiveSnapshotEntry, *, persist_egress: bool = False
-    ) -> None:
-        keep_egress = persist_egress or entry.server_id in self._generations
+    async def test(self, entry: McpActiveSnapshotEntry, *, persist_egress: bool = False) -> None:
+        keep_egress = persist_egress or self._generations.get(entry.server_id) == entry.revision
         if self._egress is not None:
             await self._egress.apply(entry)
         connector = self._factory(self._definition(entry, enabled=True))
@@ -128,12 +126,12 @@ class McpConnectionManager:
             await connector.snapshot(_probe_context(entry))
         except BaseException:
             if self._egress is not None and not keep_egress:
-                await self._egress.revoke(entry.server_id)
+                await self._egress.revoke(entry.server_id, expected_revision=entry.revision)
             raise
         finally:
             await connector.aclose()
         if self._egress is not None and not keep_egress:
-            await self._egress.revoke(entry.server_id)
+            await self._egress.revoke(entry.server_id, expected_revision=entry.revision)
         await self._record_tested(entry)
 
     async def test_capability(
@@ -150,9 +148,7 @@ class McpConnectionManager:
         """Run an explicit, read-only capability probe through the managed connector."""
         if self._catalog is None:
             raise NotFoundError("MCP capability catalog is unavailable")
-        capability = await self._catalog.get(
-            tenant_id=tenant_id, capability_id=capability_id
-        )
+        capability = await self._catalog.get(tenant_id=tenant_id, capability_id=capability_id)
         if capability is None or capability.server_id != server_id:
             raise NotFoundError("MCP capability was not found")
         connector = self._connectors.get(server_id)
@@ -219,9 +215,7 @@ class McpConnectionManager:
                 template = source.get("uri_template") or source.get("uriTemplate")
                 allowed = isinstance(template, str) and _matches_test_uri(template, uri)
             if not allowed:
-                raise AuthorizationError(
-                    "Resource test URI must match the selected capability"
-                )
+                raise AuthorizationError("Resource test URI must match the selected capability")
             contents = await connector.read_resource(trusted, uri)
             output = [item.model_dump(mode="json") for item in contents]
         elif capability.kind is CapabilityKind.PROMPT:
@@ -237,9 +231,7 @@ class McpConnectionManager:
             raise InvalidTransitionError("This capability kind cannot be tested")
 
         expectation_matched = (
-            None
-            if expected_output is None
-            else _contains_expected(output, expected_output)
+            None if expected_output is None else _contains_expected(output, expected_output)
         )
         passed = error is None and expectation_matched is not False
         return {
@@ -253,6 +245,40 @@ class McpConnectionManager:
         }
 
     async def apply(
+        self,
+        entry: McpActiveSnapshotEntry,
+        *,
+        restore: bool = False,
+        tested: bool = False,
+    ) -> None:
+        async with self._server_locks.setdefault(entry.server_id, asyncio.Lock()):
+            if self._generations.get(entry.server_id, 0) > entry.revision:
+                return
+            await self._apply(entry, restore=restore, tested=tested)
+            desired = {item.server_id: item for item in await self._registry.active_snapshot()}
+            current = desired.get(entry.server_id)
+            if current is None or current.revision != entry.revision:
+                if self._reconciler is not None:
+                    self._reconciler.block_server(entry.server_id)
+                self._pending_revokes[entry.server_id] = entry.revision
+                await self._registry.record_runtime(
+                    McpServerRuntimeRecord(
+                        server_id=entry.server_id,
+                        instance_id=self._instance_id,
+                        loaded_revision=entry.revision,
+                        observed_state=McpObservedState.DEGRADED,
+                        safe_error_code="mcp_apply_superseded",
+                        updated_at=datetime.now(UTC),
+                    )
+                )
+                raise InvalidTransitionError("MCP apply was superseded by a desired-state change")
+            self._pending_revokes.pop(entry.server_id, None)
+            previous = self._closing.pop(entry.server_id, None)
+            if previous is not None:
+                self._draining.append(previous)
+                asyncio.create_task(self._drain_safely(previous))
+
+    async def _apply(
         self,
         entry: McpActiveSnapshotEntry,
         *,
@@ -281,16 +307,14 @@ class McpConnectionManager:
                 server_id=entry.server_id,
                 instance_id=self._instance_id,
                 loaded_revision=entry.revision,
-                observed_state=(
-                    McpObservedState.LOADING if restore else McpObservedState.ACTIVE
-                ),
+                observed_state=(McpObservedState.LOADING),
                 last_test_at=tested_at,
                 updated_at=now,
             )
         )
         if previous is not None and previous is not connector:
             self._draining.append(previous)
-            asyncio.create_task(self._drain(previous))
+            asyncio.create_task(self._drain_safely(previous))
         if self._reconciler is not None:
             result = await self._reconciler.reconcile_server(definition)
             observed = {
@@ -307,52 +331,75 @@ class McpConnectionManager:
                     last_test_at=tested_at,
                     last_sync_at=datetime.now(UTC),
                     consecutive_failures=result.consecutive_failures,
-                    safe_error_code=(
-                        None if result.error is None else "mcp_catalog_degraded"
-                    ),
+                    safe_error_code=(None if result.error is None else "mcp_catalog_degraded"),
                     updated_at=datetime.now(UTC),
                 )
             )
 
     async def revoke(self, server_id: str) -> None:
-        previous = self._connectors.pop(server_id, None)
-        self._generations.pop(server_id, None)
-        if self._egress is not None:
-            await self._egress.revoke(server_id)
-        if self._reconciler is not None:
-            await self._reconciler.drop_server(server_id)
-        await self._registry.record_runtime(
-            McpServerRuntimeRecord(
-                server_id=server_id,
-                instance_id=self._instance_id,
-                loaded_revision=None,
-                observed_state=McpObservedState.DISABLED,
-                updated_at=datetime.now(UTC),
+        async with self._server_locks.setdefault(server_id, asyncio.Lock()):
+            desired = {entry.server_id: entry for entry in await self._registry.active_snapshot()}
+            if server_id in desired:
+                return
+            revision = self._pending_revokes.setdefault(server_id, self._generations.get(server_id))
+            if self._reconciler is not None:
+                self._reconciler.block_server(server_id)
+            previous = self._connectors.pop(server_id, None)
+            if previous is not None:
+                self._closing[server_id] = previous
+            await self._registry.record_runtime(
+                McpServerRuntimeRecord(
+                    server_id=server_id,
+                    instance_id=self._instance_id,
+                    loaded_revision=revision,
+                    observed_state=McpObservedState.DEGRADED,
+                    safe_error_code="mcp_revocation_pending",
+                    updated_at=datetime.now(UTC),
+                )
             )
-        )
-        if previous is not None:
-            self._draining.append(previous)
-            asyncio.create_task(self._drain(previous))
+            # The generation/pending entry is retained across every failing await.
+            if self._reconciler is not None:
+                await self._reconciler.drop_server(server_id)
+            if self._egress is not None:
+                await self._egress.revoke(server_id, expected_revision=revision)
+            previous = self._closing.get(server_id)
+            if previous is not None:
+                await self._drain(previous)
+                self._closing.pop(server_id, None)
+            await self._registry.record_runtime(
+                McpServerRuntimeRecord(
+                    server_id=server_id,
+                    instance_id=self._instance_id,
+                    loaded_revision=None,
+                    observed_state=McpObservedState.DISABLED,
+                    updated_at=datetime.now(UTC),
+                )
+            )
+            self._generations.pop(server_id, None)
+            self._pending_revokes.pop(server_id, None)
 
     async def purge(self, server_id: str) -> None:
         await self.revoke(server_id)
+        if any(item.server_id == server_id for item in await self._registry.active_snapshot()):
+            raise InvalidTransitionError("MCP purge was superseded by an enabled configuration")
         if self._catalog is not None:
             await self._catalog.remove_server(server_id)
 
     async def reconcile_loaded(self) -> int:
-        snapshot = {
-            entry.server_id: entry
-            for entry in await self._registry.active_snapshot()
-        }
+        for connector in tuple(self._draining):
+            await self._drain_safely(connector)
+        snapshot = {entry.server_id: entry for entry in await self._registry.active_snapshot()}
         operations: list[tuple[str, McpActiveSnapshotEntry | str]] = []
         scheduled: set[str] = set()
-        for server_id, revision in list(self._generations.items()):
+        local_ids = set(self._generations) | set(self._connectors) | set(self._pending_revokes)
+        for server_id in local_ids:
+            revision = self._generations.get(server_id)
             desired = snapshot.get(server_id)
             if desired is None:
                 operations.append(("revoke", server_id))
                 scheduled.add(server_id)
                 continue
-            if desired.revision != revision:
+            if desired.revision != revision or server_id in self._pending_revokes:
                 operations.append(("apply", desired))
                 scheduled.add(server_id)
         for server_id, entry in snapshot.items():
@@ -382,8 +429,7 @@ class McpConnectionManager:
                 ),
                 (
                     lambda operation: (
-                        urlsplit(operation[1].config.endpoint).hostname
-                        or operation[1].server_id
+                        urlsplit(operation[1].config.endpoint).hostname or operation[1].server_id
                         if isinstance(operation[1], McpActiveSnapshotEntry)
                         else operation[1]
                     ),
@@ -393,9 +439,7 @@ class McpConnectionManager:
         )
         return sum(results)
 
-    async def record_reconcile_results(
-        self, results: tuple[McpReconcileResult, ...]
-    ) -> None:
+    async def record_reconcile_results(self, results: tuple[McpReconcileResult, ...]) -> None:
         """Heartbeat this instance's catalog load state without global last-writer state."""
         now = datetime.now(UTC)
         for result in results:
@@ -416,9 +460,7 @@ class McpConnectionManager:
                     ),
                     last_sync_at=now,
                     consecutive_failures=result.consecutive_failures,
-                    safe_error_code=(
-                        None if result.error is None else "mcp_catalog_degraded"
-                    ),
+                    safe_error_code=(None if result.error is None else "mcp_catalog_degraded"),
                     updated_at=now,
                 )
             )
@@ -429,13 +471,11 @@ class McpConnectionManager:
         *,
         restore: bool = False,
     ) -> bool:
-        lock = self._server_locks.setdefault(entry.server_id, asyncio.Lock())
         try:
-            async with lock:
-                await asyncio.wait_for(
-                    self.apply(entry, restore=restore),
-                    timeout=self._server_timeout_seconds,
-                )
+            await asyncio.wait_for(
+                self.apply(entry, restore=restore),
+                timeout=self._server_timeout_seconds,
+            )
             return True
         except Exception as exc:
             logger.warning(
@@ -447,12 +487,8 @@ class McpConnectionManager:
             return False
 
     async def _revoke_isolated(self, server_id: str) -> bool:
-        lock = self._server_locks.setdefault(server_id, asyncio.Lock())
         try:
-            async with lock:
-                await asyncio.wait_for(
-                    self.revoke(server_id), timeout=self._server_timeout_seconds
-                )
+            await asyncio.wait_for(self.revoke(server_id), timeout=self._server_timeout_seconds)
             return True
         except Exception as exc:
             logger.warning(
@@ -462,9 +498,7 @@ class McpConnectionManager:
             )
             return False
 
-    async def _record_unavailable(
-        self, entry: McpActiveSnapshotEntry, exc: BaseException
-    ) -> None:
+    async def _record_unavailable(self, entry: McpActiveSnapshotEntry, exc: BaseException) -> None:
         safe_error_code = (
             exc.code
             if isinstance(exc, AuraClawError) and isinstance(exc.code, str)
@@ -500,13 +534,9 @@ class McpConnectionManager:
             McpServerRuntimeRecord(
                 server_id=entry.server_id,
                 instance_id=self._instance_id,
-                loaded_revision=(
-                    previous.loaded_revision if previous is not None else None
-                ),
+                loaded_revision=(previous.loaded_revision if previous is not None else None),
                 observed_state=(
-                    previous.observed_state
-                    if previous is not None
-                    else McpObservedState.PENDING
+                    previous.observed_state if previous is not None else McpObservedState.PENDING
                 ),
                 last_test_at=now,
                 last_sync_at=previous.last_sync_at if previous is not None else None,
@@ -516,18 +546,24 @@ class McpConnectionManager:
             )
         )
 
-    def _definition(
-        self, entry: McpActiveSnapshotEntry, *, enabled: bool
-    ) -> McpServerDefinition:
+    def _definition(self, entry: McpActiveSnapshotEntry, *, enabled: bool) -> McpServerDefinition:
         return entry.config.materialize(
             revision=entry.revision,
-            desired_state=(
-                McpDesiredState.ENABLED if enabled else McpDesiredState.DISABLED
-            ),
+            desired_state=(McpDesiredState.ENABLED if enabled else McpDesiredState.DISABLED),
             observed_state=entry.observed_state,
         ).model_copy(update={"enabled": enabled, "status": CapabilityStatus.ACTIVE})
 
+    async def _drain_safely(self, connector: Any) -> None:
+        try:
+            await self._drain(connector)
+        except Exception:
+            logger.warning("MCP connector close pending; retry on next reconciliation")
+
     async def _drain(self, connector: Any) -> None:
+        async with self._drain_locks.setdefault(id(connector), asyncio.Lock()):
+            await self._close_connector(connector)
+
+    async def _close_connector(self, connector: Any) -> None:
         await asyncio.sleep(self._drain_seconds)
         close = getattr(connector, "aclose", None)
         if close is not None:
@@ -560,9 +596,12 @@ def _contains_expected(actual: Any, expected: Any) -> bool:
             for key, value in expected.items()
         )
     if isinstance(expected, list):
-        return isinstance(actual, list) and len(actual) >= len(expected) and all(
-            _contains_expected(actual[index], value)
-            for index, value in enumerate(expected)
+        return (
+            isinstance(actual, list)
+            and len(actual) >= len(expected)
+            and all(
+                _contains_expected(actual[index], value) for index, value in enumerate(expected)
+            )
         )
     # JSON booleans must not compare equal to numbers (True == 1 in Python).
     if isinstance(actual, bool) != isinstance(expected, bool):

@@ -564,7 +564,9 @@ def build_action_hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         manager = getattr(app.state, "mcp_connection_manager", None)
         if manager is None:
             return 0
-        return int(await manager.reconcile_loaded())
+        changed = int(await manager.reconcile_loaded())
+        changed += await mcp_registry.reconcile_pending_deletes()
+        return changed
 
     app.state.initialize = initialize_remote_catalog
     periodic_jobs.append(

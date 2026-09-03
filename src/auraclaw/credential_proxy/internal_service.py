@@ -43,7 +43,7 @@ class PolicyDecisionValidator(Protocol):
 class McpEgressLoader(Protocol):
     async def apply(self, entry: McpActiveSnapshotEntry) -> None: ...
 
-    async def revoke(self, server_id: str) -> None: ...
+    async def revoke(self, server_id: str, *, expected_revision: int | None = None) -> None: ...
 
 
 class CredentialProxyInternalService:
@@ -82,6 +82,10 @@ class CredentialProxyInternalService:
         if not valid:
             raise CredentialAccessError("policy decision is invalid or expired")
         adapter = self._adapters.get(request.target)
+        if request.operation == "mcp.invoke":
+            revision = request.request.get("config_revision")
+            if adapter is None or getattr(adapter, "config_revision", None) != revision:
+                adapter = self._adapters.get(f"{request.target}:probe:{revision}")
         if adapter is None:
             raise CredentialAccessError("credential target is not allowlisted")
         usage_id = str(uuid.uuid4())
@@ -103,15 +107,11 @@ class CredentialProxyInternalService:
             response=body,
         )
 
-    async def resource(
-        self, request: CredentialResourceRequest
-    ) -> CredentialResourceResponse:
+    async def resource(self, request: CredentialResourceRequest) -> CredentialResourceResponse:
         if request.context.service_identity is not ServiceIdentity.TASK_API:
             raise CredentialAccessError("credential lifecycle is restricted to Task Ops")
         if request.operation == "revoke":
-            await self._proxy.revoke_reference(
-                request.context.tenant_id, request.credential_ref
-            )
+            await self._proxy.revoke_reference(request.context.tenant_id, request.credential_ref)
             return CredentialResourceResponse(
                 credential_ref=request.credential_ref, status="revoked"
             )
@@ -122,23 +122,20 @@ class CredentialProxyInternalService:
                 provider=request.resource,
                 account_scope=request.resource,
                 allowed_operations=request.allowed_operations,
-                expires_at=request.expires_at
-                or datetime.now(UTC) + timedelta(hours=1),
+                expires_at=request.expires_at or datetime.now(UTC) + timedelta(hours=1),
             ),
         )
-        return CredentialResourceResponse(
-            credential_ref=request.credential_ref, status="active"
-        )
+        return CredentialResourceResponse(credential_ref=request.credential_ref, status="active")
 
-    async def mcp_egress(
-        self, request: McpEgressCommandRequest
-    ) -> McpEgressCommandResponse:
+    async def mcp_egress(self, request: McpEgressCommandRequest) -> McpEgressCommandResponse:
         if request.context.service_identity is not ServiceIdentity.ACTION_HANDS:
             raise CredentialAccessError("workload may not load MCP egress")
         if self._mcp_egress is None:
             raise CredentialAccessError("MCP egress manager is not configured")
         if request.operation == "revoke":
-            await self._mcp_egress.revoke(request.server_id)
+            await self._mcp_egress.revoke(
+                request.server_id, expected_revision=request.expected_revision
+            )
             return McpEgressCommandResponse(
                 server_id=request.server_id,
                 operation="revoke",

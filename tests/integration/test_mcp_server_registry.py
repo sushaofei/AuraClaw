@@ -50,9 +50,7 @@ def _sql_url() -> str | None:
 
 
 SQL_URL = _sql_url()
-pytestmark = pytest.mark.skipif(
-    SQL_URL is None, reason="SQL registry test URL not configured"
-)
+pytestmark = pytest.mark.skipif(SQL_URL is None, reason="SQL registry test URL not configured")
 
 
 async def _apply_registry_migration(database_url: str) -> None:
@@ -68,9 +66,7 @@ async def _apply_registry_migration(database_url: str) -> None:
                 sql = (ROOT / "migrations/0020_mcp_server_registry.sql").read_text()
                 for statement in _split_sql(sql):
                     await connection.execute(statement)
-            claims = (
-                ROOT / "migrations/0046_mcp_lifecycle_operation_claims.sql"
-            ).read_text()
+            claims = (ROOT / "migrations/0046_mcp_lifecycle_operation_claims.sql").read_text()
             for statement in _split_sql(claims):
                 await connection.execute(statement)
     finally:
@@ -100,15 +96,9 @@ def _split_sql(source: str) -> list[str]:
 
 async def _cleanup(store: PostgresMcpServerRegistryStore, server_id: str) -> None:
     pool = await store.pool()
-    await pool.execute(
-        "DELETE FROM hands.mcp_server_operation WHERE server_id=$1", server_id
-    )
-    await pool.execute(
-        "DELETE FROM hands.mcp_server_runtime WHERE server_id=$1", server_id
-    )
-    await pool.execute(
-        "DELETE FROM hands.mcp_server_revision WHERE server_id=$1", server_id
-    )
+    await pool.execute("DELETE FROM hands.mcp_server_operation WHERE server_id=$1", server_id)
+    await pool.execute("DELETE FROM hands.mcp_server_runtime WHERE server_id=$1", server_id)
+    await pool.execute("DELETE FROM hands.mcp_server_revision WHERE server_id=$1", server_id)
     await pool.execute("DELETE FROM hands.mcp_server WHERE server_id=$1", server_id)
 
 
@@ -345,5 +335,85 @@ def test_lifecycle_command_is_claimed_before_runtime_side_effect() -> None:
             await _cleanup(store_a, server_id)
             await store_a.close()
             await store_b.close()
+
+    asyncio.run(scenario())
+
+
+def test_sql_pending_delete_survives_restart_and_revision_fences_cleanup() -> None:
+    async def scenario() -> None:
+        assert SQL_URL is not None
+        await _apply_registry_migration(SQL_URL)
+        suffix = uuid4().hex[:12]
+        server_id = f"delete-{suffix}"
+        tenant_id = f"tenant-{suffix}"
+        store = PostgresMcpServerRegistryStore(SQL_URL)
+        service = McpServerRegistryService(store, allow_private_auth_none=True)
+        restarted = PostgresMcpServerRegistryStore(SQL_URL)
+        try:
+            config = McpServerConfig(
+                server_id=server_id,
+                tenant_id=tenant_id,
+                title="Deletion recovery",
+                endpoint="http://127.0.0.1:18080/mcp",
+                network_mode="loopback",
+                auth_strategy="none",
+            )
+            write = McpServerWriteCommand(
+                command_id=f"create-{suffix}",
+                tenant_id=tenant_id,
+                actor_id="admin",
+                correlation_id="corr",
+                causation_id="cause",
+                expected_revision=0,
+                config=config,
+            )
+            await service.create(write)
+
+            class FailingRuntime:
+                async def revoke(self, server_id):
+                    raise RuntimeError("injected close failure")
+
+            service.bind_runtime(FailingRuntime())
+            pending = await service.delete(
+                server_id,
+                McpServerLifecycleCommand(
+                    command_id=f"delete-{suffix}",
+                    tenant_id=tenant_id,
+                    actor_id="admin",
+                    correlation_id="corr",
+                    causation_id="cause",
+                    expected_revision=1,
+                ),
+            )
+            assert pending.status is McpRegistryOperationStatus.RECONCILING
+            assert any(
+                op.operation_id == pending.operation_id
+                for op in await restarted.list_pending_deletes()
+            )
+            assert not any(
+                entry.server_id == server_id for entry in await service.active_snapshot()
+            )
+            recovered = McpServerRegistryService(restarted, allow_private_auth_none=True)
+            calls = []
+
+            class RecoveredRuntime:
+                async def revoke(self, server_id):
+                    calls.append(server_id)
+
+            recovered.bind_runtime(RecoveredRuntime())
+            assert await recovered.reconcile_pending_deletes() == 1
+            assert calls == [server_id]
+            assert await store.get_server(server_id) is None
+            assert (
+                await store.get_operation(pending.operation_id)
+            ).status is McpRegistryOperationStatus.SUCCEEDED
+            await recovered.create(write.model_copy(update={"command_id": f"new-{suffix}"}))
+            with pytest.raises(VersionConflictError, match="superseded"):
+                await store.delete_server(server_id, expected_revision=1)
+            assert await store.get_server(server_id) is not None
+        finally:
+            await _cleanup(store, server_id)
+            await store.close()
+            await restarted.close()
 
     asyncio.run(scenario())

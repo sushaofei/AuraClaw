@@ -5,6 +5,7 @@ from uuid import uuid4
 
 from auraclaw.action.ports import CredentialInvoker, ResourcePolicyEvaluator
 from auraclaw.contracts.capabilities import McpServerDefinition
+from auraclaw.contracts.errors import PolicyDeniedError
 from auraclaw.contracts.hands import (
     CapabilitySnapshot,
     HandsPromptArgument,
@@ -51,6 +52,7 @@ class ManagedMcpConnector:
         if max_pages < 1 or max_items < 1:
             raise ValueError("MCP pagination limits must be positive")
         self._server = server
+        self._admitted = True
         self._transport = ManagedRemoteMcpTransport(
             server, credentials=credentials, policy=policy
         )
@@ -66,6 +68,13 @@ class ManagedMcpConnector:
     @property
     def connector_id(self) -> str:
         return f"mcp:{self._server.server_id}"
+
+    def set_admission(self, admitted: bool) -> None:
+        self._admitted = admitted
+
+    def _assert_admitted(self) -> None:
+        if not self._admitted:
+            raise PolicyDeniedError("mcp_execution_blocked: server is disabled or quarantined")
 
     def set_notification_handler(self, handler: Any) -> None:
         self._transport.set_notification_handler(handler)
@@ -176,6 +185,7 @@ class ManagedMcpConnector:
         trusted: HandsTrustedContext,
         uri: str,
     ) -> tuple[HandsResourceContent, ...]:
+        self._assert_admitted()
         result = await self._send(_mcp_trusted(trusted), "resources/read", {"uri": uri})
         contents = []
         for item in result.get("contents", []):
@@ -204,6 +214,7 @@ class ManagedMcpConnector:
         *,
         arguments: dict[str, str] | None = None,
     ) -> HandsPromptResult:
+        self._assert_admitted()
         result = await self._send(
             _mcp_trusted(trusted),
             "prompts/get",
@@ -232,6 +243,7 @@ class ManagedMcpConnector:
         arguments: dict[str, Any],
         invocation_id: str,
     ) -> HandsToolResult:
+        self._assert_admitted()
         request_meta: dict[str, Any] = {
             MCP_AURACLAW_INVOCATION_ID_META_KEY: invocation_id,
             MCP_AURACLAW_TENANT_ID_META_KEY: trusted.tenant_id,
@@ -326,7 +338,7 @@ class ManagedMcpConnector:
         return descriptor
 
     async def aclose(self) -> None:
-        return None
+        self._admitted = False
 
     async def _list_all(
         self,
