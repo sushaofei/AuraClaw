@@ -15,7 +15,11 @@ from auraclaw.action.capability_catalog import (
     CapabilityCatalog,
     RoutedHandsExecutor,
 )
-from auraclaw.action.ports import CapabilityCatalogStore, CapabilityConnector
+from auraclaw.action.ports import (
+    CapabilityCatalogStore,
+    CapabilityConnector,
+    CommittedCatalogSnapshot,
+)
 from auraclaw.action.tool_gateway import ToolRegistry
 from auraclaw.contracts.capabilities import (
     CapabilityDescriptor,
@@ -82,9 +86,7 @@ class ConnectorToolExecutor:
         self._connector = connector
         self.route_owner = f"{connector.connector_id}:tools"
 
-    async def execute(
-        self, invocation: ToolInvocation, capability: ToolCapability
-    ) -> object:
+    async def execute(self, invocation: ToolInvocation, capability: ToolCapability) -> object:
         del capability
         result = await self._connector.call_tool(
             HandsTrustedContext(
@@ -131,9 +133,7 @@ class CapabilityCatalogReconciler:
         tenant_limit = (
             max_concurrent if max_concurrent_per_tenant is None else max_concurrent_per_tenant
         )
-        host_limit = (
-            max_concurrent if max_concurrent_per_host is None else max_concurrent_per_host
-        )
+        host_limit = max_concurrent if max_concurrent_per_host is None else max_concurrent_per_host
         if (
             max_concurrent < 1
             or not 1 <= tenant_limit <= max_concurrent
@@ -157,11 +157,22 @@ class CapabilityCatalogReconciler:
         self._owner = owner or f"catalog-reconciler-{uuid.uuid4().hex}"
         self._dirty: set[str] = set()
         self._snapshots: dict[str, CapabilitySnapshot] = {}
+        self._local_epochs: dict[str, int] = {}
         self._pending_invalidations: dict[str, set[str]] = {}
 
     def snapshot_for(self, server_id: str) -> CapabilitySnapshot | None:
         """Return the exact validated snapshot used for the latest publication."""
         return self._snapshots.get(server_id)
+
+    def is_locally_available(self, capability: CapabilityDescriptor) -> bool:
+        snapshot = self._snapshots.get(capability.server_id)
+        return bool(
+            snapshot is not None
+            and snapshot.extra.get("_auraclaw_catalog_generation")
+            == capability.metadata.get("catalog_generation")
+            and snapshot.extra.get("_auraclaw_config_revision")
+            == capability.metadata.get("config_revision")
+        )
 
     async def reconcile_all(self) -> int:
         results = await self.reconcile_all_results()
@@ -181,9 +192,7 @@ class CapabilityCatalogReconciler:
             partitions=self._partitions(),
         )
 
-    async def _reconcile_isolated(
-        self, server: McpServerDefinition
-    ) -> McpReconcileResult:
+    async def _reconcile_isolated(self, server: McpServerDefinition) -> McpReconcileResult:
         try:
             return await asyncio.wait_for(
                 self.reconcile_server(server), timeout=self._server_timeout_seconds
@@ -196,17 +205,24 @@ class CapabilityCatalogReconciler:
                 safe_error_code="TimeoutError",
                 quarantine_after_failures=self._quarantine_after_failures,
             )
-            status = (CapabilityStatus.QUARANTINED if health.quarantined
-                      else CapabilityStatus.DEGRADED)
+            status = (
+                CapabilityStatus.QUARANTINED if health.quarantined else CapabilityStatus.DEGRADED
+            )
             if health.quarantined:
                 self._remove_remote_tools(server)
                 self._snapshots.pop(server.server_id, None)
-                await self._catalog.register_server(server.model_copy(update={
-                    "status": status,
-                    "metadata": {**server.metadata,
-                                 "consecutive_sync_failures": health.consecutive_failures,
-                                 "last_sync_error": "TimeoutError"},
-                }))
+                await self._catalog.register_server(
+                    server.model_copy(
+                        update={
+                            "status": status,
+                            "metadata": {
+                                **server.metadata,
+                                "consecutive_sync_failures": health.consecutive_failures,
+                                "last_sync_error": "TimeoutError",
+                            },
+                        }
+                    )
+                )
             return McpReconcileResult(
                 server.server_id,
                 status,
@@ -221,23 +237,32 @@ class CapabilityCatalogReconciler:
     ) -> McpReconcileResult:
         connector = self._connectors.get(server.server_id)
         if connector is None or not server.enabled:
+            self.block_server(server.server_id)
+            self._snapshots.pop(server.server_id, None)
             return McpReconcileResult(
                 server_id=server.server_id,
                 status=server.status,
                 capability_count=0,
                 error="transport_unavailable",
             )
+        local_epoch = self._local_epochs.get(server.server_id, 0)
         lease = await self._store.claim_catalog_reconcile(
             server_id=server.server_id,
             owner=self._owner,
             ttl=self._lease_ttl,
         )
         if lease is None:
+            try:
+                loaded = await self.hydrate_committed(server)
+            except Exception:
+                self.block_server(server.server_id)
+                self._snapshots.pop(server.server_id, None)
+                loaded = False
             return McpReconcileResult(
                 server_id=server.server_id,
-                status=server.status,
-                capability_count=0,
-                error="lease_contended",
+                status=CapabilityStatus.ACTIVE if loaded else CapabilityStatus.DEGRADED,
+                capability_count=(len(self._snapshots[server.server_id].tools) if loaded else 0),
+                error=None if loaded else "lease_contended_local_unavailable",
             )
         trusted = _reconcile_context(server)
         existing_items = await self._store.list_server_capabilities(
@@ -270,25 +295,28 @@ class CapabilityCatalogReconciler:
             if len(ids) != len(set(ids)):
                 raise ValueError("remote connector returned duplicate capabilities")
             existing = {
-                (item.kind, item.canonical_name, item.version): item
-                for item in existing_items
+                (item.kind, item.canonical_name, item.version): item for item in existing_items
             }
             for item in descriptors:
-                previous = existing.get(
-                    (item.kind, item.canonical_name, item.version)
-                )
-                if (
-                    previous is not None
-                    and previous.content_digest != item.content_digest
-                ):
+                previous = existing.get((item.kind, item.canonical_name, item.version))
+                if previous is not None and previous.content_digest != item.content_digest:
                     raise CapabilitySchemaDriftError(
                         "remote MCP capability changed without version bump"
                     )
             if self._tool_registry is not None:
-                self._tool_registry.prepare_owner(connector.connector_id, tuple(
-                    _tool_capability(item, connector.connector_id) for item in descriptors
-                    if item.kind == CapabilityKind.TOOL
-                ))
+                self._tool_registry.prepare_owner(
+                    connector.connector_id,
+                    tuple(
+                        _tool_capability(item, connector.connector_id)
+                        for item in descriptors
+                        if item.kind == CapabilityKind.TOOL
+                    ),
+                )
+            if (
+                self._local_epochs.get(server.server_id, 0) != local_epoch
+                or self._connectors.get(server.server_id) is not connector
+            ):
+                raise StaleCapabilitySnapshotError("local MCP owner was revoked")
             snapshot_digest = _catalog_snapshot_digest(server, snapshot, descriptors)
             commit = await self._catalog.replace_server_capabilities(
                 server.server_id,
@@ -298,6 +326,11 @@ class CapabilityCatalogReconciler:
                 source_revision=snapshot.source_revision,
             )
             committed = True
+            if (
+                self._local_epochs.get(server.server_id, 0) != local_epoch
+                or self._connectors.get(server.server_id) is not connector
+            ):
+                raise StaleCapabilitySnapshotError("local MCP owner changed during publication")
             self._replace_remote_tools(server, descriptors, connector)
             self._snapshots[server.server_id] = snapshot.model_copy(
                 update={
@@ -334,9 +367,7 @@ class CapabilityCatalogReconciler:
                         "consecutive_sync_failures": health.consecutive_failures,
                         "catalog_quarantined_at": None,
                         "catalog_stale": False,
-                        "active_catalog_generation": (
-                            commit.generation
-                        ),
+                        "active_catalog_generation": (commit.generation),
                     },
                 }
             )
@@ -348,13 +379,23 @@ class CapabilityCatalogReconciler:
                 capability_count=len(descriptors),
             )
         except StaleCapabilitySnapshotError:
+            loaded = False
+            if self._local_epochs.get(server.server_id, 0) == local_epoch:
+                try:
+                    loaded = await self.hydrate_committed(server)
+                except Exception:
+                    pass
             return McpReconcileResult(
                 server_id=server.server_id,
-                status=CapabilityStatus.ACTIVE if existing_items else server.status,
-                capability_count=len(existing_items),
+                status=CapabilityStatus.ACTIVE if loaded else CapabilityStatus.DEGRADED,
+                capability_count=len(existing_items) if loaded else 0,
                 error="stale_snapshot",
             )
         except Exception as exc:
+            if self._local_epochs.get(server.server_id, 0) != local_epoch:
+                return McpReconcileResult(
+                    server.server_id, CapabilityStatus.DEGRADED, 0, error="local_owner_revoked"
+                )
             attempted_at = datetime.now(UTC)
             health = await self._store.record_catalog_sync(
                 server.server_id,
@@ -365,9 +406,7 @@ class CapabilityCatalogReconciler:
             )
             failures = health.consecutive_failures
             status = (
-                CapabilityStatus.QUARANTINED
-                if health.quarantined
-                else CapabilityStatus.DEGRADED
+                CapabilityStatus.QUARANTINED if health.quarantined else CapabilityStatus.DEGRADED
             )
             published_status = (
                 CapabilityStatus.QUARANTINED
@@ -386,9 +425,7 @@ class CapabilityCatalogReconciler:
                             "last_sync_error": type(exc).__name__,
                             "consecutive_sync_failures": failures,
                             "catalog_quarantined_at": (
-                                attempted_at.isoformat()
-                                if health.quarantined
-                                else None
+                                attempted_at.isoformat() if health.quarantined else None
                             ),
                             "catalog_stale": bool(existing_items),
                             "active_catalog_generation": (
@@ -405,7 +442,10 @@ class CapabilityCatalogReconciler:
                 self._snapshots.pop(server.server_id, None)
                 self._dirty.add(server.server_id)
             elif existing_items and not health.quarantined:
-                self._replace_remote_tools(server, existing_items, connector)
+                try:
+                    await self.hydrate_committed(server)
+                except Exception:
+                    self.block_server(server.server_id)
             elif health.quarantined:
                 self._remove_remote_tools(server)
             return McpReconcileResult(
@@ -417,6 +457,45 @@ class CapabilityCatalogReconciler:
             )
         finally:
             await self._store.release_catalog_reconcile(lease)
+
+    async def hydrate_committed(self, server: McpServerDefinition) -> bool:
+        """Install shared committed state independently of the discovery lease."""
+        connector = self._connectors.get(server.server_id)
+        if connector is None:
+            return False
+        epoch = self._local_epochs.get(server.server_id, 0)
+        committed = await self._store.read_committed_snapshot(
+            server.tenant_id or "platform", server.server_id
+        )
+        if committed is None:
+            self.block_server(server.server_id)
+            self._snapshots.pop(server.server_id, None)
+            return False
+        try:
+            snapshot, descriptors = _restore_snapshot(server, committed)
+            latest = await self._store.read_committed_snapshot(
+                server.tenant_id or "platform", server.server_id
+            )
+            if (
+                latest is None
+                or latest.generation != committed.generation
+                or latest.snapshot_digest != committed.snapshot_digest
+                or latest.server != committed.server
+                or self._local_epochs.get(server.server_id, 0) != epoch
+                or self._connectors.get(server.server_id) is not connector
+            ):
+                raise StaleCapabilitySnapshotError("committed MCP snapshot was superseded")
+            restore = getattr(connector, "restore_snapshot", None)
+            if callable(restore):
+                restore(snapshot)
+            self._replace_remote_tools(server, descriptors, connector)
+            self._snapshots[server.server_id] = snapshot
+            return True
+        except Exception:
+            if self._local_epochs.get(server.server_id, 0) == epoch:
+                self.block_server(server.server_id)
+                self._snapshots.pop(server.server_id, None)
+            raise
 
     async def handle_notification(
         self,
@@ -494,8 +573,11 @@ class CapabilityCatalogReconciler:
         self._tool_registry.replace_owner(owner, capabilities)
         self._hands_router.replace_owner_routes(
             owner,
-            {capability.invocation_ref.model_name: executor for capability in capabilities
-             if capability.invocation_ref is not None},
+            {
+                capability.invocation_ref.model_name: executor
+                for capability in capabilities
+                if capability.invocation_ref is not None
+            },
         )
         admission = getattr(connector, "set_admission", None)
         if callable(admission):
@@ -514,6 +596,8 @@ class CapabilityCatalogReconciler:
             await self._catalog.replace_server_capabilities(server_id, ())
 
     def block_server(self, server_id: str) -> None:
+        self._local_epochs[server_id] = self._local_epochs.get(server_id, 0) + 1
+        self._snapshots.pop(server_id, None)
         connector = self._connectors.get(server_id)
         admission = getattr(connector, "set_admission", None)
         if callable(admission):
@@ -531,17 +615,101 @@ class CapabilityCatalogReconciler:
 McpCatalogReconciler = CapabilityCatalogReconciler
 
 
+def _restore_snapshot(
+    server: McpServerDefinition,
+    committed: CommittedCatalogSnapshot,
+) -> tuple[CapabilitySnapshot, tuple[CapabilityDescriptor, ...]]:
+    published = committed.server
+    if (
+        not server.enabled
+        or not published.enabled
+        or published.status not in {CapabilityStatus.ACTIVE, CapabilityStatus.DEGRADED}
+        or server.config_revision != published.config_revision
+        or server.tenant_id != published.tenant_id
+        or server.endpoint != published.endpoint
+    ):
+        raise StaleCapabilitySnapshotError("committed MCP snapshot is not executable")
+    descriptors = tuple(
+        item.model_copy(
+            update={
+                "metadata": {
+                    key: value
+                    for key, value in item.metadata.items()
+                    if key != "catalog_generation"
+                }
+            }
+        )
+        for item in committed.capabilities
+    )
+    for item in descriptors:
+        if (
+            item.server_id != server.server_id
+            or item.tenant_id != server.tenant_id
+            or item.metadata.get("config_revision") != int(server.config_revision or 0)
+            or item.status not in {CapabilityStatus.ACTIVE, CapabilityStatus.DEGRADED}
+            or _digest(item.metadata.get("source", {})) != item.content_digest
+        ):
+            raise StaleCapabilitySnapshotError("committed MCP descriptor identity is invalid")
+    snapshot = CapabilitySnapshot(
+        connector_id=f"mcp:{server.server_id}",
+        source_revision=committed.source_revision,
+        tools=tuple(
+            HandsToolDescriptor(
+                name=item.canonical_name,
+                description=item.description,
+                input_schema=item.metadata["source"]["inputSchema"],
+                output_schema=item.metadata["source"]["outputSchema"],
+                version=item.metadata["source"].get("version"),
+                read_only=item.permission == "read-only",
+                risk_level=item.risk_level,
+            )
+            for item in descriptors
+            if item.kind is CapabilityKind.TOOL
+        ),
+        resources=tuple(
+            HandsResourceDescriptor.model_validate(item.metadata["source"])
+            for item in descriptors
+            if item.kind is CapabilityKind.RESOURCE
+        ),
+        resource_templates=tuple(
+            HandsResourceDescriptor.model_validate(item.metadata["source"])
+            for item in descriptors
+            if item.kind is CapabilityKind.RESOURCE_TEMPLATE
+        ),
+        prompts=tuple(
+            HandsPromptDescriptor.model_validate(item.metadata["source"])
+            for item in descriptors
+            if item.kind is CapabilityKind.PROMPT
+        ),
+        extra={
+            "_auraclaw_config_revision": int(server.config_revision or 0),
+            "_auraclaw_catalog_generation": committed.generation,
+            "_auraclaw_snapshot_digest": committed.snapshot_digest,
+        },
+    )
+    if committed.snapshot_digest not in {
+        _catalog_snapshot_digest(server, snapshot, descriptors),
+        _catalog_snapshot_digest(server, snapshot, descriptors, include_timestamps=True),
+    }:
+        raise StaleCapabilitySnapshotError("committed MCP snapshot digest mismatch")
+    return snapshot, descriptors
+
+
 def _catalog_snapshot_digest(
     server: McpServerDefinition,
     snapshot: CapabilitySnapshot,
     descriptors: tuple[CapabilityDescriptor, ...],
+    *,
+    include_timestamps: bool = False,
 ) -> str:
     payload = {
         "server_id": server.server_id,
         "config_revision": server.config_revision,
         "source_revision": snapshot.source_revision,
         "capabilities": [
-            descriptor.model_dump(mode="json")
+            descriptor.model_dump(
+                mode="json", exclude=set() if include_timestamps else {"updated_at"}
+            )
             for descriptor in sorted(
                 descriptors,
                 key=lambda item: (
@@ -566,9 +734,7 @@ def _normalize_snapshot(
     items.extend(_normalize_tools(server, snapshot.tools))
     items.extend(_normalize_resources(server, snapshot.resources, CapabilityKind.RESOURCE))
     items.extend(
-        _normalize_resources(
-            server, snapshot.resource_templates, CapabilityKind.RESOURCE_TEMPLATE
-        )
+        _normalize_resources(server, snapshot.resource_templates, CapabilityKind.RESOURCE_TEMPLATE)
     )
     items.extend(_normalize_prompts(server, snapshot.prompts))
     if len(items) > max_items:
@@ -738,9 +904,7 @@ def _tool_capability(
         description=descriptor.description,
         input_schema=input_schema,
         output_schema=output_schema,
-        permission=ToolPermission(
-            descriptor.permission or ToolPermission.WRITE_WITH_APPROVAL
-        ),
+        permission=ToolPermission(descriptor.permission or ToolPermission.WRITE_WITH_APPROVAL),
         risk_level=RiskLevel(descriptor.risk_level or RiskLevel.HIGH),
         runtime_location="remote-mcp",
         invocation_ref=CapabilityInvocationRef.from_descriptor(descriptor),
@@ -783,14 +947,9 @@ def _tool_search_tags(server: McpServerDefinition, canonical_name: str) -> tuple
             if str(mapped) != canonical_name:
                 continue
             tags.append(str(remote_name))
-            tags.extend(
-                part for part in re.split(r"[_.-]+", str(remote_name)) if part
-            )
+            tags.extend(part for part in re.split(r"[_.-]+", str(remote_name)) if part)
     lowered = canonical_name.casefold()
-    if any(
-        marker in lowered
-        for marker in ("price_insight", "price-insight", "procurement.price")
-    ):
+    if any(marker in lowered for marker in ("price_insight", "price-insight", "procurement.price")):
         tags.extend(_PRICE_INSIGHT_SEARCH_TAGS)
     tags.extend(part for part in re.split(r"[_.-]+", canonical_name) if part)
     return tuple(dict.fromkeys(tag for tag in tags if tag))
@@ -815,9 +974,7 @@ def _validate_depth(value: Any, *, depth: int) -> None:
     while pending:
         current, current_depth = pending.pop()
         if current_depth > MAX_DESCRIPTOR_DEPTH:
-            raise CapabilityDescriptorDepthError(
-                "remote MCP descriptor exceeds recursion limit"
-            )
+            raise CapabilityDescriptorDepthError("remote MCP descriptor exceeds recursion limit")
         if isinstance(current, dict):
             for key, item in current.items():
                 if not isinstance(key, str) or len(key) > 256:

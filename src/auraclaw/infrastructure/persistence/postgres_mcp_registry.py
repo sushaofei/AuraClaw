@@ -319,10 +319,11 @@ class PostgresMcpServerRegistryStore(LazyPool, McpServerRegistryStore):
         await pool.execute(
             """INSERT INTO hands.mcp_server_runtime
             (server_id,instance_id,loaded_revision,observed_state,last_test_at,last_sync_at,
-             consecutive_failures,safe_error_code,updated_at)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+             consecutive_failures,safe_error_code,updated_at,applied_generation)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
             ON CONFLICT (server_id,instance_id) DO UPDATE SET
               loaded_revision=EXCLUDED.loaded_revision,
+              applied_generation=EXCLUDED.applied_generation,
               observed_state=EXCLUDED.observed_state,
               last_test_at=EXCLUDED.last_test_at,
               last_sync_at=EXCLUDED.last_sync_at,
@@ -338,6 +339,7 @@ class PostgresMcpServerRegistryStore(LazyPool, McpServerRegistryStore):
             runtime.consecutive_failures,
             runtime.safe_error_code,
             runtime.updated_at,
+            runtime.applied_generation,
         )
 
     async def list_pending_deletes(
@@ -513,6 +515,7 @@ def _runtime(row: dict[str, Any]) -> McpServerRuntimeRecord:
         server_id=str(row["server_id"]),
         instance_id=str(row.get("instance_id") or "legacy"),
         loaded_revision=(None if row["loaded_revision"] is None else int(row["loaded_revision"])),
+        applied_generation=row.get("applied_generation"),
         observed_state=McpObservedState(str(row["observed_state"])),
         last_test_at=row["last_test_at"],
         last_sync_at=row["last_sync_at"],

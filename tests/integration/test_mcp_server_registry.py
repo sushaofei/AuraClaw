@@ -19,6 +19,7 @@ from auraclaw.contracts.mcp_registry import (
     McpServerConfig,
     McpServerLifecycleCommand,
     McpServerOperationRecord,
+    McpServerRuntimeRecord,
     McpServerWriteCommand,
 )
 from auraclaw.infrastructure.persistence.migration_runner import discover_migrations
@@ -66,6 +67,9 @@ async def _apply_registry_migration(database_url: str) -> None:
                 sql = (ROOT / "migrations/0020_mcp_server_registry.sql").read_text()
                 for statement in _split_sql(sql):
                     await connection.execute(statement)
+            await connection.execute(
+                (ROOT / "migrations/0060_mcp_local_applied_generation.sql").read_text()
+            )
             claims = (ROOT / "migrations/0046_mcp_lifecycle_operation_claims.sql").read_text()
             for statement in _split_sql(claims):
                 await connection.execute(statement)
@@ -368,6 +372,17 @@ def test_sql_pending_delete_survives_restart_and_revision_fences_cleanup() -> No
                 config=config,
             )
             await service.create(write)
+            await service.record_runtime(
+                McpServerRuntimeRecord(
+                    server_id=server_id,
+                    instance_id="cold-follower",
+                    loaded_revision=1,
+                    applied_generation=7,
+                    updated_at=datetime.now(UTC),
+                )
+            )
+            restored_record = await restarted.get_server(server_id)
+            assert restored_record.runtimes[0].applied_generation == 7
 
             class FailingRuntime:
                 async def revoke(self, server_id):

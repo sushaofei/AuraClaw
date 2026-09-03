@@ -8,6 +8,7 @@ from auraclaw.action.ports import (
     CatalogCommitResult,
     CatalogReconcileLease,
     CatalogSyncHealth,
+    CommittedCatalogSnapshot,
 )
 from auraclaw.contracts.capabilities import (
     CapabilityDescriptor,
@@ -65,11 +66,7 @@ class PostgresCapabilityCatalogStore(LazyPool):
                         else {}
                     ),
                     **(
-                        {
-                            "_auraclaw_allowed_private_hosts": list(
-                                server.allowed_private_hosts
-                            )
-                        }
+                        {"_auraclaw_allowed_private_hosts": list(server.allowed_private_hosts)}
                         if server.allowed_private_hosts
                         else {}
                     ),
@@ -129,8 +126,7 @@ class PostgresCapabilityCatalogStore(LazyPool):
                 or server_row["reconcile_expires_at"] is None
                 or server_row["reconcile_expires_at"] <= datetime.now(UTC)
                 or int(server_row["config_revision"]) != lease.config_revision
-                or int(server_row["active_catalog_generation"])
-                != lease.previous_generation
+                or int(server_row["active_catalog_generation"]) != lease.previous_generation
             ):
                 raise StaleCapabilitySnapshotError(
                     "Capability snapshot ownership or catalog generation is stale"
@@ -151,9 +147,7 @@ class PostgresCapabilityCatalogStore(LazyPool):
                     server_id,
                 )
                 if conflict is not None:
-                    raise ValueError(
-                        f"Capability id belongs to another MCP server: {conflict}"
-                    )
+                    raise ValueError(f"Capability id belongs to another MCP server: {conflict}")
             await connection.execute(
                 "DELETE FROM hands.capability_catalog WHERE server_id=$1",
                 server_id,
@@ -255,6 +249,37 @@ class PostgresCapabilityCatalogStore(LazyPool):
         )
         return None if value is None else int(value)
 
+    async def read_committed_snapshot(
+        self, tenant_id: str, server_id: str
+    ) -> CommittedCatalogSnapshot | None:
+        pool = await self.pool()
+        async with (
+            pool.acquire() as connection,
+            connection.transaction(isolation="repeatable_read", readonly=True),
+        ):
+            row = await connection.fetchrow(
+                """SELECT * FROM hands.downstream_mcp_server
+                WHERE server_id=$1 AND (tenant_id IS NULL OR tenant_id=$2)""",
+                server_id,
+                tenant_id,
+            )
+            if row is None or int(row["active_catalog_generation"]) < 1:
+                return None
+            generation = int(row["active_catalog_generation"])
+            rows = await connection.fetch(
+                """SELECT * FROM hands.capability_catalog
+                WHERE server_id=$1 AND catalog_generation=$2""",
+                server_id,
+                generation,
+            )
+            return CommittedCatalogSnapshot(
+                _server(row),
+                generation,
+                str(row["active_snapshot_digest"] or ""),
+                row["active_source_revision"],
+                tuple(_capability(item) for item in rows),
+            )
+
     async def record_catalog_sync(
         self,
         server_id: str,
@@ -319,9 +344,7 @@ class PostgresCapabilityCatalogStore(LazyPool):
                 server_id,
             )
 
-    async def list_capabilities(
-        self, tenant_id: str
-    ) -> tuple[CapabilityDescriptor, ...]:
+    async def list_capabilities(self, tenant_id: str) -> tuple[CapabilityDescriptor, ...]:
         pool = await self.pool()
         rows = await pool.fetch(
             """SELECT c.* FROM hands.capability_catalog AS c

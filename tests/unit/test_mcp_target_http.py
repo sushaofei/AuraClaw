@@ -3,10 +3,13 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+from datetime import timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
+from uuid import uuid4
 
 import httpx
+import pytest
 
 from auraclaw.action.capability_catalog import (
     CapabilityCatalog,
@@ -109,16 +112,43 @@ class NoFallback:
         raise AssertionError("No fallback routing allowed")
 
 
-def test_runtime_hands_targets_two_real_http_servers_with_same_tool_name() -> None:
+@pytest.mark.parametrize("cold", [False, True])
+def test_runtime_hands_targets_two_real_http_servers_with_same_tool_name(cold: bool) -> None:
+    _exercise_two_servers(cold=cold)
+
+
+def test_postgres_cold_replica_targets_real_http_servers() -> None:
+    from auraclaw.config import get_settings
+
+    settings = get_settings()
+    if not settings.postgres_enabled:
+        pytest.skip("PostgreSQL test URL not configured")
+    _exercise_two_servers(cold=True, database_url=settings.resolved_database_url)
+
+
+def _exercise_two_servers(*, cold: bool, database_url: str | None = None) -> None:
     servers = []
-    for marker in ("one", "two"):
+    suffix = uuid4().hex[:10] if database_url else ""
+    for marker in ("one" + suffix, "two" + suffix):
         handler = type(f"Handler_{marker}", (Handler,), {"marker": marker, "requests": []})
         server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         servers.append((marker, server))
 
     async def scenario() -> None:
-        store = InMemoryCapabilityCatalogStore()
+        from auraclaw.infrastructure.persistence.postgres_capability_catalog import (
+            PostgresCapabilityCatalogStore,
+        )
+
+        store = (
+            InMemoryCapabilityCatalogStore()
+            if database_url is None
+            else PostgresCapabilityCatalogStore(database_url)
+        )
+        follower_store = (
+            store if database_url is None else PostgresCapabilityCatalogStore(database_url)
+        )
+        leases = []
         catalog = CapabilityCatalog(store)
         load = capability_load_tool()
         registry = ToolRegistry((load,))
@@ -163,6 +193,37 @@ def test_runtime_hands_targets_two_real_http_servers_with_same_tool_name() -> No
                     for item in await store.list_server_capabilities(
                         "tenant-a", definition.server_id
                     )
+                )
+            if cold:
+                before = sum(len(server.RequestHandlerClass.requests) for _, server in servers)
+                catalog = CapabilityCatalog(follower_store)
+                registry = ToolRegistry((load,))
+                router = RoutedHandsExecutor(
+                    NoFallback(), {load.name: CapabilityLoadExecutor(catalog)}
+                )
+                cold_connectors = {
+                    definition.server_id: ManagedMcpConnector(
+                        definition, credentials=Credentials(adapter), policy=Allow()
+                    )
+                    for definition, adapter in zip(definitions, adapters, strict=True)
+                }
+                follower = CapabilityCatalogReconciler(
+                    catalog=catalog,
+                    store=follower_store,
+                    connectors=cold_connectors,
+                    tool_registry=registry,
+                    hands_router=router,
+                )
+                for definition in definitions:
+                    lease = await store.claim_catalog_reconcile(
+                        server_id=definition.server_id, owner="leader", ttl=timedelta(minutes=1)
+                    )
+                    assert lease is not None
+                    leases.append(lease)
+                    result = await follower.reconcile_server(definition)
+                    assert result.status is CapabilityStatus.ACTIVE, result.error
+                assert (
+                    sum(len(server.RequestHandlerClass.requests) for _, server in servers) == before
                 )
             gateway = HandsGateway(
                 registry=registry,
@@ -248,6 +309,13 @@ def test_runtime_hands_targets_two_real_http_servers_with_same_tool_name() -> No
                 ]
                 assert len(calls) == 1 and calls[0]["params"]["arguments"] == {"value": 42}
         finally:
+            for lease in leases:
+                await store.release_catalog_reconcile(lease)
+            if database_url is not None:
+                for definition in definitions:
+                    await store.remove_server(definition.server_id)
+                await store.close()
+                await follower_store.close()
             for adapter in adapters:
                 await adapter.aclose()
 

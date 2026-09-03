@@ -164,6 +164,7 @@ class McpServerRuntimeRecord(ContractModel):
     server_id: str
     instance_id: str = Field(default="legacy", min_length=1, max_length=256)
     loaded_revision: int | None = None
+    applied_generation: int | None = Field(default=None, ge=1)
     observed_state: McpObservedState = McpObservedState.PENDING
     last_test_at: datetime | None = None
     last_sync_at: datetime | None = None

@@ -543,6 +543,7 @@ def build_action_hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         max_concurrent_per_host=settings.mcp_reconcile_max_concurrent_per_host,
         server_timeout_seconds=settings.mcp_reconcile_server_timeout_seconds,
     )
+    resource_gateway.set_mcp_readiness(reconciler.is_locally_available)
     app.state.catalog_reconciler = reconciler
 
     async def initialize_remote_catalog() -> None:
