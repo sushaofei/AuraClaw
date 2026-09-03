@@ -42,6 +42,19 @@ class McpServerLifecycleOps(Protocol):
         self, server_id: str, command: McpServerLifecycleCommand
     ) -> McpServerOperationRecord: ...
 
+    async def test_capability(
+        self,
+        *,
+        tenant_id: str,
+        actor_id: str,
+        dept_id: str | None,
+        correlation_id: str,
+        server_id: str,
+        capability_id: str,
+        input_payload: dict[str, Any],
+        expected_output: Any = None,
+    ) -> dict[str, Any]: ...
+
 
 class McpServerToolCatalog(Protocol):
     async def list_server_tools(
@@ -51,6 +64,10 @@ class McpServerToolCatalog(Protocol):
     async def publication_status(
         self, *, tenant_id: str, server_id: str
     ) -> dict[str, object] | None: ...
+
+    async def list_server_capabilities(
+        self, *, tenant_id: str, server_id: str
+    ) -> tuple[CapabilityDescriptor, ...]: ...
 
 
 def create_mcp_admin_router(
@@ -251,6 +268,61 @@ def create_mcp_admin_router(
             "tools": [item.as_search_result() for item in tools],
         }
 
+    @router.get("/mcp-servers/{server_id}/capabilities")
+    async def list_server_capabilities(
+        server_id: str, identity: Identity
+    ) -> dict[str, Any]:
+        await registry.get_server(
+            tenant_id=identity.tenant_id,
+            server_id=server_id,
+            actor_id=identity.actor.id,
+        )
+        capabilities = (
+            ()
+            if catalog is None
+            else await catalog.list_server_capabilities(
+                tenant_id=identity.tenant_id, server_id=server_id
+            )
+        )
+        return {
+            "server_id": server_id,
+            "capabilities": [
+                _admin_capability_payload(item) for item in capabilities
+            ],
+        }
+
+    @router.post("/mcp-servers/{server_id}/capabilities/{capability_id}:test")
+    async def test_server_capability(
+        server_id: str,
+        capability_id: str,
+        payload: dict[str, Any],
+        identity: Identity,
+    ) -> dict[str, Any]:
+        await registry.get_server(
+            tenant_id=identity.tenant_id,
+            server_id=server_id,
+            actor_id=identity.actor.id,
+        )
+        input_payload = payload.get("input", {})
+        if not isinstance(input_payload, dict):
+            raise HTTPException(status_code=422, detail="input must be a JSON object")
+        tester = getattr(ops, "test_capability", None)
+        if tester is None:
+            raise HTTPException(
+                status_code=501, detail="MCP capability testing is unavailable"
+            )
+        result = await tester(
+            tenant_id=identity.tenant_id,
+            actor_id=identity.actor.id,
+            dept_id=identity.dept_id,
+            correlation_id=identity.correlation_id,
+            server_id=server_id,
+            capability_id=capability_id,
+            input_payload=dict(input_payload),
+            expected_output=payload.get("expected_output"),
+        )
+        return dict(result)
+
     @router.put("/mcp-servers/{server_id}", status_code=status.HTTP_202_ACCEPTED)
     async def update_server(
         server_id: str,
@@ -351,3 +423,31 @@ def create_mcp_admin_router(
         return record.model_dump(mode="json")
 
     return router
+
+
+def _admin_capability_payload(item: CapabilityDescriptor) -> dict[str, Any]:
+    payload = item.as_search_result()
+    payload["read_only"] = item.permission == "read-only"
+    payload["enabled"] = item.status.value == "active"
+    source = item.metadata.get("source")
+    if not isinstance(source, dict):
+        return payload
+    if item.kind.value == "tool":
+        input_schema = source.get("inputSchema")
+        output_schema = source.get("outputSchema")
+        payload["input_schema"] = input_schema if isinstance(input_schema, dict) else {}
+        payload["output_schema"] = output_schema if isinstance(output_schema, dict) else {}
+    elif item.kind.value in {"resource", "resource_template"}:
+        for source_key, target_key in (
+            ("uri", "uri"),
+            ("uri_template", "uri_template"),
+            ("mime_type", "mime_type"),
+            ("size", "size"),
+        ):
+            value = source.get(source_key)
+            if value is not None:
+                payload[target_key] = value
+    elif item.kind.value == "prompt":
+        arguments = source.get("arguments")
+        payload["arguments"] = arguments if isinstance(arguments, list) else []
+    return payload

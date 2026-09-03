@@ -11,7 +11,13 @@ from auraclaw.action.capability_catalog import (
     InMemoryCapabilityCatalogStore,
     RoutedHandsExecutor,
 )
-from auraclaw.action.catalog_reconciler import CapabilityCatalogReconciler
+from auraclaw.action.catalog_reconciler import (
+    MAX_DESCRIPTOR_DEPTH,
+    CapabilityCatalogReconciler,
+    CapabilityDescriptorDepthError,
+    CapabilityDescriptorSizeError,
+    _digest,
+)
 from auraclaw.action.ports import PolicyEvaluation
 from auraclaw.action.tool_gateway import ToolRegistry
 from auraclaw.contracts.capabilities import (
@@ -65,6 +71,24 @@ def _server(*, protocol_revision: str = "2026-07-28") -> McpServerDefinition:
         status=CapabilityStatus.ACTIVE,
         enabled=True,
     )
+
+
+def test_descriptor_supports_nested_chart_schema_but_keeps_bounded_limits() -> None:
+    schema: dict[str, Any] = {"type": "string"}
+    for _ in range(9):
+        schema = {"type": "object", "properties": {"child": schema}}
+    assert _digest({"inputSchema": schema}).startswith("sha256:")
+    deep: dict[str, Any] = {}
+    for _ in range(MAX_DESCRIPTOR_DEPTH + 1):
+        deep = {"child": deep}
+    with pytest.raises(CapabilityDescriptorDepthError):
+        _digest(deep)
+    with pytest.raises(CapabilityDescriptorSizeError):
+        _digest({"description": "x" * (256 * 1024)})
+    cyclic: dict[str, Any] = {}
+    cyclic["child"] = cyclic
+    with pytest.raises(CapabilityDescriptorDepthError):
+        _digest(cyclic)
 
 
 class _AllowPolicy:

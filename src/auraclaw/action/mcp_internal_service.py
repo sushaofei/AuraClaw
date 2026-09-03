@@ -1,9 +1,12 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Protocol
 
 from auraclaw.action.mcp_registry import McpServerRegistryService
+from auraclaw.contracts.errors import InvalidTransitionError
 from auraclaw.contracts.internal import (
+    McpCapabilityTestRequest,
+    McpCapabilityTestResponse,
     McpRegistryAdminRequest,
     McpRegistryAdminResponse,
     McpRegistrySnapshotRequest,
@@ -17,9 +20,35 @@ from auraclaw.contracts.mcp_registry import (
 )
 
 
+class McpCapabilityTester(Protocol):
+    async def test_capability(self, **kwargs: Any) -> dict[str, Any]: ...
+
+
 class McpRegistryInternalService:
-    def __init__(self, registry: McpServerRegistryService) -> None:
+    def __init__(
+        self,
+        registry: McpServerRegistryService,
+        *,
+        capability_tester: McpCapabilityTester | None = None,
+    ) -> None:
         self._registry = registry
+        self._capability_tester = capability_tester
+
+    async def test_capability(
+        self, request: McpCapabilityTestRequest
+    ) -> McpCapabilityTestResponse:
+        if self._capability_tester is None:
+            raise InvalidTransitionError("MCP capability testing is unavailable")
+        result = await self._capability_tester.test_capability(
+            tenant_id=request.context.tenant_id,
+            actor_id=request.actor_id,
+            dept_id=request.dept_id,
+            server_id=request.server_id,
+            capability_id=request.capability_id,
+            input_payload=dict(request.input),
+            expected_output=request.expected_output,
+        )
+        return McpCapabilityTestResponse.model_validate(result)
 
     async def command(
         self, request: McpRegistryAdminRequest

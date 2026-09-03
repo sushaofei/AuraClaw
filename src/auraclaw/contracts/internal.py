@@ -944,6 +944,27 @@ class McpRegistrySnapshotResponse(ContractModel):
     servers: tuple[dict[str, Any], ...] = ()
 
 
+class McpCapabilityTestRequest(ContractModel):
+    context: InternalRequestContext
+    server_id: str = Field(min_length=1)
+    capability_id: str = Field(min_length=1)
+    actor_id: str = Field(min_length=1)
+    dept_id: str | None = None
+    input: dict[str, Any] = Field(default_factory=dict)
+    expected_output: Any = None
+
+
+class McpCapabilityTestResponse(ContractModel):
+    api_version: str = INTERNAL_API_VERSION
+    status: Literal["passed", "failed"]
+    kind: str
+    output: Any = None
+    schema_valid: bool | None = None
+    expectation_matched: bool | None = None
+    duration_ms: int = Field(ge=0)
+    error: str | None = None
+
+
 class McpEgressCommandRequest(ContractModel):
     context: InternalRequestContext
     operation: Literal["apply", "revoke"]

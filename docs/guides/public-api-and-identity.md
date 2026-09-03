@@ -224,6 +224,8 @@ Secret 只允许引用 `credential_ref`，响应里不会出现明文。写命�
 | `GET` / `POST` | `/v1/admin/mcp-servers` | 列出 / 创建受管 MCP Server |
 | `GET` / `PUT` | `/v1/admin/mcp-servers/{server_id}` | 详情 / 更新配置 |
 | `GET` | `/v1/admin/mcp-servers/{server_id}/tools` | 列出该 Server 对账后的 Catalog tools |
+| `GET` | `/v1/admin/mcp-servers/{server_id}/capabilities` | 列出该 Server 对账后的 Tool、Resource、Prompt 及其安全属性与 Schema |
+| `POST` | `/v1/admin/mcp-servers/{server_id}/capabilities/{capability_id}:test` | 使用模拟 Input 调用只读能力，返回实际 Output、Schema 校验与可选期望子集匹配结果；写能力拒绝执行 |
 | `POST` | `/v1/admin/mcp-servers/{server_id}:test` | 连通性探测 |
 | `POST` | `/v1/admin/mcp-servers/{server_id}:enable` | 启用 |
 | `POST` | `/v1/admin/mcp-servers/{server_id}:disable` | 停用 |

@@ -43,6 +43,8 @@ from auraclaw.contracts.internal import (
     CredentialResourceRequest,
     CredentialResourceResponse,
     LoadCheckpointRequest,
+    McpCapabilityTestRequest,
+    McpCapabilityTestResponse,
     McpEgressCommandRequest,
     McpEgressCommandResponse,
     McpRegistryAdminRequest,
@@ -276,6 +278,11 @@ def mcp_registry_routes(
         ),
         "/snapshot": contract_route(
             McpRegistrySnapshotRequest, McpRegistrySnapshotResponse, service.snapshot
+        ),
+        "/capability-test": contract_route(
+            McpCapabilityTestRequest,
+            McpCapabilityTestResponse,
+            service.test_capability,
         ),
     }
 

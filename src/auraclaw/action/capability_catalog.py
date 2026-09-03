@@ -437,8 +437,17 @@ class CapabilityCatalog:
     ) -> tuple[CapabilityDescriptor, ...]:
         return tuple(
             capability
-            for capability in await self._store.list_server_capabilities(tenant_id, server_id)
+            for capability in await self.list_server_capabilities(
+                tenant_id=tenant_id, server_id=server_id
+            )
             if capability.kind is CapabilityKind.TOOL
+        )
+
+    async def list_server_capabilities(
+        self, *, tenant_id: str, server_id: str
+    ) -> tuple[CapabilityDescriptor, ...]:
+        return tuple(
+            await self._store.list_server_capabilities(tenant_id, server_id)
         )
 
     async def publication_status(

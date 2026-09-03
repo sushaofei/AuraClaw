@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any
 
 import httpx
 
 from auraclaw.contracts.internal import (
+    McpCapabilityTestRequest,
+    McpCapabilityTestResponse,
     McpRegistryAdminRequest,
     McpRegistryAdminResponse,
 )
@@ -17,6 +20,7 @@ from auraclaw.contracts.mcp_registry import (
 from auraclaw.infrastructure.clients.internal import (
     InternalContractSession,
     command_context,
+    query_context,
 )
 
 
@@ -71,6 +75,33 @@ class RemoteMcpRegistryClient:
         self, server_id: str, command: McpServerLifecycleCommand
     ) -> McpServerOperationRecord:
         return await self._lifecycle("delete", server_id, command)
+
+    async def test_capability(
+        self,
+        *,
+        tenant_id: str,
+        actor_id: str,
+        dept_id: str | None,
+        correlation_id: str,
+        server_id: str,
+        capability_id: str,
+        input_payload: dict[str, Any],
+        expected_output: Any = None,
+    ) -> dict[str, Any]:
+        response = await self._contract.call(
+            "/internal/v1/mcp-registry/capability-test",
+            McpCapabilityTestRequest(
+                context=query_context(tenant_id, correlation_id),
+                server_id=server_id,
+                capability_id=capability_id,
+                actor_id=actor_id,
+                dept_id=dept_id,
+                input=input_payload,
+                expected_output=expected_output,
+            ),
+            McpCapabilityTestResponse,
+        )
+        return response.model_dump(mode="json")
 
     async def _lifecycle(
         self,
