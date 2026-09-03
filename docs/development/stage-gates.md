@@ -3352,3 +3352,17 @@ Ruff、Mypy（248 文件）、10 条架构合同通过。迁移不适用，部�
 - [x] 提交不含秘密/无关修改；实际双副本时限和 #99 恢复联合验收前保持 issue 开放。
 
 参见 [MCP 撤销恢复](../operations/mcp-revocation-recovery.md)。
+
+## Skill / MCP 修复 F：冷副本就绪（Issue #99）
+
+- [x] committed snapshot 一致读取；租约竞争与启动恢复独立安装本机路由。
+- [x] snapshot/content digest、tenant/revision/generation、撤销 epoch 和安装前后状态校验通过。
+- [x] 空注册表不报告 active；搜索/load backing 使用本地已安装 generation。
+- [x] 冷连接恢复别名和只读属性，标准旧协议首次业务调用初始化；不重新列举远端目录。
+- [x] 不变目录 generation 稳定，旧含时间摘要读取兼容。
+- [x] 新增 0060 可空 applied_generation；PostgreSQL up/down/up、跨 store 读取、真实 HTTP MCP 联合 8 passed。
+- [x] 全量 645 passed / 55 skipped，最终目录专项 34 passed；Ruff、Mypy、10 条架构合同通过。
+- [x] 默认迁移目标、严格 DTO 升级顺序与操作文档同步；提交排除无关修改和秘密。
+- [x] 代码阶段与真实双进程部署验收分别记录，issue 不提前关闭。
+
+参见 [MCP 冷副本就绪](../operations/mcp-cold-replica-readiness.md)。

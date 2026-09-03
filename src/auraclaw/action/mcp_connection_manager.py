@@ -299,7 +299,9 @@ class McpConnectionManager:
         self._connectors[entry.server_id] = connector
         self._generations[entry.server_id] = entry.revision
         if self._catalog is not None:
-            await self._catalog.register_server(definition)
+            published = await self._catalog.get_server_definition(entry.server_id)
+            if published is None or published.config_revision != definition.config_revision:
+                await self._catalog.register_server(definition)
         now = datetime.now(UTC)
         tested_at = None if restore else now
         await self._registry.record_runtime(
@@ -316,7 +318,17 @@ class McpConnectionManager:
             self._draining.append(previous)
             asyncio.create_task(self._drain_safely(previous))
         if self._reconciler is not None:
-            result = await self._reconciler.reconcile_server(definition)
+            hydrated = False
+            if restore:
+                try:
+                    hydrated = await self._reconciler.hydrate_committed(definition)
+                except Exception:
+                    pass
+            result = (
+                McpReconcileResult(entry.server_id, CapabilityStatus.ACTIVE, 0)
+                if hydrated
+                else await self._reconciler.reconcile_server(definition)
+            )
             observed = {
                 CapabilityStatus.ACTIVE: McpObservedState.ACTIVE,
                 CapabilityStatus.DEGRADED: McpObservedState.DEGRADED,
@@ -327,6 +339,7 @@ class McpConnectionManager:
                     server_id=entry.server_id,
                     instance_id=self._instance_id,
                     loaded_revision=entry.revision,
+                    applied_generation=self._applied_generation(entry.server_id),
                     observed_state=observed,
                     last_test_at=tested_at,
                     last_sync_at=datetime.now(UTC),
@@ -439,6 +452,13 @@ class McpConnectionManager:
         )
         return sum(results)
 
+    def _applied_generation(self, server_id: str) -> int | None:
+        snapshot = None if self._reconciler is None else self._reconciler.snapshot_for(server_id)
+        if snapshot is None:
+            return None
+        generation = snapshot.extra.get("_auraclaw_catalog_generation")
+        return generation if isinstance(generation, int) and generation > 0 else None
+
     async def record_reconcile_results(self, results: tuple[McpReconcileResult, ...]) -> None:
         """Heartbeat this instance's catalog load state without global last-writer state."""
         now = datetime.now(UTC)
@@ -451,6 +471,7 @@ class McpConnectionManager:
                     server_id=result.server_id,
                     instance_id=self._instance_id,
                     loaded_revision=revision,
+                    applied_generation=self._applied_generation(result.server_id),
                     observed_state=(
                         McpObservedState.ACTIVE
                         if result.status is CapabilityStatus.ACTIVE

@@ -55,12 +55,15 @@ class MetricWriter(Protocol):
 
 class DefaultResourceContentScanner:
     def scan(self, content: bytes, *, media_type: str) -> tuple[str, ...]:
-        if media_type.startswith("text/") or media_type in {
-            "application/json",
-            "application/xml",
-            "application/yaml",
-        } or (
-            media_type.startswith("application/") and media_type.endswith("+json")
+        if (
+            media_type.startswith("text/")
+            or media_type
+            in {
+                "application/json",
+                "application/xml",
+                "application/yaml",
+            }
+            or (media_type.startswith("application/") and media_type.endswith("+json"))
         ):
             if b"\x00" in content:
                 raise SchemaValidationError("text Resource contains null bytes")
@@ -141,17 +144,23 @@ class ManagedResourceGateway:
         self._inflight = 0
         self._metric_writer = metric_writer
         self._catalog_store = catalog_store
+        self._mcp_readiness: Callable[[CapabilityDescriptor], bool] | None = None
         self._skill_availability = SkillDependencyAvailability(catalog_store)
         self._connectors = connectors if connectors is not None else {}
         self._miss_loader = miss_loader
 
-    async def is_available(
-        self, tenant_id: str, capability: CapabilityDescriptor
-    ) -> bool:
+    def set_mcp_readiness(self, checker: Callable[[CapabilityDescriptor], bool]) -> None:
+        self._mcp_readiness = checker
+
+    async def is_available(self, tenant_id: str, capability: CapabilityDescriptor) -> bool:
+        if (
+            capability.metadata.get("source_type") == "mcp"
+            and self._mcp_readiness is not None
+            and not self._mcp_readiness(capability)
+        ):
+            return False
         if capability.kind is CapabilityKind.SKILL:
-            available = await self._skill_availability.is_available(
-                tenant_id, capability
-            )
+            available = await self._skill_availability.is_available(tenant_id, capability)
             if not available:
                 await self._emit(
                     "capability.catalog.backing_missing",
@@ -171,8 +180,7 @@ class ManagedResourceGateway:
             return False
         uri = source.get("uri")
         available = (
-            isinstance(uri, str)
-            and self._registry.has_resource(tenant_id, uri)
+            isinstance(uri, str) and self._registry.has_resource(tenant_id, uri)
         ) or capability.server_id in self._connectors
         if not available:
             await self._emit(
@@ -217,9 +225,7 @@ class ManagedResourceGateway:
                     queue_depth = None
                 else:
                     self._queued += 1
-                    generation = self._generations.get(
-                        (trusted_context.tenant_id, uri), 0
-                    )
+                    generation = self._generations.get((trusted_context.tenant_id, uri), 0)
                     load = asyncio.create_task(
                         self._load(
                             trusted_context,
@@ -283,11 +289,11 @@ class ManagedResourceGateway:
                     CapabilityKind.RESOURCE_TEMPLATE,
                 }:
                     continue
+                if self._mcp_readiness is not None and not self._mcp_readiness(capability):
+                    continue
                 connector = self._connectors.get(capability.server_id)
                 descriptor = _resource_descriptor(capability)
-                if connector is None or descriptor is None or not _matches_uri(
-                    descriptor, uri
-                ):
+                if connector is None or descriptor is None or not _matches_uri(descriptor, uri):
                     continue
                 selected_connector = connector
 
@@ -314,9 +320,7 @@ class ManagedResourceGateway:
             }
             for affected_tenant in affected_tenants:
                 generation_key = (affected_tenant, uri)
-                self._generations[generation_key] = (
-                    self._generations.get(generation_key, 0) + 1
-                )
+                self._generations[generation_key] = self._generations.get(generation_key, 0) + 1
             keys = [
                 key
                 for key in self._cache
@@ -362,12 +366,8 @@ class ManagedResourceGateway:
                 time.monotonic() - queued_at,
                 trusted.tenant_id,
             )
-            await self._emit(
-                "resource.gateway.queue.depth", float(queue_depth), trusted.tenant_id
-            )
-            await self._emit(
-                "resource.gateway.in_flight", float(inflight), trusted.tenant_id
-            )
+            await self._emit("resource.gateway.queue.depth", float(queue_depth), trusted.tenant_id)
+            await self._emit("resource.gateway.in_flight", float(inflight), trusted.tenant_id)
             classification = resource.descriptor.classification or "internal"
             policy_decision_id = await self._authorize(
                 trusted,
@@ -388,9 +388,9 @@ class ManagedResourceGateway:
                 ]
             )
             async with self._state_lock:
-                generation_matches = self._generations.get(
-                    (trusted.tenant_id, uri), 0
-                ) == generation
+                generation_matches = (
+                    self._generations.get((trusted.tenant_id, uri), 0) == generation
+                )
                 revision_matches = False
                 try:
                     current = self._registry.get_resource(trusted.tenant_id, uri)
@@ -402,11 +402,7 @@ class ManagedResourceGateway:
                     revision_matches = current_revision == cache_key[4]
                 except KeyError:
                     pass
-                if (
-                    self._cache_ttl_seconds > 0
-                    and generation_matches
-                    and revision_matches
-                ):
+                if self._cache_ttl_seconds > 0 and generation_matches and revision_matches:
                     self._cache[cache_key] = _CacheEntry(
                         expires_at=time.monotonic() + self._cache_ttl_seconds,
                         contents=normalized,
@@ -431,12 +427,8 @@ class ManagedResourceGateway:
                     self._generations.pop(generation_key, None)
                 queue_depth = self._queued
                 inflight = self._inflight
-            await self._emit(
-                "resource.gateway.queue.depth", float(queue_depth), trusted.tenant_id
-            )
-            await self._emit(
-                "resource.gateway.in_flight", float(inflight), trusted.tenant_id
-            )
+            await self._emit("resource.gateway.queue.depth", float(queue_depth), trusted.tenant_id)
+            await self._emit("resource.gateway.in_flight", float(inflight), trusted.tenant_id)
 
     async def _emit(
         self,
@@ -568,15 +560,10 @@ def _content_bytes(content: HandsResourceContent) -> bytes:
 
 def _media_type_allowed(media_type: str, allowed: tuple[str, ...]) -> bool:
     normalized = media_type.split(";", 1)[0].strip().lower()
-    structured_json = (
-        normalized.startswith("application/") and normalized.endswith("+json")
-    )
+    structured_json = normalized.startswith("application/") and normalized.endswith("+json")
     return any(
         candidate.lower() == normalized
-        or (
-            candidate.endswith("/*")
-            and normalized.startswith(candidate.removesuffix("*").lower())
-        )
+        or (candidate.endswith("/*") and normalized.startswith(candidate.removesuffix("*").lower()))
         or (candidate.lower() == "application/json" and structured_json)
         for candidate in allowed
     )

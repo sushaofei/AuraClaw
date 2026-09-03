@@ -85,6 +85,15 @@ class CatalogCommitResult:
     snapshot_digest: str
 
 
+@dataclass(frozen=True)
+class CommittedCatalogSnapshot:
+    server: McpServerDefinition
+    generation: int
+    snapshot_digest: str
+    source_revision: str | None
+    capabilities: tuple[CapabilityDescriptor, ...]
+
+
 class InvocationStore(Protocol):
     async def begin(
         self,
@@ -286,6 +295,10 @@ class CapabilityCatalogStore(Protocol):
     async def release_catalog_reconcile(self, lease: CatalogReconcileLease) -> None: ...
 
     async def get_active_generation(self, server_id: str) -> int | None: ...
+
+    async def read_committed_snapshot(
+        self, tenant_id: str, server_id: str
+    ) -> CommittedCatalogSnapshot | None: ...
 
     async def record_catalog_sync(
         self,

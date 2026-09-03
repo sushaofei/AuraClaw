@@ -15,6 +15,7 @@ from auraclaw.action.ports import (
     CatalogCommitResult,
     CatalogReconcileLease,
     CatalogSyncHealth,
+    CommittedCatalogSnapshot,
     HandsExecutor,
 )
 from auraclaw.contracts.capabilities import (
@@ -107,6 +108,7 @@ class InMemoryCapabilityCatalogStore:
         self._sync_failures: dict[str, int] = {}
         self._reconcile_leases: dict[str, CatalogReconcileLease] = {}
         self._snapshot_digests: dict[str, str] = {}
+        self._source_revisions: dict[str, str | None] = {}
         self._lock = asyncio.Lock()
 
     async def upsert_server(self, server: McpServerDefinition) -> None:
@@ -140,7 +142,6 @@ class InMemoryCapabilityCatalogStore:
         snapshot_digest: str,
         source_revision: str | None,
     ) -> CatalogCommitResult:
-        del source_revision
         current_lease = self._reconcile_leases.get(server_id)
         server = self._servers.get(server_id)
         if (
@@ -179,6 +180,7 @@ class InMemoryCapabilityCatalogStore:
         )
         self._generations[server_id] = generation
         self._snapshot_digests[server_id] = snapshot_digest
+        self._source_revisions[server_id] = source_revision
         return CatalogCommitResult(generation, True, snapshot_digest)
 
     async def claim_catalog_reconcile(
@@ -210,6 +212,22 @@ class InMemoryCapabilityCatalogStore:
 
     async def get_active_generation(self, server_id: str) -> int | None:
         return self._generations.get(server_id)
+
+    async def read_committed_snapshot(
+        self, tenant_id: str, server_id: str
+    ) -> CommittedCatalogSnapshot | None:
+        async with self._lock:
+            server = self._servers.get(server_id)
+            generation = self._generations.get(server_id, 0)
+            if server is None or server.tenant_id not in {None, tenant_id} or generation < 1:
+                return None
+            return CommittedCatalogSnapshot(
+                server,
+                generation,
+                self._snapshot_digests.get(server_id, ""),
+                self._source_revisions.get(server_id),
+                tuple(item for item in self._capabilities.values() if item.server_id == server_id),
+            )
 
     async def record_catalog_sync(
         self,
@@ -252,6 +270,7 @@ class InMemoryCapabilityCatalogStore:
         self._sync_failures.pop(server_id, None)
         self._reconcile_leases.pop(server_id, None)
         self._snapshot_digests.pop(server_id, None)
+        self._source_revisions.pop(server_id, None)
         self._capabilities = {
             capability_id: capability
             for capability_id, capability in self._capabilities.items()
@@ -320,6 +339,9 @@ class CapabilityCatalog:
         return self._availability is None or await self._availability.is_available(
             tenant_id, capability
         )
+
+    async def get_server_definition(self, server_id: str) -> McpServerDefinition | None:
+        return await self._store.get_server(server_id)
 
     async def register_server(self, server: McpServerDefinition) -> None:
         await self._store.upsert_server(server)
@@ -447,9 +469,7 @@ class CapabilityCatalog:
     async def list_server_capabilities(
         self, *, tenant_id: str, server_id: str
     ) -> tuple[CapabilityDescriptor, ...]:
-        return tuple(
-            await self._store.list_server_capabilities(tenant_id, server_id)
-        )
+        return tuple(await self._store.list_server_capabilities(tenant_id, server_id))
 
     async def publication_status(
         self, *, tenant_id: str, server_id: str
@@ -972,8 +992,11 @@ def _load_result(descriptor: CapabilityDescriptor) -> dict[str, Any]:
     raw_source = descriptor.metadata.get("source", {})
     source = dict(raw_source) if isinstance(raw_source, dict) else {}
     if descriptor.kind == CapabilityKind.TOOL:
-        ref = (CapabilityInvocationRef.from_descriptor(descriptor)
-               if descriptor.metadata.get("source_type") == "mcp" else None)
+        ref = (
+            CapabilityInvocationRef.from_descriptor(descriptor)
+            if descriptor.metadata.get("source_type") == "mcp"
+            else None
+        )
         if ref is not None:
             result["invocation_ref"] = ref.model_dump(mode="json")
         result["model_tool"] = {
