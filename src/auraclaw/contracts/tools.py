@@ -96,6 +96,7 @@ class ToolInvocation:
     credential_ref: str | None = None
     user_id: str | None = None
     actor_role: str | None = None
+    dept_id: str | None = None
 
 
 @dataclass(frozen=True)

@@ -10,7 +10,7 @@ from uuid import uuid4
 
 from auraclaw.contracts.errors import ApprovalValidationError
 from auraclaw.contracts.events import CanonicalEvent
-from auraclaw.contracts.tools import ApprovalRecord, ApprovalStatus, RiskLevel
+from auraclaw.contracts.tools import ApprovalRecord, ApprovalStatus, RiskLevel, ToolInvocation
 
 
 def _aware_expires_at(value: object) -> datetime:
@@ -28,6 +28,30 @@ def action_digest(tool_name: str, tool_version: str, arguments: dict[str, Any]) 
         ensure_ascii=False,
     ).encode()
     return hashlib.sha256(normalized).hexdigest()
+
+
+def invocation_action_digest(invocation: ToolInvocation) -> str:
+    """Bind execution replay and approval to the trusted business identity.
+
+    Headless legacy calls without a user/department retain their old digest.
+    A user-scoped old result cannot match the new identity-bound digest; it is
+    rejected, never cleared or replayed with a different invocation key.
+    """
+    digest = action_digest(invocation.tool_name, invocation.tool_version, invocation.arguments)
+    if invocation.user_id is None and invocation.dept_id is None:
+        return digest
+    payload = {
+        "version": 2,
+        "action_digest": digest,
+        "tenant_id": invocation.tenant_id,
+        "root_session_id": invocation.root_session_id,
+        "session_id": invocation.session_id,
+        "user_id": invocation.user_id,
+        "dept_id": invocation.dept_id,
+        "actor_role": invocation.actor_role,
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def approval_request_digest(

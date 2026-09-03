@@ -471,3 +471,59 @@ def test_same_key_waiter_timeout_does_not_stop_owner_heartbeat() -> None:
             await connection.close()
 
     asyncio.run(scenario())
+
+
+def test_identity_digest_survives_hands_restart_and_rejects_other_department() -> None:
+    async def scenario() -> None:
+        assert DATABASE_URL is not None
+        suffix = uuid4().hex
+        invocation = ToolInvocation(
+            tool_invocation_id=f"identity-{suffix}", tenant_id=f"identity-{suffix}",
+            root_session_id="root", session_id="session", run_id="run",
+            tool_name="identity-check", tool_version="1", arguments={},
+            expected_side_effect="read", idempotency_key=f"identity-{suffix}", deadline=None,
+            fencing_token=1, actor_id="runtime-a", user_id="user-a", dept_id="dept-a",
+        )
+        capability = ToolCapability(
+            name=invocation.tool_name, version="1", description="identity check",
+            input_schema={"type": "object"}, output_schema={"type": "object"},
+            permission=ToolPermission.READ_ONLY, risk_level=RiskLevel.LOW,
+        )
+        calls = []
+
+        class Executor:
+            async def execute(self, call, capability):
+                calls.append(call)
+                return {"dept": call.dept_id}
+
+        try:
+            for changes, expected in (({}, "success"), ({"actor_id": "runtime-b"}, "success"),
+                                      ({"dept_id": "dept-b"}, "denied"),
+                                      ({"user_id": "user-b"}, "denied")):
+                # Each call uses new store and gateway objects: no process cache.
+                store = PostgresInvocationStore(DATABASE_URL)
+                try:
+                    gateway = ToolGateway(
+                        registry=ToolRegistry((capability,)), policy=PolicyEngine(),
+                        hands=Executor(), approvals=InMemoryApprovalProjection(),
+                        invocation_store=store, artifacts=ArtifactStore(
+                            InMemoryObjectStorage(), signing_key=b"identity-store-test"
+                        ),
+                    )
+                    result = await gateway.execute(replace(invocation, **changes))
+                    assert result.status.value == expected
+                    if expected == "denied":
+                        assert result.error_code == "idempotency_conflict"
+                    else:
+                        assert result.content == {"dept": "dept-a"}
+                finally:
+                    await store.close()
+            assert len(calls) == 1
+        finally:
+            connection = await asyncpg.connect(DATABASE_URL)
+            await connection.execute("DELETE FROM hands.invocation_attempt WHERE tenant_id=$1",
+                                     invocation.tenant_id)
+            await connection.execute("DELETE FROM hands.invocation WHERE tenant_id=$1",
+                                     invocation.tenant_id)
+            await connection.close()
+    asyncio.run(scenario())

@@ -3295,3 +3295,17 @@ active-reference barrier，并简化 AuraX 卸载入口。
 验证：608 passed / 52 skipped；独立临时 PostgreSQL 完整迁移后 5 项 invocation 集成通过。
 Ruff、Mypy（248 文件）、10 条架构合同通过。迁移不适用，部署说明见
 [实时能力查询升级](../operations/authority-query-upgrade.md)。
+
+
+## Skill / MCP 修复 B：可信部门贯通（Issue #100）
+
+- [x] Hands / Connector / 开发客户端透传可信部门，保持模型输入与可信身份隔离。
+- [x] 审批、内存及持久 invocation 摘要绑定用户/部门；不同主体不能重放结果，Runtime 副本更换不触发重复执行。
+- [x] 正式 HTTP Hands → Gateway → Connector → Credential Proxy → 本机真实 AuraMCP 的租户/用户/部门报文通过。
+- [x] 有部门、合法无部门、冲突声明与伪造身份既有契约回归通过；跨进程 store 重建测试通过。
+- [x] 现有控制层 JSON 已持久化并恢复可信身份；无新数据库迁移，旧摘要冲突与升级次序已说明。
+- [x] Ruff、Mypy、10 条架构合同、相关审批/信任边界测试通过。
+- [x] 提交范围排除无关修改、秘密和缓存；实际发布验收后关闭 issue。
+
+正式调用链与 PostgreSQL 集成 8 passed，契约/身份 30 passed，审批等相关回归 66 passed。
+实际部署尚未执行；网络推送状态以 Git/issue 交付记录为准。

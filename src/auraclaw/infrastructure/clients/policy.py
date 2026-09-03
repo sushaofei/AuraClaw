@@ -49,7 +49,11 @@ class RemotePolicyClient:
         if invocation is None:
             raise ValueError("remote policy evaluation requires invocation context")
         encoded = json.dumps(
-            invocation.arguments,
+            {
+                "arguments": invocation.arguments,
+                "trusted_user_id": invocation.user_id,
+                "trusted_dept_id": invocation.dept_id,
+            },
             sort_keys=True,
             separators=(",", ":"),
             default=str,
@@ -79,6 +83,8 @@ class RemotePolicyClient:
                     "permission": capability.permission.value,
                     "risk_level": capability.risk_level.value,
                     "runtime_location": capability.runtime_location,
+                    "trusted_user_id": invocation.user_id,
+                    "trusted_dept_id": invocation.dept_id,
                 },
             ),
             PolicyEvaluateResponse,

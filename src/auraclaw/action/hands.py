@@ -149,6 +149,7 @@ class HandsGateway:
             approval_id=call.approval_id,
             credential_ref=call.credential_ref,
             user_id=trusted.user_id,
+            dept_id=trusted.dept_id,
             actor_role=(
                 trusted.lease_assertion.role if trusted.lease_assertion is not None else None
             ),
