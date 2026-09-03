@@ -9,7 +9,6 @@ import pytest
 from auraclaw.action.ports import PolicyEvaluation
 from auraclaw.contracts.capabilities import (
     CapabilityStatus,
-    CapabilityTrustLevel,
     McpAuthStrategy,
     McpOAuthConfiguration,
     McpServerDefinition,
@@ -128,7 +127,6 @@ def _server() -> McpServerDefinition:
             resource="https://mcp.example/v1/mcp",
             scopes=("tools.read", "tools.write"),
         ),
-        trust_level=CapabilityTrustLevel.TENANT_VERIFIED,
         allowed_tool_prefixes=("github.",),
         allowed_resource_schemes=("github",),
         allowed_prompt_prefixes=("github.",),
@@ -418,7 +416,6 @@ def test_mcp_egress_allows_loopback_http_when_private_host_allowlisted() -> None
                 title="Java Agent Runtime MCP Gateway",
                 endpoint="http://127.0.0.1:48080/rpc-api/agent-runtime/mcp",
                 credential_ref="vault/java-mcp#client_secret",
-                trust_level=CapabilityTrustLevel.TENANT_VERIFIED,
                 allowed_tool_prefixes=("",),
                 allowed_private_hosts=("127.0.0.1",),
                 status=CapabilityStatus.ACTIVE,
@@ -588,7 +585,6 @@ def test_mcp_egress_sends_department_snapshot_headers() -> None:
             endpoint="https://mcp.example/v1/mcp",
             credential_ref="vault/chaintower-mcp#workload",
             auth_strategy=McpAuthStrategy.WORKLOAD_TRUSTED_CONTEXT,
-            trust_level=CapabilityTrustLevel.TENANT_VERIFIED,
             allowed_tool_prefixes=("github.",),
             status=CapabilityStatus.ACTIVE,
             enabled=True,

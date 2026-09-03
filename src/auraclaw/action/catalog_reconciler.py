@@ -21,7 +21,6 @@ from auraclaw.contracts.capabilities import (
     CapabilityDescriptor,
     CapabilityKind,
     CapabilityStatus,
-    CapabilityTrustLevel,
     McpServerDefinition,
 )
 from auraclaw.contracts.errors import StaleCapabilitySnapshotError
@@ -107,7 +106,6 @@ class CapabilityCatalogReconciler:
         resource_cache: ResourceCacheInvalidator | None = None,
         tool_registry: ToolRegistry | None = None,
         hands_router: RoutedHandsExecutor | None = None,
-        trust_remote_tool_annotations: bool = False,
         quarantine_after_failures: int = 3,
         max_pages: int = 100,
         max_items: int = 10_000,
@@ -137,7 +135,6 @@ class CapabilityCatalogReconciler:
         self._resource_cache = resource_cache
         self._tool_registry = tool_registry
         self._hands_router = hands_router
-        self._trust_remote_tool_annotations = trust_remote_tool_annotations
         self._quarantine_after_failures = quarantine_after_failures
         self._max_items = max_items
         self._max_concurrent = max_concurrent
@@ -234,7 +231,6 @@ class CapabilityCatalogReconciler:
                 server,
                 snapshot,
                 self._max_items,
-                trust_remote_tool_annotations=self._trust_remote_tool_annotations,
             )
             remote_count = (
                 len(snapshot.tools)
@@ -521,17 +517,9 @@ def _normalize_snapshot(
     server: McpServerDefinition,
     snapshot: CapabilitySnapshot,
     max_items: int,
-    *,
-    trust_remote_tool_annotations: bool = False,
 ) -> tuple[CapabilityDescriptor, ...]:
     items: list[CapabilityDescriptor] = []
-    items.extend(
-        _normalize_tools(
-            server,
-            snapshot.tools,
-            trust_remote_tool_annotations=trust_remote_tool_annotations,
-        )
-    )
+    items.extend(_normalize_tools(server, snapshot.tools))
     items.extend(_normalize_resources(server, snapshot.resources, CapabilityKind.RESOURCE))
     items.extend(
         _normalize_resources(
@@ -547,8 +535,6 @@ def _normalize_snapshot(
 def _normalize_tools(
     server: McpServerDefinition,
     tools: tuple[HandsToolDescriptor, ...],
-    *,
-    trust_remote_tool_annotations: bool = False,
 ) -> tuple[CapabilityDescriptor, ...]:
     normalized: list[CapabilityDescriptor] = []
     for tool in tools:
@@ -569,71 +555,13 @@ def _normalize_tools(
                 source=source,
                 title=tool.name,
                 description=tool.description,
-                permission=_remote_tool_permission(
-                    server,
-                    tool,
-                    trust_remote_tool_annotations=trust_remote_tool_annotations,
-                ),
-                risk_level=_remote_tool_risk_level(
-                    server,
-                    tool,
-                    trust_remote_tool_annotations=trust_remote_tool_annotations,
-                ),
+                permission="read-only" if tool.read_only else "write-with-approval",
+                risk_level=tool.risk_level or ("low" if tool.read_only else "high"),
                 version=_capability_semver(tool.version),
                 tags=_tool_search_tags(server, tool.name),
             )
         )
     return tuple(normalized)
-
-
-def _remote_tool_risk_level(
-    server: McpServerDefinition,
-    tool: HandsToolDescriptor,
-    *,
-    trust_remote_tool_annotations: bool,
-) -> str:
-    override = _remote_tool_policy_override(server, tool.name, "risk_level")
-    if override in {"low", "medium", "high", "critical"}:
-        return override
-    if trust_remote_tool_annotations:
-        return tool.risk_level or "high"
-    return "high"
-
-
-def _remote_tool_permission(
-    server: McpServerDefinition,
-    tool: HandsToolDescriptor,
-    *,
-    trust_remote_tool_annotations: bool,
-) -> str:
-    override = _remote_tool_policy_override(server, tool.name, "permission")
-    if override in {"read-only", "write-with-approval", "sandbox-only"}:
-        return override
-    if not tool.read_only:
-        return "write-with-approval"
-    if trust_remote_tool_annotations:
-        return "read-only"
-    if server.trust_level in {
-        CapabilityTrustLevel.PLATFORM,
-        CapabilityTrustLevel.TENANT_VERIFIED,
-    }:
-        return "read-only"
-    return "write-with-approval"
-
-
-def _remote_tool_policy_override(
-    server: McpServerDefinition,
-    tool_name: str,
-    field: str,
-) -> str | None:
-    overrides = server.metadata.get("tool_policy_overrides")
-    if not isinstance(overrides, dict):
-        return None
-    configured = overrides.get(tool_name)
-    if not isinstance(configured, dict):
-        return None
-    value = configured.get(field)
-    return str(value) if isinstance(value, str) else None
 
 
 def _normalize_resources(
@@ -724,7 +652,6 @@ def _descriptor(
         description=_text(description, 4096),
         tags=tags,
         tenant_id=server.tenant_id,
-        trust_level=server.trust_level,
         classification="internal",
         permission=permission,
         risk_level=risk_level,

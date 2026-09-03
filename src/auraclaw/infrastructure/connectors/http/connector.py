@@ -120,7 +120,6 @@ class ManagedJavaApiConnector:
             attributes={
                 "operation_id": operation.operation_id,
                 "server_id": self._server.server_id,
-                "trust_level": self._server.trust_level.value,
             },
         )
         if evaluation.decision not in {
@@ -168,7 +167,6 @@ def catalog_server_definition(server: JavaApiServerDefinition) -> McpServerDefin
         title=server.title,
         endpoint=server.base_url,
         credential_ref=server.credential_ref,
-        trust_level=server.trust_level,
         allowed_tool_prefixes=tuple(item.tool_name for item in server.operations),
         status=server.status,
         enabled=server.enabled,

@@ -421,7 +421,6 @@ revision 写入 Hands Registry，Action Hands 与 Credential Proxy **无需重�
     "resource": "https://order.example/mcp",
     "scopes": ["tools.read"]
   },
-  "trust_level": "tenant_verified",
   "allowed_tool_prefixes": ["order."],
   "allowed_resource_schemes": ["order"],
   "allowed_prompt_prefixes": ["order."]
@@ -455,7 +454,6 @@ MCP 边界做名称转换；若远端 schema 要求单一 `input` 参数，也�
   "network_mode": "loopback",
   "credential_ref": "vault/java-mcp#client_secret",
   "auth_strategy": "workload_trusted_context",
-  "trust_level": "tenant_verified",
   "allowed_tool_prefixes": ["procurement.price.", "price_insight."],
   "metadata": {
     "tool_name_aliases": {
@@ -577,7 +575,7 @@ AuraClaw 从不把 `order.order.get` 解析成 REST 路径。换一台 Java 服�
 6. **Java 改 schema 必须升版本。** 否则对账报 “changed without version bump”。  
 7. **当前 Egress 拒绝私网 IP。** 典型 K8s/VPC Java 还接不进这条路径；需要私网 Transport（见第 8 节）或旁挂可公网/专线暴露的 MCP Adapter。  
 8. **开发 profile 默认不对账远端 Server。** 需要 Credential Proxy + 远端 Policy。  
-9. **远端 Tool 一律 `write-with-approval/high`。** Java 的 `readOnlyHint` 不能降权。只读查询现在也会走审批，除非后续做了策略覆盖。  
+9. **直接采用自研 MCP 的注解。** `annotations.readOnlyHint=true` 为只读；false 或缺失为写入需审批。风险采用 `_meta.auraclaw.riskLevel`，缺失时只读默认 low、其余默认 high。无需信任等级或权限覆盖。
 10. **不要用 Python executor 封装 Java REST 作为正式接入标准。** 过渡可以走 Credential Proxy adapter，正路仍是 Java MCP。理由：每改一个 Java 字段都要发 AuraClaw 版，Hands 会变成集成仓库。
 
 ---

@@ -127,7 +127,6 @@ class ManagedRemoteMcpTransport:
                 "method": request.method,
                 **({"permission": "read-only"} if read_only else {}),
                 "server_id": self._server.server_id,
-                "trust_level": self._server.trust_level.value,
             },
         )
         if evaluation.decision not in {

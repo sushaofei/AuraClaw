@@ -17,7 +17,6 @@ from auraclaw.action.tool_gateway import ToolRegistry
 from auraclaw.contracts.capabilities import (
     CapabilityKind,
     CapabilityStatus,
-    CapabilityTrustLevel,
     McpAuthStrategy,
     McpOAuthConfiguration,
     McpServerDefinition,
@@ -60,7 +59,6 @@ def _server(*, protocol_revision: str = "2026-07-28") -> McpServerDefinition:
             client_id="auraclaw-hands",
             resource="https://mcp.example/v1/mcp",
         ),
-        trust_level=CapabilityTrustLevel.TENANT_VERIFIED,
         allowed_tool_prefixes=("github.",),
         allowed_resource_schemes=("github",),
         allowed_prompt_prefixes=("github.",),
@@ -730,7 +728,6 @@ def test_connector_tool_executor_forwards_trusted_user_id() -> None:
             protocol_revision=MCP_LEGACY_PROTOCOL_VERSION,
             credential_ref="vault/java-mcp#client_secret",
             auth_strategy=McpAuthStrategy.WORKLOAD_TRUSTED_CONTEXT,
-            trust_level=CapabilityTrustLevel.TENANT_VERIFIED,
             allowed_tool_prefixes=("github.",),
             status=CapabilityStatus.ACTIVE,
             enabled=True,
@@ -818,7 +815,7 @@ def test_mcp_business_status_is_not_treated_as_tool_result_status() -> None:
     asyncio.run(scenario())
 
 
-def test_trusted_remote_tool_annotations_use_safe_defaults_when_missing() -> None:
+def test_remote_tool_capability_uses_defaults_when_metadata_missing() -> None:
     from datetime import UTC, datetime
 
     from auraclaw.action.catalog_reconciler import _tool_capability
@@ -842,121 +839,93 @@ def test_trusted_remote_tool_annotations_use_safe_defaults_when_missing() -> Non
     assert capability.risk_level.value == "high"
 
 
-def test_remote_tool_permission_follows_trust_boundary() -> None:
-    from auraclaw.action.catalog_reconciler import _remote_tool_permission
-    from auraclaw.contracts.hands import HandsToolDescriptor
+@pytest.mark.parametrize(
+    ("annotations", "declared_risk", "permission", "risk"),
+    [
+        ({"readOnlyHint": True}, None, "read-only", "low"),
+        ({"readOnlyHint": False}, None, "write-with-approval", "high"),
+        ({"readOnlyHint": "false"}, None, "write-with-approval", "high"),
+        ({}, None, "write-with-approval", "high"),
+        ({"readOnlyHint": True}, "medium", "read-only", "medium"),
+        ({"readOnlyHint": False}, "critical", "write-with-approval", "critical"),
+    ],
+)
+def test_mcp_annotations_determine_catalog_and_runtime_permissions(
+    annotations: dict[str, object], declared_risk: str | None, permission: str, risk: str
+) -> None:
+    from auraclaw.action.catalog_reconciler import _normalize_tools, _tool_capability
+    from auraclaw.infrastructure.connectors.mcp.connector import _tool_descriptor
 
-    read_only = HandsToolDescriptor(
-        name="auramcp.about.auraclaw",
-        version="1",
-        description="About AuraClaw",
-        read_only=True,
-    )
-    write_tool = HandsToolDescriptor(
-        name="auramcp.example.echo",
-        version="1",
-        description="Echo",
-        read_only=False,
-    )
-    untrusted = _server().model_copy(
-        update={"trust_level": CapabilityTrustLevel.EXTERNAL_UNTRUSTED}
-    )
-    trusted = _server()
-
-    assert (
-        _remote_tool_permission(
-            untrusted,
-            read_only,
-            trust_remote_tool_annotations=False,
-        )
-        == "write-with-approval"
-    )
-    assert (
-        _remote_tool_permission(
-            trusted,
-            read_only,
-            trust_remote_tool_annotations=False,
-        )
-        == "read-only"
-    )
-    assert (
-        _remote_tool_permission(
-            untrusted,
-            read_only,
-            trust_remote_tool_annotations=True,
-        )
-        == "read-only"
-    )
-    assert (
-        _remote_tool_permission(
-            trusted,
-            write_tool,
-            trust_remote_tool_annotations=False,
-        )
-        == "write-with-approval"
-    )
-
-
-def test_admin_controlled_tool_policy_override_corrects_legacy_mcp_metadata() -> None:
-    from auraclaw.action.catalog_reconciler import (
-        _remote_tool_permission,
-        _remote_tool_risk_level,
-    )
-    from auraclaw.contracts.hands import HandsToolDescriptor
-
-    tool = HandsToolDescriptor(
-        name="price_insight.dataset.profile",
-        version="1.0.0",
-        description="Legacy server omits MCP read-only annotations",
-    )
-    server = _server().model_copy(
-        update={
-            "allowed_tool_prefixes": ("price_insight.",),
-            "trust_level": CapabilityTrustLevel.EXTERNAL_UNTRUSTED,
-            "metadata": {
-                "tool_policy_overrides": {
-                    "price_insight.dataset.profile": {
-                        "permission": "read-only",
-                        "risk_level": "low",
-                    }
-                }
-            },
+    tool = _tool_descriptor(
+        {
+            "name": "github.issue.get",
+            "annotations": annotations,
+            "_meta": {"auraclaw": {"riskLevel": declared_risk}},
         }
     )
+    # Obsolete exact-name overrides must no longer change remote declarations.
+    server = _server().model_copy(
+        update={
+            "metadata": {
+                "tool_policy_overrides": {
+                    tool.name: {"permission": "sandbox-only", "risk_level": "critical"}
+                }
+            }
+        }
+    )
+    (descriptor,) = _normalize_tools(server, (tool,))
+    capability = _tool_capability(descriptor, server.server_id)
+    assert descriptor.permission == capability.permission.value == permission
+    assert descriptor.risk_level == capability.risk_level.value == risk
+    assert "trust_level" not in descriptor.as_search_result()
 
-    assert (
-        _remote_tool_permission(
-            server,
-            tool,
-            trust_remote_tool_annotations=False,
-        )
-        == "read-only"
-    )
-    assert (
-        _remote_tool_risk_level(
-            server,
-            tool,
-            trust_remote_tool_annotations=False,
-        )
-        == "low"
-    )
 
-    similarly_named_tool = tool.model_copy(
-        update={"name": "price_insight.dataset.profile_v2"}
-    )
-    assert (
-        _remote_tool_permission(
-            server,
-            similarly_named_tool,
-            trust_remote_tool_annotations=False,
+def test_reconciliation_refreshes_legacy_permissions_without_schema_version_bump() -> None:
+    from auraclaw.action.catalog_reconciler import _normalize_snapshot
+
+    class AnnotatedCredentials(_RemoteCredentials):
+        read_only = True
+
+        async def invoke(self, **arguments: Any) -> object:
+            response = await super().invoke(**arguments)
+            if arguments["request"]["method"] == "tools/list":
+                response["result"]["tools"][0]["annotations"] = {
+                    "readOnlyHint": self.read_only,
+                }
+            return response
+
+    async def scenario() -> None:
+        store = InMemoryCapabilityCatalogStore()
+        catalog = CapabilityCatalog(store)
+        server = _server()
+        await catalog.register_server(server)
+        credentials = AnnotatedCredentials()
+        connector = ManagedMcpConnector(server, credentials=credentials, policy=_AllowPolicy())
+        snapshot = await connector.snapshot(_hands_trusted())
+        items = _normalize_snapshot(server, snapshot, 100)
+        # Seed the old published policy before a new process builds its registry.
+        await catalog.replace_server_capabilities(
+            server.server_id,
+            tuple(
+                item.model_copy(update={"permission": "write-with-approval", "risk_level": "high"})
+                if item.kind == CapabilityKind.TOOL
+                else item
+                for item in items
+            ),
         )
-        == "write-with-approval"
-    )
-    assert (
-        _remote_tool_risk_level(
-            server,
-            similarly_named_tool,
-            trust_remote_tool_annotations=False,
+        tools = ToolRegistry()
+        reconciler = CapabilityCatalogReconciler(
+            catalog=catalog,
+            store=store,
+            connectors={server.server_id: connector},
+            tool_registry=tools,
+            hands_router=RoutedHandsExecutor(_UnexpectedHands(), {}),
         )
-        == "high"
-    )
+        result = await reconciler.reconcile_server(server)
+        assert result.status == CapabilityStatus.ACTIVE
+        assert tools.get("github.issue.get", "2.1.0").permission.value == "read-only"
+        current = await store.list_server_capabilities("tenant-a", server.server_id)
+        tool = next(item for item in current if item.kind == CapabilityKind.TOOL)
+        assert (tool.permission, tool.risk_level) == ("read-only", "low")
+
+    asyncio.run(scenario())

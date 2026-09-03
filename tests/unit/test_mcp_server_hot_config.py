@@ -60,7 +60,6 @@ def _config(**overrides: object) -> McpServerConfig:
         "network_mode": "loopback",
         "auth_strategy": "none",
         "allowed_tool_prefixes": ("order.",),
-        "trust_level": "tenant_verified",
     }
     payload.update(overrides)
     return McpServerConfig.model_validate(payload)
@@ -899,3 +898,22 @@ def test_private_auth_none_requires_platform_policy() -> None:
             await service.create(_write(config))
 
     asyncio.run(scenario())
+
+
+def test_historical_mcp_config_load_discards_retired_trust_without_mutation() -> None:
+    from copy import deepcopy
+
+    from auraclaw.infrastructure.persistence.postgres_mcp_registry import _stored_config
+
+    legacy = _config().model_dump(mode="json")
+    legacy["trust_level"] = "external_untrusted"
+    legacy["metadata"] = {
+        "tool_policy_overrides": {"order.list": {"permission": "write-with-approval"}},
+        "tool_name_aliases": {"order.old": "order.list"},
+    }
+    original = deepcopy(legacy)
+    loaded = _stored_config(legacy)
+    assert legacy == original
+    assert "trust_level" not in loaded.model_dump()
+    assert loaded.metadata == {"tool_name_aliases": {"order.old": "order.list"}}
+    assert "trust_level" not in McpServerConfig.model_json_schema()["properties"]

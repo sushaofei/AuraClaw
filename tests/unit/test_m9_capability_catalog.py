@@ -19,7 +19,6 @@ from auraclaw.contracts.capabilities import (
     CapabilityDescriptor,
     CapabilityKind,
     CapabilityStatus,
-    CapabilityTrustLevel,
     McpServerDefinition,
 )
 from auraclaw.contracts.tools import ToolInvocation
@@ -96,11 +95,6 @@ def _descriptor(
         description=f"Managed capability for {canonical_name}",
         tags=("github", "issue"),
         tenant_id=tenant_id,
-        trust_level=(
-            CapabilityTrustLevel.PLATFORM
-            if tenant_id is None
-            else CapabilityTrustLevel.TENANT_VERIFIED
-        ),
         permission=permission,
         risk_level="low",
         status=status,
@@ -117,7 +111,6 @@ def test_catalog_filters_tenant_status_kind_permission_and_query() -> None:
                 server_id="server-global",
                 title="Platform",
                 endpoint="https://platform.example/mcp",
-                trust_level=CapabilityTrustLevel.PLATFORM,
                 status=CapabilityStatus.ACTIVE,
                 enabled=True,
             )
@@ -128,7 +121,6 @@ def test_catalog_filters_tenant_status_kind_permission_and_query() -> None:
                 tenant_id="tenant-a",
                 title="Tenant A",
                 endpoint="https://tenant-a.example/mcp",
-                trust_level=CapabilityTrustLevel.TENANT_VERIFIED,
                 status=CapabilityStatus.ACTIVE,
                 enabled=True,
             )
@@ -196,7 +188,6 @@ def test_catalog_search_and_load_hide_capabilities_without_backing() -> None:
             server_id="server-global",
             title="Platform",
             endpoint="https://platform.example/mcp",
-            trust_level=CapabilityTrustLevel.PLATFORM,
             status=CapabilityStatus.ACTIVE,
             enabled=True,
         )
@@ -228,7 +219,6 @@ def test_capability_search_runs_through_tool_policy_and_trusted_tenant() -> None
                 server_id="server-global",
                 title="Platform",
                 endpoint="https://platform.example/mcp",
-                trust_level=CapabilityTrustLevel.PLATFORM,
                 status=CapabilityStatus.ACTIVE,
                 enabled=True,
             )
@@ -284,7 +274,6 @@ def test_catalog_search_matches_chinese_query_without_year_token() -> None:
                 tenant_id="1",
                 title="Java MCP",
                 endpoint="https://java-mcp.example.com/mcp",
-                trust_level=CapabilityTrustLevel.TENANT_VERIFIED,
                 status=CapabilityStatus.ACTIVE,
                 enabled=True,
             )
@@ -325,7 +314,6 @@ def test_catalog_search_resolves_mcp_metadata_exact_refs_and_stable_browse() -> 
             tenant_id="tenant-a",
             title="价格洞察服务",
             endpoint="https://pricing.example/mcp",
-            trust_level=CapabilityTrustLevel.TENANT_VERIFIED,
             status=CapabilityStatus.ACTIVE,
             enabled=True,
             metadata={"search_aliases": ["采购行情"]},
@@ -392,7 +380,6 @@ def test_search_executor_empty_result_recommends_broader_retry() -> None:
                 server_id="server-global",
                 title="Platform",
                 endpoint="https://platform.example/mcp",
-                trust_level=CapabilityTrustLevel.PLATFORM,
                 status=CapabilityStatus.ACTIVE,
                 enabled=True,
             )
@@ -436,7 +423,6 @@ def test_catalog_lists_tools_without_enabled_filter() -> None:
                 tenant_id="tenant-a",
                 title="Tenant A",
                 endpoint="https://tenant-a.example/mcp",
-                trust_level=CapabilityTrustLevel.TENANT_VERIFIED,
                 status=CapabilityStatus.QUARANTINED,
                 enabled=False,
             )

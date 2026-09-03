@@ -538,7 +538,6 @@ def build_action_hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         resource_cache=resource_gateway,
         tool_registry=registry,
         hands_router=routed_hands,
-        trust_remote_tool_annotations=settings.mcp_trust_remote_tool_annotations,
         max_concurrent=settings.mcp_reconcile_max_concurrent,
         max_concurrent_per_tenant=settings.mcp_reconcile_max_concurrent_per_tenant,
         max_concurrent_per_host=settings.mcp_reconcile_max_concurrent_per_host,

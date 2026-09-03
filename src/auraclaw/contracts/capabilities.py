@@ -18,12 +18,6 @@ class CapabilityKind(StrEnum):
     SKILL = "skill"
 
 
-class CapabilityTrustLevel(StrEnum):
-    PLATFORM = "platform"
-    TENANT_VERIFIED = "tenant_verified"
-    EXTERNAL_UNTRUSTED = "external_untrusted"
-
-
 class CapabilityStatus(StrEnum):
     ACTIVE = "active"
     DEGRADED = "degraded"
@@ -70,7 +64,6 @@ class McpServerDefinition(ContractModel):
     credential_ref: str | None = None
     oauth: McpOAuthConfiguration | None = None
     auth_strategy: McpAuthStrategy | None = None
-    trust_level: CapabilityTrustLevel = CapabilityTrustLevel.EXTERNAL_UNTRUSTED
     allowed_tool_prefixes: tuple[str, ...] = ()
     allowed_resource_schemes: tuple[str, ...] = ()
     allowed_prompt_prefixes: tuple[str, ...] = ()
@@ -192,7 +185,6 @@ class JavaApiServerDefinition(ContractModel):
     title: str = Field(min_length=1, max_length=256)
     base_url: str = Field(min_length=1, pattern=r"^https://")
     credential_ref: str | None = None
-    trust_level: CapabilityTrustLevel = CapabilityTrustLevel.TENANT_VERIFIED
     operations: tuple[JavaApiOperationDefinition, ...] = ()
     allowed_private_hosts: tuple[str, ...] = ()
     status: CapabilityStatus = CapabilityStatus.QUARANTINED
@@ -221,7 +213,6 @@ class CapabilityDescriptor(ContractModel):
     description: str = ""
     tags: tuple[str, ...] = ()
     tenant_id: str | None = None
-    trust_level: CapabilityTrustLevel = CapabilityTrustLevel.EXTERNAL_UNTRUSTED
     classification: str = "internal"
     permission: str | None = None
     risk_level: str | None = None
@@ -241,7 +232,6 @@ class CapabilityDescriptor(ContractModel):
             "title": self.title,
             "description": self.description,
             "tags": list(self.tags),
-            "trust_level": self.trust_level.value,
             "classification": self.classification,
             "permission": self.permission,
             "risk_level": self.risk_level,

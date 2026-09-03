@@ -372,7 +372,7 @@ class PostgresMcpServerRegistryStore(LazyPool, McpServerRegistryStore):
                 server_id=str(row["server_id"]),
                 tenant_id=row["tenant_id"],
                 revision=int(row["active_revision"]),
-                config=McpServerConfig.model_validate(json_loads(row["config_json"])),
+                config=_stored_config(row["config_json"]),
                 desired_state=McpDesiredState(str(row["desired_state"])),
                 observed_state=McpObservedState(
                     str(row["observed_state"] or "pending")
@@ -464,11 +464,22 @@ async def _upsert_operation(connection: Any, operation: McpServerOperationRecord
     )
 
 
+def _stored_config(value: Any) -> McpServerConfig:
+    # Historical revisions remain immutable, including their original digest.
+    # Retired trust settings are discarded only when materializing a revision.
+    config = dict(json_loads(value))
+    config.pop("trust_level", None)
+    metadata = dict(config.get("metadata") or {})
+    metadata.pop("tool_policy_overrides", None)
+    config["metadata"] = metadata
+    return McpServerConfig.model_validate(config)
+
+
 def _revision(row: dict[str, Any]) -> McpServerRevisionRecord:
     return McpServerRevisionRecord(
         server_id=str(row["server_id"]),
         revision=int(row["revision"]),
-        config=McpServerConfig.model_validate(json_loads(row["config_json"])),
+        config=_stored_config(row["config_json"]),
         config_digest=str(row["config_digest"]),
         created_by=str(row["created_by"]),
         created_at=row["created_at"],

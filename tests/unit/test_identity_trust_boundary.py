@@ -12,7 +12,6 @@ from auraclaw.composition.identity import build_identity_verifier
 from auraclaw.config import Settings, get_settings
 from auraclaw.contracts.capabilities import (
     CapabilityStatus,
-    CapabilityTrustLevel,
     McpAuthStrategy,
     McpServerDefinition,
 )
@@ -488,7 +487,6 @@ def test_mcp_workload_trusted_context_does_not_require_oauth() -> None:
         endpoint="https://mcp.chaintower.example/mcp",
         credential_ref="vault/chaintower-mcp#workload",
         auth_strategy=McpAuthStrategy.WORKLOAD_TRUSTED_CONTEXT,
-        trust_level=CapabilityTrustLevel.TENANT_VERIFIED,
         allowed_tool_prefixes=("order.",),
         allowed_resource_schemes=("order",),
         allowed_prompt_prefixes=("order.",),
@@ -532,7 +530,6 @@ def test_mcp_transport_rejects_argument_identity_override_and_missing_user() -> 
             endpoint="https://mcp.chaintower.example/mcp",
             credential_ref="vault/chaintower-mcp#workload",
             auth_strategy=McpAuthStrategy.WORKLOAD_TRUSTED_CONTEXT,
-            trust_level=CapabilityTrustLevel.TENANT_VERIFIED,
             allowed_tool_prefixes=("order.",),
             allowed_resource_schemes=("order",),
             allowed_prompt_prefixes=("order.",),

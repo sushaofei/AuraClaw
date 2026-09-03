@@ -1,18 +1,28 @@
 import asyncio
+import json
 import shutil
 import socket
 import subprocess
 import tempfile
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 import asyncpg
 import pytest
 
+from auraclaw.action.capability_catalog import CapabilityCatalog
+from auraclaw.contracts.capabilities import CapabilityDescriptor, CapabilityKind
 from auraclaw.infrastructure.persistence.migration_runner import (
     MigrationError,
     PostgresMigrationRunner,
     discover_migrations,
+)
+from auraclaw.infrastructure.persistence.postgres_capability_catalog import (
+    PostgresCapabilityCatalogStore,
+)
+from auraclaw.infrastructure.persistence.postgres_mcp_registry import (
+    PostgresMcpServerRegistryStore,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -22,6 +32,108 @@ def _free_port() -> int:
     with socket.socket() as server:
         server.bind(("127.0.0.1", 0))
         return int(server.getsockname()[1])
+
+
+async def _check_mcp_trust_migration(
+    connection: asyncpg.Connection, database_url: str, migration_dir: Path
+) -> None:
+    legacy = {
+        "server_id": "trust-migration",
+        "title": "Managed MCP",
+        "endpoint": "https://managed.example/mcp",
+        "network_mode": "public",
+        "auth_strategy": "workload_trusted_context",
+        "credential_ref": "vault/test",
+        "trust_level": "tenant_verified",
+        "metadata": {
+            "tool_policy_overrides": {
+                "managed.query": {"permission": "write-with-approval", "risk_level": "high"}
+            },
+            "deployment": "internal",
+        },
+    }
+    await connection.execute(
+        """INSERT INTO hands.mcp_server
+        (server_id,desired_state,latest_revision,active_revision,created_by)
+        VALUES ('trust-migration','enabled',1,1,'admin')"""
+    )
+    await connection.execute(
+        """INSERT INTO hands.mcp_server_revision
+        (server_id,revision,config_json,config_digest,created_by)
+        VALUES ('trust-migration',1,$1::jsonb,'original-digest','admin')""",
+        json.dumps(legacy),
+    )
+    down = (migration_dir / "0057_remove_capability_trust.down.sql").read_text()
+    up = (migration_dir / "0057_remove_capability_trust.sql").read_text()
+    await connection.execute(down)
+    await connection.execute(
+        """INSERT INTO hands.downstream_mcp_server
+        (server_id,title,endpoint,enabled,status,trust_level,metadata,config_revision)
+        VALUES ('trust-migration','Managed MCP','https://managed.example/mcp',true,
+                'active','tenant_verified',$1::jsonb,1)""",
+        json.dumps(legacy["metadata"]),
+    )
+    await connection.execute(up)
+    assert not await connection.fetchval(
+        """SELECT EXISTS(SELECT 1 FROM information_schema.columns
+        WHERE table_schema='hands' AND column_name='trust_level')"""
+    )
+    store = PostgresCapabilityCatalogStore(database_url)
+    registry = PostgresMcpServerRegistryStore(database_url)
+    try:
+        revision = await registry.get_revision("trust-migration", 1)
+        assert revision is not None
+        assert revision.config_digest == "original-digest"
+        assert revision.config.metadata == {"deployment": "internal"}
+        server = await store.get_server("trust-migration")
+        assert server is not None and "trust_level" not in server.model_dump()
+        assert server.metadata["deployment"] == "internal"
+        assert "tool_policy_overrides" not in server.metadata
+        await store.upsert_server(server)
+        catalog = CapabilityCatalog(store)
+        await catalog.replace_server_capabilities(
+            "trust-migration",
+            (
+                CapabilityDescriptor(
+                    capability_id="trust-migration-query",
+                    kind=CapabilityKind.TOOL,
+                    server_id="trust-migration",
+                    canonical_name="managed.query",
+                    version="1.0.0",
+                    content_digest="unchanged-schema",
+                    title="Query",
+                    permission="read-only",
+                    risk_level="low",
+                    updated_at=datetime.now(UTC),
+                ),
+            ),
+        )
+        items = await store.list_server_capabilities("platform", "trust-migration")
+        assert len(items) == 1 and items[0].permission == "read-only"
+        await connection.execute(down)
+        assert (
+            await connection.fetchval(
+                "SELECT trust_level FROM hands.capability_catalog WHERE server_id='trust-migration'"
+            )
+            == "tenant_verified"
+        )
+        restored = await connection.fetchval(
+            "SELECT metadata FROM hands.downstream_mcp_server WHERE server_id='trust-migration'"
+        )
+        assert (
+            json.loads(restored)["tool_policy_overrides"]
+            == legacy["metadata"]["tool_policy_overrides"]
+        )
+        await connection.execute(up)
+        row = await connection.fetchrow(
+            "SELECT config_json,config_digest FROM hands.mcp_server_revision "
+            "WHERE server_id='trust-migration'"
+        )
+        assert json.loads(row["config_json"]) == legacy
+        assert row["config_digest"] == "original-digest"
+    finally:
+        await store.close()
+        await registry.close()
 
 
 def test_migration_runner_is_locked_idempotent_and_detects_drift(tmp_path: Path) -> None:
@@ -57,6 +169,7 @@ def test_migration_runner_is_locked_idempotent_and_detects_drift(tmp_path: Path)
 
         connection = await asyncpg.connect(database_url)
         try:
+            await _check_mcp_trust_migration(connection, database_url, migration_dir)
             await connection.execute(
                 """INSERT INTO hands.downstream_mcp_server
                    (server_id,title,endpoint,enabled,status,active_catalog_generation)
@@ -68,10 +181,10 @@ def test_migration_runner_is_locked_idempotent_and_detects_drift(tmp_path: Path)
             await connection.execute(
                 """INSERT INTO hands.capability_catalog
                    (capability_id,kind,server_id,canonical_name,version,
-                    content_digest,title,trust_level,status,catalog_generation)
+                    content_digest,title,status,catalog_generation)
                    VALUES ('cap-stale-generation','resource','stale-generation-test',
                            'stale.resource','1.0.0','sha256:stale','stale resource',
-                           'external_untrusted','active',1)"""
+                           'active',1)"""
             )
             await connection.execute(
                 (migration_dir / "0053_resource_catalog_backing_consistency.sql").read_text()

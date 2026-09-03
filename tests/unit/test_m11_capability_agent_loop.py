@@ -32,7 +32,6 @@ from auraclaw.contracts.capabilities import (
     CapabilityDescriptor,
     CapabilityKind,
     CapabilityStatus,
-    CapabilityTrustLevel,
     McpServerDefinition,
 )
 from auraclaw.contracts.errors import (
@@ -999,7 +998,6 @@ def test_real_mcp_search_and_load_hydrates_authoritative_tool_schema() -> None:
             tenant_id="tenant-a",
             title="GitHub",
             endpoint="https://mcp.example/mcp",
-            trust_level=CapabilityTrustLevel.TENANT_VERIFIED,
             status=CapabilityStatus.ACTIVE,
             enabled=True,
         )
@@ -1014,7 +1012,6 @@ def test_real_mcp_search_and_load_hydrates_authoritative_tool_schema() -> None:
             title="Get issue",
             description="Get one GitHub issue",
             tenant_id="tenant-a",
-            trust_level=CapabilityTrustLevel.TENANT_VERIFIED,
             permission="read-only",
             risk_level="low",
             status=CapabilityStatus.ACTIVE,
@@ -1262,7 +1259,6 @@ def test_real_mcp_skill_search_load_resolve_and_instruction_activation() -> None
                 tenant_id="tenant-a",
                 title="AuraClaw Skill Registry",
                 endpoint="https://skill-registry.auraclaw.invalid/mcp",
-                trust_level=CapabilityTrustLevel.TENANT_VERIFIED,
                 status=CapabilityStatus.ACTIVE,
                 enabled=True,
             )

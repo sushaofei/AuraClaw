@@ -45,7 +45,6 @@ Canonical Session Event；目录、缓存、通知和步骤进度都可丢弃并
     "resource": "https://mcp.example/v1/mcp",
     "scopes": ["tools.read"]
   },
-  "trust_level": "tenant_verified",
   "allowed_tool_prefixes": ["github."],
   "allowed_resource_schemes": ["github"],
   "allowed_prompt_prefixes": ["github."]
@@ -64,7 +63,6 @@ OAuth `client_credentials` 是**可选 Connector 策略**，不是 AuraClaw 用�
   "endpoint": "https://mcp.chaintower.example/mcp",
   "credential_ref": "vault/chaintower-mcp#workload",
   "auth_strategy": "workload_trusted_context",
-  "trust_level": "tenant_verified",
   "allowed_tool_prefixes": ["order."]
 }
 ```
@@ -81,7 +79,6 @@ AuraMCP 扩展面同样走 `workload_trusted_context`，前缀锁定 `auramcp.` 
   "network_mode": "public",
   "credential_ref": "vault/auramcp#workload",
   "auth_strategy": "workload_trusted_context",
-  "trust_level": "platform",
   "allowed_tool_prefixes": ["auramcp."],
   "allowed_resource_schemes": ["auramcp"],
   "allowed_prompt_prefixes": ["auramcp."]
@@ -114,8 +111,10 @@ Server Registry / tenant
 ```
 
 任一 DNS 结果为 loopback、private、link-local、reserved 或其他非公网地址时整次请求失败。
-Runtime 不能覆盖 endpoint、Header、Authorization 或 Token。远端 Tool 一律先按
-`write-with-approval/high` 注册；服务端 annotations 不提升权限。
+Runtime 不能覆盖 endpoint、Header、Authorization 或 Token。当前仅接入自行开发的 MCP，
+直接采用 `annotations.readOnlyHint`：true 为 `read-only`，false 或缺失为 `write-with-approval`。
+风险等级采用 `_meta.auraclaw.riskLevel`，未提供时只读为 `low`、其余为 `high`。
+不再配置 Server 信任等级、全局信任开关或工具级权限覆盖。
 
 2026-07-28 Server 只有在 `server/discover` 和全部分页 list 成功后才发布快照；显式登记为
 2025-11-25 的 legacy Server 仍走 `initialize`。同名同版本内容漂移会失败，不会覆盖

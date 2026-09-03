@@ -343,8 +343,6 @@ class CapabilityCatalog:
                 raise ValueError("Capability server_id does not match the publication")
             if capability.tenant_id != server.tenant_id:
                 raise ValueError("Capability tenant does not match the MCP server")
-            if capability.trust_level != server.trust_level:
-                raise ValueError("Capability trust level does not match the MCP server")
         owned_lease = lease is None
         if lease is None:
             lease = await self._store.claim_catalog_reconcile(

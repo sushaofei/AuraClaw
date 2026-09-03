@@ -15,7 +15,6 @@ import pytest
 
 from auraclaw.action.ports import PolicyEvaluation
 from auraclaw.contracts.capabilities import (
-    CapabilityTrustLevel,
     McpAuthStrategy,
     McpNetworkMode,
 )
@@ -100,7 +99,6 @@ def _config(endpoint: str) -> McpServerConfig:
         network_mode=McpNetworkMode.LOOPBACK,
         auth_strategy=McpAuthStrategy.WORKLOAD_TRUSTED_CONTEXT,
         credential_ref="vault/auramcp#workload",
-        trust_level=CapabilityTrustLevel.PLATFORM,
         allowed_tool_prefixes=("auramcp.",),
         allowed_resource_schemes=("auramcp",),
         allowed_prompt_prefixes=("auramcp.",),
@@ -110,7 +108,6 @@ def _config(endpoint: str) -> McpServerConfig:
 def test_auramcp_hot_config_is_workload_trusted_context() -> None:
     config = _config("http://127.0.0.1:8020/mcp")
     assert config.auth_strategy is McpAuthStrategy.WORKLOAD_TRUSTED_CONTEXT
-    assert config.trust_level is CapabilityTrustLevel.PLATFORM
     assert config.network_mode is McpNetworkMode.LOOPBACK
     assert config.allowed_tool_prefixes == ("auramcp.",)
     assert config.allowed_resource_schemes == ("auramcp",)

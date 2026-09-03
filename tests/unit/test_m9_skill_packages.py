@@ -29,7 +29,6 @@ from auraclaw.contracts.capabilities import (
     CapabilityDescriptor,
     CapabilityKind,
     CapabilityStatus,
-    CapabilityTrustLevel,
     McpServerDefinition,
 )
 from auraclaw.contracts.errors import (
@@ -153,7 +152,6 @@ def _descriptor(
         version=version,
         content_digest=f"sha256:{capability_id.encode().hex().ljust(64, '0')[:64]}",
         title=canonical_name,
-        trust_level=CapabilityTrustLevel.PLATFORM,
         status=CapabilityStatus.ACTIVE,
         updated_at=datetime.now(UTC),
         metadata=metadata or {},
@@ -384,7 +382,6 @@ def test_skill_resolver_pins_highest_compatible_dependencies() -> None:
                 server_id="server-platform",
                 title="Platform capabilities",
                 endpoint="https://platform.example/mcp",
-                trust_level=CapabilityTrustLevel.PLATFORM,
                 status=CapabilityStatus.ACTIVE,
                 enabled=True,
             )
@@ -512,7 +509,6 @@ def test_skill_resolver_flattens_child_skills_and_rejects_cycles() -> None:
                 server_id="server-platform",
                 title="Platform capabilities",
                 endpoint="https://platform.example/mcp",
-                trust_level=CapabilityTrustLevel.PLATFORM,
                 status=CapabilityStatus.ACTIVE,
                 enabled=True,
             )

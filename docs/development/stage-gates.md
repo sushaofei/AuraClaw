@@ -3180,3 +3180,19 @@ active-reference barrier，并简化 AuraX 卸载入口。
 - [x] AuraX SDK 47 tests、desktop typecheck 与 lint 通过；lint 仅保留既有 ChatView hook warnings。
 - [x] 暂存范围排除 `.vscode/launch.json`、`compose.prod.yml`、`docs/tmp/`、Secret、缓存和虚拟环境。
 - [x] AuraClaw 与 AuraX 分别以 intentional commit 提交并 push 当前分支到 `origin`，同步更新 Issue #87。
+
+## 自研 MCP 注解直通与信任模型裁剪（2026-09-03）
+
+当前范围只接入自行开发的 MCP。实现与验证完成，部署步骤见
+[自研 MCP 注解直接生效升级](../operations/mcp-annotation-upgrade.md)。
+
+- [x] 删除 Server / Capability 信任等级、全局信任开关及工具级权限/风险覆盖分支。
+- [x] 直接采用 MCP `readOnlyHint`；风险采用声明，缺失时只读 low、其余 high。
+- [x] Tool Gateway 写入审批、租户隔离、身份、Policy 显式拒绝与 Credential Proxy 保持生效。
+- [x] 删除契约、持久化、装配、客户端类型及文档中的旧信任配置入口。
+- [x] 0057 up/down/up 在临时 PostgreSQL 验证；旧配置 revision / digest 保持原样，读取时丢弃退休字段。
+- [x] 回归覆盖注解真假/缺失、风险声明、旧覆盖无效、旧目录权限同版本重新对账与新目录持久化。
+- [x] 后端 unit、Ruff、Mypy、10 条 import-linter 合同通过；AuraX SDK 51 tests 与 desktop typecheck 通过。
+- [x] 提交范围只含本次改动，排除已有其他变更、环境配置、Secret、缓存与虚拟环境。
+
+测试环境尚未发布；本阶段交付包含需要维护窗口执行的数据库迁移和回滚说明。
