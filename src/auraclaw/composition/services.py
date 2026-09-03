@@ -30,6 +30,7 @@ from auraclaw.action.ports import (
     ArtifactWriter,
     SkillArtifactLifecycle,
 )
+from auraclaw.action.skill_admin_catalog import SkillCapabilityAvailability
 from auraclaw.action.skill_lifecycle import (
     InMemorySkillLifecycleStore,
     SkillLifecycleStore,
@@ -143,6 +144,7 @@ def _skill_publication_service(
     artifact_reader: ArtifactContentReader | None = None,
     artifact_lifecycle: SkillArtifactLifecycle | None = None,
     publisher_trust: SkillPublisherTrustService | None = None,
+    dependency_availability: SkillCapabilityAvailability | None = None,
 ) -> tuple[SkillPublicationService, SkillLifecycleStore]:
     selected_lifecycle = lifecycle
     if selected_lifecycle is None:
@@ -163,6 +165,7 @@ def _skill_publication_service(
             artifacts=artifact_reader,
             artifact_lifecycle=artifact_lifecycle,
             publisher_trust=publisher_trust,
+            dependency_availability=dependency_availability,
         ),
         selected_lifecycle,
     )

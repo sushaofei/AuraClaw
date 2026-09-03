@@ -50,7 +50,7 @@ from auraclaw.action.skill_lifecycle_events import (
     SkillTenantRebuilder,
 )
 from auraclaw.action.skill_management import SkillManagementService
-from auraclaw.action.skill_packages import SkillResolver
+from auraclaw.action.skill_packages import SkillDependencyAvailability, SkillResolver
 from auraclaw.action.skill_publishers import (
     InMemorySkillPublisherStore,
     SkillPublisherService,
@@ -232,6 +232,7 @@ def build_action_hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         artifact_reader=artifact_reader,
         artifact_lifecycle=skill_artifacts,
         publisher_trust=publisher_trust,
+        dependency_availability=SkillDependencyAvailability(capability_catalog_store),
     )
     skill_content_cache = SkillPackageContentCache(
         artifact_reader,

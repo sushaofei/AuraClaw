@@ -3411,3 +3411,13 @@ Ruff、Mypy（248 文件）、10 条架构合同通过。迁移不适用，部�
 - [x] 全量 675 passed / 56 skipped；临时 PostgreSQL 调度、Runtime、invocation 集成通过。
 - [x] Ruff、Mypy（251 文件）、10 条架构合同通过，无 DDL，恢复/发布文档更新。
 - [x] 提交不含无关文件或秘密；#94 全 Run 取消与旧包 drain 联合验收继续，不提前关闭 issue。
+
+## Skill / MCP 修复 K：安装与发布原子切换（Issue #94 B）
+
+- [x] 升级自动替换 pin/版本并提升 revision，保留 disabled/uninstalled 状态；候选不提前可执行。
+- [x] 签名/内容/依赖失败保留当前版本；旧 active 退出发现且按 continue 保留在途使用。
+- [x] publication/installation/撤销/当前升级状态同事务；命令幂等、CAS、迟到降级和冷副本切换通过。
+- [x] 0061 当前操作表和 down 未完成防护；临时 PostgreSQL up/down/up，双 store 集成 4 passed。
+- [x] 全量 679 passed / 57 skipped；Ruff、Mypy（251 文件）、10 条架构合同通过。
+- [x] 迁移目标和严格 DTO 发布顺序同步；draining 与完成明确区分，C/D 物理删除及产品闭环继续。
+- [x] 提交排除无关修改/秘密，推送网络状态单独跟踪；不提前关闭 #94。

@@ -84,6 +84,7 @@ class PublishSkillCommand(ContractModel):
     activate: bool = True
     command_id: str = Field(min_length=1, max_length=256)
     expected_revision: int = Field(default=0, ge=0)
+    expected_installation_revision: int | None = Field(default=None, ge=0)
     correlation_id: str = Field(min_length=1, max_length=256)
     causation_id: str = Field(min_length=1, max_length=256)
 
@@ -461,7 +462,25 @@ class SkillPublisherKeyRecord(ContractModel):
         return self
 
 
+class SkillUpgradeState(ContractModel):
+    tenant_id: str
+    publisher: str
+    name: str
+    operation_id: str
+    command_id: str
+    current_version: str = Field(pattern=_SEMVER)
+    package_digest: str = Field(pattern=_DIGEST)
+    generation: int = Field(ge=1)
+    phase: Literal["draining", "deleting", "completed", "blocked"] = "draining"
+    reason_code: str | None = None
+    actor_id: str
+    correlation_id: str
+    causation_id: str
+    updated_at: datetime
+
+
 class PublishedSkill(ContractModel):
+    upgrade: SkillUpgradeState | None = None
     tenant_id: str
     manifest: SkillManifest
     package_digest: str = Field(pattern=_DIGEST)
@@ -574,7 +593,8 @@ class SkillInstallationRecord(ContractModel):
             r"^(>=|<=|>|<|==|=)?(0|[1-9]\d*)"
             r"(?:\.(0|[1-9]\d*))?(?:\.(0|[1-9]\d*))?$"
         )
-        if constraint != "*" and any(
+        exact_prerelease = re.fullmatch(r"(?:==|=)?" + _SEMVER[1:-1], constraint)
+        if constraint != "*" and exact_prerelease is None and any(
             clause.fullmatch(item.strip()) is None for item in constraint.split(",")
         ):
             raise ValueError(f"Unsupported Skill version constraint: {constraint}")

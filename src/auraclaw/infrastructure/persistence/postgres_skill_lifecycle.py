@@ -17,6 +17,7 @@ from auraclaw.action.skill_lifecycle import (
     _publish_outbox_payload,
     decode_skill_admission_cursor,
     encode_skill_admission_cursor,
+    validate_upgrade,
 )
 from auraclaw.contracts.errors import NotFoundError, VersionConflictError
 from auraclaw.contracts.skills import (
@@ -26,6 +27,7 @@ from auraclaw.contracts.skills import (
     SkillPackageRetentionStatus,
     SkillPublicationRecord,
     SkillPublicationStatus,
+    SkillUpgradeState,
 )
 from auraclaw.infrastructure.persistence.postgres_common import (
     LazyPool,
@@ -48,6 +50,38 @@ from auraclaw.infrastructure.persistence.postgres_skill_publication_records impo
 
 
 class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
+    async def get_publish_command_digest(self, tenant_id: str, command_id: str) -> str | None:
+        pool = await self.pool()
+        value = await pool.fetchval(
+            "SELECT request_digest FROM hands.skill_command "
+            "WHERE tenant_id=$1 AND command_id=$2 AND command_type='publish'",
+            tenant_id,
+            command_id,
+        )
+        return str(value) if value is not None else None
+
+    async def get_upgrade(
+        self, tenant_id: str, publisher: str, name: str
+    ) -> SkillUpgradeState | None:
+        pool = await self.pool()
+        row = await pool.fetchrow(
+            "SELECT * FROM hands.skill_upgrade_current "
+            "WHERE tenant_id=$1 AND publisher=$2 AND name=$3",
+            tenant_id,
+            publisher,
+            name,
+        )
+        return SkillUpgradeState.model_validate(dict(row)) if row is not None else None
+
+    async def list_pending_upgrades(self, *, limit: int = 100) -> tuple[SkillUpgradeState, ...]:
+        pool = await self.pool()
+        rows = await pool.fetch(
+            "SELECT * FROM hands.skill_upgrade_current WHERE phase <> 'completed' "
+            "ORDER BY updated_at LIMIT $1",
+            limit,
+        )
+        return tuple(SkillUpgradeState.model_validate(dict(row)) for row in rows)
+
     async def record_admission(self, record: SkillAdmissionAuditRecord) -> None:
         pool = await self.pool()
         await pool.execute(
@@ -189,6 +223,10 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
                 "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
                 f"{package.tenant_id}:{commit.command_id}",
             )
+            await connection.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+                f"skill:{package.tenant_id}:{package.manifest.publisher}:{package.manifest.name}",
+            )
             replay = await connection.fetchrow(
                 """SELECT request_digest FROM hands.skill_command
                 WHERE tenant_id=$1 AND command_id=$2""",
@@ -200,6 +238,26 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
                     raise VersionConflictError("Skill command id was reused")
                 return await _load_publish_result(connection, commit, replayed=True)
 
+            if commit.upgrade is not None:
+                rows = await connection.fetch(
+                    "SELECT * FROM hands.skill_publication "
+                    "WHERE tenant_id=$1 AND publisher=$2 AND name=$3",
+                    package.tenant_id,
+                    package.manifest.publisher,
+                    package.manifest.name,
+                )
+                current = await connection.fetchrow(
+                    "SELECT * FROM hands.skill_installation "
+                    "WHERE tenant_id=$1 AND publisher=$2 AND name=$3 FOR UPDATE",
+                    package.tenant_id,
+                    package.manifest.publisher,
+                    package.manifest.name,
+                )
+                validate_upgrade(
+                    commit,
+                    tuple(publication_from_row(dict(row)) for row in rows),
+                    installation_from_row(dict(current)) if current is not None else None,
+                )
             committed_installation: SkillInstallationRecord | None
             if commit.replace_purged:
                 (
@@ -215,8 +273,28 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
                     expected_revision=commit.expected_publication_revision,
                 )
                 committed_installation = await _put_installation_transaction(
-                    connection, commit.installation
+                    connection,
+                    commit.installation,
+                    expected_revision=(
+                        commit.expected_installation_revision if commit.upgrade else None
+                    ),
                 )
+            if commit.upgrade is not None:
+                await connection.execute(
+                    """UPDATE hands.skill_publication SET status='revoked',
+                    revocation_action='continue', revocation_policy_version='skill-upgrade-v1',
+                    reason_code='skill_version_replaced', revision=revision+1,
+                    updated_by=$5, updated_at=$6
+                    WHERE tenant_id=$1 AND publisher=$2 AND name=$3
+                    AND version<>$4 AND status='active'""",
+                    package.tenant_id,
+                    package.manifest.publisher,
+                    package.manifest.name,
+                    package.manifest.version,
+                    commit.actor_id,
+                    commit.occurred_at,
+                )
+                await _upsert_upgrade(connection, commit.upgrade)
             result = SkillPublishCommitResult(
                 package=package,
                 publication=committed_publication,
@@ -379,9 +457,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
             for row in rows
         )
 
-    async def renew_outbox(
-        self, *, outbox_id: str, owner: str, claim_ttl: timedelta
-    ) -> bool:
+    async def renew_outbox(self, *, outbox_id: str, owner: str, claim_ttl: timedelta) -> bool:
         pool = await self.pool()
         status = await pool.execute(
             """UPDATE hands.skill_outbox
@@ -405,9 +481,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
         )
         return bool(status.rsplit(" ", 1)[-1] == "1")
 
-    async def fail_outbox(
-        self, *, outbox_id: str, owner: str, safe_error_code: str
-    ) -> bool:
+    async def fail_outbox(self, *, outbox_id: str, owner: str, safe_error_code: str) -> bool:
         pool = await self.pool()
         status = await pool.execute(
             """UPDATE hands.skill_outbox SET claimed_by=NULL,claim_expires_at=NULL,
@@ -679,11 +753,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
                 record.updated_by,
                 record.updated_at,
                 record.reason_code,
-                (
-                    record.uninstall_action.value
-                    if record.uninstall_action is not None
-                    else None
-                ),
+                (record.uninstall_action.value if record.uninstall_action is not None else None),
                 record.uninstall_policy_version,
                 record.uninstall_policy_decision_id,
                 record.tenant_id,
@@ -712,9 +782,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
             )
             if replay is not None:
                 if str(replay["request_digest"]) != commit.request_digest:
-                    raise VersionConflictError(
-                        "Skill installation command id was reused"
-                    )
+                    raise VersionConflictError("Skill installation command id was reused")
                 current = await connection.fetchrow(
                     """SELECT * FROM hands.skill_installation
                     WHERE tenant_id=$1 AND publisher=$2 AND name=$3""",
@@ -723,13 +791,9 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
                     str(replay["name"]),
                 )
                 if current is None:
-                    raise VersionConflictError(
-                        "Skill installation command result is incomplete"
-                    )
+                    raise VersionConflictError("Skill installation command result is incomplete")
                 return installation_from_row(dict(current))
-            _require_next_revision(
-                record.revision, commit.expected_revision, "installation"
-            )
+            _require_next_revision(record.revision, commit.expected_revision, "installation")
             row = await connection.fetchrow(
                 """UPDATE hands.skill_installation SET
                 version_constraint=$1,pinned_package_digest=$2,status=$3,
@@ -746,11 +810,7 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
                 record.updated_by,
                 record.updated_at,
                 record.reason_code,
-                (
-                    record.uninstall_action.value
-                    if record.uninstall_action is not None
-                    else None
-                ),
+                (record.uninstall_action.value if record.uninstall_action is not None else None),
                 record.uninstall_policy_version,
                 record.uninstall_policy_decision_id,
                 record.tenant_id,
@@ -827,7 +887,6 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
         return tuple(installation_from_row(dict(row)) for row in rows)
 
 
-
 async def _put_package_transaction(
     connection: asyncpg.Connection, record: SkillPackageRecord
 ) -> None:
@@ -886,9 +945,7 @@ async def _replace_purged_package_transaction(
     if installation is None or commit.expected_installation_revision is None:
         raise VersionConflictError("Purged Skill replacement requires an installation")
 
-    await connection.execute(
-        "SET CONSTRAINTS hands.skill_publication_package_digest_fk DEFERRED"
-    )
+    await connection.execute("SET CONSTRAINTS hands.skill_publication_package_digest_fk DEFERRED")
     package_row = await connection.fetchrow(
         """SELECT * FROM hands.skill_package
         WHERE tenant_id=$1 AND publisher=$2 AND name=$3 AND version=$4
@@ -937,12 +994,8 @@ async def _replace_purged_package_transaction(
         raise VersionConflictError("Skill publication revision conflict")
     if previous_installation.revision != commit.expected_installation_revision:
         raise VersionConflictError("Skill installation revision conflict")
-    _require_next_revision(
-        publication.revision, previous_publication.revision, "publication"
-    )
-    _require_next_revision(
-        installation.revision, previous_installation.revision, "installation"
-    )
+    _require_next_revision(publication.revision, previous_publication.revision, "publication")
+    _require_next_revision(installation.revision, previous_installation.revision, "installation")
 
     await connection.execute(
         """INSERT INTO hands.skill_package_tombstone
@@ -1152,9 +1205,30 @@ async def _put_publication_transaction(
 async def _put_installation_transaction(
     connection: asyncpg.Connection,
     record: SkillInstallationRecord | None,
+    *,
+    expected_revision: int | None = None,
 ) -> SkillInstallationRecord | None:
     if record is None:
         return None
+    if expected_revision is not None:
+        row = await connection.fetchrow(
+            """UPDATE hands.skill_installation SET
+            version_constraint=$4, pinned_package_digest=$5, auto_upgrade=false,
+            revision=$6, updated_by=$7, updated_at=$8
+            WHERE tenant_id=$1 AND publisher=$2 AND name=$3 AND revision=$9 RETURNING *""",
+            record.tenant_id,
+            record.publisher,
+            record.name,
+            record.version_constraint,
+            record.pinned_package_digest,
+            record.revision,
+            record.updated_by,
+            record.updated_at,
+            expected_revision,
+        )
+        if row is None:
+            raise VersionConflictError("Skill installation revision conflict")
+        return installation_from_row(dict(row))
     row = await connection.fetchrow(
         """INSERT INTO hands.skill_installation
         (installation_id,tenant_id,publisher,name,version_constraint,
@@ -1236,3 +1310,32 @@ async def _load_publish_result(
 def _require_next_revision(revision: int, expected_revision: int, label: str) -> None:
     if revision != expected_revision + 1:
         raise VersionConflictError(f"Skill {label} next revision is invalid")
+
+
+async def _upsert_upgrade(connection: asyncpg.Connection, state: SkillUpgradeState) -> None:
+    await connection.execute(
+        """INSERT INTO hands.skill_upgrade_current
+        (tenant_id,publisher,name,operation_id,command_id,current_version,package_digest,generation,
+         phase,reason_code,actor_id,correlation_id,causation_id,updated_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+        ON CONFLICT (tenant_id,publisher,name) DO UPDATE SET
+        operation_id=EXCLUDED.operation_id,command_id=EXCLUDED.command_id,
+        current_version=EXCLUDED.current_version,package_digest=EXCLUDED.package_digest,
+        generation=EXCLUDED.generation,phase=EXCLUDED.phase,reason_code=EXCLUDED.reason_code,
+        actor_id=EXCLUDED.actor_id,correlation_id=EXCLUDED.correlation_id,
+        causation_id=EXCLUDED.causation_id,updated_at=EXCLUDED.updated_at""",
+        state.tenant_id,
+        state.publisher,
+        state.name,
+        state.operation_id,
+        state.command_id,
+        state.current_version,
+        state.package_digest,
+        state.generation,
+        state.phase,
+        state.reason_code,
+        state.actor_id,
+        state.correlation_id,
+        state.causation_id,
+        state.updated_at,
+    )
