@@ -77,3 +77,18 @@ Hands 启动恢复及周期任务自动处理 skill_upgrade_current。0063 的 g
 全量 694 passed / 62 skipped；最后 PostgreSQL/晚到激活/同版本清理/管理/可靠性联合通过。
 独立数据库 0063 up/down/up、Ruff、Mypy（253 文件）、10 条架构合同通过。管理页操作状态展示与测试环境
 实际升级验收仍在后续阶段完成。
+
+## 管理 API / SDK / AuraX（#94 D）
+
+目录与详情优先显示当前安装的 active 包，未来 staged 候选不遮住当前可用版本。安装 pin 与 active
+版本不匹配时继续显示明确的不可用原因。公开目录、发布响应和 management 返回当前 upgrade 操作，
+只含 operation_id/current_version/generation/phase/reason_code；此操作不承载旧包历史。
+
+AuraX 发布前读取 publication 和 installation revision，文件与 Artifact 两条发布路径均传递 CAS。
+Task API → Hands 内部 DTO 同样传递 expected_installation_revision；不存在的安装 revision 为 0。
+冲突不能自动覆盖最新安装，应刷新后重试。升级状态贯通 Hands 快照、Task API、SDK 与界面，
+等待在途调用、正在删除、阻塞重试和完成分别展示；页面只显示当前版本，支持手动刷新清理状态。
+
+部署顺序是新 Hands/内部消费者，再 Task API，再 AuraX/SDK；字段可选不代表可以与 strict 旧 DTO 混跑。
+无新增 DDL。跨 HTTP 契约验证 inline/artifact 过期 revision 拒绝、实际升级和租户隔离；
+浏览器验证各 phase 与当前版本展示。完整测试 697 passed / 62 skipped，PostgreSQL/真实 MCP 联合 12 passed。

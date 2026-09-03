@@ -33,6 +33,7 @@ from auraclaw.contracts.skills import (
     SkillPublicationRecord,
     SkillPublicationStatus,
     SkillRevocationAction,
+    SkillUpgradeState,
 )
 from auraclaw.contracts.tools import ArtifactRef
 
@@ -80,6 +81,14 @@ class SkillManagementService:
             raise NotFoundError("Skill package not found")
         return record
 
+    async def list_upgrade_states(self, tenant_id: str) -> tuple[SkillUpgradeState, ...]:
+        return await self._lifecycle.list_upgrades(tenant_id)
+
+    async def get_upgrade_state(
+        self, tenant_id: str, publisher: str, name: str
+    ) -> SkillUpgradeState | None:
+        return await self._lifecycle.get_upgrade(tenant_id, publisher, name)
+
     async def get_admin_snapshot(
         self, tenant_id: str
     ) -> tuple[
@@ -107,9 +116,7 @@ class SkillManagementService:
             raise NotFoundError("Skill installation not found")
         return record
 
-    async def list_installations(
-        self, tenant_id: str
-    ) -> tuple[SkillInstallationRecord, ...]:
+    async def list_installations(self, tenant_id: str) -> tuple[SkillInstallationRecord, ...]:
         return await self._lifecycle.list_installations(tenant_id)
 
     async def get_publication(
@@ -124,9 +131,7 @@ class SkillManagementService:
             raise NotFoundError("Skill publication not found")
         return record
 
-    async def list_publications(
-        self, tenant_id: str
-    ) -> tuple[SkillPublicationRecord, ...]:
+    async def list_publications(self, tenant_id: str) -> tuple[SkillPublicationRecord, ...]:
         return await self._lifecycle.list_publications(tenant_id)
 
     async def change_installation(
@@ -507,9 +512,7 @@ def _installation_target(
     if command.operation is SkillInstallationOperation.DISABLE:
         return SkillInstallationStatus.DISABLED
     return (
-        SkillInstallationStatus.UNINSTALLED
-        if command.force
-        else SkillInstallationStatus.DRAINING
+        SkillInstallationStatus.UNINSTALLED if command.force else SkillInstallationStatus.DRAINING
     )
 
 

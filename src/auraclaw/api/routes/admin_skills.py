@@ -63,6 +63,7 @@ _MAX_ENCODED_UPLOAD_BYTES = 24 * 1024 * 1024
 
 class PublishSkillRequest(ContractModel):
     activate: bool = True
+    expected_installation_revision: int | None = Field(default=None, ge=0)
     files: dict[str, str] | None = Field(default=None, min_length=1, max_length=_MAX_UPLOAD_FILES)
     artifact_ref: dict[str, Any] | None = None
     expected_digest: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
@@ -231,7 +232,7 @@ class SkillAdmissionReader(Protocol):
 
 def _summary(publication: PublishedSkill, *, skill_markdown: str | None = None) -> dict[str, Any]:
     manifest = publication.manifest
-    payload = {
+    payload: dict[str, Any] = {
         "publisher": manifest.publisher,
         "name": manifest.name,
         "version": manifest.version,
@@ -245,6 +246,9 @@ def _summary(publication: PublishedSkill, *, skill_markdown: str | None = None) 
         ],
         "required_skills": [item.model_dump(mode="json") for item in manifest.required_skills],
     }
+    if publication.upgrade is not None:
+        payload["upgrade"] = publication.upgrade.model_dump(mode="json", include={
+            "operation_id", "current_version", "generation", "phase", "reason_code"})
     if skill_markdown is not None:
         payload["skill_markdown"] = skill_markdown
     return payload
@@ -761,11 +765,14 @@ def create_skill_admin_router(
         ]
         if not records:
             raise NotFoundError("Skill publication not found")
-        state = max(records, key=lambda item: _semver_key(item.version))
-        package = await service.get_package(
-            identity.tenant_id, publisher, name, state.version
-        )
-        publication = _published_skill(package, state)
+        assert catalog_query_service is not None
+        selected = next((item for item in await catalog_query_service.list_latest(
+            identity.tenant_id, SkillCatalogQuery(publisher=publisher))
+            if item.publication.manifest.name == name), None)
+        if selected is None:
+            raise NotFoundError("Skill publication not found")
+        state = selected.publication_state
+        publication = selected.publication
         markdown = await _skill_markdown(
             content_reader,
             registry,
@@ -800,6 +807,9 @@ def create_skill_admin_router(
             )
         except NotFoundError:
             installation = None
+        read_upgrade = getattr(service, "get_upgrade_state", None)
+        upgrade = (await read_upgrade(identity.tenant_id, publisher, name)
+                   if callable(read_upgrade) else None)
         versions = [
             {
                 "publication": _publication_state_summary(item),
@@ -818,6 +828,8 @@ def create_skill_admin_router(
                 None if installation is None else _installation_summary(installation)
             ),
             "versions": versions,
+            "upgrade": None if upgrade is None else upgrade.model_dump(mode="json", include={
+                "operation_id", "current_version", "generation", "phase", "reason_code"}),
         }
 
     @router.get("/skills/{publisher}/{name}/versions/{version}")
@@ -973,6 +985,7 @@ def create_skill_admin_router(
             tenant_id=identity.tenant_id,
             actor_id=identity.actor.id,
             activate=payload.activate,
+            expected_installation_revision=payload.expected_installation_revision,
             command_id=command_id,
             expected_revision=expected_revision,
             correlation_id=identity.correlation_id,

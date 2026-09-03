@@ -194,3 +194,47 @@ def test_catalog_and_runtime_reject_active_new_publication_pinned_to_old_package
         assert _installation_allows(upgraded, "2.0.0", new.package_digest)
 
     asyncio.run(scenario())
+
+
+def test_staged_candidate_does_not_replace_current_skill_or_upgrade_status() -> None:
+    from auraclaw.contracts.skills import SkillUpgradeState
+
+    async def scenario() -> None:
+        current, candidate = _package("2.0.0", "b"), _package("3.0.0", "c")
+        state = SkillUpgradeState(
+            tenant_id="tenant-a",
+            publisher="platform",
+            name="release.prepare",
+            operation_id="upgrade",
+            command_id="upgrade",
+            current_version="2.0.0",
+            package_digest=current.package_digest,
+            generation=2,
+            phase="deleting",
+            actor_id="admin",
+            correlation_id="upgrade",
+            causation_id="upgrade",
+            updated_at=datetime.now(UTC),
+        )
+
+        class Snapshot(_Snapshot):
+            async def list_upgrade_states(self, tenant_id):
+                return (state,)
+
+        snapshot = Snapshot(
+            (current, candidate),
+            (
+                _publication(current),
+                _publication(candidate).model_copy(
+                    update={"status": SkillPublicationStatus.STAGED}
+                ),
+            ),
+            (),
+        )
+        items = await SkillAdminCatalogQueryService(snapshot).list_latest(
+            "tenant-a", SkillCatalogQuery()
+        )
+        assert items[0].publication.manifest.version == "2.0.0"
+        assert items[0].publication.upgrade == state
+
+    asyncio.run(scenario())

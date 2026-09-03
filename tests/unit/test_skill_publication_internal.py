@@ -33,7 +33,7 @@ from auraclaw.action.skill_publishers import (
 from auraclaw.action.skill_rebuild import SkillStateRebuilder
 from auraclaw.api.routes.admin_skills import create_skill_admin_router
 from auraclaw.contracts.capabilities import CapabilityKind
-from auraclaw.contracts.errors import SchemaValidationError
+from auraclaw.contracts.errors import SchemaValidationError, VersionConflictError
 from auraclaw.contracts.internal import ServiceIdentity
 from auraclaw.contracts.skills import (
     ChangeSkillInstallationCommand,
@@ -92,11 +92,11 @@ class _ArtifactWriter:
         return self.contents[artifact_ref.artifact_id]
 
 
-def _package() -> SkillPackage:
+def _package(version: str = "2.0.0") -> SkillPackage:
     verifier = HmacSkillSignatureVerifier({"platform": _KEY})
     unsigned = SkillManifest(
         name="release.prepare",
-        version="2.0.0",
+        version=version,
         description="Prepare a release",
         publisher="platform",
         signature=f"hmac-sha256:{'0' * 64}",
@@ -443,5 +443,76 @@ def test_task_api_client_publishes_through_action_hands_service() -> None:
             tenant_id="tenant-a", kinds=(CapabilityKind.SKILL,)
         )
         assert projected == ()
+
+    asyncio.run(scenario())
+
+
+def test_remote_upgrade_preserves_installation_cas_and_current_operation() -> None:
+    class Projector:
+        async def rebuild_tenant(self, tenant_id: str) -> None:
+            pass
+
+    async def scenario() -> None:
+        artifacts = _ArtifactWriter()
+        lifecycle = InMemorySkillLifecycleStore()
+        registry = SkillPackageRegistry(
+            artifacts=artifacts,
+            signature_verifier=HmacSkillSignatureVerifier({"platform": _KEY}),
+            resources=HandsResourceRegistry(),
+        )
+        publication = SkillPublicationService(
+            registry=registry, lifecycle=lifecycle, artifacts=artifacts,
+        )
+        management = SkillManagementService(lifecycle=lifecycle, projector=Projector())
+        contract = create_contract_app(
+            "skill-upgrade-test",
+            skill_publication_routes(SkillPublicationInternalService(
+                publication, management=management, admissions=lifecycle,
+            )),
+            workload_identities={"task-token": ServiceIdentity.TASK_API},
+        )
+        app = FastAPI()
+        app.mount("/internal/v1/skill-publications", contract)
+        client = RemoteSkillPublicationClient(
+            "http://hands", bearer_token="task-token", transport=httpx.ASGITransport(app=app),
+        )
+
+        def command(identifier: str, installation_revision: int, **changes: object):
+            return PublishSkillCommand.model_validate({
+                "tenant_id": "tenant-a", "actor_id": "admin-a", "command_id": identifier,
+                "correlation_id": identifier, "causation_id": identifier, "expected_revision": 0,
+                "expected_installation_revision": installation_revision, **changes,
+            })
+
+        try:
+            with pytest.raises(VersionConflictError):
+                await client.publish(command("missing-installation", 9), _package())
+            await client.publish(command("first", 0), _package())
+            with pytest.raises(VersionConflictError):
+                await client.publish(command("stale-inline", 0), _package("3.0.0"))
+            staged = await client.publish(
+                command("stage", 1, activate=False), _package("3.0.0"),
+            )
+            with pytest.raises(VersionConflictError):
+                await client.publish_artifact(
+                    command("stale-artifact", 0, expected_revision=1),
+                    staged.artifact_ref, staged.package_digest,
+                )
+            upgraded = await client.publish_artifact(
+                command("activate", 1, expected_revision=1),
+                staged.artifact_ref, staged.package_digest,
+            )
+            installation = await client.get_installation("tenant-a", "platform", "release.prepare")
+            assert installation.revision == 2
+            assert installation.pinned_package_digest == upgraded.package_digest
+            states = await client.list_upgrade_states("tenant-a")
+            assert len(states) == 1
+            assert states[0].current_version == "3.0.0"
+            assert states[0].phase == "draining"
+            current = await client.get_upgrade_state("tenant-a", "platform", "release.prepare")
+            assert current == states[0]
+            assert await client.list_upgrade_states("tenant-b") == ()
+        finally:
+            await client.aclose()
 
     asyncio.run(scenario())

@@ -58,6 +58,7 @@ from auraclaw.contracts.skills import (
     SkillPublicationRecord,
     SkillPublisherKeyRecord,
     SkillPublisherRecord,
+    SkillUpgradeState,
 )
 from auraclaw.contracts.tools import ArtifactRef
 from auraclaw.infrastructure.clients.internal import (
@@ -100,6 +101,7 @@ class RemoteSkillPublicationClient:
                 context=_context(command),
                 actor_id=command.actor_id,
                 activate=command.activate,
+                expected_installation_revision=command.expected_installation_revision,
                 command_id=command.command_id,
                 expected_revision=command.expected_revision,
                 files={
@@ -123,6 +125,7 @@ class RemoteSkillPublicationClient:
                 context=_context(command),
                 actor_id=command.actor_id,
                 activate=command.activate,
+                expected_installation_revision=command.expected_installation_revision,
                 command_id=command.command_id,
                 expected_revision=command.expected_revision,
                 expected_digest=expected_digest,
@@ -286,6 +289,16 @@ class RemoteSkillPublicationClient:
     async def list_packages(self, tenant_id: str) -> tuple[SkillPackageRecord, ...]:
         response = await self._admin_snapshot(tenant_id)
         return tuple(SkillPackageRecord.model_validate(item) for item in response.packages)
+
+    async def list_upgrade_states(self, tenant_id: str) -> tuple[SkillUpgradeState, ...]:
+        response = await self._admin_snapshot(tenant_id)
+        return tuple(SkillUpgradeState.model_validate(item) for item in response.upgrades)
+
+    async def get_upgrade_state(
+        self, tenant_id: str, publisher: str, name: str
+    ) -> SkillUpgradeState | None:
+        return next((state for state in await self.list_upgrade_states(tenant_id)
+                     if state.publisher == publisher and state.name == name), None)
 
     async def get_admin_snapshot(
         self, tenant_id: str

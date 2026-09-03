@@ -13,6 +13,8 @@ from auraclaw.contracts.skills import (
     SkillPackageRecord,
     SkillPackageRetentionStatus,
     SkillPublicationRecord,
+    SkillPublicationStatus,
+    SkillUpgradeState,
 )
 
 
@@ -27,9 +29,7 @@ class SkillAdminSnapshotReader(Protocol):
 
 
 class SkillCapabilityAvailability(Protocol):
-    async def is_available(
-        self, tenant_id: str, capability: CapabilityDescriptor
-    ) -> bool: ...
+    async def is_available(self, tenant_id: str, capability: CapabilityDescriptor) -> bool: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,18 +63,39 @@ class SkillAdminCatalogQueryService:
     async def list_latest(
         self, tenant_id: str, query: SkillCatalogQuery
     ) -> tuple[SkillCatalogItem, ...]:
-        packages, publication_states, installation_records = (
-            await self._snapshot.get_admin_snapshot(tenant_id)
-        )
+        (
+            packages,
+            publication_states,
+            installation_records,
+        ) = await self._snapshot.get_admin_snapshot(tenant_id)
         package_by_version = {
             (item.manifest.publisher, item.manifest.name, item.manifest.version): item
             for item in packages
             if item.retention_status is not SkillPackageRetentionStatus.PURGED
         }
         state_by_version = {
-            (item.publisher, item.name, item.version): item
-            for item in publication_states
+            (item.publisher, item.name, item.version): item for item in publication_states
         }
+        installations = {(item.publisher, item.name): item for item in installation_records}
+        read_upgrades = getattr(self._snapshot, "list_upgrade_states", None)
+        upgrades = {
+            (item.publisher, item.name): item
+            for item in (await read_upgrades(tenant_id) if callable(read_upgrades) else ())
+            if isinstance(item, SkillUpgradeState)
+        }
+
+        def selection_key(publication: PublishedSkill) -> tuple[bool, bool, tuple[int, ...]]:
+            installed = installations.get(
+                (publication.manifest.publisher, publication.manifest.name)
+            )
+            active = publication.status is SkillPublicationStatus.ACTIVE
+            pinned = (
+                active
+                and installed is not None
+                and installed.pinned_package_digest == publication.package_digest
+            )
+            return pinned, active, semver_key(publication.manifest.version)
+
         latest: dict[tuple[str, str], tuple[PublishedSkill, SkillPublicationRecord]] = {}
         for version_key, publication_state in state_by_version.items():
             package = package_by_version.get(version_key)
@@ -83,13 +104,8 @@ class SkillAdminCatalogQueryService:
             publication = published_skill(package, publication_state)
             skill_key = (publication.manifest.publisher, publication.manifest.name)
             current = latest.get(skill_key)
-            if current is None or semver_key(publication.manifest.version) > semver_key(
-                current[0].manifest.version
-            ):
+            if current is None or selection_key(publication) > selection_key(current[0]):
                 latest[skill_key] = (publication, publication_state)
-        installations = {
-            (item.publisher, item.name): item for item in installation_records
-        }
         normalized_query = (query.text or "").casefold()
         result: list[SkillCatalogItem] = []
         for publication, publication_state in latest.values():
@@ -99,14 +115,10 @@ class SkillAdminCatalogQueryService:
                 continue
             if query.risk_level and manifest.risk_level != query.risk_level:
                 continue
-            if (
-                query.publication_status
-                and publication.status.value != query.publication_status
-            ):
+            if query.publication_status and publication.status.value != query.publication_status:
                 continue
             if query.installation_status and (
-                installation is None
-                or installation.status.value != query.installation_status
+                installation is None or installation.status.value != query.installation_status
             ):
                 continue
             haystack = " ".join(
@@ -114,6 +126,9 @@ class SkillAdminCatalogQueryService:
             ).casefold()
             if normalized_query and normalized_query not in haystack:
                 continue
+            upgrade = upgrades.get((manifest.publisher, manifest.name))
+            if upgrade is not None and upgrade.package_digest == publication.package_digest:
+                publication = publication.model_copy(update={"upgrade": upgrade})
             availability = skill_availability(publication, installation)
             if (
                 availability == "available"

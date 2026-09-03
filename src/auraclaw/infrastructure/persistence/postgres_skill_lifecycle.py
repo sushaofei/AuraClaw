@@ -52,6 +52,13 @@ from auraclaw.infrastructure.persistence.postgres_skill_publication_records impo
 
 
 class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
+    async def list_upgrades(self, tenant_id: str) -> tuple[SkillUpgradeState, ...]:
+        pool = await self.pool()
+        rows = await pool.fetch(
+            "SELECT * FROM hands.skill_upgrade_current WHERE tenant_id=$1", tenant_id
+        )
+        return tuple(SkillUpgradeState.model_validate(dict(row)) for row in rows)
+
     async def claim_upgrade(self, state: SkillUpgradeState, *, ttl: timedelta) -> str | None:
         pool = await self.pool()
         token = uuid4().hex

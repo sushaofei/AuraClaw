@@ -15,8 +15,8 @@
 默认执行：上传代码 → 构建镜像 → 核对镜像所需迁移目标 → 停止服务 → 迁移并校验 → 强制重建全部服务 → 健康检查。
 这是维护窗口发布，会短暂中断服务。迁移不再需要额外参数。
 
-当前目标为 `0058`。脚本使用 `AURACLAW_DEV_IMAGE`（默认 `auraclaw:dev`）和
-`AURACLAW_MIGRATE_TARGET`（默认 `0058`）覆盖 Compose 的同名配置，保证迁移与应用使用
+当前目标为 `0063`。脚本使用 `AURACLAW_DEV_IMAGE`（默认 `auraclaw:dev`）和
+`AURACLAW_MIGRATE_TARGET`（默认 `0063`）覆盖 Compose 的同名配置，保证迁移与应用使用
 本次选择的同一镜像。目标不等于镜像内 `migrate latest` 时，在停服前拒绝发布；
 迁移或 `migrate check` 失败时不会启动应用。`--force-recreate` 保证所有副本重新建立数据库连接池。
 
@@ -46,7 +46,7 @@
 
 ```dotenv
 AURACLAW_IMAGE=auraclaw:dev
-AURACLAW_MIGRATE_TARGET=0058
+AURACLAW_MIGRATE_TARGET=0063
 KAFKA_HOST=10.244.16.132
 AURACLAW_ARTIFACT_BACKEND=obs
 OBS_ENDPOINT=obsv3.example.com
@@ -110,3 +110,11 @@ DEV_SERVICE 与生产共用 12 服务拓扑。缩短「创建任务 → 首 Toke
 | `AURACLAW_RUNTIME_POLL_INTERVAL` | `0.05` | agent-runtime claim 轮询 |
 
 性能结论请在多服务拓扑（本机 `compose.test.yml` 或 DEV_SERVICE）验证，不要以 `auraclaw serve` 合一体为依据。详见 #42。
+
+## Skill / MCP 联合修复发布（0063）
+
+本次迁移目标为 0063；0058 至 0063 涉及 Tool 前缀、审批模式、本地目录 generation 和 Skill 升级清理。
+协调发布全部服务，避免严格 DTO 及旧 Runtime 行为混跑。启用新 Hands 的自动清理之前，必须先确认旧 Runtime
+的在途写调用已结束或人工核对其结果；没有 Canonical invocation 记录的旧调用不能自动推断已完成。
+参见 [Skill 升级](skill-upgrade.md)、[工作流恢复](skill-workflow-recovery.md) 和各阶段门禁。
+旧 Skill 清理包含对象所有版本及元数据物理删除，回滚二进制不会恢复旧包。测试环境业务验收须另行记录。

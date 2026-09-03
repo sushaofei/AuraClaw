@@ -161,6 +161,7 @@ class SkillOutboxRecord:
 
 
 class SkillLifecycleStore(Protocol):
+    async def list_upgrades(self, tenant_id: str) -> tuple[SkillUpgradeState, ...]: ...
     async def claim_upgrade(self, state: SkillUpgradeState, *, ttl: timedelta) -> str | None: ...
 
     async def renew_upgrade(
@@ -293,6 +294,9 @@ class InMemorySkillLifecycleStore:
     _outbox: dict[str, SkillOutboxRecord] = field(default_factory=dict)
     _claimed_outbox: dict[str, str] = field(default_factory=dict)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+    async def list_upgrades(self, tenant_id: str) -> tuple[SkillUpgradeState, ...]:
+        return tuple(state for state in self._upgrades.values() if state.tenant_id == tenant_id)
 
     async def claim_upgrade(self, state: SkillUpgradeState, *, ttl: timedelta) -> str | None:
         async with self._lock:
