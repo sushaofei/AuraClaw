@@ -979,7 +979,7 @@ def test_capability_loop_applies_revocation_action_to_active_binding(
         assert event_types.count("skill.revocation.applied") == 1
         assert len(model.requests) == 3
         if action == "pause":
-            assert control.suspended_reason == "skill_revoked"
+            assert control.suspended_reason == "waiting_for_human"
             assert control.outcome is None
             assert "run.cancelled" not in event_types
         else:

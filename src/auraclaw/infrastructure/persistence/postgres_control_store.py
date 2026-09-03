@@ -691,20 +691,21 @@ class PostgresControlStateStore(_LazyPool):
                 """UPDATE control.runnable_item
                 SET status='queued', claimed_by=NULL, claim_token=NULL,
                     claim_expires_at=NULL, available_at=now()
-                WHERE task_id=$1 RETURNING task_id""",
+                WHERE task_id=$1 AND status='acked' RETURNING task_id""",
                 task_id,
             )
             return updated is not None
 
     async def list_waiting_assignments(
-        self, *, limit: int = 100
+        self, *, limit: int = 100, status: str = "waiting_children"
     ) -> tuple[RuntimeAssignment, ...]:
         pool = await self.pool()
         task_ids = await pool.fetch(
-            """SELECT task_id FROM control.assignment
-               WHERE assignment_status='waiting_children'
-               ORDER BY completed_at, task_id LIMIT $1""",
-            max(0, limit),
+            """SELECT a.task_id FROM control.assignment a
+               JOIN control.runnable_item r ON r.task_id=a.task_id
+               WHERE a.assignment_status=$2 AND r.status='acked'
+               ORDER BY a.completed_at, a.task_id LIMIT $1""",
+            max(0, limit), status,
         )
         assignments: list[RuntimeAssignment] = []
         for row in task_ids:

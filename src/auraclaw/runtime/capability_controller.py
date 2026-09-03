@@ -287,6 +287,8 @@ class RuntimeCapabilityController:
         for item in state.get("active_skills", ()):
             if not isinstance(item, dict):
                 continue
+            if item.get("workflow_status") in {"completed", "failed", "cancelled"}:
+                continue
             activation = item.get("activation")
             binding = item.get("binding")
             if not isinstance(activation, dict) or not isinstance(binding, dict):
@@ -1046,6 +1048,7 @@ class RuntimeCapabilityController:
             ),
             start_step_index=int(existing.get("workflow_next_step_index", 0)),
             on_progress=checkpoint_workflow,
+            before_step=lambda: self.binding_disposition(assignment, state),
             completed_steps=tuple(existing.get("workflow_completed_steps", ())),
             deadline=datetime.fromisoformat(str(existing["workflow_deadline"])),
             pending_invocation_id=(existing.get("workflow_pending_invocation_id")
@@ -1081,11 +1084,11 @@ class RuntimeCapabilityController:
                 events=tuple(events),
             )
         existing["workflow_error_code"] = workflow_result.error_code
-        if workflow_result.status == "unknown":
+        if workflow_result.status in {"unknown", "paused"}:
             existing["workflow_pending_step"] = workflow_result.pending_step_id
             existing["workflow_pending_invocation_id"] = workflow_result.pending_invocation_id
             return CapabilityExecution(
-                result={"status": "unknown", "error_code": workflow_result.error_code,
+                result={"status": workflow_result.status, "error_code": workflow_result.error_code,
                         "skill_activation_id": activation.skill_activation_id,
                         "pending_invocation_id": workflow_result.pending_invocation_id},
                 state=state, events=tuple(events),

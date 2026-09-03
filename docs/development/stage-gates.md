@@ -3402,3 +3402,12 @@ Ruff、Mypy（248 文件）、10 条架构合同通过。迁移不适用，部�
 - [x] 提交排除无关修改/秘密；推送交付状态单独跟踪，不提前关闭 #94。
 
 参见 [Skill 升级](../operations/skill-upgrade.md)。
+
+## Skill / MCP 修复 J：逐步撤销与等待恢复（Issue #95/#96）
+
+- [x] 每个声明式步骤前真实查询撤销；pause/cancel 阻止下一步，原调用未知时不重放。
+- [x] pause 调度原因合法；workflow deadline 之后继续查询已发出的原调用，不延长执行预算。
+- [x] 周期恢复 waiting_for_tool；唤醒幂等且不覆盖已排队/已领取的 claim。
+- [x] 全量 675 passed / 56 skipped；临时 PostgreSQL 调度、Runtime、invocation 集成通过。
+- [x] Ruff、Mypy（251 文件）、10 条架构合同通过，无 DDL，恢复/发布文档更新。
+- [x] 提交不含无关文件或秘密；#94 全 Run 取消与旧包 drain 联合验收继续，不提前关闭 issue。

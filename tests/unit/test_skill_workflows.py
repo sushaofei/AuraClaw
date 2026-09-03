@@ -227,6 +227,8 @@ class _Client:
 
     async def execute(self, assignment: RuntimeAssignment, call: ToolCall) -> dict[str, Any]:
         del assignment
+        if call.name == "auraclaw.skills.binding-status":
+            return {"status": "success", "content": {"action": "continue"}}
         self.calls.append(call)
         if call.name == CAPABILITY_LOAD:
             return {
@@ -400,7 +402,7 @@ def test_capability_controller_executes_workflow_on_skill_activation() -> None:
 
 class _ApprovalClient(_Client):
     async def execute(self, assignment: RuntimeAssignment, call: ToolCall) -> dict[str, Any]:
-        if call.name in {CAPABILITY_LOAD}:
+        if call.name in {CAPABILITY_LOAD, "auraclaw.skills.binding-status"}:
             return await super().execute(assignment, call)
         self.calls.append(call)
         if call.approval_id is None:
@@ -483,7 +485,7 @@ def test_workflow_non_success_never_advances_or_completes_on_chat_finish(status)
 
         class FailedClient(_Client):
             async def execute(self, assignment, call):
-                if call.name == CAPABILITY_LOAD:
+                if call.name in {CAPABILITY_LOAD, "auraclaw.skills.binding-status"}:
                     return await super().execute(assignment, call)
                 self.calls.append(call)
                 return {"status": status, "content": {"sku": "must-not-use"}}
@@ -561,7 +563,7 @@ def test_unknown_write_waits_for_original_invocation_without_replay() -> None:
 
         class UnknownClient(_Client):
             async def execute(self, assignment, call):
-                if call.name == CAPABILITY_LOAD:
+                if call.name in {CAPABILITY_LOAD, "auraclaw.skills.binding-status"}:
                     return await super().execute(assignment, call)
                 self.calls.append(call)
                 return {"status": "timeout", "side_effect_status": "unknown"}
@@ -604,5 +606,62 @@ def test_reference_loading_is_inside_overall_workflow_deadline() -> None:
             deadline=datetime.now(UTC) + timedelta(milliseconds=30),
         )
         assert result.status == "failed" and result.error_code == "workflow_budget_exhausted"
+        assert not client.calls and not client.resource_uris
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("action", ["pause", "cancel"])
+def test_workflow_observes_revocation_between_steps(action: str) -> None:
+    async def scenario() -> None:
+        package = _package()
+        identities: list[str] = []
+
+        class RevokedClient(_Client):
+            async def execute(self, assignment, call):
+                if call.name == "auraclaw.skills.binding-status":
+                    identities.append(call.tool_invocation_id)
+                    return {"status": "success", "content": {
+                        "action": "continue" if len(identities) == 1 else action,
+                        "reason_code": "fixture_revocation"}}
+                return await super().execute(assignment, call)
+        client = RevokedClient(package, _binding(package))
+        controller = RuntimeCapabilityController(client)  # type: ignore[arg-type]
+        result = await controller.execute(_assignment(), _activation_call(),
+                                          _controller_state(package))
+        assert result.state["active_skills"][0]["workflow_status"] == (
+            "paused" if action == "pause" else "cancelled")
+        assert len(identities) == 2 and len(set(identities)) == 2
+        assert not client.resource_uris
+        assert not any(event.type == "skill.completed" for event in result.events)
+    asyncio.run(scenario())
+
+
+def test_pending_write_is_queried_after_workflow_deadline_without_dispatch() -> None:
+    from datetime import UTC, datetime, timedelta
+
+    async def scenario() -> None:
+        package = _package()
+
+        class SettledClient(_Client):
+            observed: str = "unknown"
+            queried = 0
+
+            async def invocation_status(self, assignment, invocation_id):
+                assert invocation_id == "original-write"
+                self.queried += 1
+                return {"found": True, "status": self.observed, "side_effect_status": "unknown"}
+        client = SettledClient(package, _binding(package))
+        executor = RuntimeSkillWorkflowExecutor(client)  # type: ignore[arg-type]
+        activation = SkillActivation(skill_activation_id="ska_wait", activation_key="activate",
+            binding=client.binding, input_digest="sha256:" + "5" * 64)
+        arguments = dict(inputs={}, loaded_capabilities={},
+                         deadline=datetime.now(UTC) - timedelta(seconds=1),
+                         pending_invocation_id="original-write")
+        pending = await executor.execute(_assignment(), activation, **arguments)
+        assert pending.status == "unknown" and pending.pending_invocation_id == "original-write"
+        client.observed = "success"
+        settled = await executor.execute(_assignment(), activation, **arguments)
+        assert settled.status == "failed" and settled.error_code == "workflow_budget_exhausted"
+        assert settled.pending_invocation_id is None and client.queried == 2
         assert not client.calls and not client.resource_uris
     asyncio.run(scenario())

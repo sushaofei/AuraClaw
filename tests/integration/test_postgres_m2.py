@@ -224,10 +224,14 @@ def test_postgres_control_claim_lease_fencing_checkpoint_and_capacity() -> None:
             assert waiting[0].run_id == assignment.run_id
             assert await store_b.wake_assignment(task_id)
             await store_a.suspend_assignment(task_id, "waiting_for_tool")
+            tool_waiting = await store_b.list_waiting_assignments(status="waiting_for_tool")
+            assert len(tool_waiting) == 1 and tool_waiting[0].run_id == assignment.run_id
             restored_identity = await store_b.get_assignment(task_id)
             assert restored_identity is not None
             assert (restored_identity.user_id, restored_identity.dept_id) == ("user-a", "dept-a")
             assert await store_b.wake_assignment(task_id)
+            assert not await store_a.wake_assignment(task_id)
+            assert await store_a.list_waiting_assignments(status="waiting_for_tool") == ()
         finally:
             await store_a.close()
             await store_b.close()

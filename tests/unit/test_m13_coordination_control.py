@@ -442,3 +442,28 @@ def test_cancelled_root_clears_waiting_assignment_without_requeue() -> None:
         assert root_id not in {item.item.session_id for item in claims}
 
     asyncio.run(scenario())
+
+
+def test_pending_tool_recovery_is_periodic_and_does_not_steal_a_queued_claim() -> None:
+    async def scenario() -> None:
+        store, control = InMemoryEventStore(), InMemoryControlStateStore()
+        feed = RunnableFeedConsumer(source=store, store=control, worker_id="tool-recovery")
+        item = RunnableItem(task_id="tenant:session:run", tenant_id="tenant",
+                            root_session_id="session", session_id="session", run_id="run",
+                            source_version=1)
+        await control.enqueue(item)
+        claim = (await control.claim("scheduler"))[0]
+        lease = await control.acquire_lease("session:tenant:session", "scheduler",
+                                            ttl=timedelta(seconds=30))
+        assert lease is not None
+        assignment = RuntimeAssignment(tenant_id="tenant", root_session_id="session",
+            session_id="session", run_id="run", runtime_id="runtime", lease_id=lease.lease_id,
+            fencing_token=lease.fencing_token, role="root", resource_profile={})
+        assert await control.assign(item.task_id, assignment, claim_token=claim.claim_token)
+        await control.suspend_assignment(item.task_id, "waiting_for_tool")
+        assert await feed._recover_waiting_tools() == 1
+        assert await feed._recover_waiting_tools() == 0
+        recovery_claim = (await control.claim("recovery-scheduler"))[0]
+        assert await control.wake_assignment(item.task_id) is False
+        assert recovery_claim.item == item
+    asyncio.run(scenario())
