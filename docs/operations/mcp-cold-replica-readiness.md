@@ -28,3 +28,14 @@ Compose、部署脚本和示例配置默认迁移目标同步至 0060。旧服�
 已加载 generation 跨 store 重建读取通过；0060 up/down/up 在隔离 PostgreSQL 验证。
 全量 645 passed / 55 skipped；最终摘要稳定性和恢复专项另行验证。Ruff、Mypy 与 10 条架构合同通过。
 真实环境双 Hands 进程滚动恢复时限仍应联合 #98 部署验收，当前证据不替代该验收。
+
+## 独立进程验收
+
+`tests/integration/test_mcp_replica_processes.py` 使用 multiprocessing spawn 创建两个独立 Hands 进程，
+以真实 HTTP 经 Runtime adapter 调用 search/load/call，共享仅限 PostgreSQL。两个同名工具的本机 MCP
+Server 记录实际请求数。持有远端发现租约时，冷启动及杀死后重启仍从 committed snapshot 装载，
+不增加 tools/list。关闭一台 Server 且预先删除共享目录后，无通知的周期对账在 5 秒断言内清除
+两个进程的旧路由/Egress adapter，旧绑定不触发远端调用，另一 owner 不受影响。
+
+本测试使用真实 McpConnectionManager/McpEgressManager/受管网络 adapter；CredentialProxy 在各 Hands
+测试进程内运行，未以此冒充部署拓扑下独立 Credential HTTP 服务的网络故障验收。

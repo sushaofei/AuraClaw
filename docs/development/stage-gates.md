@@ -3470,3 +3470,14 @@ Ruff、Mypy（248 文件）、10 条架构合同通过。迁移不适用，部�
 - [x] AuraX/SDK 实现状态、当前版本与双 revision；55 SDK tests、类型/静态检查和 Skill 浏览器测试通过。
 - [x] 不纳入无关 UI/编辑器/临时文件；后端阶段提交推送，前端按所在仓库单独交付。
 - [x] 实际环境发布与业务签名/数据验收继续单独跟踪，不提前关闭 issue。
+
+## Skill / MCP 修复 Q：独立进程与存量安装验收（#89/#94/#97/#98/#99）
+
+- [x] 两个 spawn 的独立 Hands 进程、真实 HTTP、PostgreSQL committed snapshot 与真实 MCP 测试服务器完成 search/load/call。
+- [x] 持有远端发现租约时冷启动和杀进程后恢复仍可调用，同名工具命中正确 owner，不增加 tools/list 请求。
+- [x] 无通知的周期对账下，共享目录先被其他 owner 删除，两个 Hands 的路由和 Egress adapter 均在 5 秒内收敛；旧加载调用不抵达远端，其他 owner 继续工作。
+- [x] 新增回归验证 active v2/revoked v1/pin v1 可用同一签名包和新命令原子修复，重试不重复增加 revision。
+- [x] 独立进程 PostgreSQL 测试通过；发布专项 17 passed，AuraSkill 离线 18 passed。Ruff/Mypy/架构合同通过，无 DDL。
+- [x] 测试环境只读核验本地 2.0 签名受信、已发布摘要一致、安装仍为 1.0；修正过时发布说明。未改变测试环境数据。
+- [x] 门禁和运维说明同步；阶段只提交测试与文档，排除无关修改，推送当前分支。
+- [x] 明确本阶段是代码与隔离进程验证；独立 Credential HTTP 部署拓扑、真实业务 Session 及安装迁移尚未验收，继续由相关 issue 跟踪。
