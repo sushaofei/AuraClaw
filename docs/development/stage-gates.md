@@ -3380,3 +3380,15 @@ Ruff、Mypy（248 文件）、10 条架构合同通过。迁移不适用，部�
 - [x] 提交排除无关修改/秘密，阶段提交并推送；issue 不提前关闭。
 
 参见 [MCP 入参与错误](../operations/mcp-arguments-and-errors.md)。
+
+## Skill / MCP 修复 H：标准 HTTP 会话（Issue #93 D）
+
+- [x] 2025 标准握手、无 id 通知、202 空体、有/无 Session ID 的真实 HTTP 回归通过。
+- [x] 会话绑定可信身份、凭据与 adapter 修订；有界并发、404 重建不重放业务、取消通知通过。
+- [x] DELETE/405、关闭失败重试、迟到初始化撤销与入口 fencing 通过。
+- [x] 多行 SSE 与有界流式读取；2026 server/discover 独立分支、AuraMCP 回归通过。
+- [x] 全量 669 passed / 56 skipped，最终 PostgreSQL/真实 HTTP/热配置/取消联合 75 passed。
+- [x] Ruff、Mypy（250 文件）、10 条架构合同通过；无 DDL，发布顺序、SDK 决策和协议限制已记录。
+- [x] 排除无关修改与秘密；代码阶段提交推送，测试环境业务验收未冒充完成，issue 保持开放。
+
+参见 [MCP HTTP 会话](../operations/mcp-http-sessions.md)。

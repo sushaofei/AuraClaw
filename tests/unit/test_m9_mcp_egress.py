@@ -101,9 +101,13 @@ class _Sender:
         return McpEgressResponse(
             status_code=200,
             headers={"content-type": "application/json"},
-            content=(
-                b'{"jsonrpc":"2.0","id":1,"result":{"value":"remote-access-token must not escape"}}'
-            ),
+            content=json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": json.loads(request["content"])["id"],
+                    "result": {"value": "remote-access-token must not escape"},
+                }
+            ).encode(),
         )
 
 
