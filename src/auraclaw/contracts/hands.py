@@ -200,6 +200,7 @@ class HandsInvocationStatusResponse(ContractModel):
     side_effect_status: str | None = None
     error_code: str | None = None
     cancel_requested: bool = False
+    result: HandsToolResult | None = None
 
 
 class HandsReadResourceResponse(ContractModel):

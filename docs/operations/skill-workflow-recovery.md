@@ -27,3 +27,14 @@ Runtime 再读取原 invocation 状态；调度器不判断业务成功、不直
 
 本阶段全量 675 passed / 56 skipped；临时 PostgreSQL 调度、Runtime 与 invocation 联合验证通过。
 无 DDL，Control/Runtime 应协调升级。
+
+### 已完成调用的只读结果恢复（#96 M）
+
+Hands invocation status 新增可选 result，直接返回已持久化的规范结果。查询严格匹配可信 tenant、
+root session、session、run；同租户其他 Run 不能读取结果。Runtime 查询原 invocation 成功后使用
+该结果继续，禁止再次进入 tools/call。老服务只返回 success 状态但无结果时仍保持 unknown，
+不能用空结果或重新执行替代。失败/拒绝/取消只有副作用明确时才能结束等待。
+
+此阶段无 DDL，Hands 严格 DTO 消费者需同步发布；先服务端后 Runtime。全量 686 passed /
+60 skipped，PostgreSQL 双副本、Hands 隔离与工作流联合 47 passed。全 Run 取消和 Canonical
+引用 drain 仍在后续阶段处理，不能凭这一项宣称 #96 全部完成。

@@ -64,8 +64,10 @@ class HandsGateway:
                 risk_level=capability.risk_level.value,
             )
             for capability in self._registry.discover()
-            if (capability.invocation_ref is None
-                or capability.invocation_ref.tenant_id in {None, trusted.tenant_id})
+            if (
+                capability.invocation_ref is None
+                or capability.invocation_ref.tenant_id in {None, trusted.tenant_id}
+            )
         )
         return _page(tools, cursor, self._page_size)
 
@@ -168,15 +170,19 @@ class HandsGateway:
         self, trusted: HandsTrustedContext, tool_invocation_id: str
     ) -> HandsInvocationStatusResponse:
         status = await self._gateway.get_authoritative_status(trusted.tenant_id, tool_invocation_id)
-        if status is None:
+        if status is None or (status.root_session_id, status.session_id, status.run_id) != (
+            trusted.root_session_id,
+            trusted.session_id,
+            trusted.run_id,
+        ):
             return HandsInvocationStatusResponse(found=False)
-        state, side_effect, error_code, cancel_requested = status
         return HandsInvocationStatusResponse(
             found=True,
-            status=state,
-            side_effect_status=side_effect,
-            error_code=error_code,
-            cancel_requested=cancel_requested,
+            status=status.status,
+            side_effect_status=status.side_effect_status,
+            error_code=status.error_code,
+            cancel_requested=status.cancel_requested,
+            result=_tool_result(status.result) if status.result is not None else None,
         )
 
 
