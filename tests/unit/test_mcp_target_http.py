@@ -58,6 +58,12 @@ class Handler(BaseHTTPRequestHandler):
         request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         self.requests.append(request)
         method = request["method"]
+        if method == "notifications/initialized":
+            assert "id" not in request
+            self.send_response(202)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         if method == "initialize":
             result = {
                 "protocolVersion": "2025-11-25",
