@@ -339,6 +339,8 @@ class InMemoryTaskProjection:
             error_code = payload.get("error_code")
             if isinstance(error_code, str) and error_code:
                 error.setdefault("code", error_code)
+            if isinstance(payload.get("error_details"), dict):
+                error["details"] = dict(payload["error_details"])
             view.update(
                 status=(
                     SessionStatus.READY.value

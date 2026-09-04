@@ -13,11 +13,15 @@ from enum import StrEnum
 from typing import Any
 
 from auraclaw.contracts.errors import (
-    BudgetExceededError,
     CollaborationValidationError,
     ModelOutputTruncatedError,
     ModelProviderError,
     RuntimeCancelledError,
+    RuntimeCostBudgetExceededError,
+    RuntimeDeadlineExceededError,
+    RuntimeNoProgressError,
+    RuntimeOutputTokenBudgetExceededError,
+    RuntimeStepBudgetExceededError,
     TerminalBudgetExceededError,
 )
 from auraclaw.contracts.events import NewEvent
@@ -150,12 +154,12 @@ class RuntimeExecutionEngine:
         execute_started = time.perf_counter()
         try:
             await self._guard_service.check(assignment)
-        except RuntimeCancelledError:
+        except (RuntimeCancelledError, RuntimeDeadlineExceededError):
             if await self._recover_pending_outcomes(assignment):
                 return
             raise
         if assignment.budget.max_steps < 1:
-            raise BudgetExceededError("Runtime step budget is exhausted")
+            raise RuntimeStepBudgetExceededError("Runtime step budget is exhausted")
         events = await self._session.load(assignment)
         terminal = next((e for e in events if e.run_id == assignment.run_id
                          and e.type in RUN_TERMINAL_EVENTS), None)
@@ -441,7 +445,7 @@ class RuntimeExecutionEngine:
                 output_tokens_used = int(dict(state.get("usage", {})).get("output_tokens", 0))
                 remaining_output_tokens = assignment.budget.max_output_tokens - output_tokens_used
                 if remaining_output_tokens < 1:
-                    raise BudgetExceededError(
+                    raise RuntimeOutputTokenBudgetExceededError(
                         "Runtime cumulative output token budget was exhausted"
                     )
                 terminal_role = assignment.role in {"worker", "repair", "reviewer"}
@@ -636,7 +640,12 @@ class RuntimeExecutionEngine:
                     )
                 else:
                     if int(state.get("steps_used", 0)) >= assignment.budget.max_steps:
-                        raise BudgetExceededError("Runtime capability step budget was exhausted")
+                        await self._settle_local_stop(
+                            assignment, call, turn_index, "runtime_step_budget_exceeded"
+                        )
+                        raise RuntimeStepBudgetExceededError(
+                            "Runtime capability step budget was exhausted"
+                        )
                     signature = hashlib.sha256(
                         json.dumps(
                             {"name": call.name, "arguments": call.arguments},
@@ -654,13 +663,16 @@ class RuntimeExecutionEngine:
                     signatures = dict(state.get("call_signatures", {}))
                     repeated = int(signatures.get(signature, 0)) + (0 if recovering_pending else 1)
                     if repeated > 3:
+                        await self._settle_local_stop(
+                            assignment, call, turn_index, "tool_repeat_suppressed"
+                        )
                         logger.warning(
-                            "tool.argument_validation_failed capability_id=%s "
+                            "tool.repeat_suppressed capability_id=%s "
                             "repeat_count=%s side_effect_status=not_started outcome=bounded",
                             call.name,
                             repeated,
                         )
-                        raise BudgetExceededError(
+                        raise RuntimeNoProgressError(
                             "Runtime detected a repeated no-progress capability call"
                         )
                     signatures[signature] = repeated
@@ -740,7 +752,7 @@ class RuntimeExecutionEngine:
                         side_events = execution.events
                     if result.get("error_code") == "tool_schema_invalid":
                         logger.info(
-                            "tool.argument_validation_failed capability_id=%s "
+                            "tool.repeat_suppressed capability_id=%s "
                             "repeat_count=%s side_effect_status=%s",
                             call.name,
                             repeated,
@@ -766,7 +778,9 @@ class RuntimeExecutionEngine:
                         + (0 if recovering_pending else 1),
                     }
                     if int(state["steps_used"]) > assignment.budget.max_steps:
-                        raise BudgetExceededError("Runtime capability step budget was exhausted")
+                        raise RuntimeStepBudgetExceededError(
+                            "Runtime capability step budget was exhausted"
+                        )
                     await self._progress.save_checkpoint(
                         assignment, RuntimePhase.CAPABILITY_CALL_COMPLETED, state
                     )
@@ -993,7 +1007,7 @@ class RuntimeExecutionEngine:
                 await self._capability_controller.release_run(assignment)
             await self._control.finish_assignment(self._task_id(assignment), "completed")
             return
-        raise BudgetExceededError("Runtime capability step budget was exhausted")
+        raise RuntimeStepBudgetExceededError("Runtime capability step budget was exhausted")
 
     @staticmethod
     def _classify_finish_reason(response: ModelResponse) -> FinishReasonKind:
@@ -1121,6 +1135,22 @@ class RuntimeExecutionEngine:
         )
         return True
 
+    async def _settle_local_stop(
+        self, assignment: RuntimeAssignment, call: ToolCall, turn_index: int, code: str
+    ) -> None:
+        """Settle a proven pre-dispatch rejection using the existing invocation identity."""
+        events = await self._session.load(assignment)
+        await self._events.append_once(
+            assignment, events, "tool.call.completed",
+            {"tool_invocation_id": call.tool_invocation_id, "name": call.name,
+             "turn_index": turn_index,
+             "result": {"status": "denied", "error_code": code,
+                        "side_effect_status": "not_started", "retryable": False,
+                        "summary": "Runtime stopped this call before execution.",
+                        "metadata": {"decision": "not_dispatched", "policy_version": "1"}}},
+            identity=call.tool_invocation_id,
+        )
+
     async def record_failure(self, assignment: RuntimeAssignment, error: Exception) -> bool:
         """Return True when pending-result recovery owns assignment disposition."""
         if await self._recover_pending_outcomes(assignment):
@@ -1189,6 +1219,7 @@ class RuntimeExecutionEngine:
                 "run_id": assignment.run_id,
                 "error": _error_payload(error),
                 "error_code": _error_code(error),
+                "error_details": self._failure_details(assignment, error, checkpoint, events),
             },
             identity=assignment.run_id,
             visibility=Visibility.USER,
@@ -1197,6 +1228,38 @@ class RuntimeExecutionEngine:
         if self._capability_controller is not None:
             await self._capability_controller.release_run(assignment)
         return False
+
+    @staticmethod
+    def _failure_details(
+        assignment: RuntimeAssignment, error: Exception, checkpoint: Any, events: list[Any]
+    ) -> dict[str, Any]:
+        state = checkpoint.state if checkpoint is not None else {}
+        usage = dict(state.get("usage", {}))
+        code = _error_code(error)
+        category = {
+            "runtime_step_budget_exceeded": "steps",
+            "runtime_output_token_budget_exceeded": "output_tokens",
+            "runtime_cost_budget_exceeded": "cost",
+            "runtime_deadline_exceeded": "deadline",
+            "runtime_no_progress_detected": "no_progress",
+        }.get(code, "execution")
+        # References, never raw tool data; authorization remains on the Session query path.
+        completed = [e for e in events if e.run_id == assignment.run_id
+                     and e.type == "tool.call.completed"]
+        successful = [e.payload["tool_invocation_id"] for e in completed
+                      if e.payload.get("result", {}).get("status") == "success"]
+        return {
+            "policy_version": "1", "category": category, "reason_code": code,
+            "scope": "run",
+            "budget": {"max_steps": assignment.budget.max_steps,
+                       "max_output_tokens": assignment.budget.max_output_tokens,
+                       "max_cost": assignment.budget.max_cost,
+                       "deadline": (assignment.deadline.isoformat()
+                                    if assignment.deadline is not None else None)},
+            "usage": {"steps_used": state.get("steps_used", 0),
+                      "output_tokens": usage.get("output_tokens"), "cost": usage.get("cost")},
+            "successful_tool_invocation_ids": successful,
+        }
 
     async def _record_approval_wait(
         self,
@@ -1528,10 +1591,12 @@ class RuntimeExecutionEngine:
     async def _validate_usage(assignment: RuntimeAssignment, response: ModelResponse) -> None:
         output_tokens = int(response.usage.get("output_tokens", 0))
         if output_tokens > assignment.budget.max_output_tokens:
-            raise BudgetExceededError("provider output exceeded Runtime token budget")
+            raise RuntimeOutputTokenBudgetExceededError(
+                "provider output exceeded Runtime token budget"
+            )
         cost = float(response.usage.get("cost", 0.0))
         if assignment.budget.max_cost is not None and cost > assignment.budget.max_cost:
-            raise BudgetExceededError("provider output exceeded Runtime cost budget")
+            raise RuntimeCostBudgetExceededError("provider output exceeded Runtime cost budget")
 
     @staticmethod
     def _accumulate_usage(
@@ -1550,12 +1615,14 @@ class RuntimeExecutionEngine:
         usage: dict[str, int | float],
     ) -> None:
         if int(usage.get("output_tokens", 0)) > assignment.budget.max_output_tokens:
-            raise BudgetExceededError("provider cumulative output exceeded Runtime token budget")
+            raise RuntimeOutputTokenBudgetExceededError(
+                "provider cumulative output exceeded Runtime token budget"
+            )
         if (
             assignment.budget.max_cost is not None
             and float(usage.get("cost", 0.0)) > assignment.budget.max_cost
         ):
-            raise BudgetExceededError("provider cumulative cost exceeded Runtime budget")
+            raise RuntimeCostBudgetExceededError("provider cumulative cost exceeded Runtime budget")
 
     @staticmethod
     def _task_id(assignment: RuntimeAssignment) -> str:
