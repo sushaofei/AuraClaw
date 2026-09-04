@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from pathlib import Path
 from uuid import uuid4
 
@@ -22,6 +23,8 @@ DATABASE_URL = asyncpg_url(SETTINGS.resolved_database_url) if SETTINGS.postgres_
 MIGRATION = (
     Path(__file__).resolve().parents[2] / "migrations/0063_skill_upgrade_cleanup.sql"
 ).read_text()
+CLEANUP_UP = Path("migrations/0065_skill_rejected_admission_cleanup.sql").read_text()
+CLEANUP_DOWN = Path("migrations/0065_skill_rejected_admission_cleanup.down.sql").read_text()
 pytestmark = pytest.mark.skipif(DATABASE_URL is None, reason="Explicit PostgreSQL required")
 
 
@@ -57,6 +60,18 @@ def test_two_replicas_remove_replaced_package_without_recoverable_history() -> N
             )
             state = new.upgrade
             assert state is not None
+            old_audit = next(r for r in await a.list_admissions(tenant) if r.version == "1.0.0")
+            rejected = replace(
+                old_audit,
+                admission_id="unsigned-" + tenant,
+                package_digest=None,
+                outcome="rejected",
+                stage="signature_validation",
+                safe_error_code="policy_denied",
+            )
+            await a.record_admission(rejected)
+            current_rejected = replace(rejected, admission_id="current-" + tenant, version="2.0.0")
+            await a.record_admission(current_rejected)
             artifacts.failed = True
             assert not await worker_a._process(state)
             assert (await b.get_upgrade(tenant, "acme", "release.prepare")).phase == "blocked"
@@ -90,6 +105,18 @@ def test_two_replicas_remove_replaced_package_without_recoverable_history() -> N
                 old.package_digest,
             )
             assert (await a.get_upgrade(tenant, "acme", "release.prepare")).phase == "completed"
+            audits = {r.admission_id for r in await a.list_admissions(tenant)}
+            assert rejected.admission_id not in audits
+            assert current_rejected.admission_id in audits
+            # Emulate the no-digest residue from an upgrade completed by the old worker.
+            await a.record_admission(rejected)
+            migration = CLEANUP_UP
+            await connection.execute(migration)
+            await connection.execute(CLEANUP_DOWN)
+            await connection.execute(migration)
+            audits = {r.admission_id for r in await a.list_admissions(tenant)}
+            assert rejected.admission_id not in audits
+            assert current_rejected.admission_id in audits
         finally:
             await a.close()
             await b.close()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import timedelta
 
 from tests.unit.test_skill_publication import _command, _package, _service
@@ -37,6 +38,22 @@ def test_upgrade_drains_retries_and_erases_old_package_metadata_and_replay_mater
     async def scenario():
         service, store = _service()
         old = await service.publish(_command(), _package(version="1.0.0"))
+        accepted = (await store.list_admissions("tenant-a"))[0]
+        rejected = replace(
+            accepted,
+            admission_id="old-rejected",
+            package_digest=None,
+            outcome="rejected",
+            stage="signature_validation",
+            safe_error_code="policy_denied",
+        )
+        await store.record_admission(rejected)
+        await store.record_admission(
+            replace(rejected, admission_id="other-tenant", tenant_id="other")
+        )
+        await store.record_admission(
+            replace(rejected, admission_id="current-rejected", version="2.0.0")
+        )
         current = await service.publish(_command(command_id="upgrade"), _package(version="2.0.0"))
         assert current.upgrade is not None
         artifacts, refs = _Artifacts(), _References()
@@ -64,6 +81,13 @@ def test_upgrade_drains_retries_and_erases_old_package_metadata_and_replay_mater
         assert (
             await store.get_publication("tenant-a", "acme", "release.prepare", "2.0.0")
         ).status is SkillPublicationStatus.ACTIVE
+        assert "old-rejected" not in {
+            a.admission_id for a in await store.list_admissions("tenant-a")
+        }
+        assert "current-rejected" in {
+            a.admission_id for a in await store.list_admissions("tenant-a")
+        }
+        assert "other-tenant" in {a.admission_id for a in await store.list_admissions("other")}
         assert await worker.run_once() == 0
         assert len(artifacts.calls) == 2
         assert (await store.get_upgrade("tenant-a", "acme", "release.prepare")).phase == "completed"

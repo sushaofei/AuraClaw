@@ -227,9 +227,11 @@ class PostgresSkillLifecycleStore(LazyPool, SkillLifecycleStore):
             )
             await connection.execute(
                 """DELETE FROM hands.skill_admission_audit WHERE tenant_id=$1 AND publisher=$2
-                AND name=$3 AND version=$4 AND package_digest=$5""",
+                AND name=$3 AND version=$4
+                AND (package_digest=$5 OR ($4 <> $6 AND package_digest IS NULL))""",
                 *identity,
                 package.package_digest,
+                state.current_version,
             )
             return True
 
