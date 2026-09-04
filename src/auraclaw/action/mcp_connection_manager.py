@@ -192,7 +192,7 @@ class McpConnectionManager:
             if result.status != "success":
                 error = result.summary or result.error_code or "MCP Tool returned an error"
             output_schema = source.get("outputSchema")
-            if isinstance(output_schema, dict) and output_schema:
+            if result.status == "success" and isinstance(output_schema, dict) and output_schema:
                 try:
                     JsonSchemaValidator.validate(output, output_schema)
                     schema_valid = True

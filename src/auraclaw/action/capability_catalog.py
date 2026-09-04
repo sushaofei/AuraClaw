@@ -549,6 +549,8 @@ class CapabilitySearchExecutor:
             payload["hint"] = (
                 "No matching capabilities were found. Retry once with a broader query, "
                 "an exact capability_id/canonical_name/server_id, or an empty query to browse. "
+                "For MCP queries/actions include kinds=[\"tool\"] or omit kinds; "
+                "a Skill/Resource filter excludes Tools. "
                 "To list Skills use kinds=[\"skill\"] and query=\"\". "
                 "No executable match does not mean no Skill is installed or registered; "
                 "an installation may be disabled, version-mismatched, or missing dependencies. "

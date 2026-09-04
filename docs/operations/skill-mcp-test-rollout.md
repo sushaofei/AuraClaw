@@ -1,6 +1,6 @@
 # Skill/MCP 测试环境部署记录（2026-09-04）
 
-本次完成后端协调发布和现场诊断，业务成功闭环及 Skill 安装迁移尚未完成。
+Vault 访问已恢复，workload 配置 revision 4 已测试并启用；Java 仍返回身份上下文不可用。业务成功闭环及 Skill 安装迁移尚未完成。
 
 ## 已部署内容
 
@@ -70,3 +70,31 @@ Vault 只负责保管和提供凭据，下游是否校验对应 workload token �
 
 相关回归与 Ruff/Mypy 通过；全量 unit 中本地 socket 沙箱受限的真实 HTTP 项单独提权重跑通过。
 #93/#98/#99/#100 已更新此次证据及待办，保持开放；旧 Skill pin/unknown/物理清理仍未改动。
+
+
+## Vault 访问恢复与后续验收（2026-09-04）
+
+用户授权后创建仅专用 MCP KV 路径 read 的测试 token，无 default policy、不可续期、
+最长 24 小时。Vault capabilities 验证其他凭据路径、创建 token、管理策略均 deny。
+初次以非目标路径 HTTP 状态做检查未通过，临时 token 当即撤销，未安装；
+随后用 Vault 权限接口确认实际权限，获准安装。旧 token 未读取，密钥未写入仓库或日志。
+
+两个 Credential Proxy 已使用 ef6cd69 镜像重建并健康启动。
+候选 revision 4 TEST 与 ENABLE 均 succeeded，active_revision=4。
+之前等待授权、Vault 403、active revision 3 的描述仅为历史诊断，不再是当前状态。
+
+当前测试 token 预计在北京时间 **2026-09-05 10:50** 到期。
+这是用于继续验收的短期凭据，长期自动续发/重新认证尚未配置，不能作为长期修复验收完成。
+到期前需要平台确定受限工作负载自动认证方案；不得把管理/root token 配置给服务。
+
+真实只读管理测试仍收到 mcp_tool_error / remote_tool / downstream，摘要“身份上下文不可用”。
+原先输出 Schema 校验把这个错误覆盖为 `$ violates anyOf`，现修正为仅校验成功结果，保留原始错误。
+新聊天第一次错误限定 kinds=skill/resource 后耗尽搜索预算；补充搜索说明及空结果提示，
+明确普通 MCP 查询使用 tool 或不限制 kinds。明确 Tool 的新验收中 search/load 成功，
+总览生成合法 input={}，location 生成 input.type=warehouse/input.limit=10；
+两项执行仍返回相同 Java 身份错误，没有库存查询成功证据。
+
+Java 本地源码的 McpTrustedContextFilter 读取 X-CT-Tenant-ID/X-CT-User-ID，
+再向 AdminUserApi 查询启用用户及部门。AuraClaw 出站代码头名与之匹配；
+尚未取得部署端收到的头、Filter 生效和 Java 用户事实源查询结果，不能猜定其中某一步的原因。
+管理探测错误保真回归及目录/Agent/管理联合 45 项通过，Ruff/Mypy 通过，无 DDL。

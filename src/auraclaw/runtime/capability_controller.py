@@ -132,6 +132,8 @@ class RuntimeCapabilityController:
                 CAPABILITY_SEARCH,
                 "Search the policy-visible capability catalog when the task needs "
                 "external data, an action, or a governed Skill. "
+                "For MCP queries or actions use kinds=[\"tool\"] or omit kinds to search "
+                "all kinds. Do not restrict ordinary data queries to Skills or Resources. "
                 "To list Skills use kinds=[\"skill\"] "
                 "and query=\"\"; use canonical_name for a known exact name. An empty result "
                 "does not prove no Skill is installed; "

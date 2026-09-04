@@ -3530,3 +3530,13 @@ Ruff、Mypy（248 文件）、10 条架构合同通过。迁移不适用，部�
 - [x] 内部 HTTP 服务发现的各副本并发接收 apply/revoke，发现/RPC/数量有界，失败不假报完成。
 - [x] 回归覆盖所有目标被访问及部分副本失败向上传递，管理/热配置测试与 Ruff/Mypy 通过。
 - [x] 固定目标及 HTTPS authority 不改变；业务请求不自动重放，无 DDL，文档和阶段提交推送。
+
+## Skill / MCP 修复 X：Vault 接入验证与探测错误保真
+
+- [x] 经用户授权替换测试 Vault access token；仅专用 KV 路径 read、无 default policy、不可续期、最长 24 小时，权限接口确认其他路径/token 创建/policy 管理均 deny。
+- [x] 未提取旧 token；未通过校验的临时 token 已撤销；两个 Credential Proxy 更新为 ef6cd69 并健康启动。
+- [x] 候选 revision 4 TEST/ENABLE 均 succeeded；Vault 阻塞解除，未宣称 Java 业务认证通过。
+- [x] 新聊天 search/load 成功并生成非空嵌套 input；管理/聊天均返回下游身份不可用，保留真实错误与历史 unknown。
+- [x] 管理测试仅对成功结果验证输出 Schema，回归确保原始工具错误不被覆盖；搜索提示明确 MCP Tool 类型，避免将普通查询限为 Skill/Resource。
+- [x] 45 项目录/Agent/管理测试通过；Ruff/Mypy 253 文件通过；无 DTO/DDL 变更，架构依赖未改变。
+- [x] 记录测试 token 到期与长期续发未完成，部署/issue 状态继续更新；阶段提交推送排除秘密和无关修改。
