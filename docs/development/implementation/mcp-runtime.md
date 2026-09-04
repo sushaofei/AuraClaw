@@ -172,3 +172,14 @@ uv run lint-imports
 ```
 
 真实生产 Secret、Token、完整 Resource/Skill 内容和 Tool 参数/结果不得写入日志或阶段报告。
+
+## 管理授权边界（2026-09-04）
+
+MCP 配置功能的管理授权由 AuraAPI / ChainTower 等上游执行，AuraClaw 不维护管理员角色，
+也不再要求共享 MCP 的调用者使用字面量 `platform` 租户。已经通过入口身份验证的管理请求
+可以创建、修改 `tenant_id=null` 的共享 Server；审计和命令幂等仍绑定真实调用者租户/用户。
+外层必须在转发管理请求前完成授权，生产入口不能将管理接口无授权暴露给终端用户。
+
+租户专属记录的归属、调用可见范围、可信断言、CAS、Policy 和 Vault/Egress 凭据隔离继续有效。
+这些是数据与执行边界，不是管理员角色。调整管理权限不能修改业务用户的 tenant/user/dept，
+不能为通过检查而把业务租户换成 `platform`。

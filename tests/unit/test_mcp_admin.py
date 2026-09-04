@@ -367,3 +367,44 @@ def test_mcp_admin_rejects_retired_tool_prefix_write_and_omits_it_on_read() -> N
             "/v1/admin/mcp-servers/local-order-mcp", headers=headers, json=config
         )
         assert rejected_update.status_code == 422, rejected_update.text
+
+
+def test_upstream_authorized_tenant_can_manage_shared_mcp_without_platform_identity() -> None:
+    registry = McpServerRegistryService(
+        InMemoryMcpServerRegistryStore(), allow_private_auth_none=True
+    )
+    app = _task_app()
+    app.include_router(create_mcp_admin_router(registry))
+    app.state.config_ready = True
+    headers = {"X-Tenant-ID": "1", "X-Actor-ID": "1", "X-Dept-ID": "100"}
+    config = {
+        "server_id": "shared-mcp", "tenant_id": None, "title": "Shared MCP",
+        "endpoint": "http://127.0.0.1:48080/mcp", "network_mode": "loopback",
+        "auth_strategy": "none",
+    }
+    with TestClient(app) as client:
+        created = client.post(
+            "/v1/admin/mcp-servers", json=config,
+            headers={**headers, "Idempotency-Key": "shared-create"},
+        )
+        assert created.status_code == 202, created.text
+        updated = client.put(
+            "/v1/admin/mcp-servers/shared-mcp",
+            json={**config, "auth_strategy": "workload_trusted_context",
+                  "credential_ref": "vault/shared-mcp#workload"},
+            headers={**headers, "Idempotency-Key": "shared-update",
+                     "X-Expected-Revision": "1"},
+        )
+        assert updated.status_code == 202, updated.text
+        assert updated.json()["tenant_id"] == "1"
+        assert updated.json()["actor_id"] == "1"
+        conflict = client.put(
+            "/v1/admin/mcp-servers/shared-mcp", json=config,
+            headers={**headers, "Idempotency-Key": "shared-stale",
+                     "X-Expected-Revision": "1"},
+        )
+        assert conflict.status_code == 409
+        fetched = client.get("/v1/admin/mcp-servers/shared-mcp", headers=headers)
+        assert fetched.status_code == 200
+        assert fetched.json()["tenant_id"] is None
+        assert fetched.json()["latest_revision"] == 2
