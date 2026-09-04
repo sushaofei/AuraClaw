@@ -1199,3 +1199,39 @@ def test_egress_rpc_timeout_allows_normal_drain_window() -> None:
         finally:
             await client.aclose()
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("failing_peer", [False, True])
+def test_egress_control_reaches_all_replicas_and_reports_partial_failure(
+    failing_peer: bool,
+) -> None:
+    from auraclaw.infrastructure.clients.mcp_egress import RemoteMcpEgressClient
+
+    class ReplicatedClient(RemoteMcpEgressClient):
+        async def _targets(self) -> tuple[str, ...]:
+            return ("http://peer-one", "http://peer-two")
+
+    async def scenario() -> None:
+        calls = []
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(request.url.host)
+            if failing_peer and request.url.host == "peer-two":
+                raise httpx.ReadTimeout("injected replica timeout")
+            return httpx.Response(200, json={
+                "api_version": "v1", "server_id": "local-order-mcp",
+                "operation": "revoke", "status": "revoked",
+            })
+        client = ReplicatedClient(
+            "http://credential.internal", bearer_token="test-token",
+            transport=httpx.MockTransport(handler),
+        )
+        try:
+            if failing_peer:
+                with pytest.raises(httpx.ReadTimeout):
+                    await client.revoke("local-order-mcp", expected_revision=2)
+            else:
+                await client.revoke("local-order-mcp", expected_revision=2)
+            assert set(calls) == {"peer-one", "peer-two"}
+        finally:
+            await client.aclose()
+    asyncio.run(scenario())

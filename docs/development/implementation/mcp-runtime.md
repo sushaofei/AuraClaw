@@ -196,3 +196,9 @@ adapter 的 Server owner 和精确 credential_ref 读取引用，不能改按业
 
 Egress 控制 RPC 使用显式 30 秒超时；默认关闭 drain 为 5 秒，不能沿用 HTTPX 的 5 秒
 默认 read timeout，否则正常候选清理也会误报失败。超时仍有界，不触发业务工具自动重放。
+
+内部 HTTP Credential Proxy 服务名解析出多个地址时，控制 RPC 对当前全部地址并发执行
+apply/revoke（最多 16 个，DNS 查询 5 秒、单 RPC 30 秒），任一失败不会假报全部完成。
+这样候选探测不会只在一台创建，却由普通调用连接选中另一台。发现结果不长期缓存，
+后续控制请求重新解析；业务请求不因此重复执行。固定 IP/localhost 保持单目标；HTTPS
+保持原 TLS authority，若其后有负载均衡，部署方仍须提供管理请求覆盖副本的路由。
