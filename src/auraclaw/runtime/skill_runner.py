@@ -13,6 +13,7 @@ from uuid import uuid4
 from auraclaw.contracts.errors import (
     BudgetExceededError,
     RuntimeCancelledError,
+    RuntimeDeadlineExceededError,
 )
 from auraclaw.contracts.events import NewEvent
 from auraclaw.contracts.skills import SkillActivation, effective_skill_role
@@ -248,7 +249,7 @@ class SkillRunner:
                     )
                     return result
             raise BudgetExceededError("Skill step budget was exhausted")
-        except RuntimeCancelledError:
+        except (RuntimeCancelledError, RuntimeDeadlineExceededError):
             await self._append_terminal_safe(
                 assignment,
                 event_type="skill.cancelled",
@@ -429,7 +430,7 @@ class SkillRunner:
         ):
             raise RuntimeCancelledError(f"Runtime run cancelled: {assignment.run_id}")
         if assignment.deadline is not None and datetime.now(UTC) >= assignment.deadline:
-            raise RuntimeCancelledError(f"Runtime deadline exceeded: {assignment.run_id}")
+            raise RuntimeDeadlineExceededError(f"Runtime deadline exceeded: {assignment.run_id}")
 
     async def _publish_step(
         self,

@@ -11,7 +11,11 @@ from enum import StrEnum
 from typing import Any
 from uuid import uuid4
 
-from auraclaw.contracts.errors import ModelProviderError, RuntimeCancelledError
+from auraclaw.contracts.errors import (
+    ModelProviderError,
+    RuntimeCancelledError,
+    RuntimeDeadlineExceededError,
+)
 from auraclaw.control.ports import RuntimeAssignment
 from auraclaw.runtime.model_stream import iter_model_stream
 from auraclaw.runtime.ports import (
@@ -123,6 +127,8 @@ class ModelRoundExecutor:
             aclose = getattr(stream, "aclose", None)
             if aclose is not None:
                 await aclose()
+            if reason == "runtime deadline exceeded":
+                raise RuntimeDeadlineExceededError(f"{reason}: {assignment.run_id}")
             raise RuntimeCancelledError(f"{reason}: {assignment.run_id}")
 
         first_chunk_task = asyncio.create_task(next_chunk(iterator))

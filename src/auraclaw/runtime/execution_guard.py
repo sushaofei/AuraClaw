@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from auraclaw.contracts.errors import RuntimeCancelledError
+from auraclaw.contracts.errors import RuntimeCancelledError, RuntimeDeadlineExceededError
 from auraclaw.control.ports import RuntimeAssignment
 from auraclaw.runtime.clients import assignment_resource_id
 from auraclaw.runtime.ports import RuntimeControlClient
@@ -26,4 +26,4 @@ class RuntimeExecutionGuard:
         ):
             raise RuntimeCancelledError(f"Runtime run cancelled: {assignment.run_id}")
         if assignment.deadline is not None and datetime.now(UTC) >= assignment.deadline:
-            raise RuntimeCancelledError(f"Runtime deadline exceeded: {assignment.run_id}")
+            raise RuntimeDeadlineExceededError(f"Runtime deadline exceeded: {assignment.run_id}")

@@ -67,6 +67,28 @@ class BudgetExceededError(AuraClawError):
     status_code = 409
 
 
+class RuntimeStepBudgetExceededError(BudgetExceededError):
+    code = "runtime_step_budget_exceeded"
+
+
+class RuntimeOutputTokenBudgetExceededError(BudgetExceededError):
+    code = "runtime_output_token_budget_exceeded"
+
+
+class RuntimeCostBudgetExceededError(BudgetExceededError):
+    code = "runtime_cost_budget_exceeded"
+
+
+class RuntimeDeadlineExceededError(AuraClawError):
+    code = "runtime_deadline_exceeded"
+    status_code = 409
+
+
+class RuntimeNoProgressError(AuraClawError):
+    code = "runtime_no_progress_detected"
+    status_code = 409
+
+
 class TerminalBudgetExceededError(BudgetExceededError):
     code = "agent_terminal_budget_exhausted"
 

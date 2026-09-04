@@ -37,8 +37,8 @@ from auraclaw.contracts.capabilities import (
 )
 from auraclaw.contracts.errors import (
     AuthorizationError,
-    BudgetExceededError,
     NotFoundError,
+    RuntimeNoProgressError,
 )
 from auraclaw.contracts.events import NewEvent
 from auraclaw.contracts.hands import HandsToolResult
@@ -802,18 +802,35 @@ def test_repeated_invalid_tool_arguments_fail_with_bounded_no_progress() -> None
                 *repeated_calls,
             ]
         )
+        session = _Session("Inspect issue 31")
         harness = AgentHarness(
             control_store=_Control(),
-            session=_Session("Inspect issue 31"),
+            session=session,
             model=model,
             tools=capabilities,
             runtime_events=_RuntimeEvents(),
             capability_controller=RuntimeCapabilityController(capabilities),
         )
 
-        with pytest.raises(BudgetExceededError, match="repeated no-progress"):
+        with pytest.raises(RuntimeNoProgressError, match="repeated no-progress"):
             await harness.execute(_assignment())
         assert capabilities.calls.count("github.issue.get") == 3
+        blocked = [e for e in session.events if e.type == "tool.call.completed"
+                   and e.payload["tool_invocation_id"] == "invalid-repeat-3"]
+        assert len(blocked) == 1
+        assert blocked[0].payload["result"]["side_effect_status"] == "not_started"
+        assert blocked[0].payload["result"]["error_code"] == "tool_repeat_suppressed"
+        with pytest.raises(RuntimeNoProgressError):
+            await harness.execute(_assignment())
+        assert capabilities.calls.count("github.issue.get") == 3
+        assert sum(e.type == "tool.call.completed"
+                   and e.payload["tool_invocation_id"] == "invalid-repeat-3"
+                   for e in session.events) == 1
+        await harness.record_failure(_assignment(), RuntimeNoProgressError("Repeated call"))
+        failed = next(e for e in session.events if e.type == "run.failed")
+        assert failed.payload["error_code"] == "runtime_no_progress_detected"
+        assert failed.payload["error_details"]["category"] == "no_progress"
+        assert failed.payload["error_details"]["budget"]["max_steps"] == 12
 
     asyncio.run(scenario())
 

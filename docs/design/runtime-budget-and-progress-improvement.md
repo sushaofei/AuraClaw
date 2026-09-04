@@ -1,6 +1,6 @@
 # Runtime 预算与重复调用治理改善方案
 
-状态：待实施的设计方案。本文不表示以下行为已上线；当前实现仍使用同名同参累计第4次中止规则。
+状态：实施中，跟踪 #101。阶段 A 已编码并进行验证；B–F 尚未完成，不表示以下全部行为已上线。当前重复决策仍使用同名同参累计第4次中止规则。
 范围：AuraClaw Runtime/Control/Model Gateway/Session 投影，以及 AuraX 运行进度与结束原因展示。
 关联：#93 调用稳定性、#96 执行收尾与恢复、#100 可信身份。
 
@@ -223,3 +223,14 @@ Model Gateway reservation复用、Session投影/API、AuraX SDK/工具轨迹/运
 合法查询成功后，重复请求收到已有结果引用与时间。如果没有新的刷新条件，阻断重复dispatch，
 继续其他尚未测试的工具或收尾。即使最终无法完成全部测试，也保留成功结果，准确说明
 Java输出契约问题/无效循环；不再让用户误以为21/48步、1303/8192token已经耗尽。
+
+## 11. 实施记录（#101）
+
+### A：错误契约与执行前结算
+
+- 新增 step/output token/cost/deadline/no-progress 精确错误类；保留原 generic 类型供旧事件和未迁移路径使用。
+- deadline 走失败语义，区别用户取消；停止后未知 Skill 写入仍仅查询原 invocation 进行 reconciliation。
+- 现有重复策略与步数执行前拒绝先提交同 invocation 的 tool.call.completed，status=denied、side_effect_status=not_started。恢复重试幂等补交，不重新调用业务工具。
+- run.failed 附加 error_details：当前 v1 策略、预算快照、checkpoint 用量、成功调用引用；未知 token/cost 使用 null，不猜成零。
+- Task 投影将 details 原样投影进 error；AuraX 按错误码展示原因并按结构化数字展示用量，旧 generic 显示未区分类型。
+- 无新增业务终态或 DDL。读取兼容先发布，重复策略仍 v1；阶段 A 单独通过不代表 B–F 完成。
