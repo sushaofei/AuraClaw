@@ -1,0 +1,51 @@
+# Skill/MCP 测试环境部署记录（2026-09-04）
+
+本次完成后端协调发布和现场诊断，业务成功闭环及 Skill 安装迁移尚未完成。
+
+## 已部署内容
+
+- AuraClaw 源码：`b6cd8b9`，分支 `dev_20260717`，已推送。
+- 镜像：`auraclaw:skill-mcp-b6cd8b9`，linux/amd64，镜像 ID
+  `sha256:2e4417d965f1a6e69277d5eaecba8c037bcbc19cfc3f8fda54743b18ebe00881`。
+- 从已提交文件的独立构建目录构建；未包含环境文件、编辑器修改或临时业务诊断文件。
+- 镜像内迁移 latest 为 0063；一次性镜像测试容器中 51 项相关冒烟通过。
+- 将镜像加载到测试主机，以 `dev_service_deploy.sh --skip-sync --skip-build`
+  和上述镜像标签执行维护停止、迁移、check、全服务 recreate、健康等待。
+- 0060、0061、0062、0063 应用成功，schema ready 为 0063；30 个容器健康，入口 readiness 成功。
+- AuraX `d91e001` 已推送 `dev_20260820`。此前 SDK 55 项、类型检查和 Skill 浏览器测试已通过；本次没有重新发布桌面安装包。
+
+## 现场调用证据
+
+使用原故障会话的可信用户和部门上下文，通过签名入口创建新的只读验收会话。
+正式 Agent 搜索、加载成功，仓库列表调用生成嵌套 `input.type=warehouse`、`input.limit=10`。
+调用经过部署的 Hands/Credential HTTP 链路，返回 `mcp_tool_error`，
+`error_details.stage=remote_tool`、`origin=downstream`，摘要为“身份上下文不可用”。
+总览合法 `input={}` 也得到相同下游错误。参数类型错误则在本地返回路径明确的
+`tool_schema_invalid`，没有被吞为默认空参数。
+
+管理 API 返回 76 项能力，其中 20 项写工具需要审批。仓库合法嵌套参数测试返回
+`status=failed`；错误类型参数返回 HTTP 422。本次没有成功的库存业务查询，不能关闭 #93。
+
+## 当前认证配置和待办
+
+AuraClaw 保存的 `chaintowermcp` 平台配置 revision 3 是 `auth_strategy=none`。
+该策略不会发送 workload 凭据或可信 tenant/user/dept 头；Java 工具需要已恢复的身份上下文。
+因此必须修正显式认证配置，不能让 none 模式隐式发送可信身份，也不能向业务 arguments 注入身份。
+
+用户已授权使用测试 Vault：已创建专用引用 `vault/chaintower-mcp-test#workload`，
+使用 KV v2 CAS=0 防止覆盖；未复用其他开发端点的凭据，未输出密钥值。
+Vault 只负责保管和提供凭据，下游是否校验对应 workload token 仍须独立核实和配置。
+
+通过管理 API 保存候选时，当前业务租户身份被平台写权限检查拒绝，服务返回 403，
+外层呈现 HTML 404。已只读确认 latest/active revision 仍为 3，候选未提交，旧配置仍生效。
+需要合法平台管理员通过管理入口保存 `workload_trusted_context` 和上述引用，
+随后 test、enable、完整 reconcile，再对照管理测试和新聊天的成功结果。
+不直接修改数据库，不伪造平台管理员断言，不绕过网关或授权检查。
+
+## Skill 和其他未完成验收
+
+- 受信 v2 包与现有 publication 摘要一致，installation 仍 pin v1；本次未修复 pin 或触发旧包删除。
+- 六次旧 Skill unknown 调用的业务结果尚未确认。相关 Credential audit 的 completed 仅说明出口请求完成，不能证明业务成功或无副作用。
+- 不重放这些旧调用、不修改历史 Canonical Events、不以 Run 终态直接释放旧包引用。
+- 真实 create/resume、旧对象物理清理、撤销/恢复故障矩阵继续由 #89–#100 跟踪。
+- 各 issue 已更新部署证据、认证诊断和剩余条件，保持开放；离线测试通过不替代现场验收。
