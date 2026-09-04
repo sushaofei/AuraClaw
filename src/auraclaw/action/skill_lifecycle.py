@@ -402,7 +402,14 @@ class InMemorySkillLifecycleStore:
                     a.tenant_id == package.tenant_id
                     and a.publisher == state.publisher
                     and a.name == state.name
-                    and a.package_digest == package.package_digest
+                    and a.version == package.manifest.version
+                    and (
+                        a.package_digest == package.package_digest
+                        or (
+                            package.manifest.version != state.current_version
+                            and a.package_digest is None
+                        )
+                    )
                 )
             ]
             return True
