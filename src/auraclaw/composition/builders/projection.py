@@ -23,6 +23,7 @@ from auraclaw.infrastructure.persistence.postgres_admin_store import PostgresAdm
 from auraclaw.infrastructure.projection.postgres_task_store import PostgresTaskProjection
 from auraclaw.internal.http import create_contract_app
 from auraclaw.internal.routes import admin_routes
+from auraclaw.observability.service import ObservabilityProjector, ObservabilityService
 from auraclaw.projection.approval.projector import CompositeProjection
 from auraclaw.projection.relay import OutboxRelay
 
@@ -39,7 +40,6 @@ def build_projection_app(
     task_projection = providers.get_task_projection()
     approval_projection = providers.get_approval_projection()
     collaboration_projection = providers.get_collaboration_projection()
-    projector = CompositeProjection(*providers.session_outbox_projectors())
     admin_store = PostgresAdminOperationStore(
         settings.resolved_database_url, schema="projection"
     )
@@ -56,6 +56,11 @@ def build_projection_app(
         worker_id="projection-worker",
         wait_seconds=claim_wait,
     )
+    observability_store = providers.get_observability_store()
+    projector = CompositeProjection(
+        *providers.session_outbox_projectors(),
+        ObservabilityProjector(ObservabilityService(observability_store, remote_session)),
+    )
     relay = OutboxRelay(source, projector)
     closeables: tuple[Any, ...] = (
         remote_session,
@@ -63,6 +68,7 @@ def build_projection_app(
         approval_projection,
         collaboration_projection,
         admin_store,
+        observability_store,
     )
     app = _base_service_app(
         spec,
