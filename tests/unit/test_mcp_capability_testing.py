@@ -134,6 +134,29 @@ def test_write_capability_test_is_rejected_by_backend() -> None:
     assert connector.arguments is None
 
 
+def test_remote_error_is_not_overwritten_by_success_output_schema() -> None:
+    class FailingConnector(_Connector):
+        async def call_tool(self, _trusted: object, **kwargs: Any) -> HandsToolResult:
+            return HandsToolResult(
+                status="error", summary="Identity context unavailable",
+                error_code="mcp_tool_error",
+                metadata={"error_details": {"origin": "downstream"}},
+            )
+
+    result = asyncio.run(
+        _manager(_tool(permission="read-only"), FailingConnector()).test_capability(
+            tenant_id="tenant-a", actor_id="admin-1", dept_id="dept-a",
+            server_id="market-mcp", capability_id="cap-market-quote",
+            input_payload={"symbol": "AAPL"},
+        )
+    )
+    assert result["status"] == "failed"
+    assert result["error"] == "Identity context unavailable"
+    assert result["schema_valid"] is None
+    assert result["output"]["error_code"] == "mcp_tool_error"
+    assert result["output"]["metadata"]["error_details"]["origin"] == "downstream"
+
+
 @pytest.mark.parametrize("template", [False, True])
 def test_resource_probe_cannot_read_outside_selected_capability(template: bool) -> None:
     connector = _Connector()
