@@ -3509,3 +3509,10 @@ Ruff、Mypy（248 文件）、10 条架构合同通过。迁移不适用，部�
 - [x] 回归覆盖共享调用成功及真实租户审计、错误引用拒绝、撤销后拒绝、专属 tenant/platform Server 跨租户拒绝。
 - [x] MCP Egress、热配置、可信身份联合 73 passed；Ruff/Mypy 253 文件通过，无 DDL。
 - [x] 文档与架构边界检查完成，排除无关修改与秘密，提交推送；部署后完成 Vault 实际验收。
+
+## Skill / MCP 修复 U：候选配置测试与 active 版本隔离
+
+- [x] 现场复现 TEST 把候选 revision 作为 active 传给 Egress，导致 authority fencing 拒绝。
+- [x] TEST 明确生成 probe entry；初次 disabled 测试和 enabled Server 候选测试使用同一流程。
+- [x] 真实 Registry/Connection/Egress manager 联合回归确认候选不覆盖 active，结束后清理 probe。
+- [x] MCP 热配置及管理 API 测试通过，Ruff/Mypy 通过；无 DDL，文档更新，阶段提交推送。

@@ -864,7 +864,11 @@ class McpServerRegistryService:
             tenant_id=current.tenant_id,
             revision=revision.revision,
             config=revision.config,
-            desired_state=McpDesiredState.ENABLED,
+            desired_state=(
+                McpDesiredState.DISABLED
+                if kind is McpRegistryOperationKind.TEST
+                else McpDesiredState.ENABLED
+            ),
             observed_state=McpObservedState.LOADING,
         )
         if kind is McpRegistryOperationKind.TEST:
