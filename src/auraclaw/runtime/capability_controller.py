@@ -28,6 +28,10 @@ from auraclaw.runtime.skill_workflow import (
     RuntimeSkillWorkflowExecutor,
     WorkflowStepProgress,
 )
+from auraclaw.runtime.tool_argument_guidance import (
+    tool_argument_description,
+    tool_argument_guidance,
+)
 
 CAPABILITY_SEARCH = "auraclaw.capabilities.search"
 CAPABILITY_LOAD = "auraclaw.capabilities.load"
@@ -216,12 +220,26 @@ class RuntimeCapabilityController:
                 },
             ),
         ]
-        for loaded in dict(state.get("loaded", {})).values():
+        loaded_items = [item for item in dict(state.get("loaded", {})).values()
+                        if isinstance(item, dict)]
+        kinds = {item.get("kind") for item in loaded_items}
+        tools = [tool for tool in tools if not (
+            (tool["function"]["name"] == SKILL_ACTIVATE and "skill" not in kinds)
+            or (tool["function"]["name"] == RESOURCE_READ
+                and not kinds.intersection({"resource", "resource_template"}))
+        )]
+        for loaded in loaded_items:
             if not isinstance(loaded, dict):
                 continue
             model_tool = loaded.get("model_tool")
             if isinstance(model_tool, dict):
-                tools.append(copy.deepcopy(model_tool))
+                visible_tool = copy.deepcopy(model_tool)
+                if loaded.get("kind") == "tool" and isinstance(visible_tool.get("function"), dict):
+                    function = visible_tool["function"]
+                    function["description"] = str(function.get("description", "")) + (
+                        tool_argument_description(model_tool)
+                    )
+                tools.append(visible_tool)
         return tuple(tools)
 
     async def preload_required(
@@ -752,10 +770,15 @@ class RuntimeCapabilityController:
                 ),
             }
         )
-        return CapabilityExecution(
-            result=await self._client.execute(assignment, invocation),
-            state=current,
-        )
+        result = await self._client.execute(assignment, invocation)
+        if (result.get("error_code") == "tool_schema_invalid"
+                and result.get("side_effect_status") == "not_started"):
+            result = copy.deepcopy(result)
+            result["metadata"] = {
+                **(result.get("metadata") or {}),
+                "argument_guidance": tool_argument_guidance(loaded_tool["model_tool"]),
+            }
+        return CapabilityExecution(result=result, state=current)
 
     def restore_skill_events(self, state: dict[str, Any], events: list[Any]) -> None:
         active = list(state.get("active_skills", ()))
@@ -1277,11 +1300,17 @@ class RuntimeCapabilityController:
             "resource",
             "resource_template",
         }:
+            tool = loaded.get("model_tool") if isinstance(loaded, dict) else None
+            guidance = tool_argument_guidance(tool) if isinstance(tool, dict) else None
             return CapabilityExecution(
                 result={
                     "status": "denied",
                     "error_code": "resource_not_loaded",
-                    "summary": "Resource must be loaded before reading.",
+                    "summary": (
+                        "This capability is a Tool. Call its exact loaded Tool function directly."
+                        if guidance else "Resource must be loaded before reading."
+                    ),
+                    **({"metadata": {"argument_guidance": guidance}} if guidance else {}),
                 },
                 state=state,
             )
