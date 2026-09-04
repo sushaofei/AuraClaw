@@ -189,3 +189,7 @@ adapter 的 Server owner 和精确 credential_ref 读取引用，不能改按业
 “租户查不到就尝试平台”的通用回退。只有 owner 为空的共享 MCP 可使用平台引用；显式属于
 某租户（包括名称为 platform 的租户）的 Server 仍要求调用者匹配。审计与可信出站身份
 始终使用真实业务调用者。引用撤销、provider、origin/scope、操作范围、到期检查继续执行。
+
+候选配置的 TEST 生命周期使用非启用的 probe entry。即使 Server 当前已启用，也不能把
+候选 revision 作为 active entry 发给 Credential Proxy，否则权威快照的版本保护会正确拒绝。
+探测只允许发现请求，结束后按候选 revision 清理，现有 active 连接和目录保持不变。

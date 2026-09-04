@@ -1141,3 +1141,35 @@ def test_late_delete_cannot_remove_recreated_configuration() -> None:
         assert await service.reconcile_pending_deletes() == 0
 
     asyncio.run(scenario())
+
+
+def test_candidate_probe_uses_isolated_egress_with_active_authority() -> None:
+    from auraclaw.infrastructure.credentials.mcp_egress_manager import McpEgressManager
+    from auraclaw.infrastructure.credentials.proxy import CredentialProxy, InMemoryVault
+
+    async def scenario() -> None:
+        service = McpServerRegistryService(InMemoryMcpServerRegistryStore())
+        adapters = {}
+        egress = McpEgressManager(
+            adapters=adapters, proxy=CredentialProxy(InMemoryVault({})),
+            snapshot_provider=service.active_snapshot,
+        )
+        manager = McpConnectionManager(
+            registry=service, connectors={}, factory=lambda _: _FakeConnector(),
+            egress=egress, drain_seconds=0,
+        )
+        service.bind_runtime(manager)
+        await service.create(_write(_config()))
+        # A disabled server can be tested without publishing an active target.
+        assert (await service.test("local-order-mcp", _life(command_id="first-test"))).status.value == "succeeded"
+        assert not await service.active_snapshot()
+        await service.enable("local-order-mcp", _life())
+        active = adapters["mcp:local-order-mcp"]
+        await service.update(_write(_config(title="Candidate"), expected_revision=1, command_id="update"))
+        tested = await service.test("local-order-mcp", _life(expected_revision=2, command_id="candidate"))
+        assert tested.status.value == "succeeded", tested.result
+        assert adapters["mcp:local-order-mcp"] is active
+        assert (await service.active_snapshot())[0].revision == 1
+        assert "mcp:local-order-mcp:probe:2" not in adapters
+        await egress.reconcile(())
+    asyncio.run(scenario())
