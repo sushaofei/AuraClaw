@@ -98,3 +98,13 @@ Java 本地源码的 McpTrustedContextFilter 读取 X-CT-Tenant-ID/X-CT-User-ID�
 再向 AdminUserApi 查询启用用户及部门。AuraClaw 出站代码头名与之匹配；
 尚未取得部署端收到的头、Filter 生效和 Java 用户事实源查询结果，不能猜定其中某一步的原因。
 管理探测错误保真回归及目录/Agent/管理联合 45 项通过，Ruff/Mypy 通过，无 DDL。
+
+### 本次统一发布结果
+
+`a24c7f8` 已推送；镜像 `auraclaw:skill-mcp-a24c7f8` 以 ef6cd69 的既有依赖构建，
+仅 COPY 提交中的源码。按维护脚本 skip-sync/skip-build 执行 stop → migrate/check 0063 →
+recreate → readiness，业务组件已统一到该镜像，容器全部健康。
+两个 Credential Proxy 容器内部独立 resolve 专用引用成功（仅记录布尔值）。
+发布后管理测试返回原始“身份上下文不可用”，不再被输出 Schema 错误覆盖；非法参数仍 422。
+使用原始普通查询任务的新聊天完成 search/load 并生成所需 input 字段，远端身份错误仍存在。
+#90/#93/#98/#99/#100 顶部状态已更新为 Vault 已恢复、Java 身份及长期凭据续发待办，保持开放。
