@@ -389,6 +389,7 @@ class ModelGenerateRequest(ContractModel):
     allowed_providers: tuple[str, ...] = ()
     data_classification: str = "internal"
     max_output_tokens: int = Field(default=8192, gt=0)
+    run_max_cost: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     runtime_metrics: dict[str, float] = Field(default_factory=dict, max_length=16)
     prompt_cache_key: str | None = Field(default=None, min_length=1, max_length=64)
 

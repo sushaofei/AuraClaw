@@ -40,7 +40,24 @@ class CanonicalEventCommitter:
         visibility: Visibility = Visibility.INTERNAL,
         recovery: bool = False,
     ) -> None:
-        if recovery and event_type not in {"run.failed", "run.cancelled"}:
+        local_settlement = (
+            event_type == "tool.call.requested"
+            and payload.get("runtime_decision") == "not_dispatched"
+        ) or (
+            event_type == "tool.call.completed"
+            and payload.get("result", {}).get("status") == "denied"
+            and payload.get("result", {}).get("side_effect_status") == "not_started"
+        )
+        if (
+            recovery
+            and not local_settlement
+            and event_type
+            not in {
+                "run.failed",
+                "run.cancelled",
+                "runtime.progress.recorded",
+            }
+        ):
             raise ValueError("Recovery cannot begin new execution")
         if event_type == "approval.requested":
             if self.approval_request_is_pending(existing, identity):
@@ -52,6 +69,8 @@ class CanonicalEventCommitter:
                 or event.payload.get("model_call_id") == identity
                 or event.payload.get("tool_invocation_id") == identity
                 or event.payload.get("approval_id") == identity
+                or event.payload.get("checkpoint_id") == identity
+                or event.payload.get("reservation_id") == identity
             )
             for event in existing
         ):

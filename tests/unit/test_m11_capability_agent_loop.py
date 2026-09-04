@@ -1549,6 +1549,7 @@ def test_last_step_checkpoint_recovery_settles_result_before_budget_stop() -> No
         assert not any(e.type == "tool.call.completed"
                        and e.payload["tool_invocation_id"] == "read-boundary"
                        for e in session.events)
+        control.checkpoint = None  # Control state is disposable; recover from canonical receipt.
         with pytest.raises(RuntimeStepBudgetExceededError):
             await harness.execute(assignment)
         assert capabilities.calls.count("github.issue.get") == 1
@@ -1561,18 +1562,16 @@ def test_last_step_checkpoint_recovery_settles_result_before_budget_stop() -> No
     asyncio.run(scenario())
 
 
-def test_v2_cost_limit_without_priced_reservation_does_not_start_model() -> None:
-    from auraclaw.contracts.errors import RuntimeCostReservationUnavailableError
-
+def test_v2_cost_limit_is_forwarded_to_priced_gateway() -> None:
     async def scenario() -> None:
-        capabilities, model = _Capabilities(), _ScriptedModel([])
+        capabilities, model = _Capabilities(), _ScriptedModel([
+            replace(_response("Done"), usage={"output_tokens": 1, "cost": 0.01})])
         harness = AgentHarness(control_store=_Control(), session=_Session("Cost limited"),
                                model=model, tools=capabilities, runtime_events=_RuntimeEvents(),
                                capability_controller=RuntimeCapabilityController(capabilities))
         assignment = replace(_assignment(role="root"), budget=RuntimeBudget(
             max_cost=1.0, policy_version="2"))
-        with pytest.raises(RuntimeCostReservationUnavailableError):
-            await harness.execute(assignment)
-        assert not model.requests
+        await harness.execute(assignment)
+        assert model.requests[0].run_max_cost == 1.0
 
     asyncio.run(scenario())

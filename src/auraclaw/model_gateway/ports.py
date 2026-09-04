@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
 from auraclaw.contracts.internal import ModelGenerateResponse
 
@@ -15,6 +15,7 @@ class ModelCallReservation:
         "in_progress",
         "conflict",
         "quota_exceeded",
+        "cost_quota_exceeded",
         "cancelled",
         "reconciling",
     ]
@@ -54,6 +55,7 @@ class ModelStateStore(Protocol):
         causation_id: str = "model-call",
         claim_ttl: timedelta = timedelta(seconds=30),
         window: timedelta = timedelta(hours=1),
+        cost_reservation: dict[str, Any] | None = None,
     ) -> ModelCallReservation: ...
 
     async def complete(

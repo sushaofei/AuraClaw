@@ -1,6 +1,6 @@
 # Runtime 预算与重复调用治理改善方案
 
-状态：实施中，跟踪 #101。A 已提交；v2 重复策略/有界收尾及恢复门禁基线已编码验证，默认关闭。D 的完整账本重建/成本预留与 E–F 尚未全部完成，测试环境仍为旧镜像。
+状态：A–F 实现已完成，联合发布验收中，跟踪 #101。v2 仅对新 Run 启用；已有 Run 保持原快照。
 范围：AuraClaw Runtime/Control/Model Gateway/Session 投影，以及 AuraX 运行进度与结束原因展示。
 关联：#93 调用稳定性、#96 执行收尾与恢复、#100 可信身份。
 
@@ -39,7 +39,7 @@ runtime_budget_exceeded，导致误诊。当前 model.call 和工具执行各计
   旧实现对执行前重复拦截未计数，迁移时以budget_policy_version区分，不改旧统计。
 - tool_dispatch：实际进入外部执行的一次调用；同一次在途请求恢复不重复dispatch或计数。
 - 累计输出token包含本Run所有模型轮次，包括最终总结和工具调用参数；输入token独立记录。
-- 已核实 Model Gateway 当前 reservation/settlement 只预留 token，不具备按价格计算的成本预留。需扩展可信价格、金额预留/结算与未知消费核对；未具备前，v2 配置 max_cost 时拒绝新的模型调用，返回 runtime_cost_reservation_unavailable。usage缺失/取消未知不当零。
+- Model Gateway 支持可信价格快照、Decimal 金额预留/结算。未配置价格或缺少最终输入/输出用量时 fail closed；未知消费保留预留，不当零。价格货币与 Run 限额必须一致。
 - deadline、用户取消、lease失效、预算耗尽分别处理；等待审批不消耗模型/工具次数，墙钟deadline继续有效。
 - 每次调用前检查/预留，完成后结算。并行工具批次逐个预留，不允许先并发后发现超额。
 - 新Run可获新预算，同Run重启/审批恢复/副本迁移沿用用量；用户补发消息不能抹掉旧未知副作用。
@@ -254,3 +254,54 @@ Java输出契约问题/无效循环；不再让用户误以为21/48步、1303/81
 2. B/E：结构化错误族、retry-after、有权威依据的刷新/依赖失效、后端有界轮询与任务树总配额。透明结果复用仍关闭。
 3. F：运行中只读预算投影、低基数指标、固定模型场景对照与误拦截校准。当前 AuraX 仅失败时展示结构化用量。
 4. Reader/Control/Runtime 协调发布并逐 Run 灰度后才切 v2 默认；不清理 checkpoint 或重放测试 Session 的旧业务调用。
+
+
+### D/E/F：完整治理实现与验收（2026-09-04）
+
+- Canonical `runtime.budget.reserved` 以 model_call_id / tool_invocation_id 幂等预留；
+  `runtime.progress.recorded` 保存可重建执行游标。Control checkpoint 丢失时恢复最新事实收据。
+  未获得最终用量的模型预留保留；原 Model/Hands invocation 账本负责在途/未知结果，禁止新 ID 重放。
+- Session EventStore 在根任务事务锁内完成额度检查和事实追加；子任务创建及再次申请 Run
+  都分配根 Run 的有限总额，不能伪造 scope 或通过并发 Child 绕过。配额为保守整轮分配，
+  已完成子 Run 的分配不返还，避免新增 Run 无限消耗。
+- Model Gateway 使用可信 `AURACLAW_MODEL_PRICING` JSON：provider/model/currency/version、
+  max_input_tokens、input_per_million、output_per_million；金额以该货币计。
+  按最大输入窗口和最大输出保守预留，最终按已确认输入/输出 token 结算。
+  精确 Decimal 存储；未知/取消未确认消费保留金额和 token，跨小时不释放；
+  明确未发送的 Policy 拒绝释放。未配置价格时只有设置 max_cost 的 Run 会被拒绝。
+  真实服务费率必须由运营提供，fixture 的 TEST 费率不发布到测试或生产。
+- 复杂参数错误复用受限离线 JSON Schema 校验器（移至 contracts，无网络引用或强制转换）；
+  错误族绑定结构化路径/keyword。目标级不可重试输出/身份/授权错误不因无关参数变化重试。
+- `POST /v1/tasks`、`POST /v1/sessions/{id}/runs` 可带 `read_refresh`：
+  `[{"capability_id":"已加载工具的精确ID","max_calls":2,"min_interval_seconds":5,"duration_seconds":60}]`。
+  最多8个不同目标，每目标2–10次、间隔1–300秒、授权期限1–1800秒；固定绝对到期时间，
+  同一命令重试不延长。只适用可信只读工具且仍走 Gateway；模型不能自行授予。
+  等待由后端执行且持续检查取消/lease/deadline；Retry-After 超过300秒直接抑制，不提前重试。
+  成功写入使之前的读失效；catalog/配置版本变化产生新绑定。透明缓存复用保持关闭。
+- 可信默认配置：runtime_max_steps / runtime_max_output_tokens / runtime_max_cost；
+  runtime_tree_max_steps / runtime_tree_max_output_tokens / runtime_tree_max_cost。
+  默认48步/8192 token，根树480步/81920 token；金额默认不限制。
+  额度只在新 Run 创建时快照，当前 Run 不支持直接改配置追加额度，用户可明确发起新 Run。
+- task_view.runtime_budget 投影提供 limits/usage，去除内部计数索引，不复制业务输出。
+  AuraX 区分模型轮次、工具尝试、实际外部调用、已用输出及在途预留。
+- 低基数指标：runtime.budget.{model,tool}.reserved.count、runtime.repeat.suppressed.count、
+  runtime.tool.dispatched.count、runtime.stop.<固定错误码>.count；ID仅作为追踪上下文。
+- 调度/领取同时要求 runtime_governance_v2，避免旧基线 Runtime 接管新收据。
+  迁移0064新增金额账本/调用价格快照/用量投影；先部署所有 reader，再将测试新 Run 切为v2。
+  回滚先把新 Run 开关改回1，保持兼容镜像处理存量v2；存在未决成本预留时禁止 down migration。
+
+固定场景验证（脚本化模型输入，不冒充真实 LLM 准确率评测）：
+
+| 场景 | 原策略 | v2 断言 |
+| --- | --- | --- |
+| 同参成功只读4次 | 3次外部调用后中止 | 1次外部调用、3次明确抑制，可正常结束 |
+| 长期相同只读循环 | 第4次触发混淆错误 | 有界收尾、partial保留、无新工具 |
+| 分页/参数合法修正 | 未区分条件 | 新参数/合法纠正可执行 |
+| 同参写入与unknown | 参数计数 | 成功写不合并，unknown不重放 |
+| 2个并发Child仅剩1份配额 | 无根树限制 | 仅1个创建成功，另1个原子拒绝 |
+| 2个并发priced model仅够1份 | 仅token限额 | 仅1个金额预留成功；重复结算仅扣1次 |
+| 最后一步结果收据后Control丢失 | 依赖checkpoint | Canonical恢复，外部调用仍仅1次 |
+
+测试入口：test_runtime_budget_ledger、test_runtime_repeat_policy、test_m11_capability_agent_loop、
+PostgreSQL test_runtime_cost_ledger；同时复跑原 Model 多副本和 Control 门禁集成。
+所有业务复现使用 fixture 或新只读 Session，不重放历史测试 Run。

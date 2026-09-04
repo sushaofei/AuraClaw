@@ -13,12 +13,12 @@ from enum import StrEnum
 from typing import Any
 
 from auraclaw.contracts.errors import (
+    BudgetExceededError,
     CollaborationValidationError,
     ModelOutputTruncatedError,
     ModelProviderError,
     RuntimeCancelledError,
     RuntimeCostBudgetExceededError,
-    RuntimeCostReservationUnavailableError,
     RuntimeDeadlineExceededError,
     RuntimeNoProgressError,
     RuntimeOutputTokenBudgetExceededError,
@@ -27,7 +27,8 @@ from auraclaw.contracts.errors import (
 )
 from auraclaw.contracts.events import NewEvent
 from auraclaw.contracts.state import Visibility
-from auraclaw.control.ports import RuntimeAssignment
+from auraclaw.control.ports import RuntimeAssignment, RuntimeCheckpoint
+from auraclaw.domain.runtime_budget import usage as reserved_usage
 from auraclaw.domain.skill_execution import RUN_TERMINAL_EVENTS, pending_skill_invocations
 from auraclaw.runtime.capability_controller import RuntimeCapabilityController
 from auraclaw.runtime.collaboration_controller import RuntimeCollaborationController
@@ -46,7 +47,7 @@ from auraclaw.runtime.ports import (
     ToolClient,
 )
 from auraclaw.runtime.progress_store import RuntimeProgressStore
-from auraclaw.runtime.repeat_policy import no_progress, repeat_decision, repeat_target
+from auraclaw.runtime.repeat_policy import no_progress, repeat_decision, repeat_target, wait_seconds
 from auraclaw.runtime.rounds import (
     ModelRoundExecutor,
     ToolRoundDisposition,
@@ -125,7 +126,7 @@ class RuntimeExecutionEngine:
         self._control = control_store
         self._guard_service = RuntimeExecutionGuard(control_store)
         self._events = CanonicalEventCommitter(session, self._guard_service)
-        self._progress = RuntimeProgressStore(control_store)
+        self._progress = RuntimeProgressStore(control_store, session, self._events)
         self._tool_rounds = ToolRoundExecutor(
             control=control_store,
             session=session,
@@ -346,6 +347,18 @@ class RuntimeExecutionEngine:
             assignment.session_id,
             assignment.run_id,
         )
+        if assignment.budget.policy_version == "2":
+            from datetime import UTC, datetime
+            facts = await self._session.load(assignment)
+            receipt = next((e for e in reversed(facts) if e.run_id == assignment.run_id
+                            and e.type == "runtime.progress.recorded"), None)
+            if receipt is not None:
+                checkpoint = RuntimeCheckpoint(
+                    tenant_id=assignment.tenant_id, session_id=assignment.session_id,
+                    run_id=assignment.run_id, fencing_token=assignment.fencing_token,
+                    phase=str(receipt.payload["phase"]), state=dict(receipt.payload["state"]),
+                    updated_at=datetime.now(UTC),
+                )
         state: dict[str, Any] = (
             dict(checkpoint.state)
             if checkpoint is not None and checkpoint.phase.startswith(("capability.", "agent."))
@@ -435,11 +448,6 @@ class RuntimeExecutionEngine:
             ):
                 response = self._response_from_dict(dict(state["response"]))
             else:
-                if (assignment.budget.policy_version == "2"
-                        and assignment.budget.max_cost is not None):
-                    raise RuntimeCostReservationUnavailableError(
-                        "Priced cost reservations are unavailable; no new model call was started"
-                    )
                 if int(state.get("steps_used", 0)) >= assignment.budget.max_steps:
                     raise RuntimeStepBudgetExceededError(
                         "Runtime capability step budget was exhausted"
@@ -460,6 +468,19 @@ class RuntimeExecutionEngine:
                         state["concluding_reason"] = "runtime_output_token_budget_exceeded"
                 capability_state = dict(state.get("capability_state", {}))
                 trusted: tuple[dict[str, Any], ...] = ()
+                if assignment.budget.policy_version == "2":
+                    grants: list[dict[str, Any]] = next(
+                        (e.payload.get("read_refresh", []) for e in turn_events
+                                   if e.type == "run.requested"
+                                   and e.payload.get("run_id") == assignment.run_id), [])
+                    if grants:
+                        trusted += ({"role": "system", "content": (
+                            "The user explicitly authorized these bounded read refresh grants. "
+                            "They do not grant tool access or write permission. "
+                            "Gateway authorization "
+                            "still applies; the backend enforces call counts, interval and expiry: "
+                            + json.dumps(grants, sort_keys=True)
+                        )},)
                 if self._capability_controller is not None:
                     if await self._apply_skill_binding_disposition(
                         assignment,
@@ -562,6 +583,8 @@ class RuntimeExecutionEngine:
                         *self._build_capability_messages(turn_events),
                     ),
                     tools=model_tools,
+                    run_max_cost=(assignment.budget.max_cost
+                                  if assignment.budget.policy_version == "2" else None),
                     policy=self._policy,
                     max_output_tokens=min(
                         self._per_turn_output_tokens, available_for_turn
@@ -587,6 +610,10 @@ class RuntimeExecutionEngine:
                     request=request,
                     turn_index=turn_index,
                 )
+                if assignment.budget.policy_version == "2":
+                    await checkpoint_ready
+                    await self._reserve_budget(assignment, model_call_id, "model",
+                                               request.max_output_tokens)
                 model_round = await self._model_rounds.execute(
                     assignment,
                     request,
@@ -672,7 +699,8 @@ class RuntimeExecutionEngine:
                         "version": call.version,
                         "expected_side_effect": call.expected_side_effect,
                         "repeat_identity": ({"binding": target.binding,
-                                             "arguments": target.arguments} if target else {}),
+                                             "arguments": target.arguments,
+                                             "read_only": target.read_only} if target else {}),
                         "activity": self._tool_activity_metadata(
                             dict(state.get("capability_state", {})), call
                         ),
@@ -709,6 +737,16 @@ class RuntimeExecutionEngine:
                         raise RuntimeStepBudgetExceededError(
                             "Runtime capability step budget was exhausted"
                         )
+                    if assignment.budget.policy_version == "2":
+                        try:
+                            await self._reserve_budget(
+                                assignment, call.tool_invocation_id, "tool", 0
+                            )
+                        except BudgetExceededError as error:
+                            await self._settle_unstarted_batch(
+                                assignment, response.tool_calls[call_index:], turn_index, error.code
+                            )
+                            raise
                     signature = hashlib.sha256(
                         json.dumps(
                             {"name": call.name, "arguments": call.arguments},
@@ -747,6 +785,21 @@ class RuntimeExecutionEngine:
                     waiting_child_ids = ()
                     suppressed = (repeat_decision(assignment, call, target, events)
                                   if assignment.budget.policy_version == "2" else None)
+                    try:
+                        if suppressed is None and assignment.budget.policy_version == "2":
+                            delay = wait_seconds(target, events, assignment.run_id)
+                            while delay > 0:
+                                await self._guard_service.check(assignment)
+                                await asyncio.sleep(min(1.0, delay))
+                                delay = wait_seconds(target, events, assignment.run_id)
+                            await self._guard_service.check(assignment)
+                            # A durable grant can expire while waiting; re-evaluate before dispatch.
+                            suppressed = repeat_decision(assignment, call, target, events)
+                    except (RuntimeCancelledError, RuntimeDeadlineExceededError) as error:
+                        await self._settle_unstarted_batch(
+                            assignment, response.tool_calls[call_index:], turn_index, error.code
+                            )
+                        raise
                     if state.get("concluding_reason"):
                         suppressed = {
                             "status": "denied", "error_code": "tool_repeat_suppressed",
@@ -1229,6 +1282,16 @@ class RuntimeExecutionEngine:
         )
         return True
 
+    async def _reserve_budget(
+        self, assignment: RuntimeAssignment, identity: str, kind: str, tokens: int
+    ) -> None:
+        facts = await self._session.load(assignment)
+        await self._events.append_once(
+            assignment, facts, "runtime.budget.reserved",
+            {"reservation_id": identity, "kind": kind, "output_tokens": tokens},
+            identity=identity,
+        )
+
     async def _settle_unstarted_batch(
         self, assignment: RuntimeAssignment, calls: tuple[ToolCall, ...], turn_index: int, code: str
     ) -> None:
@@ -1240,8 +1303,9 @@ class RuntimeExecutionEngine:
                 assignment, events, "tool.call.requested",
                 {"tool_invocation_id": call.tool_invocation_id, "name": call.name,
                  "arguments": call.arguments, "turn_index": turn_index,
+                 "runtime_decision": "not_dispatched",
                  "version": call.version, "expected_side_effect": call.expected_side_effect},
-                identity=call.tool_invocation_id,
+                identity=call.tool_invocation_id, recovery=True,
             )
             await self._settle_local_stop(assignment, call, turn_index, code)
 
@@ -1257,8 +1321,9 @@ class RuntimeExecutionEngine:
              "result": {"status": "denied", "error_code": code,
                         "side_effect_status": "not_started", "retryable": False,
                         "summary": "Runtime stopped this call before execution.",
-                        "metadata": {"decision": "not_dispatched", "policy_version": "1"}}},
-            identity=call.tool_invocation_id,
+                        "metadata": {"decision": "not_dispatched",
+                                     "policy_version": assignment.budget.policy_version}}},
+            identity=call.tool_invocation_id, recovery=True,
         )
 
     async def record_failure(self, assignment: RuntimeAssignment, error: Exception) -> bool:
@@ -1372,8 +1437,10 @@ class RuntimeExecutionEngine:
                        "max_cost": assignment.budget.max_cost,
                        "deadline": (assignment.deadline.isoformat()
                                     if assignment.deadline is not None else None)},
-            "usage": {"steps_used": state.get("steps_used", 0),
-                      "output_tokens": usage.get("output_tokens"), "cost": usage.get("cost")},
+            "usage": (reserved_usage(events, assignment.run_id)
+                      if assignment.budget.policy_version == "2" else
+                      {"steps_used": state.get("steps_used", 0),
+                       "output_tokens": usage.get("output_tokens"), "cost": usage.get("cost")}),
             "successful_tool_invocation_ids": successful,
         }
 

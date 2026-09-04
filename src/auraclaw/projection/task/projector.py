@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Sequence
+from types import SimpleNamespace
 from typing import Any
 
 from auraclaw.contracts.approval_mode import ApprovalConfiguration
 from auraclaw.contracts.events import CanonicalEvent
 from auraclaw.contracts.state import RunStatus, SessionStatus
+from auraclaw.domain.runtime_budget import usage
 
 
 class ProjectionGapError(RuntimeError):
@@ -18,6 +20,8 @@ class UnsupportedEventError(RuntimeError):
 
 
 KNOWN_TASK_EVENTS = {
+    "runtime.budget.reserved",
+    "runtime.progress.recorded",
     "session.created",
     "session.approval_mode_changed",
     "policy.review.requested",
@@ -183,6 +187,53 @@ class InMemoryTaskProjection:
     @staticmethod
     def _apply(view: dict[str, Any], event: CanonicalEvent) -> None:
         payload = event.payload
+        if event.type == "run.requested":
+            view["runtime_budget"] = {
+                "run_id": payload.get("run_id"),
+                "limits": payload.get("budget", {}),
+                "_facts": {},
+            }
+        if event.type in {"runtime.budget.reserved", "model.turn.completed", "tool.call.completed"}:
+            budget = dict(view.get("runtime_budget", {}))
+            if budget.get("run_id") == event.run_id:
+                facts = dict(budget.get("_facts", {}))
+                identity = payload.get(
+                    "reservation_id",
+                    payload.get("model_call_id", payload.get("tool_invocation_id")),
+                )
+                # Keep only accounting data; business tool output is never copied here.
+                minimal = {
+                    k: payload[k]
+                    for k in (
+                        "reservation_id",
+                        "model_call_id",
+                        "tool_invocation_id",
+                        "kind",
+                        "output_tokens",
+                        "usage",
+                    )
+                    if k in payload
+                }
+                if event.type == "tool.call.completed":
+                    result = payload.get("result", {})
+                    minimal["result"] = {
+                        "error_code": result.get("error_code"),
+                        "metadata": {
+                            "dispatch_started": result.get("metadata", {}).get("dispatch_started")
+                        },
+                    }
+                facts[f"{event.type}:{identity}"] = {
+                    "type": event.type,
+                    "run_id": event.run_id,
+                    "payload": minimal,
+                }
+                budget.update(
+                    _facts=facts,
+                    usage=usage(
+                        [SimpleNamespace(**fact) for fact in facts.values()], str(event.run_id)
+                    ),
+                )
+                view["runtime_budget"] = budget
         if "approval" in payload and event.type in {
             "session.created",
             "child.created",

@@ -47,6 +47,7 @@ class ModelRequest:
     tools: tuple[dict[str, Any], ...] = ()
     policy: ModelPolicy = field(default_factory=ModelPolicy)
     max_output_tokens: int = 8192
+    run_max_cost: float | None = None
     runtime_metrics: dict[str, float] = field(default_factory=dict)
     prompt_cache_key: str | None = None
 

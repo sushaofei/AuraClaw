@@ -9,7 +9,7 @@ from collections.abc import AsyncIterator
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Protocol
+from typing import Any, Protocol
 from uuid import uuid4
 
 from auraclaw.action.ports import PolicyEvaluation
@@ -19,6 +19,8 @@ from auraclaw.contracts.errors import (
     LeaseConflictError,
     ModelProviderError,
     PolicyDeniedError,
+    RuntimeCostBudgetExceededError,
+    RuntimeCostReservationUnavailableError,
     VersionConflictError,
 )
 from auraclaw.contracts.internal import (
@@ -32,6 +34,7 @@ from auraclaw.contracts.internal import (
 from auraclaw.contracts.observability import MetricPoint
 from auraclaw.contracts.tools import PolicyDecision
 from auraclaw.model_gateway.ports import ModelCallReservation, ModelStateStore
+from auraclaw.model_gateway.pricing import quote, settled_cost
 from auraclaw.runtime.model_stream import iter_model_stream
 from auraclaw.runtime.ports import (
     ModelClient,
@@ -92,6 +95,7 @@ class ModelGatewayInternalService:
         claim_ttl: timedelta = timedelta(seconds=30),
         heartbeat_interval: float = 5.0,
         metric_writer: MetricWriter | None = None,
+        pricing: dict[str, Any] | None = None,
     ) -> None:
         self._model = model
         self._policy = policy
@@ -101,6 +105,7 @@ class ModelGatewayInternalService:
         self._claim_ttl = claim_ttl
         self._heartbeat_interval = heartbeat_interval
         self._metric_writer = metric_writer
+        self._pricing = dict(pricing or {})
 
     @staticmethod
     def _require_runtime(identity: ServiceIdentity) -> None:
@@ -130,8 +135,27 @@ class ModelGatewayInternalService:
             self._require_runtime(request.context.service_identity)
             if request.purpose != "execution":
                 raise AuthorizationError("Runtime cannot impersonate an approval reviewer")
+        cost_reservation = None
+        if request.run_max_cost is not None:
+            if self._state is None:
+                raise RuntimeCostReservationUnavailableError(
+                    "durable model cost ledger is unavailable"
+                )
+            cost_reservation = quote(
+                self._pricing,
+                request.messages,
+                request.tools,
+                request.max_output_tokens,
+                request.run_max_cost,
+            )
+            request = request.model_copy(
+                update={
+                    "preferred_model": self._pricing["model"],
+                    "allowed_providers": (self._pricing["provider"],),
+                }
+            )
         request_digest = self._request_digest(request)
-        reservation = await self._prepare_stream(request, request_digest)
+        reservation = await self._prepare_stream(request, request_digest, cost_reservation)
         if reservation is not None:
             if reservation.status == "completed":
                 assert reservation.cached_response is not None
@@ -142,6 +166,10 @@ class ModelGatewayInternalService:
                 raise VersionConflictError("model_call_id was reused with another request")
             if reservation.status == "in_progress":
                 raise LeaseConflictError("model call is already in progress")
+            if reservation.status == "cost_quota_exceeded":
+                raise RuntimeCostBudgetExceededError(
+                    "model reservation exceeds available cost quota"
+                )
             if reservation.status == "quota_exceeded":
                 raise BudgetExceededError("tenant model token quota is exhausted")
             if reservation.status == "cancelled":
@@ -300,6 +328,22 @@ class ModelGatewayInternalService:
                 )
             raise ModelProviderError("model stream ended without a completed response")
         result = self._to_generate_response(response)
+        if cost_reservation is not None:
+            try:
+                cost = settled_cost(
+                    cost_reservation, result.usage, provider=result.provider, model=result.model
+                )
+                result = result.model_copy(update={"usage": {**result.usage, "cost": float(cost)}})
+            except Exception:
+                if self._state is not None and claim_token is not None:
+                    await self._state.mark_reconciling(
+                        tenant_id=request.context.tenant_id,
+                        model_call_id=request.model_call_id,
+                        execution_owner=self._gateway_id,
+                        claim_token=claim_token,
+                        error_code="priced_usage_unknown",
+                    )
+                raise
         if self._state is not None:
             try:
                 await self._state.complete(
@@ -422,13 +466,17 @@ class ModelGatewayInternalService:
         return ProviderCancellationResult(stopped=bool(result))
 
     async def _prepare_stream(
-        self, request: ModelGenerateRequest, request_digest: str
+        self,
+        request: ModelGenerateRequest,
+        request_digest: str,
+        cost_reservation: dict[str, Any] | None = None,
     ) -> ModelCallReservation | None:
         """Run policy and quota reservation concurrently when both are configured."""
 
         async def _no_reservation() -> None:
             return None
 
+        extra: dict[str, Any] = {"cost_reservation": cost_reservation} if cost_reservation else {}
         policy_result, reservation = await asyncio.gather(
             self._enforce_policy(request),
             (
@@ -445,6 +493,7 @@ class ModelGatewayInternalService:
                     correlation_id=request.context.correlation_id,
                     causation_id=request.context.causation_id,
                     claim_ttl=self._claim_ttl,
+                    **extra,
                 )
                 if self._state is not None
                 else _no_reservation()
@@ -464,7 +513,7 @@ class ModelGatewayInternalService:
                 await self._state.fail(
                     tenant_id=request.context.tenant_id,
                     model_call_id=request.model_call_id,
-                    error_code=type(policy_result).__name__,
+                    error_code="policy_rejected_before_dispatch",
                     claim_token=reservation.claim_token,
                 )
             raise policy_result
@@ -563,6 +612,11 @@ class ModelGatewayInternalService:
                     "allowed_providers": request.allowed_providers,
                     "data_classification": request.data_classification,
                     "max_output_tokens": request.max_output_tokens,
+                    **(
+                        {"run_max_cost": request.run_max_cost}
+                        if request.run_max_cost is not None
+                        else {}
+                    ),
                 },
                 sort_keys=True,
                 default=str,

@@ -79,6 +79,7 @@ async def create_task(
     return await service.create_task(
         goal=request.goal,
         context=context,
+        read_refresh=[grant.model_dump() for grant in request.read_refresh],
         source=request.source,
         schedule_id=request.schedule_id,
         occurrence_id=request.occurrence_id,
@@ -270,6 +271,7 @@ async def request_run(
         session_id=session_id,
         context=context,
         approval_mode=request.approval_mode if request else None,
+        read_refresh=[grant.model_dump() for grant in request.read_refresh] if request else [],
     )
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from typing import Any
 from uuid import uuid4
 
 from auraclaw.contracts.errors import LeaseConflictError, VersionConflictError
@@ -15,6 +16,7 @@ from auraclaw.model_gateway.ports import (
     ModelCallReservation,
     ModelCancellation,
 )
+from auraclaw.model_gateway.pricing import amount, settled_cost
 
 
 class PostgresModelStateStore(LazyPool):
@@ -34,9 +36,13 @@ class PostgresModelStateStore(LazyPool):
         causation_id: str = "model-call",
         claim_ttl: timedelta = timedelta(seconds=30),
         window: timedelta = timedelta(hours=1),
+        cost_reservation: dict[str, Any] | None = None,
     ) -> ModelCallReservation:
         pool = await self.pool()
         async with pool.acquire() as connection, connection.transaction():
+            await connection.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended($1,0))", f"model-budget:{tenant_id}"
+            )
             await connection.execute(
                 """INSERT INTO model_gateway.usage_budget
                        (tenant_id, window_started_at, window_seconds, token_limit)
@@ -54,7 +60,7 @@ class PostgresModelStateStore(LazyPool):
             assert budget is not None
             await connection.execute(
                 """UPDATE model_gateway.usage_budget SET
-                       window_started_at=now(), tokens_reserved=0, tokens_used=0,
+                       window_started_at=now(), tokens_used=0,
                        window_seconds=$2, token_limit=$3, updated_at=now()
                    WHERE tenant_id=$1
                      AND window_started_at + make_interval(secs => window_seconds) <= now()""",
@@ -103,12 +109,39 @@ class PostgresModelStateStore(LazyPool):
                         return ModelCallReservation("reconciling")
                     return ModelCallReservation("in_progress")
             if (
-                int(budget["tokens_used"])
-                + int(budget["tokens_reserved"])
-                + reserved_tokens
+                int(budget["tokens_used"]) + int(budget["tokens_reserved"]) + reserved_tokens
                 > token_limit
             ):
                 return ModelCallReservation("quota_exceeded")
+            if cost_reservation is not None:
+                profile = cost_reservation["profile"]
+                await connection.execute(
+                    "INSERT INTO model_gateway.run_cost_budget "
+                    "(tenant_id,run_id,currency,cost_limit) VALUES ($1,$2,$3,$4) "
+                    "ON CONFLICT DO NOTHING",
+                    tenant_id,
+                    run_id,
+                    profile["currency"],
+                    amount(cost_reservation["limit"]),
+                )
+                costs = await connection.fetchrow(
+                    "SELECT * FROM model_gateway.run_cost_budget WHERE tenant_id=$1 "
+                    "AND run_id=$2 FOR UPDATE",
+                    tenant_id,
+                    run_id,
+                )
+                assert costs is not None
+                if costs["currency"] != profile["currency"] or costs["cost_limit"] != amount(
+                    cost_reservation["limit"]
+                ):
+                    return ModelCallReservation("conflict")
+                if (
+                    costs["cost_used"]
+                    + costs["cost_reserved"]
+                    + amount(cost_reservation["reserved"])
+                    > costs["cost_limit"]
+                ):
+                    return ModelCallReservation("cost_quota_exceeded")
             claim_token = uuid4().hex
             if existing is None:
                 await connection.execute(
@@ -162,6 +195,21 @@ class PostgresModelStateStore(LazyPool):
                 reserved_tokens,
                 token_limit,
             )
+            if cost_reservation is not None:
+                await connection.execute(
+                    "UPDATE model_gateway.model_call SET cost_reservation=$3::jsonb "
+                    "WHERE tenant_id=$1 AND model_call_id=$2",
+                    tenant_id,
+                    model_call_id,
+                    json_dumps(cost_reservation),
+                )
+                await connection.execute(
+                    "UPDATE model_gateway.run_cost_budget SET cost_reserved=cost_reserved+$3, "
+                    "updated_at=now() WHERE tenant_id=$1 AND run_id=$2",
+                    tenant_id,
+                    run_id,
+                    amount(cost_reservation["reserved"]),
+                )
             return ModelCallReservation("reserved", claim_token=claim_token)
 
     async def complete(
@@ -175,8 +223,12 @@ class PostgresModelStateStore(LazyPool):
         used_tokens = self._usage_tokens(response)
         pool = await self.pool()
         async with pool.acquire() as connection, connection.transaction():
+            await connection.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended($1,0))", f"model-budget:{tenant_id}"
+            )
             call = await connection.fetchrow(
                 """SELECT reserved_tokens,status,claim_token,claim_expires_at,
+                          run_id,cost_reservation,
                           now() AS database_now
                    FROM model_gateway.model_call
                    WHERE tenant_id=$1 AND model_call_id=$2 FOR UPDATE""",
@@ -193,6 +245,22 @@ class PostgresModelStateStore(LazyPool):
                 or call["claim_expires_at"] <= call["database_now"]
             ):
                 raise LeaseConflictError("model call execution claim is no longer owned")
+            if call["cost_reservation"] is not None:
+                reserved = dict(json_loads(call["cost_reservation"]))
+                cost = settled_cost(
+                    reserved, response.usage, provider=response.provider, model=response.model
+                )
+                response = response.model_copy(
+                    update={"usage": {**response.usage, "cost": float(cost)}}
+                )
+                await connection.execute(
+                    "UPDATE model_gateway.run_cost_budget SET cost_reserved=cost_reserved-$3, "
+                    "cost_used=cost_used+$4,updated_at=now() WHERE tenant_id=$1 AND run_id=$2",
+                    tenant_id,
+                    call["run_id"],
+                    amount(reserved["reserved"]),
+                    cost,
+                )
             await connection.execute(
                 """UPDATE model_gateway.usage_budget SET
                        tokens_reserved=GREATEST(0,tokens_reserved-$2),
@@ -226,8 +294,12 @@ class PostgresModelStateStore(LazyPool):
     ) -> None:
         pool = await self.pool()
         async with pool.acquire() as connection, connection.transaction():
+            await connection.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended($1,0))", f"model-budget:{tenant_id}"
+            )
             call = await connection.fetchrow(
                 """SELECT reserved_tokens,status,claim_token,claim_expires_at,
+                          run_id,cost_reservation,
                           now() AS database_now
                    FROM model_gateway.model_call
                    WHERE tenant_id=$1 AND model_call_id=$2 FOR UPDATE""",
@@ -252,6 +324,24 @@ class PostgresModelStateStore(LazyPool):
                         model_call_id,
                     )
                     return
+            if call["cost_reservation"] is not None:
+                if error_code != "policy_rejected_before_dispatch":
+                    await connection.execute(
+                        "UPDATE model_gateway.model_call SET status='reconciling',error_code=$3 "
+                        "WHERE tenant_id=$1 AND model_call_id=$2",
+                        tenant_id,
+                        model_call_id,
+                        error_code,
+                    )
+                    return
+                reserved = dict(json_loads(call["cost_reservation"]))
+                await connection.execute(
+                    "UPDATE model_gateway.run_cost_budget SET cost_reserved=cost_reserved-$3 "
+                    "WHERE tenant_id=$1 AND run_id=$2",
+                    tenant_id,
+                    call["run_id"],
+                    amount(reserved["reserved"]),
+                )
             await connection.execute(
                 """UPDATE model_gateway.usage_budget SET
                        tokens_reserved=GREATEST(0,tokens_reserved-$2),updated_at=now()
@@ -308,9 +398,7 @@ class PostgresModelStateStore(LazyPool):
         return ModelCallExecution(
             status="not_found" if current is None else str(current["status"]),
             owned=False,
-            cancel_requested=(
-                current is not None and current["cancel_requested_at"] is not None
-            ),
+            cancel_requested=(current is not None and current["cancel_requested_at"] is not None),
             error_code=None if current is None else current["error_code"],
         )
 
@@ -326,6 +414,9 @@ class PostgresModelStateStore(LazyPool):
     ) -> ModelCancellation:
         pool = await self.pool()
         async with pool.acquire() as connection, connection.transaction():
+            await connection.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended($1,0))", f"model-budget:{tenant_id}"
+            )
             row = await connection.fetchrow(
                 """SELECT *,now() AS database_now FROM model_gateway.model_call
                 WHERE tenant_id=$1 AND model_call_id=$2 FOR UPDATE""",
@@ -345,10 +436,7 @@ class PostgresModelStateStore(LazyPool):
                 return ModelCancellation(status, False)
             if status == "reconciling":
                 return ModelCancellation(status, False, row["execution_owner"])
-            if (
-                row["claim_expires_at"] is None
-                or row["claim_expires_at"] <= row["database_now"]
-            ):
+            if row["claim_expires_at"] is None or row["claim_expires_at"] <= row["database_now"]:
                 await connection.execute(
                     """UPDATE model_gateway.model_call
                     SET status='reconciling',error_code='execution_owner_lost',
@@ -383,8 +471,12 @@ class PostgresModelStateStore(LazyPool):
     ) -> bool:
         pool = await self.pool()
         async with pool.acquire() as connection, connection.transaction():
+            await connection.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended($1,0))", f"model-budget:{tenant_id}"
+            )
             call = await connection.fetchrow(
-                """SELECT reserved_tokens,status FROM model_gateway.model_call
+                """SELECT reserved_tokens,status,run_id,cost_reservation
+                   FROM model_gateway.model_call
                 WHERE tenant_id=$1 AND model_call_id=$2 AND execution_owner=$3
                   AND claim_token=$4 AND claim_expires_at > now() FOR UPDATE""",
                 tenant_id,
@@ -398,6 +490,18 @@ class PostgresModelStateStore(LazyPool):
                 return True
             if call["status"] != "cancel_requested":
                 return False
+            if call["cost_reservation"] is not None:
+                reserved = dict(json_loads(call["cost_reservation"]))
+                cost = settled_cost(reserved, usage)
+                usage = {**usage, "cost": float(cost)}
+                await connection.execute(
+                    "UPDATE model_gateway.run_cost_budget SET cost_reserved=cost_reserved-$3, "
+                    "cost_used=cost_used+$4 WHERE tenant_id=$1 AND run_id=$2",
+                    tenant_id,
+                    call["run_id"],
+                    amount(reserved["reserved"]),
+                    cost,
+                )
             await connection.execute(
                 """UPDATE model_gateway.usage_budget SET
                 tokens_reserved=GREATEST(0,tokens_reserved-$2),

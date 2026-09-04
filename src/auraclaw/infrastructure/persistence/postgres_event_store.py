@@ -11,6 +11,7 @@ from uuid import uuid4
 from auraclaw.contracts.commands import CommandContext
 from auraclaw.contracts.errors import VersionConflictError
 from auraclaw.contracts.events import CanonicalEvent, NewEvent, utc_now
+from auraclaw.domain.runtime_budget import govern
 from auraclaw.infrastructure.persistence.memory_event_store import (
     CONTROL_TRIGGER_EVENTS,
     DELIVERY_TRIGGER_EVENTS,
@@ -225,6 +226,10 @@ class PostgresEventStore(LazyPool):
             await connection.execute(
                 "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", lock_key
             )
+            await connection.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+                f"runtime-budget:{context.tenant_id}:{root_session_id}",
+            )
             try:
                 previous = await connection.fetchrow(
                     """SELECT response FROM session_core.command_dedup
@@ -266,6 +271,39 @@ class PostgresEventStore(LazyPool):
                         f"expected Session version {context.expected_version}, got {actual_version}"
                     )
 
+                if any(
+                    e.type in {"run.requested", "child.created", "runtime.budget.reserved"}
+                    for e in events
+                ):
+                    from types import SimpleNamespace
+
+                    rows = await connection.fetch(
+                        "SELECT event_type,session_id,run_id,payload "
+                        "FROM session_core.canonical_event "
+                        "WHERE tenant_id=$1 AND root_session_id=$2 "
+                        "AND event_type IN ('run.requested','child.created',"
+                        "'runtime.budget.reserved',"
+                        "'model.turn.completed','tool.call.completed') "
+                        "ORDER BY occurred_at,aggregate_version",
+                        context.tenant_id,
+                        root_session_id,
+                    )
+                    root_events = [
+                        SimpleNamespace(
+                            type=r["event_type"],
+                            session_id=r["session_id"],
+                            run_id=r["run_id"],
+                            payload=json_loads(r["payload"]),
+                        )
+                        for r in rows
+                    ]
+                    events = govern(
+                        root_events,
+                        events,
+                        session_id=session_id,
+                        root_session_id=root_session_id,
+                        run_id=run_id,
+                    )
                 canonical: list[CanonicalEvent] = []
                 for offset, new_event in enumerate(events, start=1):
                     event = CanonicalEvent(

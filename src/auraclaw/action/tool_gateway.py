@@ -796,6 +796,8 @@ class ToolGateway:
             if not await store.mark_executing(invocation, claim_token=claim_token):
                 return self._claim_lost_result("before dispatch")
         result = await self._dispatch(invocation, capability, policy_decision_id=decision_id)
+        result = replace(result, metadata={**result.metadata,
+                         "dispatch_started": result.side_effect_status != "not_started"})
         if store is not None:
             if not await self._complete_claimed(invocation, result):
                 return ToolResult(

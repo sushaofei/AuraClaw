@@ -371,7 +371,7 @@ class PostgresControlStateStore(_LazyPool):
             AGENT_RUNTIME_POOL,
             item.role,
             _json({**item.required_capability, **(
-                {"budget_policy_v2": True} if item.budget.policy_version == "2" else {})}),
+                {"runtime_governance_v2": True} if item.budget.policy_version == "2" else {})}),
         )
         if row is None:
             return None
@@ -411,7 +411,8 @@ class PostgresControlStateStore(_LazyPool):
                         WHERE item.task_id=assignment.task_id
                           AND (COALESCE(item.budget->>'policy_version', '1')='1'
                                OR (item.budget->>'policy_version'='2'
-                                   AND runtime.capabilities @> '{"budget_policy_v2":true}'::jsonb))
+                                   AND runtime.capabilities
+                                       @> '{"runtime_governance_v2":true}'::jsonb))
                       )
                   )
                   AND EXISTS (

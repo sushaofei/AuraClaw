@@ -114,6 +114,7 @@ class RemoteModelClient:
             allowed_providers=request.policy.allowed_providers,
             data_classification=request.policy.data_classification,
             max_output_tokens=request.max_output_tokens,
+            run_max_cost=request.run_max_cost,
             runtime_metrics=request.runtime_metrics,
             prompt_cache_key=request.prompt_cache_key,
         )
