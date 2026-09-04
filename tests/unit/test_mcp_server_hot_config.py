@@ -1161,12 +1161,17 @@ def test_candidate_probe_uses_isolated_egress_with_active_authority() -> None:
         service.bind_runtime(manager)
         await service.create(_write(_config()))
         # A disabled server can be tested without publishing an active target.
-        assert (await service.test("local-order-mcp", _life(command_id="first-test"))).status.value == "succeeded"
+        first = await service.test("local-order-mcp", _life(command_id="first-test"))
+        assert first.status.value == "succeeded"
         assert not await service.active_snapshot()
         await service.enable("local-order-mcp", _life())
         active = adapters["mcp:local-order-mcp"]
-        await service.update(_write(_config(title="Candidate"), expected_revision=1, command_id="update"))
-        tested = await service.test("local-order-mcp", _life(expected_revision=2, command_id="candidate"))
+        await service.update(
+            _write(_config(title="Candidate"), expected_revision=1, command_id="update")
+        )
+        tested = await service.test(
+            "local-order-mcp", _life(expected_revision=2, command_id="candidate")
+        )
         assert tested.status.value == "succeeded", tested.result
         assert adapters["mcp:local-order-mcp"] is active
         assert (await service.active_snapshot())[0].revision == 1
