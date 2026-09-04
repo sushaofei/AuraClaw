@@ -118,3 +118,15 @@ def test_retry_after_does_not_retry_early_and_invalid_hint_is_ignored():
     assert wait_seconds(target, events, 'r', now) == 600
     events[-1].payload['result']['retry_after'] = 'NaN'
     assert wait_seconds(target, events, 'r', now) == 0
+
+
+def test_confirmed_workflow_write_invalidates_read_without_model_identity():
+    from datetime import timedelta
+    a, state, call = fixture()
+    target = repeat_target(a, call, state)
+    events = history(target, [{'status': 'success'}])
+    events.append(SimpleNamespace(type='tool.call.completed', run_id='r',
+        occurred_at=datetime.now(UTC) + timedelta(seconds=1), payload={
+            'tool_invocation_id': 'workflow-step', 'result': {'status': 'success',
+            'metadata': {'tool_permission': 'write-autonomous'}}}))
+    assert repeat_decision(a, call, target, events) is None

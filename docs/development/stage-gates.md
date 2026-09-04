@@ -3621,3 +3621,10 @@ Ruff、Mypy（248 文件）、10 条架构合同通过。迁移不适用，部�
 - [ ] 发布已提交的 AuraClaw/AuraX 产物，所有服务升级至0064兼容版本并通过健康检查。
 - [ ] 测试新Run启用v2，旧Run保留快照；新的只读真实会话验证用量、预留结算和重复反馈。
 - [ ] 记录发布证据与回滚操作，更新 #101 内容及最终状态。
+
+## Runtime刷新依赖边界补齐（#101）
+
+- [x] Gateway 按可信 ToolCapability 写入 tool_permission，覆盖下游同名元数据。
+- [x] Skill 工作流成功写入即使没有模型 repeat_identity，也使此前只读结果失效。
+- [x] 33项 Runtime/重复治理及26项 Tool安全/参数引导回归通过；Ruff/Mypy通过。
+- [x] 无DDL和权限绕过；本阶段提交推送，随联合测试发布更新 Hands/Runtime。

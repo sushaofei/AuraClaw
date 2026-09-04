@@ -271,10 +271,12 @@ def read_refresh_allowed(
         and e.run_id == source.run_id
         and e.occurred_at > source.occurred_at
         and e.payload.get("result", {}).get("status") == "success"
-        and requested.get(e.payload.get("tool_invocation_id"), {})
-        .get("repeat_identity", {})
-        .get("read_only")
-        is False
+        and (
+            e.payload.get("result", {}).get("metadata", {}).get("tool_permission")
+            in {"write-with-approval", "write-autonomous", "destructive/admin"}
+            or requested.get(e.payload.get("tool_invocation_id"), {})
+            .get("repeat_identity", {}).get("read_only") is False
+        )
         for e in events
     ):
         return True
