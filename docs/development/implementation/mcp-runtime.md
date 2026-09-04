@@ -183,3 +183,9 @@ MCP 配置功能的管理授权由 AuraAPI / ChainTower 等上游执行，AuraCl
 租户专属记录的归属、调用可见范围、可信断言、CAS、Policy 和 Vault/Egress 凭据隔离继续有效。
 这些是数据与执行边界，不是管理员角色。调整管理权限不能修改业务用户的 tenant/user/dept，
 不能为通过检查而把业务租户换成 `platform`。
+
+共享 Server 的 Vault 引用由 Egress Manager 登记在平台作用域。Credential Proxy 按已注册
+adapter 的 Server owner 和精确 credential_ref 读取引用，不能改按业务租户查找，也不允许
+“租户查不到就尝试平台”的通用回退。只有 owner 为空的共享 MCP 可使用平台引用；显式属于
+某租户（包括名称为 platform 的租户）的 Server 仍要求调用者匹配。审计与可信出站身份
+始终使用真实业务调用者。引用撤销、provider、origin/scope、操作范围、到期检查继续执行。
