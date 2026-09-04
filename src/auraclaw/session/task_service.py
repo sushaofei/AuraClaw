@@ -35,6 +35,7 @@ class TaskService:
         admission: AdmissionController,
         approvals: ApprovalViewReader | None = None,
         approval_notifier: HumanApprovalNotifier | None = None,
+        runtime_budget: dict[str, Any] | None = None,
     ) -> None:
         self._event_store = event_store
         self._relay = relay
@@ -42,6 +43,7 @@ class TaskService:
         self._admission = admission
         self._approvals = approvals
         self._approval_notifier = approval_notifier
+        self._runtime_budget = dict(runtime_budget) if runtime_budget else None
 
     async def create_task(
         self,
@@ -71,6 +73,7 @@ class TaskService:
             schedule_id=schedule_id,
             occurrence_id=occurrence_id,
             approval=approval,
+            runtime_budget=self._runtime_budget,
         )
         response = {
             "session_id": session_id,
@@ -158,7 +161,8 @@ class TaskService:
         session = await self._load(context.tenant_id, session_id)
         run_id = f"run_{uuid4().hex}"
         session.request_run(
-            run_id, approval_mode, command_id=context.command_id, request_fingerprint=fingerprint
+            run_id, approval_mode, command_id=context.command_id, request_fingerprint=fingerprint,
+            runtime_budget=self._runtime_budget
         )
         response = {
             "session_id": session_id,

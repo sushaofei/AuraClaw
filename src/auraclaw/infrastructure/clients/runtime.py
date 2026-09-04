@@ -406,6 +406,7 @@ class RemoteRuntimeControlClient:
                 context=_context("system", f"register:{self.runtime_id}", self.runtime_id),
                 runtime_id=self.runtime_id,
                 runtime_type="agent",
+                capabilities={"budget_policy_v2": True},
                 role=self.role,
                 node_id=self.node_id,
                 capacity=self.capacity,
@@ -455,6 +456,7 @@ class RemoteRuntimeControlClient:
                 budget=RuntimeBudget(
                     max_steps=int(budget.get("max_steps", DEFAULT_RUNTIME_MAX_STEPS)),
                     max_output_tokens=int(budget.get("max_output_tokens", 8192)),
+                    policy_version=str(budget.get("policy_version", "1")),
                     max_cost=(
                         float(budget["max_cost"])
                         if budget.get("max_cost") is not None

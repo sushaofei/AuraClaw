@@ -1454,3 +1454,125 @@ def test_stopped_run_reconciles_original_write_without_model_or_business_call(st
         assert sum(e.type == "skill.cancelled" for e in session.events) == 1
 
     asyncio.run(scenario())
+
+
+def test_v2_repeated_read_is_not_dispatched_and_can_finish_normally() -> None:
+    async def scenario() -> None:
+        capabilities = _Capabilities()
+        calls = [
+            ToolCall("search-v2", "auraclaw.capabilities.search", {"query": "github"}),
+            ToolCall("load-v2", "auraclaw.capabilities.load", {"capability_ids": ["cap-one"]}),
+            *[ToolCall(f"read-v2-{i}", "github.issue.get", {"number": 31}) for i in range(4)],
+        ]
+        model = _ScriptedModel([*[_response("", call) for call in calls],
+                                _response("Issue 31 was retrieved; repeated reads were skipped.")])
+        control, session = _Control(), _Session("Inspect issue 31")
+        harness = AgentHarness(control_store=control, session=session, model=model,
+                               tools=capabilities, runtime_events=_RuntimeEvents(),
+                               capability_controller=RuntimeCapabilityController(capabilities))
+        assignment = replace(_assignment(role="root"), budget=RuntimeBudget(
+            max_steps=48, max_output_tokens=8192, policy_version="2"))
+        await harness.execute(assignment)
+        assert capabilities.calls.count("github.issue.get") == 1
+        results = [e.payload["result"] for e in session.events if e.type == "tool.call.completed"
+                   and e.payload["name"] == "github.issue.get"]
+        assert len(results) == 4
+        assert all(r["status"] == "denied" and r["side_effect_status"] == "not_started"
+                   for r in results[1:])
+        assert results[-1]["metadata"]["source_invocation_id"] == "read-v2-0"
+        assert control.outcome == "completed"
+
+    asyncio.run(scenario())
+
+
+def test_v2_repeated_read_loop_concludes_with_partial_results_within_budget() -> None:
+    async def scenario() -> None:
+        capabilities = _Capabilities()
+        calls = [
+            ToolCall("search-v2", "auraclaw.capabilities.search", {"query": "github"}),
+            ToolCall("load-v2", "auraclaw.capabilities.load", {"capability_ids": ["cap-one"]}),
+            *[ToolCall(f"read-v2-{i}", "github.issue.get", {"number": 31}) for i in range(9)],
+        ]
+        model = _ScriptedModel([*[_response("", call) for call in calls],
+                                _response("Partial: issue retrieved. Repeated queries stopped.")])
+        control, session = _Control(), _Session("Inspect issue 31")
+        harness = AgentHarness(control_store=control, session=session, model=model,
+                               tools=capabilities, runtime_events=_RuntimeEvents(),
+                               capability_controller=RuntimeCapabilityController(capabilities))
+        assignment = replace(_assignment(role="root"), budget=RuntimeBudget(
+            max_steps=48, max_output_tokens=8192, policy_version="2"))
+        with pytest.raises(RuntimeNoProgressError) as error:
+            await harness.execute(assignment)
+        await harness.record_failure(assignment, error.value)
+        assert not model.requests[-1].tools
+        assert capabilities.calls.count("github.issue.get") == 1
+        assert control.checkpoint.state["steps_used"] < 48
+        assert any(e.type == "model.output.completed" and e.payload.get("partial")
+                   for e in session.events)
+        assert not any(e.type == "run.completed" for e in session.events)
+        failure = next(e for e in session.events if e.type == "run.failed")
+        assert "read-v2-0" in failure.payload["error_details"]["successful_tool_invocation_ids"]
+
+    asyncio.run(scenario())
+
+
+def test_last_step_checkpoint_recovery_settles_result_before_budget_stop() -> None:
+    from auraclaw.contracts.errors import RuntimeStepBudgetExceededError
+
+    async def scenario() -> None:
+        capabilities = _Capabilities()
+        model = _ScriptedModel([
+            _response("", ToolCall("search-boundary", "auraclaw.capabilities.search",
+                                    {"query": "github"})),
+            _response("", ToolCall("load-boundary", "auraclaw.capabilities.load",
+                                    {"capability_ids": ["cap-one"]})),
+            _response("", ToolCall("read-boundary", "github.issue.get", {"number": 31})),
+        ])
+        control, session = _Control(), _Session("Inspect issue")
+        crashed = False
+
+        def crash(point):
+            nonlocal crashed
+            if (point == InjectionPoint.AFTER_TOOL and not crashed
+                    and control.checkpoint.state.get("tool_invocation_id") == "read-boundary"):
+                crashed = True
+                raise RuntimeError("crash after last step checkpoint")
+
+        harness = AgentHarness(control_store=control, session=session, model=model,
+                               tools=capabilities, runtime_events=_RuntimeEvents(),
+                               capability_controller=RuntimeCapabilityController(capabilities),
+                               failure_injector=crash)
+        assignment = replace(_assignment(role="root"), budget=RuntimeBudget(
+            max_steps=6, max_output_tokens=8192, policy_version="2"))
+        with pytest.raises(RuntimeError, match="crash after last step"):
+            await harness.execute(assignment)
+        assert not any(e.type == "tool.call.completed"
+                       and e.payload["tool_invocation_id"] == "read-boundary"
+                       for e in session.events)
+        with pytest.raises(RuntimeStepBudgetExceededError):
+            await harness.execute(assignment)
+        assert capabilities.calls.count("github.issue.get") == 1
+        assert sum(e.type == "tool.call.completed"
+                   and e.payload["tool_invocation_id"] == "read-boundary"
+                   for e in session.events) == 1
+        assert control.checkpoint.state["steps_used"] == 6
+        assert len(model.requests) == 3
+
+    asyncio.run(scenario())
+
+
+def test_v2_cost_limit_without_priced_reservation_does_not_start_model() -> None:
+    from auraclaw.contracts.errors import RuntimeCostReservationUnavailableError
+
+    async def scenario() -> None:
+        capabilities, model = _Capabilities(), _ScriptedModel([])
+        harness = AgentHarness(control_store=_Control(), session=_Session("Cost limited"),
+                               model=model, tools=capabilities, runtime_events=_RuntimeEvents(),
+                               capability_controller=RuntimeCapabilityController(capabilities))
+        assignment = replace(_assignment(role="root"), budget=RuntimeBudget(
+            max_cost=1.0, policy_version="2"))
+        with pytest.raises(RuntimeCostReservationUnavailableError):
+            await harness.execute(assignment)
+        assert not model.requests
+
+    asyncio.run(scenario())

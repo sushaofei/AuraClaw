@@ -252,6 +252,7 @@ class RunnableFeedConsumer:
             budget = RuntimeBudget(
                 max_steps=int(configured.get("max_steps", DEFAULT_RUNTIME_MAX_STEPS)),
                 max_output_tokens=int(configured.get("max_output_tokens", 8192)),
+                policy_version=str(configured.get("policy_version", "1")),
                 max_cost=(
                     float(configured["max_cost"])
                     if configured.get("max_cost") is not None
@@ -292,6 +293,7 @@ class RunnableFeedConsumer:
                     budget = RuntimeBudget(
                         max_steps=int(configured.get("max_steps", DEFAULT_RUNTIME_MAX_STEPS)),
                         max_output_tokens=int(configured.get("max_output_tokens", 8192)),
+                        policy_version=str(configured.get("policy_version", "1")),
                         max_cost=(
                             float(configured["max_cost"])
                             if configured.get("max_cost") is not None
@@ -302,6 +304,15 @@ class RunnableFeedConsumer:
                 dependencies = list(event.payload.get("dependency_ids", ()))
             elif event.type in {"run.requested", "session.resumed"}:
                 run_id = str(event.payload["run_id"])
+                configured = event.payload.get("budget")
+                if isinstance(configured, dict):
+                    budget = RuntimeBudget(
+                        max_steps=int(configured.get("max_steps", DEFAULT_RUNTIME_MAX_STEPS)),
+                        max_output_tokens=int(configured.get("max_output_tokens", 8192)),
+                        max_cost=(float(configured["max_cost"])
+                                  if configured.get("max_cost") is not None else None),
+                        policy_version=str(configured.get("policy_version", "1")),
+                    )
             elif event.type in {"run.completed", "run.failed", "run.cancelled"}:
                 if event.run_id is not None:
                     terminal_runs.add(event.run_id)
@@ -351,6 +362,7 @@ class RunnableFeedConsumer:
                 runtime_budgets[event.session_id] = RuntimeBudget(
                     max_steps=int(configured.get("max_steps", DEFAULT_RUNTIME_MAX_STEPS)),
                     max_output_tokens=int(configured.get("max_output_tokens", 8192)),
+                    policy_version=str(configured.get("policy_version", "1")),
                     max_cost=(
                         float(configured["max_cost"])
                         if configured.get("max_cost") is not None

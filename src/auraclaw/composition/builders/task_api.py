@@ -95,6 +95,8 @@ def build_task_api_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
     approval_projection = PostgresApprovalProjection(settings.resolved_database_url)
     collaboration_projection = PostgresCollaborationProjection(settings.resolved_database_url)
     task_service = TaskService(
+        runtime_budget={"max_steps": 48, "max_output_tokens": 8192,
+                        "policy_version": settings.runtime_budget_policy_version},
         event_store=remote_session,
         relay=NoOpOutboxRelay(),
         reader=task_projection,

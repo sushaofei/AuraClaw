@@ -90,6 +90,7 @@ class PostgresControlStateStore(_LazyPool):
                     "max_steps": item.budget.max_steps,
                     "max_output_tokens": item.budget.max_output_tokens,
                     "max_cost": item.budget.max_cost,
+                    "policy_version": item.budget.policy_version,
                 }
             ),
         )
@@ -369,7 +370,8 @@ class PostgresControlStateStore(_LazyPool):
             LIMIT 1""",
             AGENT_RUNTIME_POOL,
             item.role,
-            _json(item.required_capability),
+            _json({**item.required_capability, **(
+                {"budget_policy_v2": True} if item.budget.policy_version == "2" else {})}),
         )
         if row is None:
             return None
@@ -404,6 +406,13 @@ class PostgresControlStateStore(_LazyPool):
                     WHERE runtime.runtime_id=$1 AND runtime.role=$2
                       AND runtime.registration_id=$3
                       AND runtime.status='ready'
+                      AND EXISTS (
+                        SELECT 1 FROM control.runnable_item item
+                        WHERE item.task_id=assignment.task_id
+                          AND (COALESCE(item.budget->>'policy_version', '1')='1'
+                               OR (item.budget->>'policy_version'='2'
+                                   AND runtime.capabilities @> '{"budget_policy_v2":true}'::jsonb))
+                      )
                   )
                   AND EXISTS (
                     SELECT 1 FROM control.runtime_lease lease
@@ -995,5 +1004,6 @@ class PostgresControlStateStore(_LazyPool):
         return RuntimeBudget(
             max_steps=int(values.get("max_steps", DEFAULT_RUNTIME_MAX_STEPS)),
             max_output_tokens=int(values.get("max_output_tokens", 8192)),
+            policy_version=str(values.get("policy_version", "1")),
             max_cost=float(values["max_cost"]) if values.get("max_cost") is not None else None,
         )

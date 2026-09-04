@@ -79,6 +79,11 @@ class RuntimeCostBudgetExceededError(BudgetExceededError):
     code = "runtime_cost_budget_exceeded"
 
 
+class RuntimeCostReservationUnavailableError(AuraClawError):
+    code = "runtime_cost_reservation_unavailable"
+    status_code = 409
+
+
 class RuntimeDeadlineExceededError(AuraClawError):
     code = "runtime_deadline_exceeded"
     status_code = 409
