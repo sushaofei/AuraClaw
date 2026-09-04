@@ -1,6 +1,6 @@
 # Runtime 预算与重复调用治理改善方案
 
-状态：A–F 实现已完成，联合发布验收中，跟踪 #101。v2 仅对新 Run 启用；已有 Run 保持原快照。
+状态：A–F 已实现并通过联合测试发布验收，跟踪 #101。v2 仅对新 Run 启用；已有 Run 保持原快照。
 范围：AuraClaw Runtime/Control/Model Gateway/Session 投影，以及 AuraX 运行进度与结束原因展示。
 关联：#93 调用稳定性、#96 执行收尾与恢复、#100 可信身份。
 
@@ -37,7 +37,7 @@ runtime_budget_exceeded，导致误诊。当前 model.call 和工具执行各计
 - model_turn：一个新的模型调用计一次；恢复同一个已完成model_call_id不重复计数。
 - tool_attempt：模型提出且进入执行决策的一次调用计一次，包括本地校验失败、去重拦截。
   旧实现对执行前重复拦截未计数，迁移时以budget_policy_version区分，不改旧统计。
-- tool_dispatch：实际进入外部执行的一次调用；同一次在途请求恢复不重复dispatch或计数。
+- tool_dispatch：实际进入工具执行器的一次调用（包括发现/加载类工具）；同一次在途请求恢复不重复dispatch或计数。
 - 累计输出token包含本Run所有模型轮次，包括最终总结和工具调用参数；输入token独立记录。
 - Model Gateway 支持可信价格快照、Decimal 金额预留/结算。未配置价格或缺少最终输入/输出用量时 fail closed；未知消费保留预留，不当零。价格货币与 Run 限额必须一致。
 - deadline、用户取消、lease失效、预算耗尽分别处理；等待审批不消耗模型/工具次数，墙钟deadline继续有效。
@@ -305,3 +305,27 @@ Java输出契约问题/无效循环；不再让用户误以为21/48步、1303/81
 测试入口：test_runtime_budget_ledger、test_runtime_repeat_policy、test_m11_capability_agent_loop、
 PostgreSQL test_runtime_cost_ledger；同时复跑原 Model 多副本和 Control 门禁集成。
 所有业务复现使用 fixture 或新只读 Session，不重放历史测试 Run。
+
+
+### 联合发布验收结果
+
+2026-09-04 已发布：数据库0064；基础服务 `budget-d2df425`，Hands/Runtime
+`budget-0e74e1f`，Projection Worker `budget-befc14e`；AuraX `9a6500f`，
+Web资源 `index-eiDtxA0F.js`。测试新Run policy_version=2；所有相关副本健康，
+后端与AuraX上游ready均200。最终默认镜像固定为 `budget-befc14e`。
+
+- `ses_167f235ec7794a7f916c981002efaff2`：两次相同发现请求，首次成功、第二次
+  `tool_repeat_suppressed / existing_read_result`；源调用引用存在；3轮模型、2次工具尝试、
+  1次工具执行，5/48步、602/8192输出token、预留0，正常结束。
+- `ses_37063c8000f44137a74734611375bdd5`：Java MCP返回错误/未知后的重试被抑制，
+  11/48步、1078/8192 token、预留0；未误报预算耗尽。此记录不代表Java业务查询成功。
+- `ses_5e86a0448ef448079e4c0bcd6077f100`：对指定PLANNED参数先检查当前Schema后停止，
+  未强行执行不符合当前契约的业务查询；5步、625输出token、预留0。
+- `ses_2b1e3ae540d7494f925e4bf622e84084`：1次模型完成，分布式worker自动落库
+  1条 `runtime.budget.model.reserved.count`。发布验收发现单体/分布式观测接线差异后已补齐，
+  不以手工补写指标替代自动链路验收。
+
+全量unit通过（1 skipped）；最后工作流依赖与指标接线补丁分别59/37项回归通过。
+PostgreSQL9项集成、Ruff/Mypy259文件/10条架构合同、AuraX55项SDK测试、类型检查、
+2项Playwright及截图检查通过。前端5项既有Hook警告保留。
+真实费率未配置且max_cost默认空；金额预留/未知消费使用隔离TEST费率验证，未虚构真实价格。
