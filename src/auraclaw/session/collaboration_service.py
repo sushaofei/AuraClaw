@@ -59,7 +59,7 @@ class CollaborationService:
                 or existing.output_contract != spec.output_contract
                 or existing.dependency_ids != spec.dependency_ids
                 or existing.budget != spec.budget
-                or existing.runtime_budget != spec.runtime_budget
+                or not _same_child_budget(existing.runtime_budget, spec.runtime_budget)
             ):
                 raise CollaborationValidationError(
                     "existing child task_key was reused with a different specification"
@@ -487,3 +487,11 @@ class ReviewerRole:
 
     async def publish(self, **kwargs: Any) -> dict[str, Any]:
         return await self._service.publish_review(**kwargs)
+
+
+def _same_child_budget(stored: dict[str, Any], requested: dict[str, Any]) -> bool:
+    if stored.get("policy_version") != "2":
+        return stored == requested
+    expected = {"max_steps": 48, "max_output_tokens": 8192, **requested}
+    actual = {k: v for k, v in stored.items() if k not in {"policy_version", "scope_id"}}
+    return actual == expected

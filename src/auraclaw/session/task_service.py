@@ -9,7 +9,12 @@ from uuid import uuid4
 
 from auraclaw.contracts.approval_mode import ApprovalConfiguration, ApprovalMode, InteractionMode
 from auraclaw.contracts.commands import CommandContext
-from auraclaw.contracts.errors import NotFoundError, VersionConflictError
+from auraclaw.contracts.errors import (
+    CollaborationValidationError,
+    NotFoundError,
+    VersionConflictError,
+)
+from auraclaw.contracts.runtime_options import ReadRefreshGrant
 from auraclaw.domain.approval import ApprovalAggregate
 from auraclaw.domain.session import SessionAggregate
 from auraclaw.projection.ports import ApprovalViewReader, TaskReader
@@ -45,6 +50,17 @@ class TaskService:
         self._approval_notifier = approval_notifier
         self._runtime_budget = dict(runtime_budget) if runtime_budget else None
 
+    def _refresh_snapshots(self, grants: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+        if grants and (self._runtime_budget or {}).get("policy_version") != "2":
+            raise CollaborationValidationError("read refresh requires runtime budget policy v2")
+        if grants and (
+            len(grants) > 8 or len({g.get("capability_id") for g in grants}) != len(grants)
+        ):
+            raise CollaborationValidationError(
+                "at most eight distinct read refresh grants are allowed"
+            )
+        return [ReadRefreshGrant.model_validate(g).snapshot() for g in grants or []]
+
     async def create_task(
         self,
         *,
@@ -55,6 +71,7 @@ class TaskService:
         occurrence_id: str | None = None,
         interaction_mode: InteractionMode | None = None,
         approval_mode: ApprovalMode | None = None,
+        read_refresh: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         interaction = interaction_mode or (
             InteractionMode.NON_STREAMING if source == "schedule" else InteractionMode.STREAMING
@@ -74,6 +91,7 @@ class TaskService:
             occurrence_id=occurrence_id,
             approval=approval,
             runtime_budget=self._runtime_budget,
+            read_refresh=self._refresh_snapshots(read_refresh),
         )
         response = {
             "session_id": session_id,
@@ -87,6 +105,7 @@ class TaskService:
                         "schedule_id": schedule_id,
                         "occurrence_id": occurrence_id,
                         **approval.public_dict(),
+                        **({"read_refresh": read_refresh} if read_refresh else {}),
                     },
                     sort_keys=True,
                 ).encode()
@@ -136,11 +155,21 @@ class TaskService:
         return result.command_result
 
     async def request_run(
-        self, *, session_id: str, context: CommandContext, approval_mode: ApprovalMode | None = None
+        self,
+        *,
+        session_id: str,
+        context: CommandContext,
+        approval_mode: ApprovalMode | None = None,
+        read_refresh: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         fingerprint = hashlib.sha256(
             json.dumps(
-                {"session_id": session_id, "approval_mode": approval_mode}, sort_keys=True
+                {
+                    "session_id": session_id,
+                    "approval_mode": approval_mode,
+                    **({"read_refresh": read_refresh} if read_refresh else {}),
+                },
+                sort_keys=True,
             ).encode()
         ).hexdigest()
         for event in await self._event_store.load(
@@ -161,8 +190,12 @@ class TaskService:
         session = await self._load(context.tenant_id, session_id)
         run_id = f"run_{uuid4().hex}"
         session.request_run(
-            run_id, approval_mode, command_id=context.command_id, request_fingerprint=fingerprint,
-            runtime_budget=self._runtime_budget
+            run_id,
+            approval_mode,
+            command_id=context.command_id,
+            request_fingerprint=fingerprint,
+            runtime_budget=self._runtime_budget,
+            read_refresh=self._refresh_snapshots(read_refresh),
         )
         response = {
             "session_id": session_id,

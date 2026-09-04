@@ -10,6 +10,7 @@ from uuid import uuid4
 from auraclaw.contracts.commands import CommandContext
 from auraclaw.contracts.errors import VersionConflictError
 from auraclaw.contracts.events import CanonicalEvent, NewEvent, utc_now
+from auraclaw.domain.runtime_budget import govern
 from auraclaw.domain.skill_execution import has_active_skill_reference
 from auraclaw.session.ports import AppendResult, ClaimedOutboxRecord, SessionSnapshot
 
@@ -175,6 +176,11 @@ class InMemoryEventStore:
                     f"expected Session version {context.expected_version}, got {len(stream)}"
                 )
 
+            root_events = [e for (tenant, _), rows in self._streams.items()
+                           if tenant == context.tenant_id for e in rows
+                           if e.root_session_id == root_session_id]
+            events = govern(root_events, events, session_id=session_id,
+                            root_session_id=root_session_id, run_id=run_id)
             canonical: list[CanonicalEvent] = []
             for offset, event in enumerate(events, start=1):
                 stored = CanonicalEvent(

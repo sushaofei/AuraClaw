@@ -21,6 +21,7 @@ class TaskCommandGateway:
         occurrence_id: str | None = None,
         interaction_mode: InteractionMode | None = None,
         approval_mode: ApprovalMode | None = None,
+        read_refresh: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         return await self._service.create_task(
             goal=goal,
@@ -30,6 +31,7 @@ class TaskCommandGateway:
             occurrence_id=occurrence_id,
             interaction_mode=interaction_mode,
             approval_mode=approval_mode,
+            read_refresh=read_refresh,
         )
 
     async def append_message(
@@ -40,10 +42,18 @@ class TaskCommandGateway:
         )
 
     async def request_run(
-        self, *, session_id: str, context: CommandContext, approval_mode: ApprovalMode | None = None
+        self,
+        *,
+        session_id: str,
+        context: CommandContext,
+        approval_mode: ApprovalMode | None = None,
+        read_refresh: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         return await self._service.request_run(
-            session_id=session_id, context=context, approval_mode=approval_mode
+            session_id=session_id,
+            context=context,
+            approval_mode=approval_mode,
+            read_refresh=read_refresh,
         )
 
     async def cancel_task(

@@ -141,7 +141,7 @@ async def test_policy_deny_releases_parallel_reservation() -> None:
         async for _ in service.generate_stream(_request()):
             pass
     assert state.reserved is True
-    assert state.failed == "PolicyDeniedError"
+    assert state.failed == "policy_rejected_before_dispatch"
 
 
 @pytest.mark.asyncio
@@ -497,3 +497,14 @@ async def test_openai_compatible_prewarm_creates_client() -> None:
     mock_client.get.assert_awaited()
     assert provider._client is mock_client
     await provider.aclose()
+
+
+@pytest.mark.asyncio
+async def test_missing_price_rejects_before_provider_or_reservation():
+    from auraclaw.contracts.errors import RuntimeCostReservationUnavailableError
+    state = _State()
+    service = ModelGatewayInternalService(_StreamingModel(), state=state)
+    with pytest.raises(RuntimeCostReservationUnavailableError):
+        async for _ in service.generate_stream(_request().model_copy(update={'run_max_cost': 1})):
+            pytest.fail('unpriced request must not emit provider output')
+    assert not state.reserved

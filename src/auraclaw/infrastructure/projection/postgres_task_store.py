@@ -55,6 +55,7 @@ class PostgresTaskProjection(LazyPool):
                     view["error"] = json_loads(row["error"])
                     view["approval"] = json_loads(row["approval"])
                     view["skill_activations"] = json_loads(row["skill_activations"])
+                    view["runtime_budget"] = json_loads(row["runtime_budget"])
                 current_version = int(view["projection_version"])
                 if event.aggregate_version != current_version + 1:
                     raise ProjectionGapError(
@@ -72,11 +73,12 @@ class PostgresTaskProjection(LazyPool):
                      result_summary, result_ref,
                      artifact_refs, error, delivery_status, delivery_id,
                      delivery_attempt_count, delivery_response_summary,
-                     skill_activations, source_version, source_event_id, projected_at, approval)
+                     skill_activations, source_version, source_event_id, projected_at,
+                     approval, runtime_budget)
                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16::jsonb,
-                            $17::jsonb,$18::jsonb,$19,$20,$21,$22,$23::jsonb,$24,$25,$26,$27::jsonb)
+                            $17::jsonb,$18::jsonb,$19,$20,$21,$22,$23::jsonb,$24,$25,$26,$27::jsonb,$28::jsonb)
                     ON CONFLICT (tenant_id, session_id) DO UPDATE SET
-                      approval=EXCLUDED.approval,
+                      approval=EXCLUDED.approval, runtime_budget=EXCLUDED.runtime_budget,
                       run_id=EXCLUDED.run_id, status=EXCLUDED.status, goal=EXCLUDED.goal,
                       source=EXCLUDED.source, schedule_id=EXCLUDED.schedule_id,
                       occurrence_id=EXCLUDED.occurrence_id,
@@ -120,6 +122,7 @@ class PostgresTaskProjection(LazyPool):
                     event.event_id,
                     event.occurred_at,
                     json_dumps(view.get("approval", {})),
+                    json_dumps(view.get("runtime_budget", {})),
                 )
                 await connection.execute(
                     """INSERT INTO projection.projector_checkpoint
@@ -224,6 +227,11 @@ class PostgresTaskProjection(LazyPool):
             "result_ref": json_loads(row["result_ref"]),
             "artifact_refs": list(json_loads(row["artifact_refs"])),
             "error": json_loads(row["error"]),
+            "runtime_budget": {
+                k: v
+                for k, v in json_loads(row.get("runtime_budget", "{}")).items()
+                if not k.startswith("_")
+            },
             "delivery_status": row["delivery_status"],
             "delivery_id": row["delivery_id"],
             "delivery_attempt_count": int(row["delivery_attempt_count"]),

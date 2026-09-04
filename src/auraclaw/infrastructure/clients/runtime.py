@@ -406,7 +406,7 @@ class RemoteRuntimeControlClient:
                 context=_context("system", f"register:{self.runtime_id}", self.runtime_id),
                 runtime_id=self.runtime_id,
                 runtime_type="agent",
-                capabilities={"budget_policy_v2": True},
+                capabilities={"runtime_governance_v2": True},
                 role=self.role,
                 node_id=self.node_id,
                 capacity=self.capacity,

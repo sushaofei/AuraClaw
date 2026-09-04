@@ -33,9 +33,7 @@ class ObservabilityStore(Protocol):
 
     async def metric_snapshot(self) -> list[MetricPoint]: ...
 
-    async def metric_summary(
-        self, tenant_id: str, *, window_hours: int
-    ) -> list[MetricSummary]: ...
+    async def metric_summary(self, tenant_id: str, *, window_hours: int) -> list[MetricSummary]: ...
 
 
 class EventReader(Protocol):
@@ -161,9 +159,7 @@ class ObservabilityService:
         rule = self.ALERT_RULES.get(name)
         if rule is not None and value > rule[0]:
             threshold, severity, summary = rule
-            identity = ":".join(
-                (name, point.tenant_id or "global", point.session_id or "global")
-            )
+            identity = ":".join((name, point.tenant_id or "global", point.session_id or "global"))
             digest = hashlib.sha256(identity.encode()).hexdigest()[:24]
             await self._store.write_alert(
                 Alert(
@@ -251,14 +247,10 @@ class ObservabilityService:
     async def metrics(self) -> list[MetricPoint]:
         return await self._store.metric_snapshot()
 
-    async def metric_summary(
-        self, tenant_id: str, *, window_hours: int
-    ) -> list[MetricSummary]:
+    async def metric_summary(self, tenant_id: str, *, window_hours: int) -> list[MetricSummary]:
         if window_hours < 1 or window_hours > 720:
             raise ValueError("metric summary window must be between 1 and 720 hours")
-        return await self._store.metric_summary(
-            tenant_id, window_hours=window_hours
-        )
+        return await self._store.metric_summary(tenant_id, window_hours=window_hours)
 
     @staticmethod
     def _as_mapping(value: Any) -> dict[str, Any]:
@@ -272,8 +264,15 @@ class ObservabilityService:
     @staticmethod
     def _correlation(item: Mapping[str, Any]) -> dict[str, Any]:
         keys: Sequence[str] = (
-            "trace_id", "root_session_id", "session_id", "run_id", "event_id",
-            "command_id", "tool_invocation_id", "delivery_id", "approval_id",
+            "trace_id",
+            "root_session_id",
+            "session_id",
+            "run_id",
+            "event_id",
+            "command_id",
+            "tool_invocation_id",
+            "delivery_id",
+            "approval_id",
         )
         return {key: item[key] for key in keys if item.get(key) is not None}
 
@@ -363,6 +362,32 @@ class ObservabilityProjector:
                 metadata=event.payload,
                 audit_id=f"aud_{digest}",
             )
+        metric_name = None
+        if event.type == "runtime.budget.reserved":
+            kind = event.payload.get("kind")
+            if kind in {"model", "tool"}:
+                metric_name = f"runtime.budget.{kind}.reserved.count"
+        elif event.type == "tool.call.completed":
+            result = event.payload.get("result", {})
+            if result.get("error_code") == "tool_repeat_suppressed":
+                metric_name = "runtime.repeat.suppressed.count"
+            elif result.get("metadata", {}).get("dispatch_started") is True:
+                metric_name = "runtime.tool.dispatched.count"
+        elif event.type == "run.failed":
+            code = event.payload.get("error_code")
+            if code in {
+                "runtime_step_budget_exceeded",
+                "runtime_output_token_budget_exceeded",
+                "runtime_cost_budget_exceeded",
+                "runtime_deadline_exceeded",
+                "runtime_no_progress_detected",
+                "runtime_cost_reservation_unavailable",
+            }:
+                metric_name = f"runtime.stop.{code}.count"
+        if metric_name is not None:
+            await self._service.metric(
+                metric_name, 1, context=context, deduplication_key=f"{event.event_id}:{metric_name}"
+            )
         if event.type == "runtime.reprovisioned":
             await self._service.metric(
                 "runtime.lease_lost.count",
@@ -385,9 +410,7 @@ class ObservabilityProjector:
                 "skill.runtime.prompt.rejected.count",
                 1,
                 context=context,
-                deduplication_key=(
-                    f"{event.event_id}:skill.runtime.prompt.rejected.count"
-                ),
+                deduplication_key=(f"{event.event_id}:skill.runtime.prompt.rejected.count"),
             )
         result = event.payload.get("result")
         if (

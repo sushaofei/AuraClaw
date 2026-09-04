@@ -173,7 +173,7 @@ def test_postgres_control_claim_lease_fencing_checkpoint_and_capacity(policy_ver
                 assert await store_a.select_runtime(item) is None
                 assert await store_a.claim_assignments(runtime.runtime_id, runtime.role) == []
                 await store_a.register_runtime(replace(
-                    runtime, capabilities={"budget_policy_v2": True}))
+                    runtime, capabilities={"runtime_governance_v2": True}))
                 # Assigned capacity is already reserved.
                 assert (await store_a.select_runtime(item)) is None
             claimed_assignments = await store_a.claim_assignments(

@@ -1,19 +1,29 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import UTC, datetime
 from typing import Any
 
 from auraclaw.contracts.errors import CollaborationValidationError
 from auraclaw.control.ports import RuntimeAssignment, RuntimeCheckpoint
+from auraclaw.runtime.event_committer import CanonicalEventCommitter
 from auraclaw.runtime.execution_state import RuntimePhase
-from auraclaw.runtime.ports import RuntimeControlClient
+from auraclaw.runtime.ports import RuntimeControlClient, SessionClient
 
 
 class RuntimeProgressStore:
     """Own persisted checkpoint and assignment-suspension commit boundaries."""
 
-    def __init__(self, control: RuntimeControlClient) -> None:
+    def __init__(
+        self,
+        control: RuntimeControlClient,
+        session: SessionClient | None = None,
+        committer: CanonicalEventCommitter | None = None,
+    ) -> None:
         self._control = control
+        self._session = session
+        self._committer = committer
 
     async def save_checkpoint(
         self,
@@ -21,6 +31,31 @@ class RuntimeProgressStore:
         phase: RuntimePhase,
         state: dict[str, Any],
     ) -> None:
+        if (
+            assignment.budget.policy_version == "2"
+            and self._session is not None
+            and self._committer is not None
+        ):
+            encoded = json.dumps(
+                {"phase": phase.value, "state": state},
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            )
+            identity = hashlib.sha256(encoded.encode()).hexdigest()
+            events = await self._session.load(assignment)
+            await self._committer.append_once(
+                assignment,
+                events,
+                "runtime.progress.recorded",
+                {
+                    "checkpoint_id": identity,
+                    "phase": phase.value,
+                    "state": json.loads(encoded)["state"],
+                },
+                identity=identity,
+                recovery=True,
+            )
         await self._control.save_checkpoint(
             RuntimeCheckpoint(
                 tenant_id=assignment.tenant_id,
@@ -53,6 +88,8 @@ class RuntimeProgressStore:
             state={**state, "waiting_child_ids": list(waiting)},
             updated_at=datetime.now(UTC),
         )
+        if assignment.budget.policy_version == "2":
+            await self.save_checkpoint(assignment, RuntimePhase(checkpoint.phase), checkpoint.state)
         await self._control.suspend_with_checkpoint(
             self.task_id(assignment), checkpoint, "waiting_children"
         )

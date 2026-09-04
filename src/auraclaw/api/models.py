@@ -5,9 +5,11 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from auraclaw.contracts.approval_mode import ApprovalConfiguration, ApprovalMode, InteractionMode
+from auraclaw.contracts.runtime_options import ReadRefreshGrant
 
 
 class CreateTaskRequest(BaseModel):
+    read_refresh: list[ReadRefreshGrant] = Field(default_factory=list, max_length=8)
     interaction_mode: InteractionMode | None = None
     approval_mode: ApprovalMode | None = None
     goal: str = Field(min_length=1, max_length=100_000)
@@ -26,6 +28,7 @@ class CreateTaskRequest(BaseModel):
 
 
 class RequestRunRequest(BaseModel):
+    read_refresh: list[ReadRefreshGrant] = Field(default_factory=list, max_length=8)
     model_config = ConfigDict(extra="forbid")
     approval_mode: ApprovalMode | None = None
 
@@ -96,6 +99,12 @@ class TaskView(ApprovalConfiguration):
     result_ref: str | None
     artifact_refs: list[Any]
     error: dict[str, Any] | None
+    runtime_budget: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("runtime_budget", mode="before")
+    @classmethod
+    def public_budget(cls, value: Any) -> dict[str, Any]:
+        return {k: v for k, v in (value or {}).items() if not k.startswith("_")}
     delivery_status: str | None = None
     delivery_id: str | None = None
     delivery_attempt_count: int = 0

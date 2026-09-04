@@ -89,3 +89,9 @@ production 复用同一 builder，仅由 Settings/provider 选择不同 adapter�
 2. 本页的包/进程映射；
 3. 受影响的系统架构或 ADR；
 4. [开发阶段校验清单](../development/stage-gates.md)。
+
+
+Runtime v2 预算治理：`domain/runtime_budget.py` 为 Canonical 事实的纯预留/根树配额规则；
+EventStore 实现在根事务内调用规则。`contracts/json_schema.py` 为 Runtime 与 Action 共享的
+受限离线校验器。`model_gateway/pricing.py` 和 ModelStateStore 拥有可信价格及成本结算，
+Runtime 仅传递 Run 预算，不读取凭据。`projection/task` 以事实重建公开用量。

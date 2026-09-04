@@ -101,8 +101,7 @@ def get_task_service() -> TaskService:
         ),
     )
     return TaskService(
-        runtime_budget={"max_steps": 48, "max_output_tokens": 8192,
-                        "policy_version": get_settings().runtime_budget_policy_version},
+        runtime_budget=get_settings().runtime_budget_snapshot(),
         event_store=event_store,
         relay=relay,
         reader=projection,

@@ -58,7 +58,7 @@ async def test_v2_run_is_not_scheduled_on_an_old_runtime():
     assert await store.select_runtime(item) is None
     await store.register_runtime(RuntimeInstance(runtime_id="new", runtime_type="agent",
                                                 role="agent", node_id="local", capacity=1,
-                                                capabilities={"budget_policy_v2": True}))
+                                                capabilities={"runtime_governance_v2": True}))
     assert (await store.select_runtime(item)).runtime_id == "new"
 
 

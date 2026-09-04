@@ -22,6 +22,7 @@ x-auraclaw-service: &auraclaw-service
 x-common-environment: &common-environment
   AURACLAW_MIGRATIONS_DIRECTORY: ${AURACLAW_MIGRATIONS_DIRECTORY:-/app/migrations}
   AURACLAW_DEPLOYMENT_PROFILE: production
+  AURACLAW_RUNTIME_BUDGET_POLICY_VERSION: ${AURACLAW_RUNTIME_BUDGET_POLICY_VERSION:-1}
   AURACLAW_HOST: 0.0.0.0
   AURACLAW_LOG_LEVEL: ${AURACLAW_LOG_LEVEL:-INFO}
   AURACLAW_STORAGE_BACKEND: ${AURACLAW_STORAGE_BACKEND:-kingbase}
@@ -82,7 +83,7 @@ services:
         "migrate",
         "up",
         "--target",
-        "${AURACLAW_MIGRATE_TARGET:-0063}",
+        "${AURACLAW_MIGRATE_TARGET:-0064}",
         "--directory",
         "${AURACLAW_MIGRATIONS_DIRECTORY:-/app/migrations}",
       ]

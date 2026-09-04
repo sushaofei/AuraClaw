@@ -5,7 +5,7 @@ import os
 from collections.abc import Mapping
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 from urllib.parse import quote
 
 from pydantic import Field, SecretStr, TypeAdapter, model_validator
@@ -484,6 +484,28 @@ class Settings(BaseSettings):
     runtime_node_id: str | None = None
     runtime_capacity: int = Field(default=1, ge=1)
     runtime_budget_policy_version: Literal["1", "2"] = "1"
+    model_pricing: dict[str, Any] = Field(default_factory=dict)
+    runtime_max_steps: int = Field(default=48, ge=4, le=256)
+    runtime_max_output_tokens: int = Field(default=8192, ge=128, le=65536)
+    runtime_tree_max_steps: int = Field(default=480, ge=4, le=4096)
+    runtime_tree_max_output_tokens: int = Field(default=81920, ge=128, le=1048576)
+    runtime_max_cost: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    runtime_tree_max_cost: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+
+    def runtime_budget_snapshot(self) -> dict[str, Any]:
+        if (self.runtime_tree_max_steps < self.runtime_max_steps
+                or self.runtime_tree_max_output_tokens < self.runtime_max_output_tokens):
+            raise ValueError("tree quotas must cover the root Run")
+        if self.runtime_tree_max_cost is not None and (self.runtime_max_cost is None
+                or self.runtime_tree_max_cost < self.runtime_max_cost):
+            raise ValueError("cost-limited tree must cover a priced root Run")
+        return {"max_steps": self.runtime_max_steps,
+                "max_output_tokens": self.runtime_max_output_tokens,
+                "max_cost": self.runtime_max_cost, "tree_max_cost": self.runtime_tree_max_cost,
+                "tree_max_steps": self.runtime_tree_max_steps,
+                "tree_max_output_tokens": self.runtime_tree_max_output_tokens,
+                "policy_version": self.runtime_budget_policy_version}
+
     model_api_key: str | None = None
     model_base_url: str | None = None
     model_name: str | None = None

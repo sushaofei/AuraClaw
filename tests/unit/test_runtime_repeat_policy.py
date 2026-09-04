@@ -85,3 +85,36 @@ def test_nonretryable_error_and_alternating_suppressions_stop():
     blocked = history(target, [{"status": "denied", "error_code": "tool_repeat_suppressed"}] * 4)
     assert no_progress(blocked, "r")
     assert not no_progress(blocked, "other-run")
+
+
+def test_refresh_is_explicit_bounded_and_waits_until_authorized_interval():
+    from datetime import timedelta
+
+    from auraclaw.runtime.repeat_policy import wait_seconds
+    a, state, call = fixture()
+    state['loaded']['cap']['capability_id'] = 'cap'
+    target = repeat_target(a, call, state)
+    now = datetime.now(UTC)
+    events = history(target, [{'status': 'success'}])
+    events[-1].occurred_at = now
+    events.insert(0, SimpleNamespace(run_id='r', type='run.requested', payload={
+        'run_id': 'r', 'read_refresh': [{'capability_id': 'cap', 'max_calls': 2,
+        'min_interval_seconds': 5, 'expires_at': (now + timedelta(seconds=60)).isoformat()}]}))
+    assert repeat_decision(a, call, target, events, now=now) is None
+    assert wait_seconds(target, events, 'r', now) == 5
+    assert wait_seconds(target, events, 'r', now + timedelta(seconds=6)) == 0
+    assert repeat_decision(a, call, target, events, now=now + timedelta(seconds=61)) is not None
+    second = history(target, [{'status': 'success'}, {'status': 'success'}])
+    assert repeat_decision(a, call, target, [events[0], *second], now=now) is not None
+
+
+def test_retry_after_does_not_retry_early_and_invalid_hint_is_ignored():
+    from auraclaw.runtime.repeat_policy import wait_seconds
+    a, state, call = fixture()
+    target = repeat_target(a, call, state)
+    now = datetime.now(UTC)
+    events = history(target, [{'status': 'error', 'retryable': True, 'retry_after': 600}])
+    events[-1].occurred_at = now
+    assert wait_seconds(target, events, 'r', now) == 600
+    events[-1].payload['result']['retry_after'] = 'NaN'
+    assert wait_seconds(target, events, 'r', now) == 0
