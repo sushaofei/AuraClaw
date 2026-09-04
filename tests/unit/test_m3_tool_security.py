@@ -1100,6 +1100,9 @@ def test_approval_response_rebuilds_and_retries_failed_policy_notification() -> 
             ),
         )
         assert responded["decision"] == "approved"
+        assert responded["effective_approval_mode"] == created["effective_approval_mode"]
+        assert responded["approval_mode_source"] == created["approval_mode_source"]
+        assert responded["approval_mode_revision"] == created["approval_mode_revision"]
         events = await event_store.load(tenant_id, session_id)
         assert [event.type for event in events].count("approval.approved") == 1
         assert notifier.calls == 2
