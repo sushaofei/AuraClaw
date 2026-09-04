@@ -1,6 +1,6 @@
 # Runtime 预算与重复调用治理改善方案
 
-状态：实施中，跟踪 #101。阶段 A 已编码并进行验证；B–F 尚未完成，不表示以下全部行为已上线。当前重复决策仍使用同名同参累计第4次中止规则。
+状态：实施中，跟踪 #101。A 已提交；v2 重复策略/有界收尾及恢复门禁基线已编码验证，默认关闭。D 的完整账本重建/成本预留与 E–F 尚未全部完成，测试环境仍为旧镜像。
 范围：AuraClaw Runtime/Control/Model Gateway/Session 投影，以及 AuraX 运行进度与结束原因展示。
 关联：#93 调用稳定性、#96 执行收尾与恢复、#100 可信身份。
 
@@ -39,7 +39,7 @@ runtime_budget_exceeded，导致误诊。当前 model.call 和工具执行各计
   旧实现对执行前重复拦截未计数，迁移时以budget_policy_version区分，不改旧统计。
 - tool_dispatch：实际进入外部执行的一次调用；同一次在途请求恢复不重复dispatch或计数。
 - 累计输出token包含本Run所有模型轮次，包括最终总结和工具调用参数；输入token独立记录。
-- 成本复用Model Gateway已有reservation/settlement。usage缺失/取消未知不当零，不释放未知消费。
+- 已核实 Model Gateway 当前 reservation/settlement 只预留 token，不具备按价格计算的成本预留。需扩展可信价格、金额预留/结算与未知消费核对；未具备前，v2 配置 max_cost 时拒绝新的模型调用，返回 runtime_cost_reservation_unavailable。usage缺失/取消未知不当零。
 - deadline、用户取消、lease失效、预算耗尽分别处理；等待审批不消耗模型/工具次数，墙钟deadline继续有效。
 - 每次调用前检查/预留，完成后结算。并行工具批次逐个预留，不允许先并发后发现超额。
 - 新Run可获新预算，同Run重启/审批恢复/副本迁移沿用用量；用户补发消息不能抹掉旧未知副作用。
@@ -114,7 +114,7 @@ capability identity、目标/配置revision、Schema digest、canonical argument
 - root/coordinator同样预留收尾预算，统一已有worker terminal reserve，避免重复预留。
 - 建议总48步中预留2步，8192输出token中预留1024，均从原总额中扣除而非额外赠送。
   小预算按比例且必须容纳实际收尾操作；配置校验不能出现“预留耗尽全部探索额度”。
-- 收尾阶段不再暴露业务工具。worker保留必要且白名单化的collaboration完成/失败上报协议。
+- 收尾阶段不再暴露业务工具。只有具备明确失败语义的 collaboration 终态才可进入白名单。当前 publish_result 会生成 Child 完成事实，不能用于强制失败收尾；首版所有角色由 Runtime 写 run.failed 并保留 partial 输出，不调用成功发布工具。正常完成时原角色输出协议不变。
 - 总结包含：已完成、失败原因、未完成项、是否存在unknown副作用、是否需要用户补充信息。
 - 如果已触及绝对硬额度、成本未知无法预留或模型不可用，采用Canonical事实生成固定模板收尾，
   不再发额外模型请求。不得为了总结超过硬token/cost/deadline上限。
@@ -234,3 +234,23 @@ Java输出契约问题/无效循环；不再让用户误以为21/48步、1303/81
 - run.failed 附加 error_details：当前 v1 策略、预算快照、checkpoint 用量、成功调用引用；未知 token/cost 使用 null，不猜成零。
 - Task 投影将 details 原样投影进 error；AuraX 按错误码展示原因并按结构化数字展示用量，旧 generic 显示未区分类型。
 - 无新增业务终态或 DDL。读取兼容先发布，重复策略仍 v1；阶段 A 单独通过不代表 B–F 完成。
+
+### B/C 与 D 基线：v2 受控实现
+
+- 可信 TaskService 配置 `AURACLAW_RUNTIME_BUDGET_POLICY_VERSION`（默认 `1`，可选 `2`）写入每个新 Run 的 budget 快照；公开请求和模型不能改此配置。旧事件缺字段按 v1 解释，恢复不改历史预算。
+- `repeat_policy.py` 从当前 Run 的 requested/completed 事实计算决策，身份/完整加载绑定/参数分别做摘要；没有跨 Run 缓存，不把模型的 expected_side_effect 当权限依据。
+- 成功只读同参请求返回 denied/not_started 与源 invocation/时间；不复制原数据、不宣称刚完成新查询。成功写入不按参数合并，未知效果即使 retryable 也阻止新 invocation 重放。
+- 必填包装/基础类型的明显错误最多三次尝试，变更无关参数不清零；合法修正仍交 Gateway 做完整 Schema 验证。策略层不解析远程 ref、regex 或注入默认值。复杂 Schema 错误族、可信 retry-after 与依赖变化策略仍待补齐。
+- 最近八次结算中至少四次抑制且没有新的成功事实时进入 concluding；search/load 同参也受控。默认从原总额预留最多两步和1024输出 token，小预算按比例缩小。
+- 收尾屏蔽全部工具，模型绕过时仍返回未执行；部分输出写 model.output.completed(partial=true)，随后 run.failed。硬边界/模型故障在失败详情给固定事实摘要，不额外调用模型。
+- 先保存模型 usage/响应，再记录模型事实并检查额度；超额 provider 结果不会进入工具执行。v2 缺失 usage 时停止，不能视为零。
+- 修复最后一步 checkpoint 恢复被 while 条件跳过的问题；完成原结果结算后再拒绝新执行。批次因本地限额停止时逐个结算剩余未执行调用。
+- Control/数据库/远程 DTO 保存 policy_version；Runtime 注册 budget_policy_v2 能力；PostgreSQL 与内存选择/领取双门禁阻止旧 Runtime 接管 v2。run.started 保存 budget_snapshot，恢复发现预算变化拒绝继续。
+- 无 DDL。已完成34项针对性回归、全量 unit 回归、一次性 PostgreSQL Control 并发/租约/版本门禁集成、Ruff/Mypy/架构检查。发布开关仍为1，不宣称已完成真实模型灰度或完整任务树限额。
+
+### 后续必须完成的门禁（不随基线提交关闭 #101）
+
+1. D：从 Canonical/Model/Hands 账本完整重建细分用量，显式预留与所有崩溃点矩阵；成本金额账本及可信价格接入。当前只验证既有 checkpoint 与 Gateway 幂等恢复、最后一步边界和版本门禁，不能替代完整验收。
+2. B/E：结构化错误族、retry-after、有权威依据的刷新/依赖失效、后端有界轮询与任务树总配额。透明结果复用仍关闭。
+3. F：运行中只读预算投影、低基数指标、固定模型场景对照与误拦截校准。当前 AuraX 仅失败时展示结构化用量。
+4. Reader/Control/Runtime 协调发布并逐 Run 灰度后才切 v2 默认；不清理 checkpoint 或重放测试 Session 的旧业务调用。

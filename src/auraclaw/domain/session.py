@@ -137,6 +137,7 @@ class SessionAggregate:
         schedule_id: str | None = None,
         occurrence_id: str | None = None,
         approval: ApprovalConfiguration | None = None,
+        runtime_budget: dict[str, Any] | None = None,
     ) -> None:
         if self.version or self.status is not None:
             raise InvalidTransitionError("Session already exists")
@@ -166,7 +167,8 @@ class SessionAggregate:
             NewEvent(
                 type="run.requested",
                 visibility=Visibility.USER,
-                payload=self._run_payload(run_id),
+                payload={**self._run_payload(run_id),
+                         **({"budget": dict(runtime_budget)} if runtime_budget else {})},
             )
         )
 
@@ -205,6 +207,7 @@ class SessionAggregate:
         *,
         command_id: str | None = None,
         request_fingerprint: str | None = None,
+        runtime_budget: dict[str, Any] | None = None,
     ) -> None:
         self._require_existing()
         status = self.status
@@ -234,6 +237,7 @@ class SessionAggregate:
                     **self._run_payload(run_id),
                     "command_id": command_id,
                     "request_fingerprint": request_fingerprint,
+                    **({"budget": dict(runtime_budget)} if runtime_budget else {}),
                 },
             )
         )

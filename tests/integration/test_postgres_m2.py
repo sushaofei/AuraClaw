@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
@@ -17,6 +18,7 @@ from auraclaw.control.orchestrator import (
 from auraclaw.control.ports import (
     RunnableItem,
     RuntimeAssignment,
+    RuntimeBudget,
     RuntimeCheckpoint,
     RuntimeInstance,
 )
@@ -90,7 +92,8 @@ async def _apply_migrations() -> None:
         await connection.close()
 
 
-def test_postgres_control_claim_lease_fencing_checkpoint_and_capacity() -> None:
+@pytest.mark.parametrize("policy_version", ["1", "2"])
+def test_postgres_control_claim_lease_fencing_checkpoint_and_capacity(policy_version: str) -> None:
     async def scenario() -> None:
         assert DATABASE_URL is not None
         await _apply_migrations()
@@ -111,6 +114,7 @@ def test_postgres_control_claim_lease_fencing_checkpoint_and_capacity() -> None:
                 session_id=session_id,
                 run_id=run_id,
                 source_version=2,
+                budget=RuntimeBudget(policy_version=policy_version),
             )
             assert await store_a.enqueue(item)
             claims = await asyncio.gather(
@@ -156,6 +160,7 @@ def test_postgres_control_claim_lease_fencing_checkpoint_and_capacity() -> None:
                 fencing_token=lease.fencing_token,
                 role="root",
                 resource_profile={}, user_id="user-a", dept_id="dept-a",
+                budget=item.budget,
             )
             assert await store_a.assign(
                 task_id,
@@ -164,6 +169,13 @@ def test_postgres_control_claim_lease_fencing_checkpoint_and_capacity() -> None:
             )
             assert await store_a.get_assignment(task_id) == assignment
             await store_a.heartbeat(runtime.runtime_id, lease.fencing_token)
+            if policy_version == "2":
+                assert await store_a.select_runtime(item) is None
+                assert await store_a.claim_assignments(runtime.runtime_id, runtime.role) == []
+                await store_a.register_runtime(replace(
+                    runtime, capabilities={"budget_policy_v2": True}))
+                # Assigned capacity is already reserved.
+                assert (await store_a.select_runtime(item)) is None
             claimed_assignments = await store_a.claim_assignments(
                 runtime.runtime_id, runtime.role
             )

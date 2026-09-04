@@ -8,7 +8,7 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
-from dataclasses import replace
+from dataclasses import asdict, replace
 from enum import StrEnum
 from typing import Any
 
@@ -18,6 +18,7 @@ from auraclaw.contracts.errors import (
     ModelProviderError,
     RuntimeCancelledError,
     RuntimeCostBudgetExceededError,
+    RuntimeCostReservationUnavailableError,
     RuntimeDeadlineExceededError,
     RuntimeNoProgressError,
     RuntimeOutputTokenBudgetExceededError,
@@ -45,6 +46,7 @@ from auraclaw.runtime.ports import (
     ToolClient,
 )
 from auraclaw.runtime.progress_store import RuntimeProgressStore
+from auraclaw.runtime.repeat_policy import no_progress, repeat_decision, repeat_target
 from auraclaw.runtime.rounds import (
     ModelRoundExecutor,
     ToolRoundDisposition,
@@ -152,6 +154,8 @@ class RuntimeExecutionEngine:
 
     async def execute(self, assignment: RuntimeAssignment) -> None:
         execute_started = time.perf_counter()
+        if assignment.budget.policy_version not in {"1", "2"}:
+            raise CollaborationValidationError("unsupported Runtime budget policy version")
         try:
             await self._guard_service.check(assignment)
         except (RuntimeCancelledError, RuntimeDeadlineExceededError):
@@ -168,11 +172,17 @@ class RuntimeExecutionEngine:
                 return
             await self._control.finish_assignment(self._task_id(assignment), terminal.type[4:])
             return
+        prior_start = next((e for e in events if e.run_id == assignment.run_id
+                            and e.type == "run.started"), None)
+        if (prior_start is not None and "budget_snapshot" in prior_start.payload
+                and prior_start.payload["budget_snapshot"] != asdict(assignment.budget)):
+            raise CollaborationValidationError("Run budget snapshot changed during recovery")
         await self._events.append_once(
             assignment,
             events,
             "run.started",
-            {"run_id": assignment.run_id, "runtime_id": assignment.runtime_id},
+            {"run_id": assignment.run_id, "runtime_id": assignment.runtime_id,
+             "budget_snapshot": asdict(assignment.budget)},
             identity=assignment.run_id,
         )
         logger.info(
@@ -353,6 +363,10 @@ class RuntimeExecutionEngine:
                 "call_signatures": {},
             }
         )
+        default_policy = "1" if checkpoint is not None else assignment.budget.policy_version
+        if state.get("budget_policy_version", default_policy) != assignment.budget.policy_version:
+            raise CollaborationValidationError("Run budget policy changed during recovery")
+        state["budget_policy_version"] = assignment.budget.policy_version
         capability_state = dict(state.get("capability_state", {}))
         if (
             self._capability_controller is not None
@@ -402,7 +416,7 @@ class RuntimeExecutionEngine:
                 )
                 return
         turn_events = events
-        while int(state.get("steps_used", 0)) < assignment.budget.max_steps:
+        while True:
             await self._guard_service.check(assignment)
             turn_index = int(state.get("turn_index", 0))
             model_call_id = f"mdl_{assignment.run_id}_turn_{turn_index + 1}"
@@ -421,8 +435,29 @@ class RuntimeExecutionEngine:
             ):
                 response = self._response_from_dict(dict(state["response"]))
             else:
+                if (assignment.budget.policy_version == "2"
+                        and assignment.budget.max_cost is not None):
+                    raise RuntimeCostReservationUnavailableError(
+                        "Priced cost reservations are unavailable; no new model call was started"
+                    )
+                if int(state.get("steps_used", 0)) >= assignment.budget.max_steps:
+                    raise RuntimeStepBudgetExceededError(
+                        "Runtime capability step budget was exhausted"
+                    )
                 if turn_events is None:
                     turn_events = await self._session.load(assignment)
+                if assignment.budget.policy_version == "2":
+                    reserve_steps = min(2, max(0, assignment.budget.max_steps // 4))
+                    reserve_tokens = min(1024, assignment.budget.max_output_tokens // 4)
+                    if no_progress(turn_events, assignment.run_id):
+                        state["concluding_reason"] = "runtime_no_progress_detected"
+                    elif (assignment.budget.max_steps - int(state.get("steps_used", 0))
+                          <= reserve_steps):
+                        state["concluding_reason"] = "runtime_step_budget_exceeded"
+                    elif assignment.budget.max_output_tokens - int(
+                        state.get("usage", {}).get("output_tokens", 0)
+                    ) <= reserve_tokens:
+                        state["concluding_reason"] = "runtime_output_token_budget_exceeded"
                 capability_state = dict(state.get("capability_state", {}))
                 trusted: tuple[dict[str, Any], ...] = ()
                 if self._capability_controller is not None:
@@ -442,6 +477,17 @@ class RuntimeExecutionEngine:
                     model_tools += self._capability_controller.model_tools(capability_state)
                 if self._collaboration_controller is not None:
                     model_tools += self._collaboration_controller.model_tools(assignment)
+                if state.get("concluding_reason"):
+                    # Existing collaboration terminals publish success-shaped results.
+                    # Stop via run.failed until a failure-capable terminal contract exists.
+                    model_tools = ()
+                    trusted += ({"role": "system", "content": (
+                        "Runtime is concluding: " + str(state["concluding_reason"]) + ". "
+                        "Do not request business tools or claim the whole task succeeded. "
+                        "Summarize confirmed results, unresolved failures and unknown effects. "
+                        "Runtime will record the failure through canonical events. "
+                        "Do not publish a successful Child result. No further tools are permitted."
+                    )},)
                 output_tokens_used = int(dict(state.get("usage", {})).get("output_tokens", 0))
                 remaining_output_tokens = assignment.budget.max_output_tokens - output_tokens_used
                 if remaining_output_tokens < 1:
@@ -451,11 +497,18 @@ class RuntimeExecutionEngine:
                 terminal_role = assignment.role in {"worker", "repair", "reviewer"}
                 recovery_turn = bool(state.get("truncation_recovery_pending"))
                 terminal_reserve = min(
-                    self._terminal_output_reserve,
+                    (1024 if assignment.budget.policy_version == "2"
+                     else self._terminal_output_reserve),
                     max(1, assignment.budget.max_output_tokens // 4),
                 )
                 available_for_turn = remaining_output_tokens
-                if terminal_role and not recovery_turn:
+                if assignment.budget.policy_version == "2":
+                    if state.get("concluding_reason"):
+                        available_for_turn = min(remaining_output_tokens, max(1, terminal_reserve))
+                    else:
+                        available_for_turn = max(1, remaining_output_tokens - min(
+                            1024, assignment.budget.max_output_tokens // 4))
+                elif terminal_role and not recovery_turn:
                     available_for_turn -= terminal_reserve
                     if available_for_turn < 1:
                         logger.warning(
@@ -545,7 +598,6 @@ class RuntimeExecutionEngine:
                 response, sequence = model_round.response, model_round.sequence
                 turn_events = None
                 usage = self._accumulate_usage(dict(state.get("usage", {})), response.usage)
-                self._validate_cumulative_usage(assignment, usage)
                 state = {
                     **state,
                     "response": self._response_to_dict(response),
@@ -589,6 +641,12 @@ class RuntimeExecutionEngine:
                 identity=response.model_call_id,
             )
 
+            self._validate_cumulative_usage(assignment, dict(state.get("usage", {})))
+            if assignment.budget.policy_version == "2":
+                if "output_tokens" not in response.usage:
+                    raise ModelProviderError("Runtime cannot continue with unknown output usage")
+                if assignment.budget.max_cost is not None and "cost" not in response.usage:
+                    raise ModelProviderError("Runtime cannot continue with unknown cost usage")
             call_index = int(state.get("call_index", 0))
             while call_index < len(response.tool_calls):
                 call = response.tool_calls[call_index]
@@ -600,6 +658,8 @@ class RuntimeExecutionEngine:
                 ):
                     call = replace(call, approval_id=str(pending_approval_id))
                 events = await self._session.load(assignment)
+                target = (repeat_target(assignment, call, dict(state.get("capability_state", {})))
+                          if assignment.budget.policy_version == "2" else None)
                 await self._events.append_once(
                     assignment,
                     events,
@@ -611,6 +671,8 @@ class RuntimeExecutionEngine:
                         "turn_index": turn_index,
                         "version": call.version,
                         "expected_side_effect": call.expected_side_effect,
+                        "repeat_identity": ({"binding": target.binding,
+                                             "arguments": target.arguments} if target else {}),
                         "activity": self._tool_activity_metadata(
                             dict(state.get("capability_state", {})), call
                         ),
@@ -640,8 +702,9 @@ class RuntimeExecutionEngine:
                     )
                 else:
                     if int(state.get("steps_used", 0)) >= assignment.budget.max_steps:
-                        await self._settle_local_stop(
-                            assignment, call, turn_index, "runtime_step_budget_exceeded"
+                        await self._settle_unstarted_batch(
+                            assignment, response.tool_calls[call_index:], turn_index,
+                            "runtime_step_budget_exceeded",
                         )
                         raise RuntimeStepBudgetExceededError(
                             "Runtime capability step budget was exhausted"
@@ -662,9 +725,10 @@ class RuntimeExecutionEngine:
                     )
                     signatures = dict(state.get("call_signatures", {}))
                     repeated = int(signatures.get(signature, 0)) + (0 if recovering_pending else 1)
-                    if repeated > 3:
-                        await self._settle_local_stop(
-                            assignment, call, turn_index, "tool_repeat_suppressed"
+                    if assignment.budget.policy_version == "1" and repeated > 3:
+                        await self._settle_unstarted_batch(
+                            assignment, response.tool_calls[call_index:], turn_index,
+                            "tool_repeat_suppressed",
                         )
                         logger.warning(
                             "tool.repeat_suppressed capability_id=%s "
@@ -681,7 +745,20 @@ class RuntimeExecutionEngine:
                     await self._guard_service.check(assignment)
                     terminal = False
                     waiting_child_ids = ()
-                    if (
+                    suppressed = (repeat_decision(assignment, call, target, events)
+                                  if assignment.budget.policy_version == "2" else None)
+                    if state.get("concluding_reason"):
+                        suppressed = {
+                            "status": "denied", "error_code": "tool_repeat_suppressed",
+                            "side_effect_status": "not_started", "retryable": False,
+                            "summary": "Concluding: this business call was not executed.",
+                            "metadata": {"policy_version": "2", "reason": "concluding"},
+                        }
+                    if suppressed is not None:
+                        result = suppressed
+                        capability_state = dict(state.get("capability_state", {}))
+                        side_events = ()
+                    elif (
                         self._collaboration_controller is not None
                         and self._collaboration_controller.owns(call.name)
                     ):
@@ -890,6 +967,24 @@ class RuntimeExecutionEngine:
                 continue
 
             events = await self._session.load(assignment)
+            if state.get("concluding_reason"):
+                await self._events.append_once(
+                    assignment, events, "model.output.completed",
+                    {"model_call_id": response.model_call_id, "provider": response.provider,
+                     "model": response.model, "output": response.completed_output,
+                     "finish_reason": response.finish_reason, "usage": dict(state.get("usage", {})),
+                     "partial": True}, identity=response.model_call_id, visibility=Visibility.USER,
+                )
+                reason = str(state["concluding_reason"])
+                if reason == "runtime_no_progress_detected":
+                    raise RuntimeNoProgressError(
+                        "Runtime stopped a no-progress loop; partial results retained"
+                    )
+                if reason == "runtime_output_token_budget_exceeded":
+                    raise RuntimeOutputTokenBudgetExceededError(
+                        "Runtime exploration stopped at the reserved concluding output allowance")
+                raise RuntimeStepBudgetExceededError(
+                    "Runtime exploration stopped at the reserved concluding step allowance")
             if self._collaboration_controller is not None:
                 all_children, active_children = await self._collaboration_controller.child_state(
                     assignment
@@ -1007,7 +1102,6 @@ class RuntimeExecutionEngine:
                 await self._capability_controller.release_run(assignment)
             await self._control.finish_assignment(self._task_id(assignment), "completed")
             return
-        raise RuntimeStepBudgetExceededError("Runtime capability step budget was exhausted")
 
     @staticmethod
     def _classify_finish_reason(response: ModelResponse) -> FinishReasonKind:
@@ -1135,6 +1229,22 @@ class RuntimeExecutionEngine:
         )
         return True
 
+    async def _settle_unstarted_batch(
+        self, assignment: RuntimeAssignment, calls: tuple[ToolCall, ...], turn_index: int, code: str
+    ) -> None:
+        # This cursor has not dispatched any of these calls. Settle every requested
+        # model tool output so the next Run does not inherit orphan tool messages.
+        for call in calls:
+            events = await self._session.load(assignment)
+            await self._events.append_once(
+                assignment, events, "tool.call.requested",
+                {"tool_invocation_id": call.tool_invocation_id, "name": call.name,
+                 "arguments": call.arguments, "turn_index": turn_index,
+                 "version": call.version, "expected_side_effect": call.expected_side_effect},
+                identity=call.tool_invocation_id,
+            )
+            await self._settle_local_stop(assignment, call, turn_index, code)
+
     async def _settle_local_stop(
         self, assignment: RuntimeAssignment, call: ToolCall, turn_index: int, code: str
     ) -> None:
@@ -1249,8 +1359,14 @@ class RuntimeExecutionEngine:
         successful = [e.payload["tool_invocation_id"] for e in completed
                       if e.payload.get("result", {}).get("status") == "success"]
         return {
-            "policy_version": "1", "category": category, "reason_code": code,
-            "scope": "run",
+            "policy_version": assignment.budget.policy_version,
+            "category": category, "reason_code": code,
+            "scope": "run", "concluding_reason": state.get("concluding_reason"),
+            "partial_summary": (
+                f"Run stopped with {len(successful)} successful tool results retained in the "
+                "Session. Unfinished work is not marked successful; inspect tool settlements "
+                "before retrying any operation."
+            ),
             "budget": {"max_steps": assignment.budget.max_steps,
                        "max_output_tokens": assignment.budget.max_output_tokens,
                        "max_cost": assignment.budget.max_cost,

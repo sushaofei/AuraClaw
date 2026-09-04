@@ -227,6 +227,9 @@ class InMemoryControlStateStore:
                     or heartbeat_at <= _now() - timedelta(seconds=30)
                 ):
                     continue
+                if (item.budget.policy_version == "2"
+                        and runtime.capabilities.get("budget_policy_v2") is not True):
+                    continue
                 if any(
                     runtime.capabilities.get(key) != value
                     for key, value in item.required_capability.items()
@@ -264,6 +267,9 @@ class InMemoryControlStateStore:
                 if assignment.runtime_id != runtime_id:
                     continue
                 if status != "assigned":
+                    continue
+                if (assignment.budget.policy_version == "2"
+                        and runtime_entry[0].capabilities.get("budget_policy_v2") is not True):
                     continue
                 resource_id = f"session:{assignment.tenant_id}:{assignment.session_id}"
                 lease = self._leases.get(resource_id)

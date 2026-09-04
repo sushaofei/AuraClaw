@@ -483,6 +483,7 @@ class Settings(BaseSettings):
     runtime_role: str = RUNTIME_POOL_ROLE
     runtime_node_id: str | None = None
     runtime_capacity: int = Field(default=1, ge=1)
+    runtime_budget_policy_version: Literal["1", "2"] = "1"
     model_api_key: str | None = None
     model_base_url: str | None = None
     model_name: str | None = None

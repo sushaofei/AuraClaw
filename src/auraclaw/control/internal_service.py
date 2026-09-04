@@ -224,6 +224,7 @@ class ControlInternalService:
                     resource_profile=dict(assignment.resource_profile),
                     budget={
                         "max_steps": assignment.budget.max_steps,
+                        "policy_version": assignment.budget.policy_version,
                         "max_output_tokens": assignment.budget.max_output_tokens,
                         "max_cost": assignment.budget.max_cost,
                     },

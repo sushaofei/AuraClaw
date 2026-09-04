@@ -19,6 +19,7 @@ class RuntimeBudget:
     max_steps: int = DEFAULT_RUNTIME_MAX_STEPS
     max_output_tokens: int = 8192
     max_cost: float | None = None
+    policy_version: str = "1"
 
 
 @dataclass
