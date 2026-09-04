@@ -456,3 +456,40 @@ def test_session_outbox_projectors_include_approval_and_collaboration() -> None:
         get_approval_projection(),
         get_collaboration_projection(),
     )
+
+
+def test_distributed_projection_consumes_runtime_budget_metrics(monkeypatch) -> None:
+    from fastapi import FastAPI
+
+    from auraclaw.composition.builders import projection
+    from auraclaw.contracts.events import Actor, CanonicalEvent
+    from auraclaw.contracts.state import Visibility
+    from auraclaw.infrastructure.observability.stores import InMemoryObservabilityStore
+
+    store = InMemoryObservabilityStore()
+    captured = []
+    original = projection.CompositeProjection
+    def composite(*writers):
+        value = original(*writers)
+        captured.append(value)
+        return value
+    monkeypatch.setattr(projection, 'CompositeProjection', composite)
+    monkeypatch.setattr(projection.providers, 'get_observability_store', lambda: store)
+    monkeypatch.setattr(projection.providers, 'session_outbox_projectors', lambda: ())
+    monkeypatch.setattr(projection, '_base_service_app', lambda *a, **kw: FastAPI())
+    settings = _settings(storage_backend='postgres')
+    projection.build_projection_app(
+        service_spec('projection', settings), settings, worker_interval=1
+    )
+    event = CanonicalEvent(event_id='evt-budget-metric', tenant_id='fixture', root_session_id='s',
+        session_id='s', run_id='r', aggregate_version=1, type='runtime.budget.reserved',
+        occurred_at=datetime.now(UTC), actor=Actor(type='runtime', id='fixture'),
+        correlation_id='fixture', causation_id='fixture', visibility=Visibility.INTERNAL,
+        schema_version=1, payload={'kind': 'model', 'reservation_id': 'm', 'output_tokens': 5})
+    async def scenario():
+        await captured[0].project([event])
+        await captured[0].project([event])
+        points = await store.metric_snapshot()
+        matches = [p for p in points if p.name == 'runtime.budget.model.reserved.count']
+        assert len(matches) == 1 and matches[0].labels == {}
+    asyncio.run(scenario())

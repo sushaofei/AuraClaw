@@ -3628,3 +3628,10 @@ Ruff、Mypy（248 文件）、10 条架构合同通过。迁移不适用，部�
 - [x] Skill 工作流成功写入即使没有模型 repeat_identity，也使此前只读结果失效。
 - [x] 33项 Runtime/重复治理及26项 Tool安全/参数引导回归通过；Ruff/Mypy通过。
 - [x] 无DDL和权限绕过；本阶段提交推送，随联合测试发布更新 Hands/Runtime。
+
+## 分布式预算指标接线补齐（#101）
+
+- [x] Projection Worker 消费 Session outbox 时挂接 ObservabilityProjector，使用远程 Session 端口。
+- [x] 观测存储随服务关闭；重复事件按 deduplication_key 去重，不给指标增加高基数 label。
+- [x] 37项拓扑/观测回归通过，包括分布式实际构建出的投影链；Ruff/Mypy/10条架构合同通过。
+- [x] 无DDL/业务事实重放；阶段提交推送，更新 Projection Worker 后单独验证指标落库。
