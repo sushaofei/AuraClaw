@@ -46,6 +46,8 @@ def test_model_contract_explains_nested_numbers_without_changing_schema_or_state
     function = next(t["function"] for t in tools if t["function"]["name"] == "mcp_exact_alias")
     assert '"/input/limit":"integer"' in function["description"]
     assert "do not flatten" in function["description"]
+    assert "gateway enforces the effective approval mode" in function["description"]
+    assert "respect actual denials" in function["description"]
     original = before["loaded"]["cap-evidence"]["model_tool"]["function"]
     assert function["parameters"] == original["parameters"]
     assert state == before

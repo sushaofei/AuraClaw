@@ -59,36 +59,48 @@ class CanonicalEventCommitter:
             }
         ):
             raise ValueError("Recovery cannot begin new execution")
-        if event_type == "approval.requested":
-            if self.approval_request_is_pending(existing, identity):
+        # Retry only the durable append, never the model/tool execution. Concurrent
+        # policy or progress facts can advance the aggregate after load.
+        for attempt in range(8):
+            if event_type == "approval.requested":
+                if self.approval_request_is_pending(existing, identity):
+                    return
+            elif any(
+                event.type == event_type
+                and (
+                    event.payload.get("run_id") == identity
+                    or event.payload.get("model_call_id") == identity
+                    or event.payload.get("tool_invocation_id") == identity
+                    or event.payload.get("approval_id") == identity
+                    or event.payload.get("checkpoint_id") == identity
+                    or event.payload.get("reservation_id") == identity
+                )
+                for event in existing
+            ):
                 return
-        elif any(
-            event.type == event_type
-            and (
-                event.payload.get("run_id") == identity
-                or event.payload.get("model_call_id") == identity
-                or event.payload.get("tool_invocation_id") == identity
-                or event.payload.get("approval_id") == identity
-                or event.payload.get("checkpoint_id") == identity
-                or event.payload.get("reservation_id") == identity
-            )
-            for event in existing
-        ):
+            await (self._guard.fence(assignment) if recovery else self._guard.check(assignment))
+            try:
+                appended = await self._session.append(
+                    assignment,
+                    [NewEvent(type=event_type, payload=payload, visibility=visibility)],
+                    command_id=f"runtime:{event_type}:{assignment.run_id}:{identity}",
+                    operation=f"runtime.{event_type}",
+                    expected_version=len(existing),
+                )
+            except VersionConflictError:
+                if attempt == 7:
+                    raise
+                refreshed = await self._session.load(assignment)
+                existing.clear()
+                existing.extend(refreshed)
+                continue
+            if appended:
+                existing.extend(appended)
+            else:
+                refreshed = await self._session.load(assignment)
+                existing.clear()
+                existing.extend(refreshed)
             return
-        await (self._guard.fence(assignment) if recovery else self._guard.check(assignment))
-        appended = await self._session.append(
-            assignment,
-            [NewEvent(type=event_type, payload=payload, visibility=visibility)],
-            command_id=f"runtime:{event_type}:{assignment.run_id}:{identity}",
-            operation=f"runtime.{event_type}",
-            expected_version=len(existing),
-        )
-        if appended:
-            existing.extend(appended)
-        else:
-            refreshed = await self._session.load(assignment)
-            existing.clear()
-            existing.extend(refreshed)
 
     async def append_capability_event(
         self, assignment: RuntimeAssignment, event: NewEvent, *, recovery: bool = False

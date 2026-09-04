@@ -55,6 +55,12 @@ def tool_argument_guidance(model_tool: dict[str, Any]) -> dict[str, Any]:
 
 
 def tool_argument_description(model_tool: dict[str, Any]) -> str:
-    return "\nArguments guidance: " + json.dumps(
+    return (
+        "\nThis loaded function is available to call for the user's authorized task. "
+        "The gateway enforces the effective approval mode and may pause the call for approval. "
+        "A write-with-approval label is not itself a denial or a pending approval. "
+        "Do not claim approval is pending unless the gateway reports it; "
+        "respect actual denials and never bypass the gateway.\nArguments guidance: "
+    ) + json.dumps(
         tool_argument_guidance(model_tool), ensure_ascii=False, separators=(",", ":")
     )

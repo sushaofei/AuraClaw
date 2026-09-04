@@ -138,6 +138,7 @@ class TaskService:
         session = await self._load(context.tenant_id, session_id)
         session.append_message(message=message)
         response = {
+            **session.approval.public_dict(),
             "session_id": session_id,
             "run_id": session.run_id,
             "status": session.status.value if session.status else "created",
@@ -226,6 +227,7 @@ class TaskService:
         session = await self._load(context.tenant_id, session_id)
         session.cancel(reason)
         response = {
+            **session.approval.public_dict(),
             "session_id": session_id,
             "run_id": session.run_id,
             "status": session.status.value if session.status else "created",
@@ -252,6 +254,7 @@ class TaskService:
         session = await self._load(context.tenant_id, session_id)
         session.close(reason)
         response = {
+            **session.approval.public_dict(),
             "session_id": session_id,
             "run_id": session.run_id,
             "status": "closed",
@@ -278,6 +281,7 @@ class TaskService:
         run_id = f"run_{uuid4().hex}"
         session.resume(run_id)
         response = {
+            **session.approval.public_dict(),
             "session_id": session_id,
             "run_id": run_id,
             "status": "pending",
@@ -335,6 +339,7 @@ class TaskService:
             )
             append_required = True
         response = {
+            **session.approval.public_dict(),
             "session_id": session_id,
             "run_id": session.run_id,
             "status": session.status.value if session.status else "created",
