@@ -108,3 +108,12 @@ recreate → readiness，业务组件已统一到该镜像，容器全部健康�
 发布后管理测试返回原始“身份上下文不可用”，不再被输出 Schema 错误覆盖；非法参数仍 422。
 使用原始普通查询任务的新聊天完成 search/load 并生成所需 input 字段，远端身份错误仍存在。
 #90/#93/#98/#99/#100 顶部状态已更新为 Vault 已恢复、Java 身份及长期凭据续发待办，保持开放。
+
+## 用户联测发布：AuraClaw + AuraX（2026-09-04）
+
+- 按用户要求重新执行 AuraClaw 维护发布：已验证代码镜像 a24c7f8，0063 migrate/check、全部服务 recreate 与 readiness 通过；源码 HEAD 0e47a3d 仅比镜像多运维文档。
+- AuraX 从已提交 d91e001 独立导出构建，VITE_AURAX_UPLINK=same-origin；TypeScript 与 Vite build 成功，使用现有部署脚本发布到测试 Web 专用 1420 端口。
+- 线上 index.html、index-C5U5D_7b.js、index-BLJ-C-Bw.css 与构建产物逐字节一致。
+- 后端重启窗口内前端代理短暂 500；全部服务健康后，前端同源 /health/ready、/v1/tasks、/v1/admin/mcp-servers 均 200，后两项使用用户指定的测试身份验证。
+- 80 端口主页未改变；本次发布 Web 版，没有生成桌面安装包；本地未提交样式/文档/编辑器修改不进入发布。
+- 这是发布就绪验收，不表示 Java MCP 业务错误或 Skill 历史未知结果已解决。
