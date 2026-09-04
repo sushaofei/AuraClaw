@@ -917,8 +917,9 @@ class McpServerRegistryService:
             raise AuthorizationError("MCP server is outside tenant scope")
 
     def _assert_writable(self, config: McpServerConfig, tenant_id: str) -> None:
-        if config.tenant_id is None and tenant_id != PLATFORM_TENANT:
-            raise AuthorizationError("platform MCP servers require platform admin")
+        # Management authorization belongs to the authenticated upstream gateway.
+        # A shared server has no tenant owner; the caller tenant is audit context,
+        # not an administrator role. Tenant-owned records still retain their scope.
         if config.tenant_id is not None and config.tenant_id != tenant_id:
             raise AuthorizationError("MCP server tenant does not match caller")
 
