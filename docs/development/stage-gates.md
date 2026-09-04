@@ -3516,3 +3516,10 @@ Ruff、Mypy（248 文件）、10 条架构合同通过。迁移不适用，部�
 - [x] TEST 明确生成 probe entry；初次 disabled 测试和 enabled Server 候选测试使用同一流程。
 - [x] 真实 Registry/Connection/Egress manager 联合回归确认候选不覆盖 active，结束后清理 probe。
 - [x] MCP 热配置及管理 API 测试通过，Ruff/Mypy 通过；无 DDL，文档更新，阶段提交推送。
+
+## Skill / MCP 修复 V：探测清理 RPC 超时
+
+- [x] 现场候选清理的 5 秒 drain 与 HTTPX 默认 5 秒超时冲突已定位。
+- [x] 控制 RPC 明确使用 30 秒超时并关闭环境代理继承，业务调用重试策略不变。
+- [x] 候选隔离与实际 HTTP client 请求 timeout 扩展契约测试通过，Ruff 通过；无 DDL。
+- [x] 文档、提交推送完成，继续部署并验证候选测试真实结果。

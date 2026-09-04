@@ -24,9 +24,14 @@ class RemoteMcpEgressClient:
         *,
         bearer_token: str,
         service_identity: ServiceIdentity = ServiceIdentity.ACTION_HANDS,
+        timeout: float = 30.0,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
-        self._client = httpx.AsyncClient(base_url=base_url, transport=transport)
+        # Revoke includes the server's normal five-second drain window.
+        # HTTPX's five-second default expires before that cleanup can finish.
+        self._client = httpx.AsyncClient(
+            base_url=base_url, transport=transport, timeout=timeout, trust_env=False
+        )
         self._contract = HttpContractClient(self._client, bearer_token=bearer_token)
         self._identity = service_identity
 

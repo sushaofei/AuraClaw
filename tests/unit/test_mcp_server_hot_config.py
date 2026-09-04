@@ -1178,3 +1178,24 @@ def test_candidate_probe_uses_isolated_egress_with_active_authority() -> None:
         assert "mcp:local-order-mcp:probe:2" not in adapters
         await egress.reconcile(())
     asyncio.run(scenario())
+
+
+def test_egress_rpc_timeout_allows_normal_drain_window() -> None:
+    from auraclaw.infrastructure.clients.mcp_egress import RemoteMcpEgressClient
+
+    async def scenario() -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.extensions["timeout"]["read"] == 30.0
+            return httpx.Response(200, json={
+                "api_version": "v1", "server_id": "local-order-mcp",
+                "operation": "revoke", "status": "revoked",
+            })
+        client = RemoteMcpEgressClient(
+            "http://credential.internal", bearer_token="test-token",
+            transport=httpx.MockTransport(handler),
+        )
+        try:
+            await client.revoke("local-order-mcp", expected_revision=2)
+        finally:
+            await client.aclose()
+    asyncio.run(scenario())
