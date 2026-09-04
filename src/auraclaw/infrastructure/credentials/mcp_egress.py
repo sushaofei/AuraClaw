@@ -236,6 +236,14 @@ class ManagedMcpEgressAdapter:
         return self._server.credential_ref
 
     @property
+    def credential_owner_tenant(self) -> str:
+        return self._server.tenant_id or "platform"
+
+    @property
+    def credential_is_shared(self) -> bool:
+        return self._server.tenant_id is None
+
+    @property
     def credential_provider(self) -> str:
         return self._server.server_id
 

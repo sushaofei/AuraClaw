@@ -678,3 +678,61 @@ def test_mcp_egress_keeps_resource_and_prompt_filters(method: str, params: dict)
         assert sender.calls == []
 
     asyncio.run(scenario())
+
+
+def test_shared_mcp_uses_bound_platform_credential_and_keeps_caller_audit() -> None:
+    async def scenario() -> None:
+        server = _server().model_copy(update={"tenant_id": None})
+        adapter = ManagedMcpEgressAdapter(server, resolver=_Resolver(), sender=_Sender())
+        proxy = CredentialProxy(InMemoryVault({server.credential_ref: "oauth-client-secret"}))
+        assert server.credential_ref is not None
+        proxy.register_reference(
+            "platform",
+            CredentialReference(
+                credential_ref=server.credential_ref, provider=server.server_id,
+                account_scope=adapter.credential_scope, allowed_operations=("mcp.invoke",),
+                expires_at=datetime.now(UTC) + timedelta(hours=1),
+            ),
+        )
+        await proxy.invoke(
+            tenant_id="tenant-a", session_id="session-a", tool_name=server.server_id,
+            credential_ref=server.credential_ref, operation="mcp.invoke",
+            request=_request(), adapter=adapter,
+        )
+        assert proxy.usage_audit()[0]["tenant_id"] == "tenant-a"
+        with pytest.raises(CredentialAccessError):
+            await proxy.invoke(
+                tenant_id="tenant-a", session_id="session-a", tool_name=server.server_id,
+                credential_ref="vault/other#secret", operation="mcp.invoke",
+                request=_request(), adapter=adapter,
+            )
+        await proxy.revoke_reference("platform", server.credential_ref)
+        with pytest.raises(CredentialAccessError):
+            await proxy.invoke(
+                tenant_id="tenant-a", session_id="session-a", tool_name=server.server_id,
+                credential_ref=server.credential_ref, operation="mcp.invoke",
+                request=_request(), adapter=adapter,
+            )
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("owner", ["tenant-other", "platform"])
+def test_tenant_owned_mcp_cannot_borrow_its_credential_from_another_tenant(owner: str) -> None:
+    async def scenario() -> None:
+        server = _server().model_copy(update={"tenant_id": owner})
+        adapter = ManagedMcpEgressAdapter(server, resolver=_Resolver(), sender=_Sender())
+        proxy = CredentialProxy(InMemoryVault({server.credential_ref: "oauth-client-secret"}))
+        assert server.credential_ref is not None
+        proxy.register_reference(owner, CredentialReference(
+            credential_ref=server.credential_ref, provider=server.server_id,
+            account_scope=adapter.credential_scope, allowed_operations=("mcp.invoke",),
+            expires_at=datetime.now(UTC) + timedelta(hours=1),
+        ))
+        with pytest.raises(CredentialAccessError, match="outside tenant scope"):
+            await proxy.invoke(
+                tenant_id="tenant-a", session_id="session-a", tool_name=server.server_id,
+                credential_ref=server.credential_ref, operation="mcp.invoke",
+                request=_request(), adapter=adapter,
+            )
+        assert not proxy.usage_audit()
+    asyncio.run(scenario())

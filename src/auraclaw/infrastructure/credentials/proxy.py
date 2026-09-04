@@ -139,10 +139,21 @@ class CredentialProxy:
         expected_provider = getattr(adapter, "credential_provider", None)
         expected_scope = getattr(adapter, "credential_scope", None)
         if secret_required:
+            reference_tenant = tenant_id
+            owner = getattr(adapter, "credential_owner_tenant", None)
+            if owner is not None:
+                # Only the registered adapter selects the reference owner. Neither
+                # caller arguments nor a missing tenant reference can select it.
+                shared = getattr(adapter, "credential_is_shared", False) is True
+                if owner != tenant_id and not (owner == "platform" and shared):
+                    raise CredentialAccessError("credential target is outside tenant scope")
+                if credential_ref != getattr(adapter, "credential_ref", None):
+                    raise CredentialAccessError("credential reference does not match target")
+                reference_tenant = owner
             if self._registry is not None:
-                reference = await self._registry.get_reference(tenant_id, credential_ref)
+                reference = await self._registry.get_reference(reference_tenant, credential_ref)
             else:
-                reference = self._references.get((tenant_id, credential_ref))
+                reference = self._references.get((reference_tenant, credential_ref))
             if reference is None:
                 raise CredentialAccessError("credential reference is not valid for tenant")
             if datetime.now(UTC) >= reference.expires_at:
