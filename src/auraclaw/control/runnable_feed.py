@@ -180,7 +180,25 @@ class RunnableFeedConsumer:
             self._next_waiting_recovery_at = now + self._waiting_recovery_interval
             enqueued += await self._recover_waiting_coordinators()
             enqueued += await self._recover_waiting_tools()
+            enqueued += await self._recover_waiting_approvals()
         return enqueued
+
+    async def _recover_waiting_approvals(self, *, limit: int = 100) -> int:
+        """Recover an approval that raced ahead of Runtime's waiting disposition."""
+        recovered = 0
+        for assignment in await self._store.list_waiting_assignments(
+            limit=limit, status="waiting_for_human"
+        ):
+            events = await self._source.load(assignment.tenant_id, assignment.session_id)
+            decided = any(
+                event.run_id == assignment.run_id
+                and event.type in {"approval.approved", "approval.rejected"}
+                for event in events
+            )
+            if decided:
+                task_id = f"{assignment.tenant_id}:{assignment.session_id}:{assignment.run_id}"
+                recovered += int(await self._store.wake_assignment(task_id))
+        return recovered
 
     async def _recover_waiting_tools(self, *, limit: int = 100) -> int:
         # Schedule recovery work only. Runtime owns the original invocation result semantics.
@@ -309,8 +327,11 @@ class RunnableFeedConsumer:
                     budget = RuntimeBudget(
                         max_steps=int(configured.get("max_steps", DEFAULT_RUNTIME_MAX_STEPS)),
                         max_output_tokens=int(configured.get("max_output_tokens", 8192)),
-                        max_cost=(float(configured["max_cost"])
-                                  if configured.get("max_cost") is not None else None),
+                        max_cost=(
+                            float(configured["max_cost"])
+                            if configured.get("max_cost") is not None
+                            else None
+                        ),
                         policy_version=str(configured.get("policy_version", "1")),
                     )
             elif event.type in {"run.completed", "run.failed", "run.cancelled"}:

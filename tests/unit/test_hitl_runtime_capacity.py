@@ -37,9 +37,7 @@ def _item(task_id: str = "tenant-hitl:session-hitl:run-hitl") -> RunnableItem:
     )
 
 
-async def _assigned_store() -> tuple[
-    InMemoryControlStateStore, RuntimeAssignment, RunnableItem
-]:
+async def _assigned_store() -> tuple[InMemoryControlStateStore, RuntimeAssignment, RunnableItem]:
     store = InMemoryControlStateStore()
     item = _item()
     runtime = RuntimeInstance(
@@ -72,9 +70,7 @@ async def _assigned_store() -> tuple[
         resource_profile={},
         lease_expires_at=lease.expires_at,
     )
-    assert await store.assign(
-        item.task_id, assignment, claim_token=claim.claim_token
-    )
+    assert await store.assign(item.task_id, assignment, claim_token=claim.claim_token)
     return store, assignment, item
 
 
@@ -197,6 +193,42 @@ async def test_approval_event_requeues_waiting_assignment() -> None:
         resource_profile={},
         lease_expires_at=lease.expires_at,
     )
-    assert await store.assign(
-        item.task_id, resumed, claim_token=resumed_claim.claim_token
+    assert await store.assign(item.task_id, resumed, claim_token=resumed_claim.claim_token)
+
+
+@pytest.mark.asyncio
+async def test_fast_approval_is_recovered_after_runtime_late_waiting_ack() -> None:
+    store, _assignment, item = await _assigned_store()
+    events = InMemoryEventStore()
+    await events.append(
+        root_session_id=item.root_session_id,
+        session_id=item.session_id,
+        run_id=item.run_id,
+        context=CommandContext(
+            command_id="fast-approved",
+            tenant_id=item.tenant_id,
+            actor=Actor(type="user", id="approver"),
+            correlation_id="corr",
+            expected_version=0,
+            operation="record_approval_response",
+        ),
+        events=(
+            NewEvent(
+                type="approval.approved",
+                payload={"approval_id": "approval-fast", "decision": "approved"},
+            ),
+        ),
+        command_result={},
     )
+    feed = RunnableFeedConsumer(
+        events, store, worker_id="orchestrator-fast", waiting_recovery_interval=timedelta(0)
+    )
+    # The response is consumed while Runtime still owns the assignment, so the
+    # immediate wake cannot change it.
+    assert await feed.run_once() == 0
+    await asyncio.sleep(0)
+    await store.finish_assignment(item.task_id, "waiting_for_human")
+    # Periodic canonical recovery observes the durable decision and repairs the race.
+    assert await feed.run_once() == 1
+    resumed = await store.claim("orchestrator-fast")
+    assert [claim.item.task_id for claim in resumed] == [item.task_id]
