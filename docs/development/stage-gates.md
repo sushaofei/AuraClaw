@@ -3682,3 +3682,14 @@ EOFBlur
 - [x] Control 每个有界恢复周期检查 waiting_for_human 对应 Run 的 Canonical 审批终态并重新入队；不依赖丢失的 outbox 时序，不重放工具。
 - [x] 新回归严格按“审批事件先消费、Runtime 后确认等待”顺序复现并恢复；审批/协调/事件冲突 14 项回归、Ruff/Mypy 通过。
 - [x] 无 DDL、授权语义或凭据变更；阶段提交推送并发布 Orchestrator 后进行快速审批现场复验。
+
+## 剩余 Skill/MCP/审批/UI 联合关闭验收（2026-09-05）
+
+- [x] MCP 双 owner 在两个真实 Hands 副本正确路由；热更新、逐副本/同时冷启动、禁用及删除后，其他 owner 持续可用且旧 owner 无路由/元数据残留。
+- [x] 测试 KingbaseES 实际版本与迁移目标已核实；前缀移除后的 create/enable/reconcile/search/load/call 全链路完成，权限与审批保持生效。
+- [x] 三档审批真实联验：人工暂停/快速批准恢复、独立模型自动批准、full_access 模式证据均完成；无工具重放。
+- [x] Skill 工作流无未结算调用或重复终态；price-insight-deviation 2.0 缺参不猜测，resume 激活并将下游错误和重复抑制正确记录。
+- [x] Vault 测试 reader 按既有授权轮换为专用路径只读、无默认策略、不可续期、24 小时；未输出或提交 token。
+- [x] AuraX 工作台浏览器回归 33/33；真实分页历史、空租户、Skill 刷新、审批与 MCP 调用证据完成。
+- [x] 对应 AuraClaw #89/#91/#92/#94/#95/#96/#97/#98/#99 与 AuraX #12/#13 已更新最终证据并关闭；下游业务/输出 Schema 错误按用户确认边界保留在下游。
+- [x] 临时 MCP Server/容器与本地 PostgreSQL 验收实例在关闭后清理；只保留 Canonical 验收事实与无秘密文档。
