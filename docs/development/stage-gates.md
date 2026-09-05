@@ -3675,3 +3675,10 @@ EOFBlur
 - [x] 现场确认 Policy 的审核模型请求返回 401：Model Gateway 代码允许 Policy，但 test/prod Compose 均漏挂该调用方凭据。
 - [x] 仅为 Model Gateway 补齐已有 Policy workload token 的文件引用和 secret mount，不生成/输出新凭据，不让 Policy 接触模型供应商密钥。
 - [x] 两种部署配置新增回归；部署与信任边界测试通过。无源码/DDL 变更，发布仅重建 Model Gateway 容器，现场自动审核复验另记。
+
+## 快速人工审批恢复竞态补全（#92，2026-09-05）
+
+- [x] 现场复现用户批准先于 Runtime 写 waiting_for_human：Canonical 工具结果成功一次，但 assignment 被后写等待状态覆盖而卡住。
+- [x] Control 每个有界恢复周期检查 waiting_for_human 对应 Run 的 Canonical 审批终态并重新入队；不依赖丢失的 outbox 时序，不重放工具。
+- [x] 新回归严格按“审批事件先消费、Runtime 后确认等待”顺序复现并恢复；审批/协调/事件冲突 14 项回归、Ruff/Mypy 通过。
+- [x] 无 DDL、授权语义或凭据变更；阶段提交推送并发布 Orchestrator 后进行快速审批现场复验。
