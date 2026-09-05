@@ -109,8 +109,7 @@ def test_production_compose_mounts_least_privilege_secrets() -> None:
 
     assert "migration_database_url" in secret_sources("migrate")
     assert all(
-        "migration_database_url" not in secret_sources(service)
-        for service in APPLICATION_SERVICES
+        "migration_database_url" not in secret_sources(service) for service in APPLICATION_SERVICES
     )
     db_services = APPLICATION_SERVICES - {"agent-runtime"}
     assert all("database_url" in secret_sources(service) for service in db_services)
@@ -133,20 +132,15 @@ def test_production_compose_mounts_least_privilege_secrets() -> None:
     )
     assert {"obs_ak", "obs_sk"} <= secret_sources("artifact-service")
     assert all(
-        "obs_ak" not in secret_sources(service)
-        and "obs_sk" not in secret_sources(service)
+        "obs_ak" not in secret_sources(service) and "obs_sk" not in secret_sources(service)
         for service in APPLICATION_SERVICES - {"artifact-service"}
     )
     assert "runtime_workload_token" in secret_sources("agent-runtime")
     assert "credential_proxy_workload_token" in secret_sources("action-hands")
     assert "streaming_gateway_workload_token" in secret_sources("session")
     assert "streaming_gateway_workload_token" in secret_sources("streaming-gateway")
-    assert not any(
-        item.endswith("database_url") for item in secret_sources("agent-runtime")
-    )
-    assert secrets["runtime_workload_token"]["file"].endswith(
-        "/runtime_workload_token"
-    )
+    assert not any(item.endswith("database_url") for item in secret_sources("agent-runtime"))
+    assert secrets["runtime_workload_token"]["file"].endswith("/runtime_workload_token")
     assert secrets["lease_signing_key"]["file"].endswith("/lease_signing_key")
     assert {
         "chaintower_workload_token",
@@ -174,9 +168,7 @@ def test_secret_file_loading_is_allowlisted_precedence_safe_and_redacted(
     assert environ["AURACLAW_RUNTIME_WORKLOAD_TOKEN"] == "direct-secret"
 
     unavailable = tmp_path / "missing"
-    with pytest.raises(
-        ValueError, match="secret file is unavailable for AURACLAW_MODEL_API_KEY"
-    ):
+    with pytest.raises(ValueError, match="secret file is unavailable for AURACLAW_MODEL_API_KEY"):
         load_secret_files({"AURACLAW_MODEL_API_KEY_FILE": str(unavailable)})
 
 
@@ -205,9 +197,7 @@ def test_committed_files_do_not_contain_environment_secret_values() -> None:
         "OBS_SK",
     }
     local_values = {
-        value
-        for name in secret_names
-        if (value := os.environ.get(name)) and len(value) >= 12
+        value for name in secret_names if (value := os.environ.get(name)) and len(value) >= 12
     }
     committed = "".join(
         path.read_text()
@@ -247,11 +237,7 @@ def test_env_templates_are_ready_to_copy() -> None:
     test = dotenv_values(ROOT / ".env.test.example")
     production = dotenv_values(ROOT / ".env.prod.example")
     for label, values in (("test", test), ("production", production)):
-        missing = [
-            name
-            for name in module.required_variables(values)
-            if not values.get(name)
-        ]
+        missing = [name for name in module.required_variables(values) if not values.get(name)]
         assert missing == [], f"{label} missing {missing}"
         assert values["AURACLAW_DEPLOYMENT_PROFILE"] == "production"
         assert values["AURACLAW_ALLOW_INSECURE_IDENTITY_HEADERS"] == "false"
@@ -272,8 +258,8 @@ def test_env_templates_are_ready_to_copy() -> None:
         "AURACLAW_ARTIFACT_BACKEND",
         "AURACLAW_CREDENTIAL_VAULT_ADDR",
         "AURACLAW_CORS_ALLOW_ORIGINS",
-            "AURACLAW_MIGRATIONS_DIRECTORY",
-            "AURACLAW_MIGRATE_TARGET",
+        "AURACLAW_MIGRATIONS_DIRECTORY",
+        "AURACLAW_MIGRATE_TARGET",
         "AURACLAW_PORT",
         "AURACLAW_RUNTIME_ID",
         "AURACLAW_RUNTIME_ROLE",
@@ -297,17 +283,12 @@ def test_env_templates_are_ready_to_copy() -> None:
     assert "NO_PROXY" not in production
     assert "SESSION_DATABASE_URL" not in debug
     shared_keys = set(test) & set(debug) - local_only
-    mismatches = [
-        key for key in sorted(shared_keys) if test[key] != debug.get(key)
-    ]
+    mismatches = [key for key in sorted(shared_keys) if test[key] != debug.get(key)]
     assert mismatches == []
     assert debug["AURACLAW_RUNTIME_WORKLOAD_TOKEN"] == test["AURACLAW_RUNTIME_WORKLOAD_TOKEN"]
     assert debug["AURACLAW_RUNTIME_WORKLOAD_TOKEN"] == production["AURACLAW_RUNTIME_WORKLOAD_TOKEN"]
 
-    tokens = [
-        production[name] or ""
-        for name in module.WORKLOAD_TOKENS
-    ]
+    tokens = [production[name] or "" for name in module.WORKLOAD_TOKENS]
     assert all(len(token) >= 32 for token in tokens)
     assert len(set(tokens)) == len(tokens)
 
@@ -386,3 +367,14 @@ def test_production_preflight_accepts_shared_database_url_and_unique_tokens(
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert result.stdout.strip() == "Compose preflight passed"
+
+
+@pytest.mark.parametrize("profile", ["test", "prod"])
+def test_model_gateway_mounts_policy_caller_identity_for_auto_review(profile: str) -> None:
+    compose = (ROOT / f"compose.{profile}.yml").read_text()
+    gateway = compose.split("  model-gateway:", 1)[1].split("  action-hands:", 1)[0]
+    assert "AURACLAW_POLICY_WORKLOAD_TOKEN_FILE: /run/secrets/policy_workload_token" in gateway
+    assert "      - policy_workload_token" in gateway
+    # Reviewer still reaches the model through Model Gateway, not a provider credential.
+    policy = compose.split("  policy:", 1)[1].split("  credential-proxy:", 1)[0]
+    assert "MODEL_API_KEY" not in policy
