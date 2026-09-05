@@ -280,6 +280,7 @@ services:
       AURACLAW_HEALTH_PORT: "8005"
       AURACLAW_DATABASE_URL_FILE: /run/secrets/database_url
       AURACLAW_MODEL_API_KEY_FILE: /run/secrets/model_api_key
+      AURACLAW_POLICY_WORKLOAD_TOKEN_FILE: /run/secrets/policy_workload_token
       AURACLAW_RUNTIME_WORKLOAD_TOKEN_FILE: /run/secrets/runtime_workload_token
       AURACLAW_MODEL_GATEWAY_WORKLOAD_TOKEN_FILE: /run/secrets/model_gateway_workload_token
       AURACLAW_MODEL_BASE_URL: ${AURACLAW_MODEL_BASE_URL:-}
@@ -290,6 +291,7 @@ services:
     secrets:
       - database_url
       - model_api_key
+      - policy_workload_token
       - runtime_workload_token
       - model_gateway_workload_token
     command: ["model-gateway", "run", "--host", "0.0.0.0", "--port", "8005"]

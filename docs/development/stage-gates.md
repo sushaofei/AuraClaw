@@ -3667,3 +3667,11 @@ Ruff、Mypy（248 文件）、10 条架构合同通过。迁移不适用，部�
 - [x] 审批、恢复、取消等命令响应返回真实模式/来源/修订，不让 API 缺省值误报 legacy；加载工具提示澄清审批由 Gateway 执行，模型不能自行宣称待批准。
 - [x] 针对性 Runtime/审批/参数回归及预算/隔离回归通过；覆盖取消、持续冲突、有界重试、并发已提交去重。Ruff/Mypy 和 10 条导入架构合同通过。
 - [x] 无 DDL、凭据、权限放宽或业务调用重放；源码、测试与本门禁一起提交推送；三档现场复验单独记录。
+ners
+##gast 自动(closeավայր chìλή skeleton
+EOFBlur
+## 自动审核部署身份接线（#92，2026-09-05）
+
+- [x] 现场确认 Policy 的审核模型请求返回 401：Model Gateway 代码允许 Policy，但 test/prod Compose 均漏挂该调用方凭据。
+- [x] 仅为 Model Gateway 补齐已有 Policy workload token 的文件引用和 secret mount，不生成/输出新凭据，不让 Policy 接触模型供应商密钥。
+- [x] 两种部署配置新增回归；部署与信任边界测试通过。无源码/DDL 变更，发布仅重建 Model Gateway 容器，现场自动审核复验另记。
