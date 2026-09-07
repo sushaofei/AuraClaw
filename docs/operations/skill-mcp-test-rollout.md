@@ -1,5 +1,24 @@
 # Skill/MCP 测试环境部署记录（2026-09-04）
 
+## 2026-09-07 Vault token 到期故障与修复方案（Issue #102）
+
+AuraX 的 MCP TEST 返回 `credential_access_denied`，目录保留旧 generation。错误发生在
+Credential Proxy 读取 `vault/chaintower-mcp-test#workload` 时；下游 MCP 尚未收到请求。
+直接原因是下述 24 小时静态 token 到期，而旧 readiness 只检查 `/v1/sys/health`，没有检查
+挂载身份是否仍然有效。
+
+代码修复增加 Vault AppRole 工作负载认证。Credential Proxy 可使用 role ID 与受 Compose
+secret 保护的 secret ID 登录；派生 token 返回 403 时，客户端串行重新登录并只重试一次。
+readiness 同时调用 `auth/token/lookup-self`，静态 token 过期时会立即转为 not ready。
+静态 token 方式继续兼容，但长驻测试/生产服务应使用受限 AppRole：仅允许读取专用 MCP KV
+路径，派生 token 使用短 TTL，role secret ID 独立轮换，不授予 policy/token 管理权限。
+
+部署时先在 Vault 创建最小权限 policy 与 AppRole，再配置
+`AURACLAW_CREDENTIAL_VAULT_APPROLE_ROLE_ID`、
+`AURACLAW_CREDENTIAL_VAULT_APPROLE_SECRET_ID`，清空旧静态 token，重新物化 Compose secrets，
+最后重建两个 Credential Proxy。验收顺序为 readiness、MCP TEST、ENABLE/reconcile、真实只读
+Tool 调用。Vault 恢复后仍需单独验证既有的 Java“身份上下文不可用”问题。
+
 Vault 访问已恢复，workload 配置 revision 4 已测试并启用；Java 仍返回身份上下文不可用。业务成功闭环及 Skill 安装迁移尚未完成。
 
 ## 已部署内容

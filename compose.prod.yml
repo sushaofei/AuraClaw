@@ -407,6 +407,9 @@ services:
       AURACLAW_HEALTH_PORT: "8008"
       AURACLAW_DATABASE_URL_FILE: /run/secrets/database_url
       AURACLAW_CREDENTIAL_VAULT_TOKEN_FILE: /run/secrets/vault_token
+      AURACLAW_CREDENTIAL_VAULT_APPROLE_ROLE_ID: ${AURACLAW_CREDENTIAL_VAULT_APPROLE_ROLE_ID:-}
+      AURACLAW_CREDENTIAL_VAULT_APPROLE_SECRET_ID_FILE: /run/secrets/vault_approle_secret_id
+      AURACLAW_CREDENTIAL_VAULT_APPROLE_MOUNT: ${AURACLAW_CREDENTIAL_VAULT_APPROLE_MOUNT:-approle}
       AURACLAW_CREDENTIAL_VAULT_ADDR: ${AURACLAW_CREDENTIAL_VAULT_ADDR:-}
       AURACLAW_CREDENTIAL_VAULT_MOUNT: ${AURACLAW_CREDENTIAL_VAULT_MOUNT:-secret}
       AURACLAW_CREDENTIAL_EGRESS_ALLOWLIST: ${AURACLAW_CREDENTIAL_EGRESS_ALLOWLIST:-}
@@ -417,6 +420,7 @@ services:
     secrets:
       - database_url
       - vault_token
+      - vault_approle_secret_id
       - action_hands_workload_token
       - delivery_workload_token
       - task_api_workload_token
@@ -604,6 +608,7 @@ secrets:
   lease_signing_key: {file: "${AURACLAW_SECRET_DIR:-.runtime/compose-secrets}/lease_signing_key"}
   model_api_key: {file: "${AURACLAW_SECRET_DIR:-.runtime/compose-secrets}/model_api_key"}
   vault_token: {file: "${AURACLAW_SECRET_DIR:-.runtime/compose-secrets}/vault_token"}
+  vault_approle_secret_id: {file: "${AURACLAW_SECRET_DIR:-.runtime/compose-secrets}/vault_approle_secret_id"}
   obs_ak: {file: "${AURACLAW_SECRET_DIR:-.runtime/compose-secrets}/obs_ak"}
   obs_sk: {file: "${AURACLAW_SECRET_DIR:-.runtime/compose-secrets}/obs_sk"}
   chaintower_workload_token: {file: "${AURACLAW_SECRET_DIR:-.runtime/compose-secrets}/chaintower_workload_token"}

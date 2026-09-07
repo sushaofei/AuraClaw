@@ -37,10 +37,15 @@ _SECRET_FILE_VARIABLES = {
     "AURACLAW_MODEL_API_KEY",
     "AURACLAW_SKILL_SIGNING_KEY",
     "AURACLAW_CREDENTIAL_VAULT_TOKEN",
+    "AURACLAW_CREDENTIAL_VAULT_APPROLE_SECRET_ID",
     "SEAWEEDFS_ACCESS_KEY",
     "SEAWEEDFS_SECRET_KEY",
     "OBS_AK",
     "OBS_SK",
+}
+_OPTIONAL_EMPTY_SECRET_FILE_VARIABLES = {
+    "AURACLAW_CREDENTIAL_VAULT_TOKEN",
+    "AURACLAW_CREDENTIAL_VAULT_APPROLE_SECRET_ID",
 }
 
 
@@ -58,6 +63,8 @@ def load_secret_files(environ: dict[str, str] | None = None) -> None:
         if path.stat().st_size > 64 * 1024:
             raise ValueError(f"secret file is too large for {variable}")
         value = path.read_text().rstrip("\r\n")
+        if not value and variable in _OPTIONAL_EMPTY_SECRET_FILE_VARIABLES:
+            continue
         if not value:
             raise ValueError(f"secret file is empty for {variable}")
         selected[variable] = value
@@ -344,6 +351,9 @@ class Settings(BaseSettings):
     )
     credential_vault_addr: str | None = None
     credential_vault_token: SecretStr | None = None
+    credential_vault_approle_role_id: str | None = None
+    credential_vault_approle_secret_id: SecretStr | None = None
+    credential_vault_approle_mount: str = "approle"
     credential_vault_mount: str = "secret"
     artifact_base_url: str = "http://127.0.0.1:8009"
     delivery_base_url: str = "http://127.0.0.1:8011"
