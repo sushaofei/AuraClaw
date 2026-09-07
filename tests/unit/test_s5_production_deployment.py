@@ -126,8 +126,10 @@ def test_production_compose_mounts_least_privilege_secrets() -> None:
         == "/run/secrets/action_hands_workload_token"
     )
     assert "vault_token" in secret_sources("credential-proxy")
+    assert "vault_approle_secret_id" in secret_sources("credential-proxy")
     assert all(
         "vault_token" not in secret_sources(service)
+        and "vault_approle_secret_id" not in secret_sources(service)
         for service in APPLICATION_SERVICES - {"credential-proxy"}
     )
     assert {"obs_ak", "obs_sk"} <= secret_sources("artifact-service")
@@ -170,6 +172,14 @@ def test_secret_file_loading_is_allowlisted_precedence_safe_and_redacted(
     unavailable = tmp_path / "missing"
     with pytest.raises(ValueError, match="secret file is unavailable for AURACLAW_MODEL_API_KEY"):
         load_secret_files({"AURACLAW_MODEL_API_KEY_FILE": str(unavailable)})
+
+    empty_optional = tmp_path / "empty-optional"
+    empty_optional.write_text("")
+    optional_environ = {
+        "AURACLAW_CREDENTIAL_VAULT_TOKEN_FILE": str(empty_optional),
+    }
+    load_secret_files(optional_environ)
+    assert "AURACLAW_CREDENTIAL_VAULT_TOKEN" not in optional_environ
 
 
 def test_migration_discovery_orders_versions_rejects_duplicates_and_ignores_down(
@@ -352,6 +362,7 @@ def test_production_preflight_accepts_shared_database_url_and_unique_tokens(
     )
     assert materialized.returncode == 0, materialized.stdout + materialized.stderr
     assert (secret_dir / "database_url").is_file()
+    assert (secret_dir / "vault_approle_secret_id").is_file()
     assert not (secret_dir / "session_database_url").exists()
     result = subprocess.run(
         [
@@ -367,6 +378,56 @@ def test_production_preflight_accepts_shared_database_url_and_unique_tokens(
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert result.stdout.strip() == "Compose preflight passed"
+
+
+def test_compose_secret_materialization_accepts_approle_without_static_token(
+    tmp_path: Path,
+) -> None:
+    env_file = tmp_path / ".env.test"
+    lines = (ROOT / ".env.test.example").read_text().splitlines()
+    replacements = {
+        "AURACLAW_CREDENTIAL_VAULT_TOKEN": "",
+        "AURACLAW_CREDENTIAL_VAULT_APPROLE_ROLE_ID": "test-role-id",
+        "AURACLAW_CREDENTIAL_VAULT_APPROLE_SECRET_ID": "test-secret-id",
+    }
+    rendered: list[str] = []
+    for line in lines:
+        key = line.split("=", 1)[0]
+        rendered.append(f"{key}={replacements[key]}" if key in replacements else line)
+    env_file.write_text("\n".join(rendered))
+    secret_dir = tmp_path / "secrets"
+
+    materialized = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts/materialize_compose_secrets.py"),
+            "--env-file",
+            str(env_file),
+            "--output-dir",
+            str(secret_dir),
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert materialized.returncode == 0, materialized.stdout + materialized.stderr
+    assert (secret_dir / "vault_token").read_text() == ""
+    assert (secret_dir / "vault_approle_secret_id").read_text() == "test-secret-id"
+
+    preflight = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts/compose_preflight.py"),
+            "--env-file",
+            str(env_file),
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert preflight.returncode == 0, preflight.stdout + preflight.stderr
 
 
 @pytest.mark.parametrize("profile", ["test", "prod"])

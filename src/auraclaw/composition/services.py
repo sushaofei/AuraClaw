@@ -686,9 +686,11 @@ def _readiness(name: str, settings: Settings) -> tuple[bool, dict[str, str]]:
                 ServiceIdentity.DELIVERY_WORKER,
             ),
         )
-        vault_configured = bool(settings.credential_vault_addr) and (
-            settings.credential_vault_token is not None
+        vault_auth_configured = settings.credential_vault_token is not None or (
+            bool(settings.credential_vault_approle_role_id)
+            and settings.credential_vault_approle_secret_id is not None
         )
+        vault_configured = bool(settings.credential_vault_addr) and vault_auth_configured
         vault_ready = vault_configured or (
             settings.deployment_profile == "development"
             and not settings.credential_vault_addr

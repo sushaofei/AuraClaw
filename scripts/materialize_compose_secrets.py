@@ -24,11 +24,18 @@ SECRET_VARIABLES = {
     "lease_signing_key": "AURACLAW_LEASE_SIGNING_KEY",
     "model_api_key": "AURACLAW_MODEL_API_KEY",
     "vault_token": "AURACLAW_CREDENTIAL_VAULT_TOKEN",
+    "vault_approle_secret_id": "AURACLAW_CREDENTIAL_VAULT_APPROLE_SECRET_ID",
     "obs_ak": "OBS_AK",
     "obs_sk": "OBS_SK",
     "chaintower_workload_token": "AURACLAW_CHAINTOWER_WORKLOAD_TOKEN",
     "agent_context_signing_keys_json": "AURACLAW_AGENT_CONTEXT_SIGNING_KEYS_JSON",
 }
+OPTIONAL_VARIABLES = {
+    "AURACLAW_CREDENTIAL_VAULT_TOKEN",
+    "AURACLAW_CREDENTIAL_VAULT_APPROLE_SECRET_ID",
+}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="materialize ignored 0600 files for Docker Compose secrets"
@@ -46,8 +53,21 @@ def main() -> int:
         for variable in SECRET_VARIABLES.values()
     }
     missing = [
-        variable for variable in SECRET_VARIABLES.values() if not values[variable]
+        variable
+        for variable in SECRET_VARIABLES.values()
+        if variable not in OPTIONAL_VARIABLES and not values[variable]
     ]
+    role_id = os.environ.get("AURACLAW_CREDENTIAL_VAULT_APPROLE_ROLE_ID") or configured.get(
+        "AURACLAW_CREDENTIAL_VAULT_APPROLE_ROLE_ID"
+    )
+    token = values["AURACLAW_CREDENTIAL_VAULT_TOKEN"]
+    secret_id = values["AURACLAW_CREDENTIAL_VAULT_APPROLE_SECRET_ID"]
+    if not token and not (role_id and secret_id):
+        missing.append(
+            "AURACLAW_CREDENTIAL_VAULT_TOKEN or complete Vault AppRole credentials"
+        )
+    if bool(role_id) != bool(secret_id):
+        missing.append("complete Vault AppRole role_id + secret_id pair")
     if missing:
         print("secret materialization failed")
         for variable in missing:

@@ -91,8 +91,10 @@ Provision 阶段使用凭证准备受控资源，例如 Clone Repo；Sandbox 获
 
 - Policy validator 未配置、不可达、超时、返回异常或决定无效：在解析 Vault Secret、写 usage audit 或调用外部适配器前 fail closed。
 - 生产 Credential Proxy 缺少任一调用方 workload identity、服务自身 Policy workload identity 或 Policy 地址时拒绝启动。
-- 生产必须使用外部 Vault/KMS；`InMemoryVault` 和 `debug_vault_secrets_json` 仅限 development，缺少
-  Vault 地址/token 时拒绝构造 production service。
+- 生产必须使用外部 Vault/KMS；`InMemoryVault` 和 `debug_vault_secrets_json` 仅限 development。认证使用
+  静态 token 或完整 AppRole；长驻服务优先使用 AppRole，缺少 Vault 地址或认证材料时拒绝构造服务。
+- AppRole 派生 token 被 Vault 拒绝时，Proxy 在进程内串行重新登录并只重试一次，防止副本并发形成
+  登录风暴。readiness 同时检查 Vault 系统健康和当前 token 的 `lookup-self`，认证失效必须 not ready。
 - Managed Connector reference 在 initialize 阶段异步写入 PostgreSQL。相同定义并发 seed 幂等，
   provider/scope/operation 冲突 fail closed；revoked row 保留为撤销事实，重启 seed 不得清除 `revoked_at`。
 - Secret 过期：Proxy 协调刷新并记录，不把刷新 Token 返回调用方。
@@ -125,11 +127,13 @@ unknown_side_effect
 - 归属：`credential_proxy/internal_service.py`、`infrastructure/credentials/`，部署在 `credential-proxy`。
 - 已实现 Credential Reference/Usage Audit、Policy decision 复核、目标 allowlist、请求代调用、Secret 脱敏、
   Vault KV 适配、Webhook、Java API 与远端 MCP egress manager。
-- 生产装配要求外部 Vault 地址/token 和 workload identity；内存 Vault/debug secret 仅允许开发环境。
+- 生产装配要求外部 Vault 地址、静态 token 或完整 AppRole，以及 workload identity；内存 Vault/debug
+  secret 仅允许开发环境。AppRole secret ID 只挂载到 Credential Proxy。
 
 ## 现有缺陷与待完善
 
-- 当前 Vault 适配集中于静态 KV 读取；OAuth refresh、动态数据库凭证、PKI/signing 和自动 rotation 多为目标设计。
+- 当前 Vault 适配支持 KV v2、AppRole 登录及派生 token 失效后的重新认证；动态数据库凭证、
+  PKI/signing、AppRole secret ID 自动轮换和主动 lease renewal 仍为后续目标。
 - Egress allowlist 与 DNS/IP 复核已有 connector 级实现，但没有独立网络层强制代理/防火墙证明。
 - 返回体 Secret/DLP 检测以规则脱敏为主，复杂编码和二进制内容仍可能需要专用扫描。
 - 待补：Vault HA/lease renew、轮换撤销传播、网络强制层、break-glass 流程和 Secret 泄漏自动化测试。

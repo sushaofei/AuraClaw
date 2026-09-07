@@ -33,7 +33,6 @@ BASE_REQUIRED = (
     "AURACLAW_MODEL_BASE_URL",
     "AURACLAW_MODEL_NAME",
     "AURACLAW_CREDENTIAL_VAULT_ADDR",
-    "AURACLAW_CREDENTIAL_VAULT_TOKEN",
     "AURACLAW_CHAINTOWER_WORKLOAD_TOKEN",
     "AURACLAW_AGENT_CONTEXT_SIGNING_KEYS_JSON",
 )
@@ -109,6 +108,9 @@ def main() -> int:
             *SEAWEEDFS_REQUIRED,
             *OBS_REQUIRED,
             "AURACLAW_ARTIFACT_BACKEND",
+            "AURACLAW_CREDENTIAL_VAULT_TOKEN",
+            "AURACLAW_CREDENTIAL_VAULT_APPROLE_ROLE_ID",
+            "AURACLAW_CREDENTIAL_VAULT_APPROLE_SECRET_ID",
         )
     }
     required = required_variables(backend_inputs)
@@ -116,6 +118,15 @@ def main() -> int:
         name: os.environ.get(name) or file_values.get(name) or "" for name in required
     }
     failures = [f"missing {name}" for name in required if not values[name]]
+    vault_token = backend_inputs["AURACLAW_CREDENTIAL_VAULT_TOKEN"]
+    vault_role_id = backend_inputs["AURACLAW_CREDENTIAL_VAULT_APPROLE_ROLE_ID"]
+    vault_secret_id = backend_inputs["AURACLAW_CREDENTIAL_VAULT_APPROLE_SECRET_ID"]
+    if not vault_token and not (vault_role_id and vault_secret_id):
+        failures.append(
+            "Vault requires AURACLAW_CREDENTIAL_VAULT_TOKEN or a complete AppRole pair"
+        )
+    if bool(vault_role_id) != bool(vault_secret_id):
+        failures.append("Vault AppRole requires both role_id and secret_id")
 
     image = values["AURACLAW_IMAGE"]
     if image and (

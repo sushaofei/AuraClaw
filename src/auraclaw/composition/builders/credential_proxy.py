@@ -45,7 +45,12 @@ def build_credential_proxy_app(spec: ServiceSpec, settings: Settings) -> FastAPI
     if settings.deployment_profile == "production":
         if settings.debug_vault_secrets:
             raise ValueError("credential-proxy production forbids debug Vault secrets")
-        if not settings.credential_vault_addr or settings.credential_vault_token is None:
+        approle_configured = bool(settings.credential_vault_approle_role_id) and (
+            settings.credential_vault_approle_secret_id is not None
+        )
+        if not settings.credential_vault_addr or (
+            settings.credential_vault_token is None and not approle_configured
+        ):
             raise ValueError("credential-proxy production requires an external Vault")
     registry = (
         PostgresCredentialRegistry(settings.resolved_database_url)
@@ -53,10 +58,26 @@ def build_credential_proxy_app(spec: ServiceSpec, settings: Settings) -> FastAPI
         else None
     )
     vault: InMemoryVault | HashiCorpVault
-    if settings.credential_vault_addr and settings.credential_vault_token is not None:
+    approle_configured = bool(settings.credential_vault_approle_role_id) and (
+        settings.credential_vault_approle_secret_id is not None
+    )
+    if settings.credential_vault_addr and (
+        settings.credential_vault_token is not None or approle_configured
+    ):
         vault = HashiCorpVault(
             settings.credential_vault_addr,
-            token=settings.credential_vault_token.get_secret_value(),
+            token=(
+                None
+                if settings.credential_vault_token is None
+                else settings.credential_vault_token.get_secret_value()
+            ),
+            approle_role_id=settings.credential_vault_approle_role_id,
+            approle_secret_id=(
+                None
+                if settings.credential_vault_approle_secret_id is None
+                else settings.credential_vault_approle_secret_id.get_secret_value()
+            ),
+            approle_mount=settings.credential_vault_approle_mount,
             mount=settings.credential_vault_mount,
         )
     else:

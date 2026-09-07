@@ -3693,3 +3693,11 @@ EOFBlur
 - [x] AuraX 工作台浏览器回归 33/33；真实分页历史、空租户、Skill 刷新、审批与 MCP 调用证据完成。
 - [x] 对应 AuraClaw #89/#91/#92/#94/#95/#96/#97/#98/#99 与 AuraX #12/#13 已更新最终证据并关闭；下游业务/输出 Schema 错误按用户确认边界保留在下游。
 - [x] 临时 MCP Server/容器与本地 PostgreSQL 验收实例在关闭后清理；只保留 Canonical 验收事实与无秘密文档。
+# 阶段 I101：Vault 工作负载凭据自动恢复（Issue #102）
+
+- [x] Credential Proxy 支持 Vault AppRole，派生 token 失效后串行重新认证并单次重试。
+- [x] Vault readiness 校验当前身份，不再只检查 Vault 进程健康。
+- [x] Compose 仅向 Credential Proxy 挂载 AppRole secret ID，静态 token 保持兼容。
+- [x] 配置预检要求静态 token 或完整 AppRole 二选一，并拒绝残缺配置。
+- [x] 单元测试覆盖静态 token 失效、AppRole 重认证、secret 隔离与部署物化。
+- [x] 运维文档记录最小权限、部署顺序、验收步骤及独立下游风险。
