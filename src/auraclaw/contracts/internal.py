@@ -925,6 +925,7 @@ class McpRegistryAdminRequest(ContractModel):
     server_id: str | None = None
     config: dict[str, Any] | None = None
     target_revision: int | None = None
+    force_schema_update: bool = False
 
 
 class McpRegistryAdminResponse(ContractModel):

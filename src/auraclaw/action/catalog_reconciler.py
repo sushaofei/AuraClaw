@@ -235,6 +235,8 @@ class CapabilityCatalogReconciler:
     async def reconcile_server(
         self,
         server: McpServerDefinition,
+        *,
+        allow_schema_drift: bool = False,
     ) -> McpReconcileResult:
         connector = self._connectors.get(server.server_id)
         if connector is None or not server.enabled:
@@ -298,12 +300,15 @@ class CapabilityCatalogReconciler:
             existing = {
                 (item.kind, item.canonical_name, item.version): item for item in existing_items
             }
+            schema_drift_count = 0
             for item in descriptors:
                 previous = existing.get((item.kind, item.canonical_name, item.version))
                 if previous is not None and previous.content_digest != item.content_digest:
-                    raise CapabilitySchemaDriftError(
-                        "remote MCP capability changed without version bump"
-                    )
+                    schema_drift_count += 1
+                    if not allow_schema_drift:
+                        raise CapabilitySchemaDriftError(
+                            "remote MCP capability changed without version bump"
+                        )
             if self._tool_registry is not None:
                 self._tool_registry.prepare_owner(
                     connector.connector_id,
@@ -369,6 +374,8 @@ class CapabilityCatalogReconciler:
                         "catalog_quarantined_at": None,
                         "catalog_stale": False,
                         "active_catalog_generation": (commit.generation),
+                        "last_sync_forced": allow_schema_drift,
+                        "forced_schema_update_count": schema_drift_count,
                     },
                 }
             )

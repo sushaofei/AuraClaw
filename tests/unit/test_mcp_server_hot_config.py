@@ -18,6 +18,7 @@ from auraclaw.contracts.capabilities import McpAuthStrategy, McpNetworkMode
 from auraclaw.contracts.errors import (
     AuthorizationError,
     CredentialAccessError,
+    InvalidTransitionError,
     NotFoundError,
     VersionConflictError,
 )
@@ -707,7 +708,7 @@ def test_remote_mcp_egress_client_forwards_apply() -> None:
     asyncio.run(scenario())
 
 
-def test_remote_mcp_registry_client_forwards_test_to_hands() -> None:
+def test_remote_mcp_registry_client_forwards_force_reconcile_to_hands() -> None:
     async def scenario() -> None:
         captured: dict[str, object] = {}
 
@@ -733,7 +734,10 @@ def test_remote_mcp_registry_client_forwards_test_to_hands() -> None:
             transport=httpx.MockTransport(handler),
         )
         try:
-            record = await client.test("auramcp", _life(command_id="cmd-test"))
+            record = await client.reconcile(
+                "auramcp",
+                _life(command_id="cmd-force-reconcile", force_schema_update=True),
+            )
         finally:
             await client.aclose()
         assert record.status.value == "succeeded"
@@ -741,11 +745,57 @@ def test_remote_mcp_registry_client_forwards_test_to_hands() -> None:
         assert captured["path"] == "/internal/v1/mcp-registry/command"
         body = captured["body"]
         assert isinstance(body, dict)
-        assert body["operation"] == "test"
+        assert body["operation"] == "reconcile"
         assert body["server_id"] == "auramcp"
+        assert body["force_schema_update"] is True
         context = body["context"]
         assert isinstance(context, dict)
         assert context["service_identity"] == "task-api"
+
+    asyncio.run(scenario())
+
+
+def test_registry_passes_force_schema_update_only_to_reconcile_runtime() -> None:
+    async def scenario() -> None:
+        store = InMemoryMcpServerRegistryStore()
+        service = McpServerRegistryService(store, allow_private_auth_none=True)
+        await service.create(_write(_config()))
+
+        class Runtime:
+            applied: list[bool] = []
+
+            async def test(self, entry: McpActiveSnapshotEntry) -> None:
+                del entry
+
+            async def apply(
+                self,
+                entry: McpActiveSnapshotEntry,
+                *,
+                force_schema_update: bool = False,
+            ) -> None:
+                del entry
+                self.applied.append(force_schema_update)
+
+            async def revoke(self, server_id: str) -> None:
+                del server_id
+
+        runtime = Runtime()
+        service.bind_runtime(runtime)
+        enabled = await service.enable("local-order-mcp", _life(command_id="enable"))
+        assert enabled.status.value == "succeeded"
+        forced = await service.reconcile(
+            "local-order-mcp",
+            _life(command_id="force-reconcile", force_schema_update=True),
+        )
+        assert forced.status.value == "succeeded"
+        assert forced.result["force_schema_update"] is True
+        assert runtime.applied == [False, True]
+
+        with pytest.raises(InvalidTransitionError, match="only supported for MCP reconcile"):
+            await service.test(
+                "local-order-mcp",
+                _life(command_id="invalid-force", force_schema_update=True),
+            )
 
     asyncio.run(scenario())
 

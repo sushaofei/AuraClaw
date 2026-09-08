@@ -143,6 +143,8 @@ def create_mcp_admin_router(
         command_id: str,
         expected_revision: int,
         target_revision: int | None = None,
+        *,
+        force_schema_update: bool = False,
     ) -> McpServerLifecycleCommand:
         return McpServerLifecycleCommand(
             command_id=command_id,
@@ -152,6 +154,7 @@ def create_mcp_admin_router(
             causation_id=command_id,
             expected_revision=expected_revision,
             target_revision=target_revision,
+            force_schema_update=force_schema_update,
         )
 
     @router.post("/mcp-servers", status_code=status.HTTP_202_ACCEPTED)
@@ -209,6 +212,17 @@ def create_mcp_admin_router(
             )
         target_revision = payload.get("target_revision")
         parsed_target = None if target_revision is None else int(target_revision)
+        force_schema_update = payload.get("force_schema_update", False)
+        if not isinstance(force_schema_update, bool):
+            raise HTTPException(
+                status_code=422,
+                detail="force_schema_update must be a boolean",
+            )
+        if force_schema_update and operation != "reconcile":
+            raise HTTPException(
+                status_code=400,
+                detail="force_schema_update is only supported for MCP reconcile",
+            )
         handlers = {
             "test": ops.test,
             "enable": ops.enable,
@@ -230,6 +244,7 @@ def create_mcp_admin_router(
             expected_revision,
             handler,
             parsed_target,
+            force_schema_update=force_schema_update,
         )
 
     @router.get("/mcp-servers")
@@ -365,10 +380,18 @@ def create_mcp_admin_router(
         expected_revision: int,
         handler: Any,
         target_revision: int | None = None,
+        *,
+        force_schema_update: bool = False,
     ) -> dict[str, Any]:
         record = await handler(
             server_id,
-            _lifecycle(identity, command_id, expected_revision, target_revision),
+            _lifecycle(
+                identity,
+                command_id,
+                expected_revision,
+                target_revision,
+                force_schema_update=force_schema_update,
+            ),
         )
         dumped: dict[str, Any] = record.model_dump(mode="json")
         return dumped

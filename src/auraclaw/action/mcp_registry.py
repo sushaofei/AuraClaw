@@ -123,7 +123,9 @@ class McpServerRegistryStore(Protocol):
 class McpRuntimeController(Protocol):
     async def test(self, entry: McpActiveSnapshotEntry) -> None: ...
 
-    async def apply(self, entry: McpActiveSnapshotEntry) -> None: ...
+    async def apply(
+        self, entry: McpActiveSnapshotEntry, *, force_schema_update: bool = False
+    ) -> None: ...
 
     async def revoke(self, server_id: str) -> None: ...
 
@@ -724,6 +726,10 @@ class McpServerRegistryService:
         kind: McpRegistryOperationKind,
     ) -> McpServerOperationRecord:
         current = await self._require_server(server_id, command.tenant_id)
+        if command.force_schema_update and kind is not McpRegistryOperationKind.RECONCILE:
+            raise InvalidTransitionError(
+                "force_schema_update is only supported for MCP reconcile"
+            )
         target_revision = command.target_revision or current.latest_revision
         now = datetime.now(UTC)
         operation = _new_operation(
@@ -770,7 +776,7 @@ class McpServerRegistryService:
                     claim_token=claim_token,
                 )
                 desired_committed = True
-            await self._apply_lifecycle(current, revision, kind)
+            await self._apply_lifecycle(current, revision, kind, command=command)
         except asyncio.CancelledError:
             unknown = operation.model_copy(
                 update={
@@ -809,6 +815,11 @@ class McpServerRegistryService:
                     "result": {
                         "desired_state": desired.value,
                         "active_revision": active,
+                        "force_schema_update": (
+                            command.force_schema_update
+                            if kind is McpRegistryOperationKind.RECONCILE
+                            else False
+                        ),
                     },
                 }
             ),
@@ -858,6 +869,8 @@ class McpServerRegistryService:
         current: McpServerRecord,
         revision: McpServerRevisionRecord,
         kind: McpRegistryOperationKind,
+        *,
+        command: McpServerLifecycleCommand,
     ) -> None:
         entry = McpActiveSnapshotEntry(
             server_id=current.server_id,
@@ -891,14 +904,19 @@ class McpServerRegistryService:
             ):
                 active = await self._store.get_revision(current.server_id, current.active_revision)
                 if active is not None:
-                    await self._runtime.apply(
-                        entry.model_copy(
-                            update={
-                                "revision": active.revision,
-                                "config": active.config,
-                            }
-                        )
+                    active_entry = entry.model_copy(
+                        update={
+                            "revision": active.revision,
+                            "config": active.config,
+                        }
                     )
+                    if command.force_schema_update:
+                        await self._runtime.apply(
+                            active_entry,
+                            force_schema_update=True,
+                        )
+                    else:
+                        await self._runtime.apply(active_entry)
             return
         if self._runtime is not None:
             await self._runtime.revoke(current.server_id)
@@ -969,6 +987,7 @@ def _lifecycle_request_digest(
             "operation": kind.value,
             "expected_revision": command.expected_revision,
             "target_revision": command.target_revision,
+            "force_schema_update": command.force_schema_update,
         },
         sort_keys=True,
         separators=(",", ":"),

@@ -232,6 +232,7 @@ class McpServerLifecycleCommand(ContractModel):
     causation_id: str = Field(min_length=1)
     expected_revision: int = Field(ge=0)
     target_revision: int | None = None
+    force_schema_update: bool = False
 
 
 def none_credential_ref(server_id: str) -> str:

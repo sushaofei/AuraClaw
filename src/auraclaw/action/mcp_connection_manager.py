@@ -250,11 +250,17 @@ class McpConnectionManager:
         *,
         restore: bool = False,
         tested: bool = False,
+        force_schema_update: bool = False,
     ) -> None:
         async with self._server_locks.setdefault(entry.server_id, asyncio.Lock()):
             if self._generations.get(entry.server_id, 0) > entry.revision:
                 return
-            await self._apply(entry, restore=restore, tested=tested)
+            await self._apply(
+                entry,
+                restore=restore,
+                tested=tested,
+                force_schema_update=force_schema_update,
+            )
             desired = {item.server_id: item for item in await self._registry.active_snapshot()}
             current = desired.get(entry.server_id)
             if current is None or current.revision != entry.revision:
@@ -284,6 +290,7 @@ class McpConnectionManager:
         *,
         restore: bool = False,
         tested: bool = False,
+        force_schema_update: bool = False,
     ) -> None:
         if not restore and not tested:
             await self.test(entry, persist_egress=True)
@@ -327,7 +334,10 @@ class McpConnectionManager:
             result = (
                 McpReconcileResult(entry.server_id, CapabilityStatus.ACTIVE, 0)
                 if hydrated
-                else await self._reconciler.reconcile_server(definition)
+                else await self._reconciler.reconcile_server(
+                    definition,
+                    allow_schema_drift=force_schema_update,
+                )
             )
             observed = {
                 CapabilityStatus.ACTIVE: McpObservedState.ACTIVE,

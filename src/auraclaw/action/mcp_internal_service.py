@@ -83,6 +83,7 @@ class McpRegistryInternalService:
                 causation_id=request.context.causation_id,
                 expected_revision=request.expected_revision,
                 target_revision=request.target_revision,
+                force_schema_update=request.force_schema_update,
             )
             handler = {
                 McpRegistryOperationKind.TEST: self._registry.test,
