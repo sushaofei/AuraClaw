@@ -267,6 +267,52 @@ def test_mcp_admin_invokes_capability_test_with_simulated_input() -> None:
     assert tested.json()["expectation_matched"] is True
 
 
+def test_mcp_admin_accepts_force_only_for_reconcile() -> None:
+    registry, catalog = _seed()
+    app = _task_app()
+    app.include_router(create_mcp_admin_router(registry, catalog=catalog))
+    app.state.config_ready = True
+    headers = {
+        "X-Tenant-ID": "tenant-a",
+        "X-Actor-ID": "admin-1",
+        "Idempotency-Key": "force-reconcile",
+        "X-Expected-Revision": "1",
+    }
+    with TestClient(app) as client:
+        forced = client.post(
+            "/v1/admin/mcp-servers/lifecycle",
+            headers=headers,
+            json={
+                "server_id": "local-order-mcp",
+                "operation": "reconcile",
+                "force_schema_update": True,
+            },
+        )
+        invalid_operation = client.post(
+            "/v1/admin/mcp-servers/lifecycle",
+            headers={**headers, "Idempotency-Key": "invalid-force-operation"},
+            json={
+                "server_id": "local-order-mcp",
+                "operation": "test",
+                "force_schema_update": True,
+            },
+        )
+        invalid_type = client.post(
+            "/v1/admin/mcp-servers/lifecycle",
+            headers={**headers, "Idempotency-Key": "invalid-force-type"},
+            json={
+                "server_id": "local-order-mcp",
+                "operation": "reconcile",
+                "force_schema_update": "yes",
+            },
+        )
+
+    assert forced.status_code == 202, forced.text
+    assert forced.json()["result"]["force_schema_update"] is True
+    assert invalid_operation.status_code == 400
+    assert invalid_type.status_code == 422
+
+
 def test_mcp_admin_hard_deletes_server_via_gateway_alias() -> None:
     registry, catalog = _seed()
     app = _task_app()

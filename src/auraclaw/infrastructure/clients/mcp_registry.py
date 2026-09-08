@@ -119,6 +119,7 @@ class RemoteMcpRegistryClient:
                 operation=operation,
                 server_id=server_id,
                 target_revision=command.target_revision,
+                force_schema_update=command.force_schema_update,
             ),
             McpRegistryAdminResponse,
         )
