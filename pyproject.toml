@@ -1,0 +1,168 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "auraclaw"
+version = "0.1.0"
+description = "Managed Agent backend service"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+  "aiokafka>=0.12,<1",
+  "asyncpg>=0.30,<1",
+  "cryptography>=45,<50",
+  "fastapi>=0.115,<1",
+  "httpx>=0.27,<1",
+  "jsonschema>=4.26,<5",
+  "pydantic-settings>=2.6,<3",
+  "regex>=2024.11,<2027",
+  "socksio>=1.0,<2",
+  "uvicorn[standard]>=0.32,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "import-linter>=2.1,<3",
+  "mypy>=1.13,<2",
+  "pytest>=8.3,<9",
+  "pytest-asyncio>=0.24,<1",
+  "ruff>=0.8,<1",
+]
+
+[tool.importlinter]
+root_package = "auraclaw"
+
+[[tool.importlinter.contracts]]
+name = "Contracts are framework independent"
+type = "forbidden"
+source_modules = ["auraclaw.contracts"]
+forbidden_modules = [
+  "auraclaw.action",
+  "auraclaw.api",
+  "auraclaw.composition",
+  "auraclaw.control",
+  "auraclaw.delivery",
+  "auraclaw.domain",
+  "auraclaw.gateways",
+  "auraclaw.infrastructure",
+  "auraclaw.observability",
+  "auraclaw.projection",
+  "auraclaw.runtime",
+  "auraclaw.session",
+]
+
+[[tool.importlinter.contracts]]
+name = "Domain only depends on contracts"
+type = "forbidden"
+source_modules = ["auraclaw.domain"]
+forbidden_modules = [
+  "auraclaw.action",
+  "auraclaw.api",
+  "auraclaw.composition",
+  "auraclaw.control",
+  "auraclaw.delivery",
+  "auraclaw.gateways",
+  "auraclaw.infrastructure",
+  "auraclaw.observability",
+  "auraclaw.projection",
+  "auraclaw.runtime",
+  "auraclaw.session",
+]
+
+[[tool.importlinter.contracts]]
+name = "API is transport only"
+type = "forbidden"
+source_modules = ["auraclaw.api"]
+forbidden_modules = ["auraclaw.composition", "auraclaw.infrastructure"]
+
+[[tool.importlinter.contracts]]
+name = "Gateways do not select adapters"
+type = "forbidden"
+source_modules = ["auraclaw.gateways"]
+forbidden_modules = ["auraclaw.composition", "auraclaw.infrastructure"]
+
+[[tool.importlinter.contracts]]
+name = "Infrastructure ignores delivery surfaces and composition"
+type = "forbidden"
+source_modules = ["auraclaw.infrastructure"]
+forbidden_modules = ["auraclaw.api", "auraclaw.composition", "auraclaw.gateways"]
+
+[[tool.importlinter.contracts]]
+name = "Business packages do not import composition"
+type = "forbidden"
+source_modules = [
+  "auraclaw.action",
+  "auraclaw.control",
+  "auraclaw.delivery",
+  "auraclaw.observability",
+  "auraclaw.projection",
+  "auraclaw.runtime",
+  "auraclaw.session",
+]
+forbidden_modules = ["auraclaw.composition"]
+
+[[tool.importlinter.contracts]]
+name = "Read gateways do not call Session write services"
+type = "forbidden"
+source_modules = ["auraclaw.gateways.query", "auraclaw.gateways.streaming"]
+forbidden_modules = ["auraclaw.session.task_service", "auraclaw.session.collaboration_service"]
+
+[[tool.importlinter.contracts]]
+name = "Projection rules are adapter independent"
+type = "forbidden"
+source_modules = [
+  "auraclaw.projection.approval",
+  "auraclaw.projection.collaboration",
+  "auraclaw.projection.task",
+]
+forbidden_modules = ["auraclaw.infrastructure"]
+
+[[tool.importlinter.contracts]]
+name = "Runtime does not embed Action Hands"
+type = "forbidden"
+source_modules = ["auraclaw.runtime"]
+forbidden_modules = [
+  "auraclaw.action",
+  "auraclaw.contracts.mcp",
+  "auraclaw.infrastructure.connectors",
+  "auraclaw.infrastructure.hands",
+]
+
+[[tool.importlinter.contracts]]
+name = "Action Hands business and Skill lifecycle adapters do not depend on Runtime or Control"
+type = "forbidden"
+source_modules = [
+  "auraclaw.action",
+  "auraclaw.infrastructure.persistence.postgres_skill_lifecycle",
+  "auraclaw.infrastructure.persistence.postgres_skill_package_records",
+  "auraclaw.infrastructure.persistence.postgres_skill_publication_records",
+  "auraclaw.infrastructure.persistence.postgres_skill_installation_records",
+]
+forbidden_modules = ["auraclaw.runtime", "auraclaw.control"]
+
+[project.scripts]
+auraclaw = "auraclaw.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/auraclaw"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+asyncio_mode = "auto"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+packages = ["auraclaw"]
+plugins = ["pydantic.mypy"]

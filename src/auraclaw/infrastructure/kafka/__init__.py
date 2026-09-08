@@ -1,0 +1,1 @@
+"""Kafka runtime event adapters."""

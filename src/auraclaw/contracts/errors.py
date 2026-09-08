@@ -1,0 +1,246 @@
+from typing import Any
+
+
+class AuraClawError(Exception):
+    code = "auraclaw_error"
+    status_code = 500
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        detail: str | None = None,
+        retry_after: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.message = message
+        self.detail = detail
+        self.retry_after = retry_after
+
+
+class NotFoundError(AuraClawError):
+    code = "not_found"
+    status_code = 404
+
+
+class VersionConflictError(AuraClawError):
+    code = "version_conflict"
+    status_code = 409
+
+
+class StaleCapabilitySnapshotError(VersionConflictError):
+    code = "stale_capability_snapshot"
+
+
+class InvalidTransitionError(AuraClawError):
+    code = "invalid_transition"
+    status_code = 409
+
+
+class UnauthenticatedError(AuraClawError):
+    code = "unauthenticated"
+    status_code = 401
+
+
+class AuthorizationError(AuraClawError):
+    code = "authorization_denied"
+    status_code = 403
+
+
+class LeaseConflictError(AuraClawError):
+    code = "lease_conflict"
+    status_code = 409
+
+
+class FencingTokenError(AuraClawError):
+    code = "stale_fencing_token"
+    status_code = 409
+
+
+class RuntimeCancelledError(AuraClawError):
+    code = "runtime_cancelled"
+    status_code = 409
+
+
+class BudgetExceededError(AuraClawError):
+    code = "runtime_budget_exceeded"
+    status_code = 409
+
+
+class RuntimeStepBudgetExceededError(BudgetExceededError):
+    code = "runtime_step_budget_exceeded"
+
+
+class RuntimeOutputTokenBudgetExceededError(BudgetExceededError):
+    code = "runtime_output_token_budget_exceeded"
+
+
+class RuntimeCostBudgetExceededError(BudgetExceededError):
+    code = "runtime_cost_budget_exceeded"
+
+
+class RuntimeCostReservationUnavailableError(AuraClawError):
+    code = "runtime_cost_reservation_unavailable"
+    status_code = 409
+
+
+class RuntimeDeadlineExceededError(AuraClawError):
+    code = "runtime_deadline_exceeded"
+    status_code = 409
+
+
+class RuntimeNoProgressError(AuraClawError):
+    code = "runtime_no_progress_detected"
+    status_code = 409
+
+
+class TerminalBudgetExceededError(BudgetExceededError):
+    code = "agent_terminal_budget_exhausted"
+
+
+class ModelOutputTruncatedError(BudgetExceededError):
+    code = "model_output_truncated_before_terminal"
+
+
+class SkillPromptBudgetExceededError(BudgetExceededError):
+    code = "skill_prompt_budget_exceeded"
+
+
+class ModelAuthenticationError(AuraClawError):
+    code = "model_authentication_failed"
+    status_code = 502
+
+
+class ModelRateLimitError(AuraClawError):
+    code = "model_rate_limited"
+    status_code = 429
+
+
+class ModelTimeoutError(AuraClawError):
+    code = "model_timeout"
+    status_code = 504
+
+
+class ModelProviderError(AuraClawError):
+    code = "model_provider_error"
+    status_code = 502
+
+
+class SchemaValidationError(AuraClawError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        validation_errors: list[dict[str, Any]] | None = None,
+        detail: str | None = None,
+        retry_after: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.detail = detail
+        self.retry_after = retry_after
+        self.validation_errors = validation_errors or []
+
+    code = "tool_schema_invalid"
+    status_code = 422
+
+
+class InvalidToolSchemaError(SchemaValidationError):
+    code = "tool_schema_definition_invalid"
+
+
+class ConnectorExecutionError(AuraClawError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str,
+        status: str = "error",
+        side_effect_status: str = "unknown",
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.status = status
+        self.side_effect_status = side_effect_status
+        self.metadata = metadata or {}
+
+
+class PolicyDeniedError(AuraClawError):
+    code = "policy_denied"
+    status_code = 403
+
+
+class SkillContentRejectedError(PolicyDeniedError):
+    def __init__(self, finding_code: str) -> None:
+        super().__init__("Skill package failed content security policy")
+        self.code = f"skill_content_{finding_code}"
+
+
+class ApprovalValidationError(AuraClawError):
+    code = "approval_invalid"
+    status_code = 409
+
+
+class ArtifactAccessError(AuraClawError):
+    code = "artifact_access_denied"
+    status_code = 403
+
+
+class SandboxViolationError(AuraClawError):
+    code = "sandbox_violation"
+    status_code = 403
+
+
+class CredentialAccessError(AuraClawError):
+    code = "credential_access_denied"
+    status_code = 403
+
+
+class McpTransportError(ConnectorExecutionError, CredentialAccessError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "mcp_transport_error",
+        stage: str = "transport",
+        remote_code: int | None = None,
+    ) -> None:
+        super().__init__(
+            message,
+            code=code,
+            metadata={
+                "error_details": {
+                    "stage": stage,
+                    "origin": "downstream",
+                    "retryable": False,
+                    **({"remote_code": remote_code} if remote_code is not None else {}),
+                }
+            },
+        )
+
+
+class CollaborationValidationError(AuraClawError):
+    code = "collaboration_invalid"
+    status_code = 409
+
+
+class SyncInvokeBusyError(AuraClawError):
+    code = "sync_invoke_busy"
+    status_code = 429
+
+    def __init__(
+        self,
+        message: str = "too many synchronous waits",
+        *,
+        detail: str | None = None,
+        retry_after: int = 2,
+    ) -> None:
+        super().__init__(message, detail=detail, retry_after=retry_after)
+
+
+class ResourceBusyError(AuraClawError):
+    code = "resource_gateway_busy"
+    status_code = 429
+
+    def __init__(self, message: str = "resource gateway capacity is exhausted") -> None:
+        super().__init__(message, retry_after=1)

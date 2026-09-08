@@ -1,0 +1,15 @@
+.env
+.env.*
+!.env.dev.example
+!.env.test.example
+!.env.prod.example
+.git
+.history
+.venv
+.runtime
+__pycache__
+*.py[cod]
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.data

@@ -1,0 +1,544 @@
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+from typing import Any
+
+from auraclaw.action.mcp_registry import (
+    McpOperationClaim,
+    McpServerRegistryStore,
+    _aggregate_runtime,
+)
+from auraclaw.contracts.errors import NotFoundError, VersionConflictError
+from auraclaw.contracts.mcp_registry import (
+    McpActiveSnapshotEntry,
+    McpDesiredState,
+    McpObservedState,
+    McpRegistryOperationKind,
+    McpRegistryOperationStatus,
+    McpServerConfig,
+    McpServerOperationRecord,
+    McpServerRecord,
+    McpServerRevisionRecord,
+    McpServerRuntimeRecord,
+)
+from auraclaw.infrastructure.persistence.postgres_common import (
+    LazyPool,
+    json_dumps,
+    json_loads,
+)
+
+
+class PostgresMcpServerRegistryStore(LazyPool, McpServerRegistryStore):
+    async def get_server(self, server_id: str) -> McpServerRecord | None:
+        pool = await self.pool()
+        row = await pool.fetchrow(
+            "SELECT * FROM hands.mcp_server WHERE server_id=$1",
+            server_id,
+        )
+        if row is None:
+            return None
+        return await self._hydrate(dict(row))
+
+    async def list_servers(self, tenant_id: str) -> tuple[McpServerRecord, ...]:
+        pool = await self.pool()
+        rows = await pool.fetch(
+            """SELECT * FROM hands.mcp_server
+            WHERE tenant_id=$1 OR tenant_id IS NULL
+            ORDER BY server_id""",
+            tenant_id,
+        )
+        return tuple([await self._hydrate(dict(row)) for row in rows])
+
+    async def get_revision(self, server_id: str, revision: int) -> McpServerRevisionRecord | None:
+        pool = await self.pool()
+        row = await pool.fetchrow(
+            """SELECT * FROM hands.mcp_server_revision
+            WHERE server_id=$1 AND revision=$2""",
+            server_id,
+            revision,
+        )
+        return None if row is None else _revision(dict(row))
+
+    async def get_operation(self, operation_id: str) -> McpServerOperationRecord | None:
+        pool = await self.pool()
+        row = await pool.fetchrow(
+            "SELECT * FROM hands.mcp_server_operation WHERE operation_id=$1",
+            operation_id,
+        )
+        return None if row is None else _operation(dict(row))
+
+    async def get_operation_by_command(
+        self, command_id: str, tenant_id: str
+    ) -> McpServerOperationRecord | None:
+        pool = await self.pool()
+        row = await pool.fetchrow(
+            """SELECT * FROM hands.mcp_server_operation
+            WHERE tenant_id=$1 AND command_id=$2""",
+            tenant_id,
+            command_id,
+        )
+        return None if row is None else _operation(dict(row))
+
+    async def insert_candidate(
+        self,
+        *,
+        record: McpServerRecord,
+        revision: McpServerRevisionRecord,
+        operation: McpServerOperationRecord,
+        create: bool,
+    ) -> None:
+        pool = await self.pool()
+        async with pool.acquire() as connection, connection.transaction():
+            if create:
+                inserted = await connection.fetchval(
+                    """INSERT INTO hands.mcp_server
+                        (server_id,tenant_id,desired_state,latest_revision,
+                         active_revision,created_by,created_at,updated_at)
+                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+                        ON CONFLICT (server_id) DO NOTHING
+                        RETURNING server_id""",
+                    record.server_id,
+                    record.tenant_id,
+                    record.desired_state.value,
+                    record.latest_revision,
+                    record.active_revision,
+                    record.created_by,
+                    record.created_at,
+                    record.updated_at,
+                )
+                if inserted is None:
+                    raise VersionConflictError("MCP server already exists")
+            else:
+                updated = await connection.fetchval(
+                    """UPDATE hands.mcp_server
+                        SET latest_revision=$1, tenant_id=$2, updated_at=$3,
+                            desired_state=$6
+                        WHERE server_id=$4 AND latest_revision=$5
+                        RETURNING server_id""",
+                    record.latest_revision,
+                    record.tenant_id,
+                    record.updated_at,
+                    record.server_id,
+                    record.latest_revision - 1,
+                    record.desired_state.value,
+                )
+                if updated is None:
+                    existing = await connection.fetchval(
+                        "SELECT server_id FROM hands.mcp_server WHERE server_id=$1",
+                        record.server_id,
+                    )
+                    if existing is None:
+                        raise NotFoundError("MCP server was not found")
+                    raise VersionConflictError("MCP server revision conflict")
+            await connection.execute(
+                """INSERT INTO hands.mcp_server_revision
+                    (server_id,revision,config_json,config_digest,created_by,created_at)
+                    VALUES ($1,$2,$3::jsonb,$4,$5,$6)""",
+                revision.server_id,
+                revision.revision,
+                json_dumps(revision.config.model_dump(mode="json")),
+                revision.config_digest,
+                revision.created_by,
+                revision.created_at,
+            )
+            await _upsert_operation(connection, operation)
+
+    async def set_desired_state(
+        self,
+        *,
+        server_id: str,
+        expected_revision: int,
+        desired_state: McpDesiredState,
+        active_revision: int | None,
+        operation: McpServerOperationRecord,
+        claim_token: str | None = None,
+    ) -> McpServerRecord:
+        pool = await self.pool()
+        async with pool.acquire() as connection, connection.transaction():
+            if claim_token is not None:
+                owns_claim = await connection.fetchval(
+                    """SELECT true FROM hands.mcp_server_operation
+                        WHERE operation_id=$1 AND claim_token=$2 AND status='running'
+                          AND claim_expires_at > now() FOR UPDATE""",
+                    operation.operation_id,
+                    claim_token,
+                )
+                if owns_claim is None:
+                    raise VersionConflictError("MCP operation claim was lost")
+            row = await connection.fetchrow(
+                """UPDATE hands.mcp_server
+                    SET desired_state=$1, active_revision=$2, updated_at=$3
+                    WHERE server_id=$4 AND latest_revision=$5
+                    RETURNING *""",
+                desired_state.value,
+                active_revision,
+                datetime.now(UTC),
+                server_id,
+                expected_revision,
+            )
+            if row is None:
+                existing = await connection.fetchval(
+                    "SELECT server_id FROM hands.mcp_server WHERE server_id=$1",
+                    server_id,
+                )
+                if existing is None:
+                    raise NotFoundError("MCP server was not found")
+                raise VersionConflictError("MCP server revision conflict")
+            if claim_token is None:
+                await _upsert_operation(connection, operation)
+        hydrated = await self._hydrate(dict(row))
+        return hydrated
+
+    async def claim_operation(
+        self,
+        operation: McpServerOperationRecord,
+        *,
+        request_digest: str,
+        claimed_by: str,
+        claim_token: str,
+        claim_ttl: timedelta,
+    ) -> McpOperationClaim:
+        pool = await self.pool()
+        tenant_id = operation.tenant_id or "platform"
+        async with pool.acquire() as connection, connection.transaction():
+            inserted = await connection.fetchval(
+                """INSERT INTO hands.mcp_server_operation
+                (operation_id,server_id,tenant_id,target_revision,command_id,actor_id,
+                 correlation_id,causation_id,operation,status,result_json,created_at,
+                 request_digest,claimed_by,claim_token,claim_expires_at,
+                 heartbeat_at,started_at)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'running','{}'::jsonb,$10,
+                        $11,$12,$13,now()+$14::interval,now(),now())
+                ON CONFLICT (tenant_id,command_id) DO NOTHING
+                RETURNING operation_id""",
+                operation.operation_id,
+                operation.server_id,
+                tenant_id,
+                operation.target_revision,
+                operation.command_id,
+                operation.actor_id,
+                operation.correlation_id,
+                operation.causation_id,
+                operation.operation.value,
+                operation.created_at,
+                request_digest,
+                claimed_by,
+                claim_token,
+                claim_ttl,
+            )
+            if inserted is not None:
+                running = operation.model_copy(
+                    update={"status": McpRegistryOperationStatus.RUNNING}
+                )
+                return McpOperationClaim(True, running, claim_token)
+            row = await connection.fetchrow(
+                """SELECT *,claim_expires_at > now() AS claim_active
+                FROM hands.mcp_server_operation
+                WHERE tenant_id=$1 AND command_id=$2 FOR UPDATE""",
+                tenant_id,
+                operation.command_id,
+            )
+            assert row is not None
+            if str(row["request_digest"]) != request_digest:
+                raise VersionConflictError(
+                    "MCP command id was already used for a different request"
+                )
+            if (
+                str(row["status"]) == "running"
+                and row["claim_expires_at"] is not None
+                and not bool(row["claim_active"])
+            ):
+                row = await connection.fetchrow(
+                    """UPDATE hands.mcp_server_operation
+                    SET status='unknown_side_effect',
+                        safe_error_code='mcp_operation_recovery_required',
+                        completed_at=now(),claimed_by=NULL,claim_token=NULL,
+                        claim_expires_at=NULL
+                    WHERE operation_id=$1 RETURNING *""",
+                    str(row["operation_id"]),
+                )
+                assert row is not None
+            return McpOperationClaim(False, _operation(dict(row)))
+
+    async def renew_operation(
+        self,
+        operation_id: str,
+        *,
+        claimed_by: str,
+        claim_token: str,
+        claim_ttl: timedelta,
+    ) -> bool:
+        pool = await self.pool()
+        status = await pool.execute(
+            """UPDATE hands.mcp_server_operation
+            SET claim_expires_at=now()+$4::interval,heartbeat_at=now()
+            WHERE operation_id=$1 AND claimed_by=$2 AND claim_token=$3
+              AND status='running' AND claim_expires_at > now()""",
+            operation_id,
+            claimed_by,
+            claim_token,
+            claim_ttl,
+        )
+        return str(status) == "UPDATE 1"
+
+    async def complete_operation(
+        self,
+        operation: McpServerOperationRecord,
+        *,
+        claim_token: str | None = None,
+    ) -> McpServerOperationRecord:
+        pool = await self.pool()
+        async with pool.acquire() as connection:
+            if claim_token is None:
+                await _upsert_operation(connection, operation)
+            else:
+                row = await connection.fetchrow(
+                    """UPDATE hands.mcp_server_operation SET status=$3,
+                       safe_error_code=$4,result_json=$5::jsonb,completed_at=$6,
+                       claimed_by=NULL,claim_token=NULL,claim_expires_at=NULL
+                    WHERE operation_id=$1 AND claim_token=$2
+                      AND status='running' AND claim_expires_at > now()
+                    RETURNING *""",
+                    operation.operation_id,
+                    claim_token,
+                    operation.status.value,
+                    operation.safe_error_code,
+                    json_dumps(operation.result),
+                    operation.completed_at,
+                )
+                if row is None:
+                    current = await connection.fetchrow(
+                        "SELECT * FROM hands.mcp_server_operation WHERE operation_id=$1",
+                        operation.operation_id,
+                    )
+                    return operation if current is None else _operation(dict(current))
+        return operation
+
+    async def update_runtime(self, runtime: McpServerRuntimeRecord) -> None:
+        pool = await self.pool()
+        await pool.execute(
+            """INSERT INTO hands.mcp_server_runtime
+            (server_id,instance_id,loaded_revision,observed_state,last_test_at,last_sync_at,
+             consecutive_failures,safe_error_code,updated_at,applied_generation)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+            ON CONFLICT (server_id,instance_id) DO UPDATE SET
+              loaded_revision=EXCLUDED.loaded_revision,
+              applied_generation=EXCLUDED.applied_generation,
+              observed_state=EXCLUDED.observed_state,
+              last_test_at=EXCLUDED.last_test_at,
+              last_sync_at=EXCLUDED.last_sync_at,
+              consecutive_failures=EXCLUDED.consecutive_failures,
+              safe_error_code=EXCLUDED.safe_error_code,
+              updated_at=EXCLUDED.updated_at""",
+            runtime.server_id,
+            runtime.instance_id,
+            runtime.loaded_revision,
+            runtime.observed_state.value,
+            runtime.last_test_at,
+            runtime.last_sync_at,
+            runtime.consecutive_failures,
+            runtime.safe_error_code,
+            runtime.updated_at,
+            runtime.applied_generation,
+        )
+
+    async def list_pending_deletes(
+        self, *, limit: int = 100
+    ) -> tuple[McpServerOperationRecord, ...]:
+        pool = await self.pool()
+        rows = await pool.fetch(
+            "SELECT * FROM hands.mcp_server_operation "
+            "WHERE operation='delete' AND status='reconciling' ORDER BY created_at LIMIT $1",
+            limit,
+        )
+        return tuple(_operation(dict(row)) for row in rows)
+
+    async def list_active_snapshot(self) -> tuple[McpActiveSnapshotEntry, ...]:
+        pool = await self.pool()
+        rows = await pool.fetch(
+            """SELECT s.server_id, s.tenant_id, s.active_revision, s.desired_state,
+                      r.config_json,
+                      COALESCE(
+                        (array_agg(rt.observed_state ORDER BY
+                          CASE rt.observed_state
+                            WHEN 'active' THEN 0 WHEN 'degraded' THEN 1
+                            WHEN 'loading' THEN 2 WHEN 'pending' THEN 3
+                            WHEN 'unavailable' THEN 4 WHEN 'quarantined' THEN 5
+                            ELSE 6 END,
+                          rt.updated_at DESC))[1],
+                        'pending'
+                      ) AS observed_state
+            FROM hands.mcp_server AS s
+            JOIN hands.mcp_server_revision AS r
+              ON r.server_id=s.server_id AND r.revision=s.active_revision
+            LEFT JOIN hands.mcp_server_runtime AS rt ON rt.server_id=s.server_id
+            WHERE s.desired_state='enabled' AND s.active_revision IS NOT NULL
+            GROUP BY s.server_id,s.tenant_id,s.active_revision,s.desired_state,r.config_json
+            ORDER BY s.server_id"""
+        )
+        return tuple(
+            McpActiveSnapshotEntry(
+                server_id=str(row["server_id"]),
+                tenant_id=row["tenant_id"],
+                revision=int(row["active_revision"]),
+                config=_stored_config(row["config_json"]),
+                desired_state=McpDesiredState(str(row["desired_state"])),
+                observed_state=McpObservedState(str(row["observed_state"] or "pending")),
+            )
+            for row in rows
+        )
+
+    async def delete_server(
+        self,
+        server_id: str,
+        *,
+        expected_revision: int | None = None,
+        expected_created_at: datetime | None = None,
+    ) -> None:
+        pool = await self.pool()
+        async with pool.acquire() as connection, connection.transaction():
+            existing = await connection.fetchrow(
+                "SELECT latest_revision, desired_state, created_at FROM hands.mcp_server "
+                "WHERE server_id=$1 FOR UPDATE",
+                server_id,
+            )
+            if existing is None:
+                raise NotFoundError("MCP server was not found")
+            if expected_revision is not None and (
+                existing["latest_revision"] != expected_revision
+                or existing["desired_state"] != "retired"
+                or (
+                    expected_created_at is not None
+                    and existing["created_at"] != expected_created_at
+                )
+            ):
+                raise VersionConflictError("MCP deletion was superseded")
+            await connection.execute(
+                "DELETE FROM hands.mcp_server_runtime WHERE server_id=$1",
+                server_id,
+            )
+            await connection.execute(
+                "DELETE FROM hands.mcp_server_revision WHERE server_id=$1",
+                server_id,
+            )
+            await connection.execute(
+                "DELETE FROM hands.mcp_server WHERE server_id=$1",
+                server_id,
+            )
+
+    async def _hydrate(self, row: dict[str, Any]) -> McpServerRecord:
+        server_id = str(row["server_id"])
+        latest = await self.get_revision(server_id, int(row["latest_revision"]))
+        active_revision = row["active_revision"]
+        active = (
+            None
+            if active_revision is None
+            else await self.get_revision(server_id, int(active_revision))
+        )
+        pool = await self.pool()
+        runtime_rows = await pool.fetch(
+            """SELECT * FROM hands.mcp_server_runtime
+            WHERE server_id=$1 ORDER BY instance_id""",
+            server_id,
+        )
+        runtimes = tuple(_runtime(dict(item)) for item in runtime_rows)
+        return McpServerRecord(
+            server_id=server_id,
+            tenant_id=row["tenant_id"],
+            desired_state=McpDesiredState(str(row["desired_state"])),
+            latest_revision=int(row["latest_revision"]),
+            active_revision=None if active_revision is None else int(active_revision),
+            created_by=str(row["created_by"]),
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            latest_config=None if latest is None else latest.config,
+            active_config=None if active is None else active.config,
+            runtime=_aggregate_runtime(runtimes),
+            runtimes=runtimes,
+        )
+
+
+async def _upsert_operation(connection: Any, operation: McpServerOperationRecord) -> None:
+    await connection.execute(
+        """INSERT INTO hands.mcp_server_operation
+        (operation_id,server_id,tenant_id,target_revision,command_id,actor_id,
+         correlation_id,causation_id,operation,status,safe_error_code,result_json,
+         created_at,completed_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13,$14)
+        ON CONFLICT (operation_id) DO UPDATE SET
+          status=EXCLUDED.status,
+          safe_error_code=EXCLUDED.safe_error_code,
+          result_json=EXCLUDED.result_json,
+          completed_at=EXCLUDED.completed_at""",
+        operation.operation_id,
+        operation.server_id,
+        operation.tenant_id or "platform",
+        operation.target_revision,
+        operation.command_id,
+        operation.actor_id,
+        operation.correlation_id,
+        operation.causation_id,
+        operation.operation.value,
+        operation.status.value,
+        operation.safe_error_code,
+        json_dumps(operation.result),
+        operation.created_at,
+        operation.completed_at,
+    )
+
+
+def _stored_config(value: Any) -> McpServerConfig:
+    # Historical revisions remain immutable, including their original digest.
+    # Retired trust settings are discarded only when materializing a revision.
+    config = dict(json_loads(value))
+    config.pop("trust_level", None)
+    config.pop("allowed_tool_prefixes", None)
+    metadata = dict(config.get("metadata") or {})
+    metadata.pop("tool_policy_overrides", None)
+    config["metadata"] = metadata
+    return McpServerConfig.model_validate(config)
+
+
+def _revision(row: dict[str, Any]) -> McpServerRevisionRecord:
+    return McpServerRevisionRecord(
+        server_id=str(row["server_id"]),
+        revision=int(row["revision"]),
+        config=_stored_config(row["config_json"]),
+        config_digest=str(row["config_digest"]),
+        created_by=str(row["created_by"]),
+        created_at=row["created_at"],
+    )
+
+
+def _runtime(row: dict[str, Any]) -> McpServerRuntimeRecord:
+    return McpServerRuntimeRecord(
+        server_id=str(row["server_id"]),
+        instance_id=str(row.get("instance_id") or "legacy"),
+        loaded_revision=(None if row["loaded_revision"] is None else int(row["loaded_revision"])),
+        applied_generation=row.get("applied_generation"),
+        observed_state=McpObservedState(str(row["observed_state"])),
+        last_test_at=row["last_test_at"],
+        last_sync_at=row["last_sync_at"],
+        consecutive_failures=int(row["consecutive_failures"]),
+        safe_error_code=row["safe_error_code"],
+        updated_at=row["updated_at"],
+    )
+
+
+def _operation(row: dict[str, Any]) -> McpServerOperationRecord:
+    return McpServerOperationRecord(
+        operation_id=str(row["operation_id"]),
+        server_id=str(row["server_id"]),
+        tenant_id=row["tenant_id"],
+        target_revision=(None if row["target_revision"] is None else int(row["target_revision"])),
+        command_id=str(row["command_id"]),
+        actor_id=str(row["actor_id"]),
+        correlation_id=str(row["correlation_id"]),
+        causation_id=str(row["causation_id"]),
+        operation=McpRegistryOperationKind(str(row["operation"])),
+        status=McpRegistryOperationStatus(str(row["status"])),
+        safe_error_code=row["safe_error_code"],
+        result=dict(json_loads(row["result_json"] or "{}")),
+        created_at=row["created_at"],
+        completed_at=row["completed_at"],
+    )

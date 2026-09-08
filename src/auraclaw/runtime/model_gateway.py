@@ -1,0 +1,113 @@
+from __future__ import annotations
+
+from collections.abc import AsyncIterator
+
+from auraclaw.contracts.errors import AuthorizationError, BudgetExceededError, ModelProviderError
+from auraclaw.runtime.ports import (
+    CredentialResolver,
+    ModelRequest,
+    ModelResponse,
+    ModelStreamChunk,
+    ProviderAdapter,
+    ProviderCancellationResult,
+)
+
+
+class ModelGateway:
+    """Provider-neutral model boundary and the only component resolving credentials."""
+
+    def __init__(
+        self,
+        adapters: tuple[ProviderAdapter, ...],
+        credentials: CredentialResolver,
+        *,
+        default_provider: str,
+    ) -> None:
+        self._adapters = {adapter.name: adapter for adapter in adapters}
+        self._credentials = credentials
+        self._default_provider = default_provider
+        self._active_adapters: dict[str, ProviderAdapter] = {}
+
+    async def prewarm(self) -> None:
+        for provider, adapter in self._adapters.items():
+            warm = getattr(adapter, "prewarm", None)
+            if not callable(warm):
+                continue
+            try:
+                credential = await self._credentials.resolve(provider, "system")
+            except Exception:
+                credential = None
+            await warm(credential=credential)
+
+    async def generate(self, request: ModelRequest) -> ModelResponse:
+        response: ModelResponse | None = None
+        async for chunk in self.generate_stream(request):
+            if chunk.kind == "completed":
+                response = chunk.response
+        if response is None:
+            raise ModelProviderError("model provider stream ended without a completed response")
+        return response
+
+    async def generate_stream(
+        self, request: ModelRequest
+    ) -> AsyncIterator[ModelStreamChunk]:
+        if request.max_output_tokens <= 0:
+            raise BudgetExceededError("model output token budget is exhausted")
+        allowed = request.policy.allowed_providers
+        provider = self._default_provider
+        if allowed and provider not in allowed:
+            provider = allowed[0]
+        adapter = self._adapters.get(provider)
+        if adapter is None:
+            raise AuthorizationError(f"model provider is not configured: {provider}")
+        credential = await self._credentials.resolve(provider, request.tenant_id)
+        stream = getattr(adapter, "generate_stream", None)
+        self._active_adapters[request.model_call_id] = adapter
+        try:
+            if callable(stream):
+                async for chunk in stream(request, credential=credential):
+                    yield chunk
+                return
+            response = await adapter.generate(request, credential=credential)
+            for delta in response.deltas:
+                yield ModelStreamChunk(kind="delta", delta=str(delta))
+            yield ModelStreamChunk(kind="completed", response=response)
+        finally:
+            if self._active_adapters.get(request.model_call_id) is adapter:
+                self._active_adapters.pop(request.model_call_id, None)
+
+    async def cancel(
+        self, model_call_id: str | ModelRequest
+    ) -> ProviderCancellationResult:
+        if isinstance(model_call_id, ModelRequest):
+            model_call_id = model_call_id.model_call_id
+        adapter = self._active_adapters.get(model_call_id)
+        if adapter is None:
+            return ProviderCancellationResult(stopped=False)
+        cancel = getattr(adapter, "cancel", None)
+        if not callable(cancel):
+            return ProviderCancellationResult(stopped=False)
+        result = await cancel(model_call_id)
+        if isinstance(result, ProviderCancellationResult):
+            return result
+        return ProviderCancellationResult(stopped=bool(result))
+
+    async def aclose(self) -> None:
+        for adapter in self._adapters.values():
+            close = getattr(adapter, "aclose", None)
+            if close is not None:
+                await close()
+
+
+class StaticCredentialResolver:
+    """Gateway-owned test/development resolver; credentials are never exposed to Runtime."""
+
+    def __init__(self, credentials: dict[str, str]) -> None:
+        self._credentials = dict(credentials)
+
+    async def resolve(self, provider: str, tenant_id: str) -> str:
+        del tenant_id
+        credential = self._credentials.get(provider)
+        if credential is None:
+            raise AuthorizationError(f"no credential configured for provider: {provider}")
+        return credential

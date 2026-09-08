@@ -1,0 +1,1276 @@
+import asyncio
+import json
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from auraclaw.action.tool_gateway import PolicyEngine, ToolGateway, ToolRegistry
+from auraclaw.contracts.commands import CommandContext
+from auraclaw.contracts.errors import (
+    ApprovalValidationError,
+    ArtifactAccessError,
+    CredentialAccessError,
+    NotFoundError,
+    PolicyDeniedError,
+    SandboxViolationError,
+    SchemaValidationError,
+)
+from auraclaw.contracts.events import Actor, CanonicalEvent, NewEvent
+from auraclaw.contracts.state import Visibility
+from auraclaw.contracts.tools import (
+    ApprovalRecord,
+    ApprovalStatus,
+    CredentialReference,
+    PolicyDecision,
+    RiskLevel,
+    ToolCapability,
+    ToolInvocation,
+    ToolPermission,
+)
+from auraclaw.control.orchestrator import LocalRuntimeProvisioner, ManagedOrchestrator
+from auraclaw.domain.approval import ApprovalAggregate
+from auraclaw.gateways.task.admission import AllowAllAdmissionController
+from auraclaw.infrastructure.artifacts.store import ArtifactStore, InMemoryObjectStorage
+from auraclaw.infrastructure.credentials.proxy import CredentialProxy, InMemoryVault
+from auraclaw.infrastructure.hands.local import LocalHandsService
+from auraclaw.infrastructure.persistence.memory_control_store import InMemoryControlStateStore
+from auraclaw.infrastructure.persistence.memory_event_store import InMemoryEventStore
+from auraclaw.internal.tool_client import GatewayToolClient
+from auraclaw.projection.approval.projector import InMemoryApprovalProjection
+from auraclaw.projection.relay import OutboxRelay
+from auraclaw.projection.task.projector import InMemoryTaskProjection
+from auraclaw.runtime.clients import (
+    FencedSessionClient,
+    InMemoryRuntimeEventBus,
+)
+from auraclaw.runtime.harness import AgentHarness
+from auraclaw.runtime.ports import ModelRequest, ModelResponse, ToolCall
+from auraclaw.session.task_service import TaskService
+
+
+class RecordingHands(LocalHandsService):
+    def __init__(self, result: Any) -> None:
+        self.calls = 0
+        self.result = result
+        super().__init__(workspace_root=Path.cwd(), handlers={"managed": self._handle})
+
+    def _handle(self, arguments: dict[str, Any]) -> Any:
+        self.calls += 1
+        del arguments
+        return self.result
+
+
+def _capability(
+    permission: ToolPermission = ToolPermission.WRITE_WITH_APPROVAL,
+    *,
+    runtime_location: str = "hands",
+) -> ToolCapability:
+    return ToolCapability(
+        name="managed",
+        version="1",
+        description="managed test tool",
+        input_schema={
+            "type": "object",
+            "properties": {"target": {"type": "string", "minLength": 1}},
+            "required": ["target"],
+            "additionalProperties": False,
+        },
+        output_schema={"type": "object"},
+        permission=permission,
+        risk_level=RiskLevel.HIGH,
+        runtime_location=runtime_location,
+        allowed_credential_operations=("write",),
+    )
+
+
+def _invocation(
+    *,
+    target: str = "resource-a",
+    key: str = "stable-key",
+    approval_id: str | None = None,
+    credential_ref: str | None = None,
+    tenant_id: str = "tenant-m3",
+) -> ToolInvocation:
+    return ToolInvocation(
+        tool_invocation_id=f"tool-{key}",
+        tenant_id=tenant_id,
+        root_session_id="session-m3",
+        session_id="session-m3",
+        run_id="run-m3",
+        tool_name="managed",
+        tool_version="1",
+        arguments={"target": target},
+        expected_side_effect="write",
+        idempotency_key=key,
+        deadline=datetime.now(UTC) + timedelta(minutes=1),
+        fencing_token=1,
+        actor_id="runtime-m3",
+        approval_id=approval_id,
+        credential_ref=credential_ref,
+    )
+
+
+def _event(event_type: str, payload: dict[str, Any], version: int) -> CanonicalEvent:
+    return CanonicalEvent(
+        event_id=f"event-{version}",
+        tenant_id="tenant-m3",
+        root_session_id="session-m3",
+        session_id="session-m3",
+        run_id="run-m3",
+        aggregate_version=version,
+        type=event_type,
+        occurred_at=datetime.now(UTC),
+        actor=Actor(type="runtime", id="runtime-m3"),
+        correlation_id="run-m3",
+        causation_id=f"cause-{version}",
+        visibility=Visibility.INTERNAL,
+        schema_version=1,
+        payload=payload,
+    )
+
+
+def _gateway(
+    hands: RecordingHands,
+    approvals: InMemoryApprovalProjection,
+    *,
+    permission: ToolPermission = ToolPermission.WRITE_WITH_APPROVAL,
+    max_inline_bytes: int = 64 * 1024,
+) -> tuple[ToolGateway, ArtifactStore]:
+    artifacts = ArtifactStore(InMemoryObjectStorage(), signing_key=b"m3-test-signing-key")
+    return (
+        ToolGateway(
+            registry=ToolRegistry((_capability(permission),)),
+            policy=PolicyEngine(),
+            approvals=approvals,
+            hands=hands,
+            artifacts=artifacts,
+            max_inline_bytes=max_inline_bytes,
+        ),
+        artifacts,
+    )
+
+
+def test_tool_gateway_surfaces_controlled_boundary_reason() -> None:
+    class DenyingHands:
+        async def execute(self, invocation: ToolInvocation, capability: ToolCapability) -> object:
+            del invocation, capability
+            raise PolicyDeniedError("chaintower MCP call is missing trusted user context")
+
+    async def scenario() -> None:
+        artifacts = ArtifactStore(InMemoryObjectStorage(), signing_key=b"m3-test-signing-key")
+        gateway = ToolGateway(
+            registry=ToolRegistry((_capability(ToolPermission.READ_ONLY),)),
+            policy=PolicyEngine(),
+            approvals=InMemoryApprovalProjection(),
+            hands=DenyingHands(),
+            artifacts=artifacts,
+        )
+        result = await gateway.execute(_invocation())
+        assert result.status.value == "denied"
+        assert result.error_code == "policy_denied"
+        assert result.summary == "chaintower MCP call is missing trusted user context"
+
+    asyncio.run(scenario())
+
+
+def test_tool_gateway_returns_recoverable_result_for_invalid_model_arguments() -> None:
+    async def scenario() -> None:
+        hands = RecordingHands({"ok": True})
+        gateway = ToolGateway(
+            registry=ToolRegistry((_capability(ToolPermission.READ_ONLY),)),
+            policy=PolicyEngine(),
+            approvals=InMemoryApprovalProjection(),
+            hands=hands,
+            artifacts=ArtifactStore(InMemoryObjectStorage(), signing_key=b"schema-validation-key"),
+        )
+        invocation = _invocation()
+        invocation = ToolInvocation(
+            **{**invocation.__dict__, "arguments": {"filter": "not-an-input"}}
+        )
+        result = await gateway.execute(invocation)
+
+        assert result.status.value == "error"
+        assert result.error_code == "tool_schema_invalid"
+        assert result.side_effect_status == "not_started"
+        assert result.summary == "$ is missing required fields: ['target']"
+        assert hands.calls == 0
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_status", "expected_code"),
+    [
+        (NotFoundError("Skill Tool dependency is unavailable"), "error", "not_found"),
+        (
+            SchemaValidationError("Capability version is invalid"),
+            "error",
+            "tool_schema_invalid",
+        ),
+    ],
+)
+def test_tool_gateway_preserves_controlled_adapter_errors(
+    error: Exception, expected_status: str, expected_code: str
+) -> None:
+    class FailingHands:
+        async def execute(self, invocation: ToolInvocation, capability: ToolCapability) -> object:
+            del invocation, capability
+            raise error
+
+    async def scenario() -> None:
+        gateway = ToolGateway(
+            registry=ToolRegistry((_capability(ToolPermission.READ_ONLY),)),
+            policy=PolicyEngine(),
+            approvals=InMemoryApprovalProjection(),
+            hands=FailingHands(),
+            artifacts=ArtifactStore(InMemoryObjectStorage(), signing_key=b"controlled-error-key"),
+        )
+        result = await gateway.execute(_invocation())
+        assert result.status.value == expected_status
+        assert result.error_code == expected_code
+        assert result.summary == str(error)
+        assert result.side_effect_status == "not_started"
+
+    asyncio.run(scenario())
+
+
+def test_tool_gateway_rejects_invalid_tenant_capacity() -> None:
+    with pytest.raises(ValueError, match="tenant tool capacity"):
+        ToolGateway(
+            registry=ToolRegistry((_capability(ToolPermission.READ_ONLY),)),
+            policy=PolicyEngine(),
+            approvals=InMemoryApprovalProjection(),
+            hands=RecordingHands({"ok": True}),
+            artifacts=ArtifactStore(InMemoryObjectStorage(), signing_key=b"invalid-capacity-key"),
+            max_concurrent=1,
+            max_concurrent_per_tenant=2,
+        )
+
+
+def test_schema_validation_happens_before_hands_execution() -> None:
+    async def scenario() -> None:
+        hands = RecordingHands({"ok": True})
+        gateway, _ = _gateway(hands, InMemoryApprovalProjection())
+        invalid = _invocation()
+        invalid = ToolInvocation(**{**invalid.__dict__, "arguments": {"unexpected": True}})
+        result = await gateway.execute(invalid)
+        assert result.error_code == "tool_schema_invalid"
+        assert result.side_effect_status == "not_started"
+        assert hands.calls == 0
+
+    asyncio.run(scenario())
+
+
+def test_write_requires_approval_and_argument_change_invalidates_it() -> None:
+    async def scenario() -> None:
+        approvals = InMemoryApprovalProjection()
+        hands = RecordingHands({"ok": True})
+        gateway, _ = _gateway(hands, approvals)
+        invocation = _invocation()
+        denied = await gateway.execute(invocation)
+        assert denied.error_code == "approval_required"
+        assert hands.calls == 0
+
+        payload = dict(denied.metadata["approval_request"])
+        await approvals.project([_event("approval.requested", payload, 1)])
+        record = await approvals.get("tenant-m3", str(payload["approval_id"]))
+        assert record is not None
+        approved = ApprovalAggregate.respond(
+            record, actor_id="human", decision="approved", feedback=None
+        )
+        await approvals.project(
+            [
+                _event(
+                    "approval.approved",
+                    {
+                        "approval_id": approved.approval_id,
+                        "decision": ApprovalStatus.APPROVED.value,
+                    },
+                    2,
+                )
+            ]
+        )
+
+        success = await gateway.execute(_invocation(approval_id=approved.approval_id))
+        assert success.status.value == "success"
+        assert hands.calls == 1
+
+        with pytest.raises(ApprovalValidationError, match="digest"):
+            await gateway.execute(
+                _invocation(
+                    target="resource-b",
+                    key="changed-action",
+                    approval_id=approved.approval_id,
+                )
+            )
+        assert hands.calls == 1
+
+    asyncio.run(scenario())
+
+
+def test_prior_run_approval_does_not_authorize_new_run() -> None:
+    async def scenario() -> None:
+        hands = RecordingHands({"resource_id": "external-1"})
+        approvals = InMemoryApprovalProjection()
+        gateway, _ = _gateway(hands, approvals)
+        denied = await gateway.execute(_invocation(key="digest-reuse"))
+        assert denied.error_code == "approval_required"
+        payload = dict(denied.metadata["approval_request"])
+        await approvals.project([_event("approval.requested", payload, 1)])
+        record = await approvals.get("tenant-m3", str(payload["approval_id"]))
+        assert record is not None
+        approved = ApprovalAggregate.respond(
+            record, actor_id="human", decision="approved", feedback=None
+        )
+        await approvals.project(
+            [
+                _event(
+                    "approval.approved",
+                    {
+                        "approval_id": approved.approval_id,
+                        "decision": ApprovalStatus.APPROVED.value,
+                    },
+                    2,
+                )
+            ]
+        )
+
+        later = ToolInvocation(
+            **_invocation(
+                key="digest-reuse-later",
+                approval_id=None,
+            ).__dict__
+            | {"run_id": "run-later", "tool_invocation_id": "tool-later"}
+        )
+        result = await gateway.execute(later)
+        assert result.error_code == "approval_required"
+        assert result.metadata["approval_request"]["run_id"] == "run-later"
+        assert hands.calls == 0
+
+    asyncio.run(scenario())
+
+
+def test_find_approved_works_with_approval_controller_without_approval_id() -> None:
+    class ControllerThatNeverValidates:
+        def __init__(self) -> None:
+            self.requested: list[ApprovalRecord] = []
+
+        async def request_approval(self, record: ApprovalRecord) -> None:
+            self.requested.append(record)
+
+        async def validate_approval(self, **kwargs: object) -> bool:
+            del kwargs
+            return False
+
+    async def scenario() -> None:
+        hands = RecordingHands({"resource_id": "external-1"})
+        approvals = InMemoryApprovalProjection()
+        controller = ControllerThatNeverValidates()
+        gateway = ToolGateway(
+            registry=ToolRegistry((_capability(),)),
+            policy=PolicyEngine(),
+            approvals=approvals,
+            hands=hands,
+            artifacts=ArtifactStore(InMemoryObjectStorage(), signing_key=b"m3-test-signing-key"),
+            approval_controller=controller,
+        )
+        denied = await gateway.execute(_invocation(key="controller-find"))
+        assert denied.error_code == "approval_required"
+        payload = dict(denied.metadata["approval_request"])
+        await approvals.project([_event("approval.requested", payload, 1)])
+        record = await approvals.get("tenant-m3", str(payload["approval_id"]))
+        assert record is not None
+        approved = ApprovalAggregate.respond(
+            record, actor_id="human", decision="approved", feedback=None
+        )
+        await approvals.project(
+            [
+                _event(
+                    "approval.approved",
+                    {
+                        "approval_id": approved.approval_id,
+                        "decision": ApprovalStatus.APPROVED.value,
+                    },
+                    2,
+                )
+            ]
+        )
+
+        result = await gateway.execute(_invocation(key="controller-find-run-2", approval_id=None))
+        assert result.status.value == "success"
+        assert hands.calls == 1
+
+    asyncio.run(scenario())
+
+
+def test_stale_pending_cache_requests_fresh_approval_after_rejection() -> None:
+    async def scenario() -> None:
+        hands = RecordingHands({"resource_id": "external-1"})
+        approvals = InMemoryApprovalProjection()
+        gateway, _ = _gateway(hands, approvals)
+        first = await gateway.execute(_invocation(key="rejected-digest"))
+        assert first.error_code == "approval_required"
+        first_payload = dict(first.metadata["approval_request"])
+        first_id = str(first_payload["approval_id"])
+        await approvals.project([_event("approval.requested", first_payload, 1)])
+        record = await approvals.get("tenant-m3", first_id)
+        assert record is not None
+        await approvals.project(
+            [
+                _event(
+                    "approval.rejected",
+                    {
+                        "approval_id": first_id,
+                        "decision": ApprovalStatus.REJECTED.value,
+                    },
+                    2,
+                )
+            ]
+        )
+
+        second = await gateway.execute(_invocation(key="rejected-digest-2"))
+        assert second.error_code == "approval_required"
+        second_id = str(second.metadata["approval_request"]["approval_id"])
+        assert second_id != first_id
+
+    asyncio.run(scenario())
+
+
+def test_idempotency_key_prevents_duplicate_side_effect() -> None:
+    async def scenario() -> None:
+        hands = RecordingHands({"resource_id": "external-1"})
+        gateway, _ = _gateway(
+            hands,
+            InMemoryApprovalProjection(),
+            permission=ToolPermission.WRITE_AUTONOMOUS,
+        )
+        first, second = await asyncio.gather(
+            gateway.execute(_invocation()), gateway.execute(_invocation())
+        )
+        assert first.as_dict() == second.as_dict()
+        assert hands.calls == 1
+        conflict = await gateway.execute(_invocation(target="different"))
+        assert conflict.error_code == "idempotency_conflict"
+        assert hands.calls == 1
+
+    asyncio.run(scenario())
+
+
+def test_large_output_becomes_tenant_scoped_artifact_ref() -> None:
+    async def scenario() -> None:
+        hands = RecordingHands({"payload": "x" * 1_000})
+        gateway, artifacts = _gateway(
+            hands,
+            InMemoryApprovalProjection(),
+            permission=ToolPermission.READ_ONLY,
+            max_inline_bytes=100,
+        )
+        result = await gateway.execute(_invocation())
+        serialized = json.dumps(result.as_dict())
+        assert "x" * 100 not in serialized
+        assert isinstance(result.as_dict()["content"], dict)
+        artifact_id = result.as_dict()["content"]["artifact_ref"]["artifact_id"]
+        token = await artifacts.issue_download_token(
+            tenant_id="tenant-m3", artifact_id=artifact_id, actor_id="human"
+        )
+        content = await artifacts.download(token=token, tenant_id="tenant-m3", actor_id="human")
+        assert json.loads(content)["payload"] == "x" * 1_000
+        with pytest.raises(ArtifactAccessError):
+            await artifacts.download(token=token, tenant_id="other", actor_id="human")
+        derived = await artifacts.derive_version(
+            tenant_id="tenant-m3",
+            source_artifact_id=artifact_id,
+            content=b'{"payload":"revised"}',
+            producer="reviewer",
+        )
+        derived_metadata = await artifacts.metadata("tenant-m3", derived.artifact_id)
+        assert derived.version == 2
+        assert derived_metadata.lineage_refs == (artifact_id,)
+
+    asyncio.run(scenario())
+
+
+def test_credential_proxy_redacts_secret_and_hands_environment_has_none() -> None:
+    async def scenario() -> None:
+        secret = "real-super-secret-token"
+        vault = InMemoryVault({"cred-1": secret})
+        proxy = CredentialProxy(vault)
+        proxy.register_reference(
+            "tenant-m3",
+            CredentialReference(
+                credential_ref="cred-1",
+                provider="example",
+                account_scope="account-1",
+                allowed_operations=("write",),
+                expires_at=datetime.now(UTC) + timedelta(hours=1),
+            ),
+        )
+
+        def external(arguments: dict[str, Any], credential: str) -> dict[str, Any]:
+            return {
+                "target": arguments["target"],
+                "authorization": f"Bearer {credential}",
+                "echo": credential,
+            }
+
+        hands = RecordingHands({"unused": True})
+        gateway = ToolGateway(
+            registry=ToolRegistry(
+                (_capability(ToolPermission.WRITE_AUTONOMOUS, runtime_location="credential_proxy"),)
+            ),
+            policy=PolicyEngine(),
+            approvals=InMemoryApprovalProjection(),
+            hands=hands,
+            artifacts=ArtifactStore(
+                InMemoryObjectStorage(), signing_key=b"credential-artifact-key"
+            ),
+            credential_proxy=proxy,
+            credential_adapters={"managed": external},
+        )
+        result = await gateway.execute(_invocation(credential_ref="cred-1"))
+        assert secret not in json.dumps(result.as_dict())
+        assert hands.calls == 0
+        assert proxy.usage_audit()[0]["credential_ref"] == "cred-1"
+
+        with pytest.raises(CredentialAccessError):
+            await proxy.invoke(
+                tenant_id="other-tenant",
+                session_id="session-m3",
+                tool_name="managed",
+                credential_ref="cred-1",
+                operation="write",
+                request={},
+                adapter=external,
+            )
+        with pytest.raises(CredentialAccessError):
+            await proxy.invoke(
+                tenant_id="tenant-m3",
+                session_id="session-m3",
+                tool_name="managed",
+                credential_ref="cred-1",
+                operation="admin",
+                request={},
+                adapter=external,
+            )
+        proxy.register_reference(
+            "tenant-m3",
+            CredentialReference(
+                credential_ref="cred-expired",
+                provider="example",
+                account_scope="account-1",
+                allowed_operations=("write",),
+                expires_at=datetime.now(UTC) - timedelta(seconds=1),
+            ),
+        )
+        with pytest.raises(CredentialAccessError):
+            await proxy.invoke(
+                tenant_id="tenant-m3",
+                session_id="session-m3",
+                tool_name="managed",
+                credential_ref="cred-expired",
+                operation="write",
+                request={},
+                adapter=external,
+            )
+        await vault.revoke("cred-1")
+        revoked = await gateway.execute(_invocation(key="after-revoke", credential_ref="cred-1"))
+        assert revoked.error_code == "credential_access_denied"
+
+        env_hands = LocalHandsService(
+            workspace_root=Path.cwd(), allowed_executables=(Path("/usr/bin/env"),)
+        )
+        environment = await env_hands.run_process(Path("/usr/bin/env"), (), timeout_seconds=2)
+        assert secret not in environment["stdout"]
+
+    asyncio.run(scenario())
+
+
+def test_sandbox_rejects_file_escape() -> None:
+    async def scenario() -> None:
+        hands = LocalHandsService(workspace_root=Path.cwd())
+        with pytest.raises(SandboxViolationError):
+            await hands.read_file("../../etc/passwd")
+
+    asyncio.run(scenario())
+
+
+def test_gateway_cancels_long_running_hands_call() -> None:
+    async def scenario() -> None:
+        started = asyncio.Event()
+
+        async def slow_handler(arguments: dict[str, Any]) -> dict[str, Any]:
+            del arguments
+            started.set()
+            await asyncio.sleep(60)
+            return {"ok": True}
+
+        hands = LocalHandsService(workspace_root=Path.cwd(), handlers={"managed": slow_handler})
+        gateway = ToolGateway(
+            registry=ToolRegistry((_capability(ToolPermission.READ_ONLY),)),
+            policy=PolicyEngine(),
+            approvals=InMemoryApprovalProjection(),
+            hands=hands,
+            artifacts=ArtifactStore(
+                InMemoryObjectStorage(), signing_key=b"cancellation-artifact-key"
+            ),
+        )
+        running = asyncio.create_task(gateway.execute(_invocation()))
+        await started.wait()
+        assert await gateway.cancel("tool-stable-key")
+        result = await running
+        assert result.status.value == "cancelled"
+        assert gateway.get_status("tool-stable-key") == "cancelled"
+
+    asyncio.run(scenario())
+
+
+def test_gateway_does_not_serialize_unrelated_invocations() -> None:
+    async def scenario() -> None:
+        both_started = asyncio.Event()
+        release = asyncio.Event()
+        started = 0
+
+        async def concurrent_handler(arguments: dict[str, Any]) -> dict[str, Any]:
+            nonlocal started
+            started += 1
+            if started == 2:
+                both_started.set()
+            await release.wait()
+            return {"target": arguments["target"]}
+
+        gateway = ToolGateway(
+            registry=ToolRegistry((_capability(ToolPermission.READ_ONLY),)),
+            policy=PolicyEngine(),
+            approvals=InMemoryApprovalProjection(),
+            hands=LocalHandsService(
+                workspace_root=Path.cwd(), handlers={"managed": concurrent_handler}
+            ),
+            artifacts=ArtifactStore(
+                InMemoryObjectStorage(), signing_key=b"concurrent-artifact-key"
+            ),
+        )
+        first = asyncio.create_task(gateway.execute(_invocation(key="concurrent-a")))
+        second = asyncio.create_task(gateway.execute(_invocation(key="concurrent-b")))
+        await asyncio.wait_for(both_started.wait(), timeout=1)
+        release.set()
+        results = await asyncio.gather(first, second)
+        assert all(result.status.value == "success" for result in results)
+
+    asyncio.run(scenario())
+
+
+def test_slow_policy_does_not_block_another_tenant() -> None:
+    class SlowPolicy:
+        version = "slow-policy-v1"
+
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def evaluate(
+            self, capability: ToolCapability, invocation: ToolInvocation
+        ) -> PolicyDecision:
+            del capability
+            if invocation.tenant_id == "tenant-slow":
+                self.started.set()
+                await self.release.wait()
+            return PolicyDecision.ALLOW
+
+    async def scenario() -> None:
+        policy = SlowPolicy()
+        gateway = ToolGateway(
+            registry=ToolRegistry((_capability(ToolPermission.READ_ONLY),)),
+            policy=policy,
+            approvals=InMemoryApprovalProjection(),
+            hands=RecordingHands({"ok": True}),
+            artifacts=ArtifactStore(
+                InMemoryObjectStorage(), signing_key=b"slow-policy-artifact-key"
+            ),
+            max_concurrent=2,
+            max_concurrent_per_tenant=1,
+        )
+        slow = asyncio.create_task(
+            gateway.execute(_invocation(key="slow-policy", tenant_id="tenant-slow"))
+        )
+        await asyncio.wait_for(policy.started.wait(), timeout=1)
+        unrelated = await asyncio.wait_for(
+            gateway.execute(_invocation(key="fast-policy", tenant_id="tenant-fast")),
+            timeout=1,
+        )
+        assert unrelated.status.value == "success"
+        policy.release.set()
+        assert (await slow).status.value == "success"
+
+    asyncio.run(scenario())
+
+
+def test_slow_approval_lookup_does_not_block_another_tenant() -> None:
+    class ApprovalPolicy:
+        version = "approval-policy-v1"
+
+        def evaluate(
+            self, capability: ToolCapability, invocation: ToolInvocation
+        ) -> PolicyDecision:
+            del capability, invocation
+            return PolicyDecision.REQUIRE_APPROVAL
+
+    class SlowApprovals:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def get(self, tenant_id: str, approval_id: str) -> ApprovalRecord | None:
+            del tenant_id, approval_id
+            return None
+
+        async def find_approved(
+            self,
+            tenant_id: str,
+            session_id: str,
+            digest: str,
+            policy_version: str,
+            run_id: str | None = None,
+        ) -> ApprovalRecord | None:
+            del session_id, digest, policy_version
+            if tenant_id == "tenant-slow":
+                self.started.set()
+                await self.release.wait()
+            return None
+
+    async def scenario() -> None:
+        approvals = SlowApprovals()
+        gateway = ToolGateway(
+            registry=ToolRegistry((_capability(),)),
+            policy=ApprovalPolicy(),
+            approvals=approvals,
+            hands=RecordingHands({"ok": True}),
+            artifacts=ArtifactStore(
+                InMemoryObjectStorage(), signing_key=b"slow-approval-artifact-key"
+            ),
+            max_concurrent=2,
+            max_concurrent_per_tenant=1,
+        )
+        slow = asyncio.create_task(
+            gateway.execute(_invocation(key="slow-approval", tenant_id="tenant-slow"))
+        )
+        await asyncio.wait_for(approvals.started.wait(), timeout=1)
+        unrelated = await asyncio.wait_for(
+            gateway.execute(_invocation(key="fast-approval", tenant_id="tenant-fast")),
+            timeout=1,
+        )
+        assert unrelated.error_code == "approval_required"
+        approvals.release.set()
+        assert (await slow).error_code == "approval_required"
+
+    asyncio.run(scenario())
+
+
+def test_tenant_capacity_preserves_fairness_and_bounds_queue() -> None:
+    class MetricRecorder:
+        def __init__(self) -> None:
+            self.points: list[Any] = []
+
+        async def write_metric(self, metric: Any) -> None:
+            self.points.append(metric)
+
+    async def scenario() -> None:
+        tenant_a_started = asyncio.Event()
+        tenant_b_started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def handler(arguments: dict[str, Any]) -> dict[str, Any]:
+            target = str(arguments["target"])
+            if target == "a-1":
+                tenant_a_started.set()
+                await release.wait()
+            elif target == "b-1":
+                tenant_b_started.set()
+            return {"target": target}
+
+        metrics = MetricRecorder()
+        gateway = ToolGateway(
+            registry=ToolRegistry((_capability(ToolPermission.READ_ONLY),)),
+            policy=PolicyEngine(),
+            approvals=InMemoryApprovalProjection(),
+            hands=LocalHandsService(workspace_root=Path.cwd(), handlers={"managed": handler}),
+            artifacts=ArtifactStore(InMemoryObjectStorage(), signing_key=b"capacity-artifact-key"),
+            max_concurrent=2,
+            max_concurrent_per_tenant=1,
+            max_queued=2,
+            max_queued_per_tenant=1,
+            queue_timeout=2,
+            metric_writer=metrics,
+        )
+        first_a = asyncio.create_task(
+            gateway.execute(_invocation(target="a-1", key="a-1", tenant_id="tenant-a"))
+        )
+        await asyncio.wait_for(tenant_a_started.wait(), timeout=1)
+        queued_a = asyncio.create_task(
+            gateway.execute(_invocation(target="a-2", key="a-2", tenant_id="tenant-a"))
+        )
+        await asyncio.sleep(0)
+        rejected_a = await gateway.execute(
+            _invocation(target="a-3", key="a-3", tenant_id="tenant-a")
+        )
+        assert rejected_a.error_code == "hands_capacity_exhausted"
+        assert rejected_a.metadata["capacity_reason"] == "tenant_queue_full"
+
+        tenant_b = await asyncio.wait_for(
+            gateway.execute(_invocation(target="b-1", key="b-1", tenant_id="tenant-b")),
+            timeout=1,
+        )
+        assert tenant_b.status.value == "success"
+        assert tenant_b_started.is_set()
+        assert not queued_a.done()
+        release.set()
+        assert (await first_a).status.value == "success"
+        assert (await queued_a).status.value == "success"
+
+        names = {point.name for point in metrics.points}
+        assert {
+            "tool.gateway.queue.depth",
+            "tool.gateway.queue.latency.seconds",
+            "tool.gateway.in_flight",
+            "tool.gateway.backpressure.count",
+        }.issubset(names)
+        assert any(
+            point.name == "tool.gateway.backpressure.count"
+            and point.tenant_id == "tenant-a"
+            and point.labels["reason"] == "tenant_queue_full"
+            for point in metrics.points
+        )
+
+    asyncio.run(scenario())
+
+
+def test_same_key_wait_is_bounded_without_duplicate_dispatch() -> None:
+    async def scenario() -> None:
+        started = asyncio.Event()
+        release = asyncio.Event()
+        calls = 0
+
+        async def handler(arguments: dict[str, Any]) -> dict[str, Any]:
+            nonlocal calls
+            calls += 1
+            started.set()
+            await release.wait()
+            return arguments
+
+        gateway = ToolGateway(
+            registry=ToolRegistry((_capability(ToolPermission.READ_ONLY),)),
+            policy=PolicyEngine(),
+            approvals=InMemoryApprovalProjection(),
+            hands=LocalHandsService(workspace_root=Path.cwd(), handlers={"managed": handler}),
+            artifacts=ArtifactStore(InMemoryObjectStorage(), signing_key=b"same-key-capacity-key"),
+            max_concurrent=1,
+            max_concurrent_per_tenant=1,
+            max_queued=2,
+            max_queued_per_tenant=2,
+            queue_timeout=0.05,
+        )
+        owner = asyncio.create_task(gateway.execute(_invocation(key="bounded-same-key")))
+        await asyncio.wait_for(started.wait(), timeout=1)
+        waiter = await asyncio.wait_for(
+            gateway.execute(_invocation(key="bounded-same-key")), timeout=1
+        )
+        assert waiter.error_code == "hands_capacity_exhausted"
+        assert waiter.metadata["capacity_reason"] == "queue_timeout"
+        assert calls == 1
+        release.set()
+        assert (await owner).status.value == "success"
+
+    asyncio.run(scenario())
+
+
+def test_runtime_waits_for_approval_then_resumes_same_tool_call() -> None:
+    class WriteProvider:
+        async def generate(self, request: ModelRequest) -> ModelResponse:
+            return ModelResponse(
+                model_call_id=request.model_call_id,
+                provider="test",
+                model="test-model",
+                completed_output="controlled write",
+                tool_calls=(
+                    ToolCall(
+                        tool_invocation_id="tool-runtime-approval",
+                        name="managed",
+                        arguments={"target": "release"},
+                        expected_side_effect="write",
+                    ),
+                ),
+            )
+
+    async def scenario() -> None:
+        tenant_id = "tenant-runtime-m3"
+        event_store = InMemoryEventStore()
+        task_projection = InMemoryTaskProjection()
+        service = TaskService(
+            event_store=event_store,
+            relay=OutboxRelay(event_store, task_projection),
+            reader=task_projection,
+            admission=AllowAllAdmissionController(),
+        )
+        created = await service.create_task(
+            goal="write after approval",
+            context=CommandContext(
+                command_id="create-runtime-m3",
+                tenant_id=tenant_id,
+                actor=Actor(type="user", id="human"),
+                correlation_id="corr-runtime-m3",
+                expected_version=0,
+                operation="create_task",
+            ),
+        )
+        task_view = await task_projection.get_task(tenant_id, str(created["session_id"]))
+        assert task_view is not None
+        control = InMemoryControlStateStore()
+        session = FencedSessionClient(event_store, control)
+        orchestrator = ManagedOrchestrator(
+            orchestrator_id="orchestrator-m3",
+            control_store=control,
+            session=session,
+            provisioner=LocalRuntimeProvisioner(),
+        )
+        assert await orchestrator.watch([task_view]) == 1
+        assignment = await orchestrator.schedule_once()
+        assert assignment is not None
+
+        approvals = InMemoryApprovalProjection()
+        hands = RecordingHands({"resource_id": "release-1"})
+        gateway, _ = _gateway(hands, approvals)
+        harness = AgentHarness(
+            control_store=control,
+            session=session,
+            model=WriteProvider(),
+            tools=GatewayToolClient(gateway),
+            runtime_events=InMemoryRuntimeEventBus(),
+        )
+        await harness.execute(assignment)
+        waiting_events = await event_store.load(tenant_id, assignment.session_id)
+        assert any(event.type == "approval.requested" for event in waiting_events)
+        assert any(event.type == "tool.call.denied" for event in waiting_events)
+        assert not any(event.type == "run.completed" for event in waiting_events)
+        approval_event = next(
+            event for event in waiting_events if event.type == "approval.requested"
+        )
+        await approvals.project([approval_event])
+        record = await approvals.get(tenant_id, str(approval_event.payload["approval_id"]))
+        assert record is not None
+        decided = ApprovalAggregate.respond(
+            record, actor_id="human", decision="approved", feedback=None
+        )
+        approved_event = CanonicalEvent(
+            **{
+                **approval_event.__dict__,
+                "event_id": "runtime-approved-event",
+                "aggregate_version": approval_event.aggregate_version + 1,
+                "type": "approval.approved",
+                "payload": {
+                    "approval_id": decided.approval_id,
+                    "decision": "approved",
+                },
+            }
+        )
+        await approvals.project([approved_event])
+
+        task_id = f"{tenant_id}:{assignment.session_id}:{assignment.run_id}"
+        assert await control.wake_assignment(task_id)
+        resumed_assignment = await orchestrator.schedule_once()
+        assert resumed_assignment is not None
+        assert resumed_assignment.run_id == assignment.run_id
+        assert resumed_assignment.fencing_token > assignment.fencing_token
+        await harness.execute(resumed_assignment)
+        completed_events = await event_store.load(tenant_id, assignment.session_id)
+        assert [event.type for event in completed_events].count("tool.call.completed") == 1
+        assert [event.type for event in completed_events].count("run.completed") == 1
+        assert hands.calls == 1
+
+    asyncio.run(scenario())
+
+
+def test_approval_response_rebuilds_and_retries_failed_policy_notification() -> None:
+    async def scenario() -> None:
+        class FlakyApprovalNotifier:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.actor_ids: list[str | None] = []
+
+            async def record_human_response(
+                self,
+                record: ApprovalRecord,
+                *,
+                decision: str,
+                feedback: str | None,
+                actor_id: str | None = None,
+            ) -> None:
+                del record, decision, feedback
+                self.calls += 1
+                self.actor_ids.append(actor_id)
+                if self.calls == 1:
+                    raise RuntimeError("policy notification interrupted")
+
+        tenant_id = "tenant-hitl-events"
+        event_store = InMemoryEventStore()
+        task_projection = InMemoryTaskProjection()
+        notifier = FlakyApprovalNotifier()
+        service = TaskService(
+            event_store=event_store,
+            relay=OutboxRelay(event_store, task_projection),
+            reader=task_projection,
+            admission=AllowAllAdmissionController(),
+            approval_notifier=notifier,
+        )
+        created = await service.create_task(
+            goal="approve from events",
+            context=CommandContext(
+                command_id="create-hitl-events",
+                tenant_id=tenant_id,
+                actor=Actor(type="user", id="human"),
+                correlation_id="corr-hitl-events",
+                expected_version=0,
+                operation="create_task",
+            ),
+        )
+        session_id = str(created["session_id"])
+        run_id = str(created["run_id"])
+        approval_id = "apr_unprojected"
+        await event_store.append(
+            root_session_id=session_id,
+            session_id=session_id,
+            run_id=run_id,
+            context=CommandContext(
+                command_id="runtime-approval-request",
+                tenant_id=tenant_id,
+                actor=Actor(type="runtime", id="runtime-1"),
+                correlation_id=run_id,
+                expected_version=2,
+                operation="runtime.approval.requested",
+            ),
+            events=[
+                NewEvent(
+                    type="approval.requested",
+                    payload={
+                        "approval_id": approval_id,
+                        "run_id": run_id,
+                        "action_digest": "digest-hitl-events",
+                        "tool_name": "auramcp.about.auraclaw",
+                        "redacted_arguments": {},
+                        "risk": "high",
+                        "reason": "write-with-approval action requires human approval",
+                        "expected_effect": "write",
+                        "allowed_decisions": ["approved", "rejected"],
+                        "assigned_approvers": [],
+                        "policy_version": "m3-v1",
+                        "expires_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+                        "status": "waiting",
+                    },
+                )
+            ],
+            command_result={"approval_id": approval_id},
+        )
+        with pytest.raises(RuntimeError, match="notification interrupted"):
+            await service.record_approval_response(
+                session_id=session_id,
+                approval_id=approval_id,
+                decision="approved",
+                feedback=None,
+                context=CommandContext(
+                    command_id="human-approve",
+                    tenant_id=tenant_id,
+                    actor=Actor(type="user", id="human"),
+                    correlation_id=run_id,
+                    expected_version=3,
+                    operation="record_approval_response",
+                ),
+            )
+        responded = await service.record_approval_response(
+            session_id=session_id,
+            approval_id=approval_id,
+            decision="approved",
+            feedback=None,
+            context=CommandContext(
+                command_id="human-approve-retry",
+                tenant_id=tenant_id,
+                actor=Actor(type="user", id="human"),
+                correlation_id=run_id,
+                expected_version=4,
+                operation="record_approval_response",
+            ),
+        )
+        assert responded["decision"] == "approved"
+        assert responded["effective_approval_mode"] == created["effective_approval_mode"]
+        assert responded["approval_mode_source"] == created["approval_mode_source"]
+        assert responded["approval_mode_revision"] == created["approval_mode_revision"]
+        events = await event_store.load(tenant_id, session_id)
+        assert [event.type for event in events].count("approval.approved") == 1
+        assert notifier.calls == 2
+        assert notifier.actor_ids == ["human", "human"]
+        with pytest.raises(NotFoundError, match="apr_missing"):
+            await service.record_approval_response(
+                session_id=session_id,
+                approval_id="apr_missing",
+                decision="approved",
+                feedback=None,
+                context=CommandContext(
+                    command_id="human-approve-missing",
+                    tenant_id=tenant_id,
+                    actor=Actor(type="user", id="human"),
+                    correlation_id=run_id,
+                    expected_version=5,
+                    operation="record_approval_response",
+                ),
+            )
+
+    asyncio.run(scenario())
+
+
+def test_remote_error_details_reach_canonical_events_and_next_model_turn() -> None:
+    from auraclaw.action.catalog_reconciler import _executor_payload
+    from auraclaw.contracts.hands import HandsToolResult
+    from auraclaw.runtime.capability_controller import RuntimeCapabilityController
+
+    async def scenario() -> None:
+        events = InMemoryEventStore()
+        projection = InMemoryTaskProjection()
+        service = TaskService(
+            event_store=events,
+            relay=OutboxRelay(events, projection),
+            reader=projection,
+            admission=AllowAllAdmissionController(),
+        )
+        created = await service.create_task(
+            goal="Query inventory",
+            context=CommandContext(
+                command_id="create-error-loop",
+                tenant_id="tenant-error",
+                actor=Actor(type="user", id="user"),
+                correlation_id="corr-error",
+                expected_version=0,
+                operation="create_task",
+            ),
+        )
+        view = await projection.get_task("tenant-error", str(created["session_id"]))
+        control = InMemoryControlStateStore()
+        session = FencedSessionClient(events, control)
+        orchestrator = ManagedOrchestrator(
+            orchestrator_id="error-loop",
+            control_store=control,
+            session=session,
+            provisioner=LocalRuntimeProvisioner(),
+        )
+        await orchestrator.watch([view])
+        assignment = await orchestrator.schedule_once()
+        calls = []
+
+        def handler(arguments):
+            calls.append(arguments)
+            if arguments["target"] == "bad":
+                return _executor_payload(
+                    HandsToolResult(
+                        status="error",
+                        error_code="mcp_tool_error",
+                        summary="input.limit must be at least 2; access_token=fixture-secret",
+                        side_effect_status="unknown",
+                        metadata={
+                            "error_details": {
+                                "stage": "remote_tool",
+                                "origin": "downstream",
+                                "retryable": False,
+                                "validation_errors": [
+                                    {"instance_path": "/input/limit", "keyword": "minimum"}
+                                ],
+                            }
+                        },
+                    )
+                )
+            return {"ok": True}
+
+        gateway = ToolGateway(
+            registry=ToolRegistry((_capability(ToolPermission.READ_ONLY),)),
+            policy=PolicyEngine(),
+            approvals=InMemoryApprovalProjection(),
+            hands=LocalHandsService(workspace_root=Path.cwd(), handlers={"managed": handler}),
+            artifacts=ArtifactStore(InMemoryObjectStorage(), signing_key=b"error-loop-test-key"),
+        )
+
+        class Model:
+            turn = 0
+
+            async def generate(self, request):
+                self.turn += 1
+                if self.turn == 2:
+                    tool_messages = json.dumps(
+                        [message for message in request.messages if message["role"] == "tool"]
+                    )
+                    assert "remote_tool" in tool_messages and "/input/limit" in tool_messages
+                    assert "fixture-secret" not in tool_messages
+                return ModelResponse(
+                    model_call_id=request.model_call_id,
+                    provider="test",
+                    model="test",
+                    completed_output="Done" if self.turn == 3 else "",
+                    tool_calls=(
+                        ()
+                        if self.turn == 3
+                        else (
+                            ToolCall(
+                                tool_invocation_id=f"error-loop-{self.turn}",
+                                name="managed",
+                                arguments={"target": "bad" if self.turn == 1 else "correct"},
+                            ),
+                        )
+                    ),
+                )
+
+        class LoadedController(RuntimeCapabilityController):
+            @staticmethod
+            def empty_state():
+                state = RuntimeCapabilityController.empty_state()
+                state["loaded"] = {
+                    "managed": {
+                        "capability_id": "managed",
+                        "kind": "tool",
+                        "canonical_name": "managed",
+                        "version": "1",
+                        "model_tool": {
+                            "type": "function",
+                            "function": {
+                                "name": "managed",
+                                "parameters": _capability().input_schema,
+                            },
+                        },
+                    }
+                }
+                return state
+
+        await AgentHarness(
+            control_store=control,
+            session=session,
+            model=Model(),
+            tools=GatewayToolClient(gateway),
+            capability_controller=LoadedController(GatewayToolClient(gateway)),
+            runtime_events=InMemoryRuntimeEventBus(),
+        ).execute(assignment)
+        completed = [
+            event
+            for event in await events.load("tenant-error", assignment.session_id)
+            if event.type == "tool.call.completed"
+        ]
+        assert len(completed) == 2, [
+            (e.type, e.payload)
+            for e in await events.load("tenant-error", assignment.session_id)
+            if e.type in {"run.failed", "run.completed"}
+        ]
+        failed = completed[0].payload["result"]
+        assert failed["error_code"] == "mcp_tool_error"
+        assert (
+            failed["metadata"]["error_details"]["validation_errors"][0]["instance_path"]
+            == "/input/limit"
+        )
+        assert "fixture-secret" not in json.dumps(failed)
+        assert completed[1].payload["result"]["status"] == "success"
+        assert calls == [{"target": "bad"}, {"target": "correct"}]
+
+    asyncio.run(scenario())

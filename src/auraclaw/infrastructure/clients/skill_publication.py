@@ -1,0 +1,540 @@
+from __future__ import annotations
+
+import base64
+from datetime import datetime
+from uuid import uuid4
+
+import httpx
+
+from auraclaw.action.skill_lifecycle import (
+    SkillAdmissionAuditRecord,
+    SkillAdmissionMetricRecord,
+    SkillAdmissionPage,
+)
+from auraclaw.action.skill_packages import SkillPackage
+from auraclaw.contracts.errors import NotFoundError
+from auraclaw.contracts.internal import (
+    SkillAdminSnapshotInternalRequest,
+    SkillAdminSnapshotInternalResponse,
+    SkillAdmissionListInternalRequest,
+    SkillAdmissionListInternalResponse,
+    SkillAdmissionMetricsInternalRequest,
+    SkillAdmissionMetricsInternalResponse,
+    SkillInstallationInternalRequest,
+    SkillInstallationInternalResponse,
+    SkillPackageStateInternalRequest,
+    SkillPackageStateInternalResponse,
+    SkillPublishArtifactInternalRequest,
+    SkillPublisherInternalResponse,
+    SkillPublisherRegisterInternalRequest,
+    SkillPublisherRevokeKeyInternalRequest,
+    SkillPublisherRotateKeyInternalRequest,
+    SkillPublisherStateInternalRequest,
+    SkillPublisherStatusInternalRequest,
+    SkillPublishInternalRequest,
+    SkillPublishInternalResponse,
+    SkillPurgeInternalRequest,
+    SkillPurgeInternalResponse,
+    SkillRestoreInternalRequest,
+    SkillRestoreInternalResponse,
+    SkillRevokeInternalRequest,
+    SkillRevokeInternalResponse,
+    SkillStateInternalRequest,
+    SkillStateInternalResponse,
+)
+from auraclaw.contracts.skills import (
+    ChangeSkillInstallationCommand,
+    ChangeSkillPublisherStatusCommand,
+    PublishedSkill,
+    PublishSkillCommand,
+    PurgeSkillPackageCommand,
+    RegisterSkillPublisherCommand,
+    RestoreSkillPublicationCommand,
+    RevokeSkillPublicationCommand,
+    RevokeSkillPublisherKeyCommand,
+    RotateSkillPublisherKeyCommand,
+    SkillInstallationRecord,
+    SkillPackageRecord,
+    SkillPublicationRecord,
+    SkillPublisherKeyRecord,
+    SkillPublisherRecord,
+    SkillUpgradeState,
+)
+from auraclaw.contracts.tools import ArtifactRef
+from auraclaw.infrastructure.clients.internal import (
+    InternalContractSession,
+)
+from auraclaw.infrastructure.clients.internal import (
+    command_context as _context,
+)
+from auraclaw.infrastructure.clients.internal import (
+    query_context as _query_context,
+)
+
+
+class RemoteSkillPublicationClient:
+    """Task API port; Action Hands owns package admission and Artifact writes."""
+
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        bearer_token: str,
+        timeout: float = 60.0,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        self._session = InternalContractSession(
+            base_url,
+            bearer_token=bearer_token,
+            timeout=timeout,
+            transport=transport,
+        )
+        self._contract = self._session.contract
+
+    async def aclose(self) -> None:
+        await self._session.aclose()
+
+    async def publish(self, command: PublishSkillCommand, package: SkillPackage) -> PublishedSkill:
+        response = await self._contract.call(
+            "/internal/v1/skill-publications/publish",
+            SkillPublishInternalRequest(
+                context=_context(command),
+                actor_id=command.actor_id,
+                activate=command.activate,
+                expected_installation_revision=command.expected_installation_revision,
+                command_id=command.command_id,
+                expected_revision=command.expected_revision,
+                files={
+                    path: base64.b64encode(content).decode()
+                    for path, content in package.files.items()
+                },
+            ),
+            SkillPublishInternalResponse,
+        )
+        return PublishedSkill.model_validate(response.publication)
+
+    async def publish_artifact(
+        self,
+        command: PublishSkillCommand,
+        artifact_ref: ArtifactRef,
+        expected_digest: str,
+    ) -> PublishedSkill:
+        response = await self._contract.call(
+            "/internal/v1/skill-publications/publish-artifact",
+            SkillPublishArtifactInternalRequest(
+                context=_context(command),
+                actor_id=command.actor_id,
+                activate=command.activate,
+                expected_installation_revision=command.expected_installation_revision,
+                command_id=command.command_id,
+                expected_revision=command.expected_revision,
+                expected_digest=expected_digest,
+                artifact_ref=artifact_ref.as_dict(),
+            ),
+            SkillPublishInternalResponse,
+        )
+        publication = PublishedSkill.model_validate(response.publication)
+        return publication
+
+    async def page_admissions(
+        self,
+        tenant_id: str,
+        *,
+        outcome: str | None = None,
+        stage: str | None = None,
+        content_policy_version: str | None = None,
+        since: datetime | None = None,
+        cursor: str | None = None,
+        limit: int = 100,
+    ) -> SkillAdmissionPage:
+        request_id = f"skill-admissions-{uuid4().hex}"
+        response = await self._contract.call(
+            "/internal/v1/skill-publications/admissions",
+            SkillAdmissionListInternalRequest(
+                context=_query_context(tenant_id, request_id),
+                outcome=outcome,
+                stage=stage,
+                content_policy_version=content_policy_version,
+                since=since,
+                cursor=cursor,
+                limit=limit,
+            ),
+            SkillAdmissionListInternalResponse,
+        )
+        records: list[SkillAdmissionAuditRecord] = []
+        for payload in response.admissions:
+            values = dict(payload)
+            occurred_at = values.get("occurred_at")
+            if isinstance(occurred_at, str):
+                values["occurred_at"] = datetime.fromisoformat(occurred_at)
+            records.append(SkillAdmissionAuditRecord(**values))
+        return SkillAdmissionPage(admissions=tuple(records), next_cursor=response.next_cursor)
+
+    async def admission_metrics(
+        self, tenant_id: str, *, since: datetime | None = None
+    ) -> tuple[SkillAdmissionMetricRecord, ...]:
+        request_id = f"skill-admission-metrics-{uuid4().hex}"
+        response = await self._contract.call(
+            "/internal/v1/skill-publications/admission-metrics",
+            SkillAdmissionMetricsInternalRequest(
+                context=_query_context(tenant_id, request_id), since=since
+            ),
+            SkillAdmissionMetricsInternalResponse,
+        )
+        return tuple(SkillAdmissionMetricRecord(**dict(payload)) for payload in response.metrics)
+
+    async def change_installation(
+        self,
+        command: ChangeSkillInstallationCommand,
+    ) -> SkillInstallationRecord:
+        response = await self._contract.call(
+            "/internal/v1/skill-publications/installation",
+            SkillInstallationInternalRequest(
+                context=_context(command),
+                actor_id=command.actor_id,
+                publisher=command.publisher,
+                name=command.name,
+                operation=command.operation.value,
+                force=command.force,
+                reason_code=command.reason_code,
+                command_id=command.command_id,
+                expected_revision=command.expected_revision,
+            ),
+            SkillInstallationInternalResponse,
+        )
+        return SkillInstallationRecord.model_validate(response.installation)
+
+    async def revoke_publication(
+        self,
+        command: RevokeSkillPublicationCommand,
+    ) -> SkillPublicationRecord:
+        response = await self._contract.call(
+            "/internal/v1/skill-publications/revoke",
+            SkillRevokeInternalRequest(
+                context=_context(command),
+                actor_id=command.actor_id,
+                publisher=command.publisher,
+                name=command.name,
+                version=command.version,
+                reason_code=command.reason_code,
+                revocation_action=command.revocation_action.value,
+                policy_version=command.policy_version,
+                policy_decision_id=command.policy_decision_id,
+                command_id=command.command_id,
+                expected_revision=command.expected_revision,
+            ),
+            SkillRevokeInternalResponse,
+        )
+        return SkillPublicationRecord.model_validate(response.publication)
+
+    async def restore_publication(
+        self,
+        command: RestoreSkillPublicationCommand,
+    ) -> SkillPublicationRecord:
+        response = await self._contract.call(
+            "/internal/v1/skill-publications/restore",
+            SkillRestoreInternalRequest(
+                context=_context(command),
+                actor_id=command.actor_id,
+                publisher=command.publisher,
+                name=command.name,
+                version=command.version,
+                reason_code=command.reason_code,
+                command_id=command.command_id,
+                expected_revision=command.expected_revision,
+            ),
+            SkillRestoreInternalResponse,
+        )
+        return SkillPublicationRecord.model_validate(response.publication)
+
+    async def get_package(
+        self,
+        tenant_id: str,
+        publisher: str,
+        name: str,
+        version: str,
+    ) -> SkillPackageRecord:
+        response = await self._package_state(tenant_id, publisher, name, version)
+        return SkillPackageRecord.model_validate(response.package)
+
+    async def get_skill_markdown(
+        self,
+        tenant_id: str,
+        publisher: str,
+        name: str,
+        version: str,
+    ) -> str | None:
+        response = await self._package_state(tenant_id, publisher, name, version)
+        return response.skill_markdown
+
+    async def _package_state(
+        self,
+        tenant_id: str,
+        publisher: str,
+        name: str,
+        version: str,
+    ) -> SkillPackageStateInternalResponse:
+        request_id = f"skill-package-state-{uuid4().hex}"
+        return await self._contract.call(
+            "/internal/v1/skill-publications/package",
+            SkillPackageStateInternalRequest(
+                context=_query_context(tenant_id, request_id),
+                publisher=publisher,
+                name=name,
+                version=version,
+            ),
+            SkillPackageStateInternalResponse,
+        )
+
+    async def list_packages(self, tenant_id: str) -> tuple[SkillPackageRecord, ...]:
+        response = await self._admin_snapshot(tenant_id)
+        return tuple(SkillPackageRecord.model_validate(item) for item in response.packages)
+
+    async def list_upgrade_states(self, tenant_id: str) -> tuple[SkillUpgradeState, ...]:
+        response = await self._admin_snapshot(tenant_id)
+        return tuple(SkillUpgradeState.model_validate(item) for item in response.upgrades)
+
+    async def get_upgrade_state(
+        self, tenant_id: str, publisher: str, name: str
+    ) -> SkillUpgradeState | None:
+        return next((state for state in await self.list_upgrade_states(tenant_id)
+                     if state.publisher == publisher and state.name == name), None)
+
+    async def get_admin_snapshot(
+        self, tenant_id: str
+    ) -> tuple[
+        tuple[SkillPackageRecord, ...],
+        tuple[SkillPublicationRecord, ...],
+        tuple[SkillInstallationRecord, ...],
+    ]:
+        response = await self._admin_snapshot(tenant_id)
+        return (
+            tuple(SkillPackageRecord.model_validate(item) for item in response.packages),
+            tuple(
+                SkillPublicationRecord.model_validate(item)
+                for item in response.publications
+            ),
+            tuple(
+                SkillInstallationRecord.model_validate(item)
+                for item in response.installations
+            ),
+        )
+
+    async def purge_package(self, command: PurgeSkillPackageCommand) -> SkillPackageRecord:
+        response = await self._contract.call(
+            "/internal/v1/skill-publications/purge",
+            SkillPurgeInternalRequest(
+                context=_context(command),
+                actor_id=command.actor_id,
+                publisher=command.publisher,
+                name=command.name,
+                version=command.version,
+                reason_code=command.reason_code,
+                command_id=command.command_id,
+                expected_revision=command.expected_revision,
+            ),
+            SkillPurgeInternalResponse,
+        )
+        return SkillPackageRecord.model_validate(response.package)
+
+    async def get_installation(
+        self,
+        tenant_id: str,
+        publisher: str,
+        name: str,
+    ) -> SkillInstallationRecord:
+        response = await self._state(
+            tenant_id=tenant_id,
+            publisher=publisher,
+            name=name,
+        )
+        if response.installation is None:
+            raise NotFoundError("Skill installation not found")
+        return SkillInstallationRecord.model_validate(response.installation)
+
+    async def list_installations(
+        self, tenant_id: str
+    ) -> tuple[SkillInstallationRecord, ...]:
+        response = await self._admin_snapshot(tenant_id)
+        return tuple(
+            SkillInstallationRecord.model_validate(item)
+            for item in response.installations
+        )
+
+    async def get_publication(
+        self,
+        tenant_id: str,
+        publisher: str,
+        name: str,
+        version: str,
+    ) -> SkillPublicationRecord:
+        response = await self._state(
+            tenant_id=tenant_id,
+            publisher=publisher,
+            name=name,
+            version=version,
+        )
+        if response.publication is None:
+            raise NotFoundError("Skill publication not found")
+        return SkillPublicationRecord.model_validate(response.publication)
+
+    async def list_publications(
+        self, tenant_id: str
+    ) -> tuple[SkillPublicationRecord, ...]:
+        response = await self._admin_snapshot(tenant_id)
+        return tuple(
+            SkillPublicationRecord.model_validate(item)
+            for item in response.publications
+        )
+
+    async def register_publisher(
+        self, command: RegisterSkillPublisherCommand
+    ) -> tuple[SkillPublisherRecord, tuple[SkillPublisherKeyRecord, ...]]:
+        response = await self._contract.call(
+            "/internal/v1/skill-publications/publishers/register",
+            SkillPublisherRegisterInternalRequest(
+                context=_context(command),
+                actor_id=command.actor_id,
+                publisher=command.publisher,
+                display_name=command.display_name,
+                command_id=command.command_id,
+                expected_revision=command.expected_revision,
+            ),
+            SkillPublisherInternalResponse,
+        )
+        return _publisher_state(response)
+
+    async def rotate_publisher_key(
+        self, command: RotateSkillPublisherKeyCommand
+    ) -> tuple[SkillPublisherRecord, tuple[SkillPublisherKeyRecord, ...]]:
+        response = await self._contract.call(
+            "/internal/v1/skill-publications/publishers/rotate-key",
+            SkillPublisherRotateKeyInternalRequest(
+                context=_context(command),
+                actor_id=command.actor_id,
+                publisher=command.publisher,
+                key_id=command.key_id,
+                public_key=command.public_key,
+                command_id=command.command_id,
+                expected_revision=command.expected_revision,
+            ),
+            SkillPublisherInternalResponse,
+        )
+        return _publisher_state(response)
+
+    async def revoke_publisher_key(
+        self, command: RevokeSkillPublisherKeyCommand
+    ) -> tuple[SkillPublisherRecord, tuple[SkillPublisherKeyRecord, ...]]:
+        response = await self._contract.call(
+            "/internal/v1/skill-publications/publishers/revoke-key",
+            SkillPublisherRevokeKeyInternalRequest(
+                context=_context(command),
+                actor_id=command.actor_id,
+                publisher=command.publisher,
+                key_id=command.key_id,
+                reason_code=command.reason_code,
+                revocation_action=command.revocation_action.value,
+                policy_version=command.policy_version,
+                policy_decision_id=command.policy_decision_id,
+                command_id=command.command_id,
+                expected_revision=command.expected_revision,
+            ),
+            SkillPublisherInternalResponse,
+        )
+        return _publisher_state(response)
+
+    async def change_publisher_status(
+        self, command: ChangeSkillPublisherStatusCommand
+    ) -> tuple[SkillPublisherRecord, tuple[SkillPublisherKeyRecord, ...]]:
+        response = await self._contract.call(
+            "/internal/v1/skill-publications/publishers/status",
+            SkillPublisherStatusInternalRequest(
+                context=_context(command),
+                actor_id=command.actor_id,
+                publisher=command.publisher,
+                operation=command.operation.value,
+                reason_code=command.reason_code,
+                revocation_action=(
+                    command.revocation_action.value
+                    if command.revocation_action is not None
+                    else None
+                ),
+                policy_version=command.policy_version,
+                policy_decision_id=command.policy_decision_id,
+                command_id=command.command_id,
+                expected_revision=command.expected_revision,
+            ),
+            SkillPublisherInternalResponse,
+        )
+        return _publisher_state(response)
+
+    async def get_publisher(
+        self, tenant_id: str, publisher: str
+    ) -> tuple[SkillPublisherRecord, tuple[SkillPublisherKeyRecord, ...]]:
+        request_id = f"skill-publisher-state-{uuid4().hex}"
+        response = await self._contract.call(
+            "/internal/v1/skill-publications/publishers/state",
+            SkillPublisherStateInternalRequest(
+                context=_query_context(tenant_id, request_id),
+                publisher=publisher,
+            ),
+            SkillPublisherInternalResponse,
+        )
+        return _publisher_state(response)
+
+    async def list_publishers(
+        self, tenant_id: str
+    ) -> tuple[tuple[SkillPublisherRecord, tuple[SkillPublisherKeyRecord, ...]], ...]:
+        response = await self._admin_snapshot(tenant_id)
+        return tuple(
+            (
+                SkillPublisherRecord.model_validate(item["publisher"]),
+                tuple(
+                    SkillPublisherKeyRecord.model_validate(key)
+                    for key in item.get("keys", ())
+                ),
+            )
+            for item in response.publishers
+        )
+
+    async def _state(
+        self,
+        *,
+        tenant_id: str,
+        publisher: str,
+        name: str,
+        version: str | None = None,
+    ) -> SkillStateInternalResponse:
+        request_id = f"skill-state-{uuid4().hex}"
+        return await self._contract.call(
+            "/internal/v1/skill-publications/state",
+            SkillStateInternalRequest(
+                context=_query_context(tenant_id, request_id),
+                publisher=publisher,
+                name=name,
+                version=version,
+            ),
+            SkillStateInternalResponse,
+        )
+
+
+    async def _admin_snapshot(
+        self, tenant_id: str
+    ) -> SkillAdminSnapshotInternalResponse:
+        request_id = f"skill-admin-snapshot-{uuid4().hex}"
+        return await self._contract.call(
+            "/internal/v1/skill-publications/admin-snapshot",
+            SkillAdminSnapshotInternalRequest(
+                context=_query_context(tenant_id, request_id)
+            ),
+            SkillAdminSnapshotInternalResponse,
+        )
+
+
+def _publisher_state(
+    response: SkillPublisherInternalResponse,
+) -> tuple[SkillPublisherRecord, tuple[SkillPublisherKeyRecord, ...]]:
+    return (
+        SkillPublisherRecord.model_validate(response.publisher),
+        tuple(SkillPublisherKeyRecord.model_validate(key) for key in response.keys),
+    )
