@@ -39,6 +39,7 @@ from auraclaw.contracts.internal import (
     InternalErrorCode,
     LeaseAssertion,
 )
+from auraclaw.contracts.operations import error_disposition
 from auraclaw.internal.http import _error_code
 from auraclaw.internal.security import LeaseAssertionVerifier
 
@@ -294,11 +295,12 @@ def create_hands_http_app(
 
     @app.exception_handler(AuraClawError)
     async def handle_auraclaw_error(_request: Request, exc: AuraClawError) -> JSONResponse:
+        disposition = error_disposition(exc.code, exc.status_code)
         error = InternalError(
             code=_error_code(exc),
             message=exc.message,
             detail=exc.detail,
-            retryable=exc.status_code >= 500,
+            retryable=disposition.retryable,
         )
         return JSONResponse(status_code=exc.status_code, content=error.model_dump(mode="json"))
 

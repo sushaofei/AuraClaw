@@ -32,6 +32,7 @@ from auraclaw.contracts.internal import (
     InternalErrorCode,
     ServiceIdentity,
 )
+from auraclaw.contracts.operations import error_disposition
 
 RequestModel = TypeVar("RequestModel", bound=ContractModel)
 ResponseModel = TypeVar("ResponseModel", bound=ContractModel)
@@ -160,11 +161,12 @@ def create_contract_app(
 
     @app.exception_handler(AuraClawError)
     async def handle_auraclaw_error(_request: Request, exc: AuraClawError) -> JSONResponse:
+        disposition = error_disposition(exc.code, exc.status_code)
         error = InternalError(
             code=_error_code(exc),
             message=exc.message,
             detail=exc.detail,
-            retryable=exc.status_code >= 500,
+            retryable=disposition.retryable,
         )
         return JSONResponse(status_code=exc.status_code, content=error.model_dump(mode="json"))
 

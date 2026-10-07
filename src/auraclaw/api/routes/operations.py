@@ -12,6 +12,7 @@ from auraclaw.api.dependencies import (
 )
 from auraclaw.api.projection_contract import apply_projection_contract
 from auraclaw.contracts.errors import NotFoundError
+from auraclaw.contracts.operations import operations_contract
 from auraclaw.observability.service import ObservabilityService
 from auraclaw.projection.ports import TaskReader
 
@@ -19,6 +20,11 @@ router = APIRouter(prefix="/v1/operations", tags=["operations"])
 Identity = Annotated[RequestIdentity, Depends(request_identity)]
 Service = Annotated[ObservabilityService, Depends(get_observability_service)]
 Reader = Annotated[TaskReader, Depends(get_task_projection)]
+
+
+@router.get("/contract")
+async def operational_contract(identity: Identity) -> dict[str, object]:
+    return {"tenant_id": identity.tenant_id, **operations_contract()}
 
 
 @router.get("/audits")

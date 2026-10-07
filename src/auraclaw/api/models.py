@@ -200,3 +200,7 @@ class ErrorResponse(BaseModel):
     code: str
     message: str
     detail: str | None = None
+    category: str
+    retryable: bool
+    operator_action: str
+    trace_id: str

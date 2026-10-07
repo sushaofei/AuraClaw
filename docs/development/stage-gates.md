@@ -3665,3 +3665,13 @@ Ruff、Mypy（248 文件）、10 条架构合同通过。迁移不适用，部�
 - [x] 单页继续限制 200 节点；prod-like PostgreSQL 生成 10,000 节点并验证索引计划和低于 1 秒的门禁。
 - [x] 数据库角色矩阵覆盖 Projection Worker 读写与 Task API 只读；当前迁移基线、架构真源和扩容手册同步为 `0071`。
 - [x] Release gate、Ruff、Mypy、79 项通过且 2 项因本机无 PostgreSQL 跳过的针对性测试，以及完整测试（920 passed、70 skipped）通过；本阶段作为单一 intentional commit 提交并 push，Issue #104 更新验证证据。
+
+## 生产化 P1-G：统一错误、失败队列与生命周期运维契约（Issue #104）
+
+- [x] 公共错误信封统一返回稳定 code、category、retryable、operator_action 与 trace_id；调用方不依赖 message 文本分支。
+- [x] 内部服务错误的 retryable 复用同一分类器，认证、协议、策略和永久依赖错误不再按所有 5xx 一律重试。
+- [x] Operations API 提供带 schema version 的机器可读契约，枚举已声明错误、分类、处置动作和失败队列状态。
+- [x] Projection、Delivery、Skill lifecycle 与 Runtime Event 明确 owner、事实源、失败状态和恢复入口，不建立跨服务共享写队列。
+- [x] Projection poison 映射 quarantined，Delivery DLQ 映射 dead_lettered/reconciling，Skill 广播映射 retry_wait；Runtime Event 明确无 DLQ，最终结果回到 Canonical API。
+- [x] 运维手册固定 tenant 隔离、owner redrive、未知副作用先对账、Projection 可重建而业务事实不可改写的处置顺序。
+- [x] Release gate、Ruff、Mypy、62 项针对性测试及完整测试（923 passed、70 skipped）通过；本阶段作为单一 intentional commit 提交并 push，Issue #104 更新验证证据。

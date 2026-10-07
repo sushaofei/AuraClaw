@@ -48,6 +48,7 @@ from auraclaw.composition.identity import build_identity_verifier
 from auraclaw.config import Settings, get_settings
 from auraclaw.contracts.errors import AuraClawError
 from auraclaw.contracts.observability import TraceContext
+from auraclaw.contracts.operations import error_disposition
 from auraclaw.infrastructure.observability.stores import StructuredLogger
 
 ApiProfile = Literal["task-api", "streaming-gateway"]
@@ -210,6 +211,7 @@ def create_app(*, profile: ApiProfile) -> FastAPI:
         trace_id = request.headers.get("traceparent", "").split("-")[1:2]
         trace = trace_id[0] if trace_id and len(trace_id[0]) == 32 else uuid4().hex
         span_id = uuid4().hex[:16]
+        request.state.trace_id = trace
         tenant_id = "unauthenticated"
         started_at = datetime.now(UTC)
         started = time.perf_counter()
@@ -263,13 +265,22 @@ def create_app(*, profile: ApiProfile) -> FastAPI:
                 )
 
     @app.exception_handler(AuraClawError)
-    async def handle_auraclaw_error(_: Request, exc: AuraClawError) -> JSONResponse:
+    async def handle_auraclaw_error(request: Request, exc: AuraClawError) -> JSONResponse:
         headers = {}
         if exc.retry_after is not None:
             headers["Retry-After"] = str(exc.retry_after)
+        disposition = error_disposition(exc.code, exc.status_code)
         return JSONResponse(
             status_code=exc.status_code,
-            content={"code": exc.code, "message": exc.message, "detail": exc.detail},
+            content={
+                "code": exc.code,
+                "message": exc.message,
+                "detail": exc.detail,
+                "category": disposition.category.value,
+                "retryable": disposition.retryable,
+                "operator_action": disposition.operator_action.value,
+                "trace_id": getattr(request.state, "trace_id", "unavailable"),
+            },
             headers=headers,
         )
 

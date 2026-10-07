@@ -295,6 +295,7 @@ AuraClaw 是纯 Python 后端。外部客户端只调用公开 HTTP/SSE API；�
 - `POST /v1/sessions/{session_id}/approvals/{approval_id}/responses`
 - `GET /v1/operations/sessions/{session_id}/timeline`
 - `GET /v1/operations/metrics`
+- `GET /v1/operations/contract`（错误分类、失败队列 owner、状态与恢复动作）
 
 写接口要求 `Idempotency-Key`；修改既有 Session 时还要求 `X-Expected-Version`。
 查询支持 `ETag`、`If-None-Match` 和 `min_version`，投影未追上时返回 `202` 与
