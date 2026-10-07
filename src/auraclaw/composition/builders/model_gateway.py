@@ -56,6 +56,9 @@ def build_model_gateway_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         tenant_token_limit=settings.model_tenant_token_limit_per_hour,
         metric_writer=metric_store,
         pricing=settings.model_pricing,
+        configured_provider=settings.model_provider,
+        configured_model=settings.model_name,
+        data_region=settings.model_data_region,
     )
     app = _base_service_app(
         spec,

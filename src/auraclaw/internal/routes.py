@@ -16,6 +16,8 @@ from auraclaw.contracts.internal import (
     ArtifactDownloadResponse,
     ArtifactFinalizeRequest,
     ArtifactFinalizeResponse,
+    ArtifactShareRequest,
+    ArtifactShareResponse,
     ArtifactSkillOrphanClaimRequest,
     ArtifactSkillOrphanClaimResponse,
     ArtifactSkillOrphanResolveRequest,
@@ -311,6 +313,9 @@ def artifact_routes(service: ArtifactInternalService) -> dict[str, ContractRoute
         ),
         "/internal/v1/artifacts/download": contract_route(
             ArtifactDownloadRequest, ArtifactDownloadResponse, service.download
+        ),
+        "/internal/v1/artifacts/share": contract_route(
+            ArtifactShareRequest, ArtifactShareResponse, service.share
         ),
         "/internal/v1/artifacts/delete": contract_route(
             ArtifactDeleteRequest, ArtifactDeleteResponse, service.delete

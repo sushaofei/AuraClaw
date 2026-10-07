@@ -130,7 +130,7 @@ def _assignment() -> RuntimeAssignment:
 
 
 @pytest.mark.asyncio
-async def test_policy_deny_releases_parallel_reservation() -> None:
+async def test_policy_deny_happens_before_quota_reservation() -> None:
     state = _State()
     service = ModelGatewayInternalService(
         _StreamingModel(),
@@ -140,12 +140,12 @@ async def test_policy_deny_releases_parallel_reservation() -> None:
     with pytest.raises(PolicyDeniedError):
         async for _ in service.generate_stream(_request()):
             pass
-    assert state.reserved is True
-    assert state.failed == "policy_rejected_before_dispatch"
+    assert state.reserved is False
+    assert state.failed is None
 
 
 @pytest.mark.asyncio
-async def test_policy_and_reserve_run_concurrently() -> None:
+async def test_policy_precedes_reservation_with_bounded_latency() -> None:
     state = _State()
     service = ModelGatewayInternalService(
         _StreamingModel(),
@@ -157,7 +157,7 @@ async def test_policy_and_reserve_run_concurrently() -> None:
     elapsed = asyncio.get_running_loop().time() - started
     assert any(event.type == "delta" for event in events)
     assert state.reserved is True
-    # Serial would be ~0.02s+; concurrent should finish closer to one sleep.
+    # Policy is deliberately evaluated before quota is mutated.
     assert elapsed < 0.035
 
 
@@ -330,9 +330,10 @@ async def test_skill_content_cache_reuses_immutable_body_across_runs() -> None:
 
     assert client.disposition_calls == 2
     assert client.content_calls == 1
-    assert controller.trusted_message_metrics(assignment)[
-        "skill.runtime.content_cache.hit.count"
-    ] == 1.0
+    assert (
+        controller.trusted_message_metrics(assignment)["skill.runtime.content_cache.hit.count"]
+        == 1.0
+    )
 
     await controller.release_run(assignment)
     assert controller.trusted_message_metrics(assignment) == {}
@@ -342,10 +343,7 @@ async def test_skill_content_cache_reuses_immutable_body_across_runs() -> None:
     assert await controller.trusted_messages(next_run, state)
     assert client.content_calls == 1
     assert (
-        controller.trusted_message_metrics(next_run)[
-            "skill.runtime.content_cache.hit.count"
-        ]
-        == 1.0
+        controller.trusted_message_metrics(next_run)["skill.runtime.content_cache.hit.count"] == 1.0
     )
 
 
@@ -365,16 +363,10 @@ def test_skill_prompt_cache_key_is_stable_across_runs_and_tenant_scoped() -> Non
         ]
     }
     first = _assignment()
-    second = RuntimeAssignment(
-        **{**first.__dict__, "run_id": "run_2", "lease_id": "lease_2"}
-    )
-    other_tenant = RuntimeAssignment(
-        **{**first.__dict__, "tenant_id": "t2", "lease_id": "lease_3"}
-    )
+    second = RuntimeAssignment(**{**first.__dict__, "run_id": "run_2", "lease_id": "lease_2"})
+    other_tenant = RuntimeAssignment(**{**first.__dict__, "tenant_id": "t2", "lease_id": "lease_3"})
 
-    assert controller.prompt_cache_key(first, state) == controller.prompt_cache_key(
-        second, state
-    )
+    assert controller.prompt_cache_key(first, state) == controller.prompt_cache_key(second, state)
     assert controller.prompt_cache_key(first, state) != controller.prompt_cache_key(
         other_tenant, state
     )
@@ -419,9 +411,10 @@ async def test_skill_prompt_budget_rejects_without_silent_truncation(
     assert raised.value.code == "skill_prompt_budget_exceeded"
     assert "sensitive-marker" not in str(raised.value)
     assert "sensitive-marker" not in str(raised.value.detail)
-    assert controller.trusted_message_metrics(_assignment())[
-        "skill.runtime.prompt.rejected.count"
-    ] == 1.0
+    assert (
+        controller.trusted_message_metrics(_assignment())["skill.runtime.prompt.rejected.count"]
+        == 1.0
+    )
 
 
 @pytest.mark.asyncio
@@ -541,9 +534,10 @@ async def test_openai_compatible_prewarm_creates_client() -> None:
 @pytest.mark.asyncio
 async def test_missing_price_rejects_before_provider_or_reservation():
     from auraclaw.contracts.errors import RuntimeCostReservationUnavailableError
+
     state = _State()
     service = ModelGatewayInternalService(_StreamingModel(), state=state)
     with pytest.raises(RuntimeCostReservationUnavailableError):
-        async for _ in service.generate_stream(_request().model_copy(update={'run_max_cost': 1})):
-            pytest.fail('unpriced request must not emit provider output')
+        async for _ in service.generate_stream(_request().model_copy(update={"run_max_cost": 1})):
+            pytest.fail("unpriced request must not emit provider output")
     assert not state.reserved

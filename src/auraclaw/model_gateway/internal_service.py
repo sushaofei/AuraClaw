@@ -124,6 +124,9 @@ class ModelGatewayInternalService:
         heartbeat_interval: float = 5.0,
         metric_writer: MetricWriter | None = None,
         pricing: dict[str, Any] | None = None,
+        configured_provider: str | None = None,
+        configured_model: str | None = None,
+        data_region: str = "local",
     ) -> None:
         self._model = model
         self._policy = policy
@@ -134,6 +137,9 @@ class ModelGatewayInternalService:
         self._heartbeat_interval = heartbeat_interval
         self._metric_writer = metric_writer
         self._pricing = dict(pricing or {})
+        self._configured_provider = configured_provider
+        self._configured_model = configured_model
+        self._data_region = data_region
 
     @staticmethod
     def _require_runtime(identity: ServiceIdentity) -> None:
@@ -163,6 +169,7 @@ class ModelGatewayInternalService:
             self._require_runtime(request.context.service_identity)
             if request.purpose != "execution":
                 raise AuthorizationError("Runtime cannot impersonate an approval reviewer")
+        request = await self._govern_request(request)
         cost_reservation = None
         if request.run_max_cost is not None:
             if self._state is None:
@@ -351,9 +358,7 @@ class ModelGatewayInternalService:
                 await self._state.fail(
                     tenant_id=request.context.tenant_id,
                     model_call_id=request.model_call_id,
-                    error_code=(
-                        exc.code if isinstance(exc, AuraClawError) else type(exc).__name__
-                    ),
+                    error_code=(exc.code if isinstance(exc, AuraClawError) else type(exc).__name__),
                     claim_token=claim_token,
                 )
             stream_error = exc
@@ -543,57 +548,36 @@ class ModelGatewayInternalService:
         request_digest: str,
         cost_reservation: dict[str, Any] | None = None,
     ) -> ModelCallReservation | None:
-        """Run policy and quota reservation concurrently when both are configured."""
+        """Reserve the governed request before provider dispatch."""
 
         async def _no_reservation() -> None:
             return None
 
         extra: dict[str, Any] = {"cost_reservation": cost_reservation} if cost_reservation else {}
-        policy_result, reservation = await asyncio.gather(
-            self._enforce_policy(request),
-            (
-                self._state.reserve(
-                    tenant_id=request.context.tenant_id,
-                    model_call_id=request.model_call_id,
-                    run_id=request.run_id,
-                    request_digest=request_digest,
-                    reserved_tokens=request.max_output_tokens,
-                    token_limit=self._tenant_token_limit,
-                    execution_owner=self._gateway_id,
-                    provider_request_ref=request.model_call_id,
-                    actor=request.context.service_identity.value,
-                    correlation_id=request.context.correlation_id,
-                    causation_id=request.context.causation_id,
-                    claim_ttl=self._claim_ttl,
-                    **extra,
-                )
-                if self._state is not None
-                else _no_reservation()
-            ),
-            return_exceptions=True,
+        reservation = await (
+            self._state.reserve(
+                tenant_id=request.context.tenant_id,
+                model_call_id=request.model_call_id,
+                run_id=request.run_id,
+                request_digest=request_digest,
+                reserved_tokens=request.max_output_tokens,
+                token_limit=self._tenant_token_limit,
+                execution_owner=self._gateway_id,
+                provider_request_ref=request.model_call_id,
+                actor=request.context.service_identity.value,
+                correlation_id=request.context.correlation_id,
+                causation_id=request.context.causation_id,
+                claim_ttl=self._claim_ttl,
+                **extra,
+            )
+            if self._state is not None
+            else _no_reservation()
         )
-        if isinstance(reservation, BaseException):
-            if isinstance(policy_result, BaseException):
-                raise policy_result
-            raise reservation
-        if isinstance(policy_result, BaseException):
-            if (
-                self._state is not None
-                and isinstance(reservation, ModelCallReservation)
-                and reservation.status == "reserved"
-            ):
-                await self._state.fail(
-                    tenant_id=request.context.tenant_id,
-                    model_call_id=request.model_call_id,
-                    error_code="policy_rejected_before_dispatch",
-                    claim_token=reservation.claim_token,
-                )
-            raise policy_result
         return reservation if isinstance(reservation, ModelCallReservation) else None
 
-    async def _enforce_policy(self, request: ModelGenerateRequest) -> None:
+    async def _govern_request(self, request: ModelGenerateRequest) -> ModelGenerateRequest:
         if self._policy is None:
-            return
+            return request
         encoded = json.dumps(request.messages, sort_keys=True, default=str).encode()
         evaluation = await self._policy.evaluate_action(
             tenant_id=request.context.tenant_id,
@@ -609,6 +593,13 @@ class ModelGatewayInternalService:
                 "permission": "read-only",
                 "risk_level": "medium",
                 "data_classification": request.data_classification,
+                "preferred_model": request.preferred_model,
+                "allowed_providers": list(request.allowed_providers),
+                "configured_model": self._configured_model,
+                "configured_provider": self._configured_provider,
+                "required_data_region": self._data_region,
+                "max_output_tokens": request.max_output_tokens,
+                "run_max_cost": request.run_max_cost,
             },
         )
         if evaluation.decision not in {
@@ -616,6 +607,30 @@ class ModelGatewayInternalService:
             PolicyDecision.ALLOW_WITH_CONSTRAINTS,
         }:
             raise PolicyDeniedError("Model policy denied generation")
+        constraints = evaluation.constraints
+        updates: dict[str, Any] = {}
+        if "data_region" in constraints and constraints["data_region"] != self._data_region:
+            raise PolicyDeniedError("Model policy selected an unavailable data region")
+        if "preferred_model" in constraints:
+            updates["preferred_model"] = str(constraints["preferred_model"])
+        if "allowed_providers" in constraints:
+            providers = tuple(str(value) for value in constraints["allowed_providers"])
+            if not providers:
+                raise PolicyDeniedError("Model policy returned no allowed provider")
+            updates["allowed_providers"] = providers
+        if "max_output_tokens" in constraints:
+            governed_tokens = int(constraints["max_output_tokens"])
+            if governed_tokens < 1:
+                raise PolicyDeniedError("Model policy returned an invalid output limit")
+            updates["max_output_tokens"] = min(request.max_output_tokens, governed_tokens)
+        if "run_max_cost" in constraints:
+            governed_cost = float(constraints["run_max_cost"])
+            updates["run_max_cost"] = (
+                governed_cost
+                if request.run_max_cost is None
+                else min(request.run_max_cost, governed_cost)
+            )
+        return request.model_copy(update=updates)
 
     async def _emit_runtime_metrics(self, request: ModelGenerateRequest) -> None:
         if self._metric_writer is None:
@@ -631,9 +646,7 @@ class ModelGatewayInternalService:
                 deduplication_key=f"{request.context.tenant_id}:{request.model_call_id}:{name}",
             )
             for name, value in request.runtime_metrics.items()
-            if name in _RUNTIME_METRICS
-            and math.isfinite(float(value))
-            and float(value) >= 0
+            if name in _RUNTIME_METRICS and math.isfinite(float(value)) and float(value) >= 0
         ]
         if not metrics:
             return

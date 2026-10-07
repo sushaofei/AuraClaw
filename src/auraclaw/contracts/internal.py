@@ -641,6 +641,25 @@ class ArtifactDownloadResponse(ContractModel):
     expires_at: datetime
 
 
+class ArtifactShareRequest(ContractModel):
+    context: InternalRequestContext
+    artifact_id: str = Field(min_length=1, max_length=256)
+    version: int = Field(ge=1)
+    actor_id: str = Field(min_length=1, max_length=256)
+    audience: str = Field(min_length=1, max_length=256)
+    ttl_seconds: int = Field(default=300, ge=30, le=3600)
+
+
+class ArtifactShareResponse(ContractModel):
+    api_version: str = INTERNAL_API_VERSION
+    artifact_id: str
+    version: int
+    audience: str
+    share_url: str
+    expires_at: datetime
+    policy_decision_id: str
+
+
 class ArtifactDeleteRequest(ContractModel):
     context: InternalRequestContext
     artifact_id: str

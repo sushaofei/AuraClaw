@@ -16,6 +16,7 @@ from auraclaw.action.skill_publishers import (
     SkillPublisherTrustService,
 )
 from auraclaw.api.dependencies import (
+    get_artifact_share_gateway,
     get_collaboration_projection,
     get_observability_service,
     get_sync_invocation_gateway,
@@ -43,6 +44,7 @@ from auraclaw.gateways.query.waiter import TaskResultWaiter
 from auraclaw.gateways.task.commands import TaskCommandGateway
 from auraclaw.gateways.task.invocations import SyncInvocationGateway
 from auraclaw.infrastructure.clients.artifact import RemoteSkillPackageUploadClient
+from auraclaw.infrastructure.clients.artifact_share import RemoteArtifactShareClient
 from auraclaw.infrastructure.clients.mcp_registry import RemoteMcpRegistryClient
 from auraclaw.infrastructure.clients.policy import RemotePolicyClient, RemoteTaskAdmissionController
 from auraclaw.infrastructure.clients.session import NoOpOutboxRelay, RemoteSessionEventStore
@@ -87,6 +89,10 @@ def build_task_api_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         bearer_token=token or secrets.token_urlsafe(32),
         service_identity=ServiceIdentity.TASK_API,
     )
+    artifact_shares = RemoteArtifactShareClient(
+        settings.artifact_base_url,
+        bearer_token=token or secrets.token_urlsafe(32),
+    )
     if not settings.sql_storage_enabled:
         raise ValueError(
             "task-api requires SQL storage; use `auraclaw serve` with .env.dev "
@@ -121,6 +127,7 @@ def build_task_api_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
     )
     observability = ObservabilityService(observability_store, remote_session)
     app.dependency_overrides[get_task_command_gateway] = lambda: gateway
+    app.dependency_overrides[get_artifact_share_gateway] = lambda: artifact_shares
     app.dependency_overrides[get_task_projection] = lambda: task_projection
     app.dependency_overrides[get_task_query_service] = lambda: query
     app.dependency_overrides[get_task_result_waiter] = lambda: waiter
@@ -135,6 +142,7 @@ def build_task_api_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         *identity_closeables,
         remote_session,
         policy,
+        artifact_shares,
         task_projection,
         approval_projection,
         collaboration_projection,
@@ -199,9 +207,7 @@ def build_task_api_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
             upload_service=skill_uploads,
             publisher_service=publisher_management,
             admission_reader=skill_publication if skill_lifecycle is None else skill_lifecycle,
-            capability_availability=SkillDependencyAvailability(
-                capability_catalog_store
-            ),
+            capability_availability=SkillDependencyAvailability(capability_catalog_store),
             admission_metrics_window_hours=settings.skill_admission_metrics_window_hours,
             admission_quarantine_alert_ratio=(settings.skill_admission_quarantine_alert_ratio),
             admission_quarantine_alert_min_samples=(

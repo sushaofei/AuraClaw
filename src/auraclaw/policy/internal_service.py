@@ -18,6 +18,7 @@ from auraclaw.contracts.internal import (
 from auraclaw.contracts.tools import RiskLevel, ToolCapability, ToolPermission
 from auraclaw.domain.approval import approval_request_digest
 from auraclaw.policy.approval_modes import ApprovalModeResolver
+from auraclaw.policy.governance import ProductionPolicy
 
 
 class PolicyStateStore(Protocol):
@@ -45,11 +46,13 @@ class PolicyInternalService:
         version: str = "s3-v1",
         store: PolicyStateStore | None = None,
         mode_resolver: ApprovalModeResolver | None = None,
+        governance: ProductionPolicy | None = None,
     ) -> None:
         self._engine = PolicyEngine(version=version)
         self._version = version
         self._store = store
         self._mode_resolver = mode_resolver
+        self._governance = governance
         self._approvals: dict[tuple[str, str], dict[str, Any]] = {}
         self._decisions: dict[str, tuple[PolicyEvaluateRequest, PolicyEvaluateResponse]] = {}
 
@@ -78,6 +81,8 @@ class PolicyInternalService:
                 decision,
                 self._engine.version,
             )
+        if self._governance is not None:
+            decision, constraints = self._governance.govern(request, decision, constraints)
         response = PolicyEvaluateResponse(
             decision_id=str(uuid.uuid4()),
             decision=decision.value,

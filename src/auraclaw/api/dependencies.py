@@ -66,9 +66,7 @@ async def request_identity(
             reason=IdentityErrorReason.VERIFIER_UNAVAILABLE,
         )
     query_tenant = request.query_params.get("tenant_id")
-    query_user = request.query_params.get("user_id") or request.query_params.get(
-        "actor_id"
-    )
+    query_user = request.query_params.get("user_id") or request.query_params.get("actor_id")
     query_dept = request.query_params.get("dept_id")
     body_tenant: str | None = None
     body_user: str | None = None
@@ -77,22 +75,14 @@ async def request_identity(
         content_type = request.headers.get("content-type", "")
         if "application/json" in content_type:
             try:
-                body_tenant, body_user, body_dept = _declared_identity_fields(
-                    await request.json()
-                )
+                body_tenant, body_user, body_dept = _declared_identity_fields(await request.json())
             except Exception:
                 body_tenant, body_user, body_dept = None, None, None
     declared_tenants = {
-        value
-        for value in (tenant_id, query_tenant, body_tenant)
-        if value is not None
+        value for value in (tenant_id, query_tenant, body_tenant) if value is not None
     }
-    declared_users = {
-        value for value in (actor_id, query_user, body_user) if value is not None
-    }
-    declared_depts = {
-        value for value in (dept_id, query_dept, body_dept) if value is not None
-    }
+    declared_users = {value for value in (actor_id, query_user, body_user) if value is not None}
+    declared_depts = {value for value in (dept_id, query_dept, body_dept) if value is not None}
     if len(declared_tenants) > 1 or len(declared_users) > 1 or len(declared_depts) > 1:
         raise identity_error(
             "declared tenant, user or department is inconsistent",
@@ -123,9 +113,7 @@ async def request_identity(
         caller_subject=envelope.caller.subject,
         key_id=None if envelope.assertion is None else envelope.assertion.key_id,
         jti_digest=(
-            None
-            if envelope.assertion is None
-            else assertion_jti_digest(envelope.assertion.jti)
+            None if envelope.assertion is None else assertion_jti_digest(envelope.assertion.jti)
         ),
         dept_id=envelope.user.dept_id,
     )
@@ -156,6 +144,10 @@ def command_context(
 
 def get_task_command_gateway() -> TaskCommandGateway:
     raise RuntimeError("TaskCommandGateway dependency was not configured by composition")
+
+
+def get_artifact_share_gateway() -> Any:
+    raise RuntimeError("Artifact share dependency was not configured by composition")
 
 
 def get_task_projection() -> TaskReader:

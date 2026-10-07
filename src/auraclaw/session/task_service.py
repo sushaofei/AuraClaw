@@ -50,6 +50,20 @@ class TaskService:
         self._approval_notifier = approval_notifier
         self._runtime_budget = dict(runtime_budget) if runtime_budget else None
 
+    async def _govern_runtime_budget(
+        self, *, goal: str, context: CommandContext
+    ) -> dict[str, Any] | None:
+        govern = getattr(self._admission, "govern_budget", None)
+        if not callable(govern):
+            await self._admission.admit(goal=goal, context=context)
+            return self._runtime_budget
+        governed = await govern(
+            goal=goal,
+            context=context,
+            runtime_budget=dict(self._runtime_budget or {}),
+        )
+        return dict(governed)
+
     def _refresh_snapshots(self, grants: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
         if grants and (self._runtime_budget or {}).get("policy_version") != "2":
             raise CollaborationValidationError("read refresh requires runtime budget policy v2")
@@ -83,7 +97,7 @@ class TaskService:
         )
         approval = ApprovalConfiguration.resolve(interaction, approval_mode)
         started = time.perf_counter()
-        await self._admission.admit(goal=goal, context=context)
+        runtime_budget = await self._govern_runtime_budget(goal=goal, context=context)
         session_id = f"ses_{uuid4().hex}"
         run_id = f"run_{uuid4().hex}"
         session = SessionAggregate.empty(session_id, context.tenant_id)
@@ -95,7 +109,7 @@ class TaskService:
             schedule_id=schedule_id,
             occurrence_id=occurrence_id,
             approval=approval,
-            runtime_budget=self._runtime_budget,
+            runtime_budget=runtime_budget,
             read_refresh=self._refresh_snapshots(read_refresh),
             skill_names=skill_names,
         )
@@ -196,13 +210,17 @@ class TaskService:
                     **event.payload.get("approval", {}),
                 }
         session = await self._load(context.tenant_id, session_id)
+        runtime_budget = await self._govern_runtime_budget(
+            goal=session.goal or "continue task",
+            context=context,
+        )
         run_id = f"run_{uuid4().hex}"
         session.request_run(
             run_id,
             approval_mode,
             command_id=context.command_id,
             request_fingerprint=fingerprint,
-            runtime_budget=self._runtime_budget,
+            runtime_budget=runtime_budget,
             read_refresh=self._refresh_snapshots(read_refresh),
         )
         response = {

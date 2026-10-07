@@ -83,8 +83,11 @@ class RemotePolicyClient:
                     "runtime_location": capability.runtime_location,
                     "trusted_user_id": invocation.user_id,
                     "trusted_dept_id": invocation.dept_id,
-                    "capability_ref": (invocation.capability_ref.model_dump(mode="json")
-                                       if invocation.capability_ref else None),
+                    "capability_ref": (
+                        invocation.capability_ref.model_dump(mode="json")
+                        if invocation.capability_ref
+                        else None
+                    ),
                 },
             ),
             PolicyEvaluateResponse,
@@ -259,6 +262,15 @@ class RemoteTaskAdmissionController:
         self._policy = policy
 
     async def admit(self, *, goal: str, context: CommandContext) -> None:
+        await self.govern_budget(goal=goal, context=context, runtime_budget={})
+
+    async def govern_budget(
+        self,
+        *,
+        goal: str,
+        context: CommandContext,
+        runtime_budget: dict[str, object],
+    ) -> dict[str, object]:
         digest = hashlib.sha256(goal.encode()).hexdigest()
         evaluation = await self._policy.evaluate_action(
             tenant_id=context.tenant_id,
@@ -270,6 +282,7 @@ class RemoteTaskAdmissionController:
             attributes={
                 "permission": "write-autonomous",
                 "risk_level": "medium",
+                "requested_runtime_budget": runtime_budget,
             },
         )
         if evaluation.decision not in {
@@ -277,3 +290,7 @@ class RemoteTaskAdmissionController:
             PolicyDecision.ALLOW_WITH_CONSTRAINTS,
         }:
             raise PolicyDeniedError("Task admission policy denied request")
+        governed = evaluation.constraints.get("runtime_budget")
+        if not isinstance(governed, dict):
+            raise PolicyDeniedError("Task admission policy omitted the governed runtime budget")
+        return dict(governed)

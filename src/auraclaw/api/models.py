@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -51,6 +52,22 @@ class CloseSessionRequest(BaseModel):
 
 class AppendMessageRequest(BaseModel):
     message: str = Field(min_length=1, max_length=100_000)
+
+
+class ArtifactSharePublicRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    version: int = Field(default=1, ge=1)
+    audience: str = Field(min_length=1, max_length=256)
+    ttl_seconds: int = Field(default=300, ge=30, le=3600)
+
+
+class ArtifactSharePublicResponse(BaseModel):
+    artifact_id: str
+    version: int
+    audience: str
+    share_url: str
+    expires_at: datetime
+    policy_decision_id: str
 
 
 class ApprovalResponseRequest(BaseModel):
@@ -105,6 +122,7 @@ class TaskView(ApprovalConfiguration):
     @classmethod
     def public_budget(cls, value: Any) -> dict[str, Any]:
         return {k: v for k, v in (value or {}).items() if not k.startswith("_")}
+
     delivery_status: str | None = None
     delivery_id: str | None = None
     delivery_attempt_count: int = 0

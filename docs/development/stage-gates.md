@@ -3612,3 +3612,13 @@ Ruff、Mypy（248 文件）、10 条架构合同通过。迁移不适用，部�
 - [x] 全量 Projection 重建必须显式提供 tenant；owner admin claim、心跳和 operation idempotency 继续约束并发管理操作。
 - [x] `0068` 正反迁移为审计检索和 poison 清单提供 tenant/time 索引，不改变 Canonical Event 或业务状态。
 - [x] Release gate、Ruff、Mypy、57 项针对性测试及完整测试（899 passed、68 skipped）通过；本阶段作为单一 intentional commit 提交并 push，Issue #104 更新验证证据。
+
+## 生产化 P1-B：Policy 统一治理（Issue #104）
+
+- [x] Runtime Budget 由 Policy 返回权威快照，Task 创建和每次 Run 请求均重新裁决并写入 Canonical Event。
+- [x] Model Gateway 在配额预留和 Provider 调用前应用 Policy 的 provider、model、区域、输出和金额约束。
+- [x] 配置区域不在 Policy allowlist、请求模型/provider 冲突或执行区域不匹配时 fail closed。
+- [x] 公共 Artifact 分享 API 仅通过 Task API 身份调用 Artifact owner；classification 从可信元数据读取。
+- [x] Artifact 分享由 Policy 约束 audience、允许 classification 和最大 TTL，不提供永久公开链接。
+- [x] 开发、测试和生产模板包含明确的区域与分享策略配置，运维文档记录执行点和拒绝语义。
+- [x] Release gate、Ruff、Mypy、89 项针对性测试及完整测试（905 passed、68 skipped）通过；本阶段作为单一 intentional commit 提交并 push，Issue #104 更新验证证据。

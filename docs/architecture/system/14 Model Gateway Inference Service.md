@@ -134,8 +134,8 @@ tokens 才算命中。
 
 ## 现有缺陷与待完善
 
-- 当前只有一个通用 OpenAI-compatible 适配器和静态首选模型；多 Provider 路由、健康评分、fallback、hedging
-  和区域/数据驻留策略尚未实现。
-- Budget 主要按 token 窗口控制，缺少价格版本、金额预算、预留/结算和组织级配额层次。
+- 当前只有一个通用 OpenAI-compatible 适配器；Policy 已统一约束 provider、model、数据驻留区域、单次输出
+  和 Run 金额预算，但多 Provider 健康评分、fallback、hedging 与跨区域 placement 尚未实现。
+- 已实现 token 窗口和 Run 金额预留/结算；价格版本、组织级配额层次与跨 Run 成本分摊仍待完善。
 - Provider 的 prompt cache key、thinking 等能力以配置开关为主，缺少能力协商和标准化 feature matrix。
 - 待补：provider 错误分类、限流反馈、模型目录、成本核算、内容策略和多 Provider 故障演练。

@@ -38,6 +38,7 @@ from auraclaw.api.dependencies import (
 from auraclaw.api.dependencies import (
     get_task_result_waiter as task_result_waiter_dependency,
 )
+from auraclaw.api.routes.artifacts import router as artifact_router
 from auraclaw.api.routes.health import router as health_router
 from auraclaw.api.routes.operations import router as operations_router
 from auraclaw.api.routes.streams import router as stream_router
@@ -160,6 +161,7 @@ def create_app(*, profile: ApiProfile) -> FastAPI:
     install_public_cors(app, settings)
     app.include_router(health_router)
     if profile == "task-api":
+        app.include_router(artifact_router)
         app.include_router(task_router)
         app.include_router(operations_router)
     else:
@@ -167,9 +169,7 @@ def create_app(*, profile: ApiProfile) -> FastAPI:
     structured_logger = StructuredLogger()
 
     @app.middleware("http")
-    async def observe_request(
-        request: Request, call_next: RequestResponseEndpoint
-    ) -> Response:
+    async def observe_request(request: Request, call_next: RequestResponseEndpoint) -> Response:
         trace_id = request.headers.get("traceparent", "").split("-")[1:2]
         trace = trace_id[0] if trace_id and len(trace_id[0]) == 32 else uuid4().hex
         span_id = uuid4().hex[:16]
@@ -189,11 +189,14 @@ def create_app(*, profile: ApiProfile) -> FastAPI:
             duration_ms = (time.perf_counter() - started) * 1_000
             context = TraceContext(trace_id=trace, span_id=span_id, tenant_id=tenant_id)
             try:
-                observability = getattr(
-                    request.app.state,
-                    "observability_service",
-                    None,
-                ) or providers.get_observability_service()
+                observability = (
+                    getattr(
+                        request.app.state,
+                        "observability_service",
+                        None,
+                    )
+                    or providers.get_observability_service()
+                )
                 await observability.record_span(
                     context=context,
                     component="task_gateway",
