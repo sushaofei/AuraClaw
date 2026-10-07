@@ -1,5 +1,16 @@
 # S4 横向扩展与恢复运行说明
 
+## 长会话 Activity 容量基线
+
+- `0071` 将 Activity 节点预计算到可重建 Projection；Task API 每次最多读取 200 个节点，正常热路径不得调用
+  Session 全量事件接口。缓存缺失、不完整或落后于 Task Projection 时允许受控回退，必须记录为容量风险并尽快
+  执行租户 Projection rebuild。
+- prod-like CI 用 10,000 节点验证 `activity_node_incremental_page_idx` 和单页数据库读取小于 1 秒；生产发布目标
+  p95 小于 100ms、p99 小于 250ms。基线至少记录节点数、响应分位、数据库 CPU/读块、索引命中和回退次数；
+  `X-Activity-Cache=fallback` 与对应结构化日志必须进入告警。
+- 扩容前用目标租户分布复测 100,000+ 节点会话；若索引查询超过目标，禁止通过增加 Task API 副本掩盖数据库
+  扫描，应先检查统计信息、索引膨胀、连接池与慢查询计划。
+
 ## Streaming Gateway 所有权与摘流
 
 - Gateway 实例使用进程 generation 注册；同一 owner 的活跃 generation 不允许第二个进程覆盖。实例

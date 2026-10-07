@@ -177,11 +177,12 @@ jobs:
             tests/integration/test_issue74_skill_multireplica.py \
             tests/integration/test_kafka_m5.py \
             tests/integration/test_postgres_s4_streaming.py \
+            tests/integration/test_postgres_activity_projection.py \
             tests/integration/test_seaweedfs_s3.py \
             tests/integration/test_postgres_role_grants.py \
             --junitxml artifacts/prod-like-junit.xml
           uv run python scripts/prod_like_gate.py verify-junit \
-            --report artifacts/prod-like-junit.xml --minimum-tests 11
+            --report artifacts/prod-like-junit.xml --minimum-tests 12
       - name: Upload prod-like evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

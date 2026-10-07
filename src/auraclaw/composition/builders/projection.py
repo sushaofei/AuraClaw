@@ -41,6 +41,7 @@ def build_projection_app(
     task_projection = providers.get_task_projection()
     approval_projection = providers.get_approval_projection()
     collaboration_projection = providers.get_collaboration_projection()
+    activity_projection = providers.get_activity_projection()
     admin_store = PostgresAdminOperationStore(
         settings.resolved_database_url, schema="projection"
     )
@@ -72,6 +73,7 @@ def build_projection_app(
         task_projection,
         approval_projection,
         collaboration_projection,
+        activity_projection,
         admin_store,
         observability_store,
     )
@@ -122,6 +124,7 @@ def build_projection_app(
             "task": await task_projection.rebuild(events, tenant_id),
             "approval": await approval_projection.rebuild(events, tenant_id),
             "collaboration": await collaboration_projection.rebuild(events, tenant_id),
+            "activity": await activity_projection.rebuild(events, tenant_id),
         }
         return {
             "accepted": True,

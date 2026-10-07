@@ -3655,3 +3655,13 @@ Ruff、Mypy（248 文件）、10 条架构合同通过。迁移不适用，部�
 - [x] Children 响应补充 root `projection_version`，Transcript、Activity 和 Timeline 保持 body/header 版本一致。
 - [x] 列表、审计检索和指标不伪造单 Session 版本；写后读调用方使用已知 session id 查询对应资源。
 - [x] Release gate、Ruff、Mypy、40 项针对性测试及完整测试（916 passed、69 skipped）通过；本阶段作为单一 intentional commit 提交并 push，Issue #104 更新验证证据。
+
+## 生产化 P1-F：长会话 Activity 预计算、缓存与性能基线（Issue #104）
+
+- [x] Projection Worker 从 Canonical Events 增量折叠 Activity 生命周期节点；缓存可删除、可按租户全量重建，不成为事实源。
+- [x] `0071` 正反迁移提供 Activity state/node、完整性标志及 `(tenant, session, updated_version)` 分页索引。
+- [x] Task API 正常路径读取预计算有界页；缓存缺失、不完整或落后时才受控回退 Canonical Events。
+- [x] Projection rebuild 同时重建 Activity；升级后 partial cache 不冒充完整历史，部署手册要求逐租户回填与抽样对账。
+- [x] 单页继续限制 200 节点；prod-like PostgreSQL 生成 10,000 节点并验证索引计划和低于 1 秒的门禁。
+- [x] 数据库角色矩阵覆盖 Projection Worker 读写与 Task API 只读；当前迁移基线、架构真源和扩容手册同步为 `0071`。
+- [x] Release gate、Ruff、Mypy、79 项通过且 2 项因本机无 PostgreSQL 跳过的针对性测试，以及完整测试（920 passed、70 skipped）通过；本阶段作为单一 intentional commit 提交并 push，Issue #104 更新验证证据。

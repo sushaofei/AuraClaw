@@ -262,6 +262,7 @@ async def get_activity(
     )
     response.headers["Cache-Control"] = "private, no-store"
     response.headers["X-Activity-Version"] = str(activity["source_version"])
+    response.headers["X-Activity-Cache"] = str(activity.pop("cache_status", "fallback"))
     apply_projection_contract(
         response,
         projection_version=int(activity["projection_version"]),

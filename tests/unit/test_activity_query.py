@@ -9,6 +9,7 @@ from auraclaw.composition.providers import (
     get_event_store,
     get_task_projection,
     get_task_service,
+    session_outbox_projectors,
 )
 from auraclaw.config import get_settings
 from auraclaw.contracts.commands import CommandContext
@@ -16,6 +17,8 @@ from auraclaw.contracts.events import Actor, CanonicalEvent, NewEvent
 from auraclaw.contracts.state import Visibility
 from auraclaw.gateways.query.activity import build_activity, page_activity
 from auraclaw.main import create_app
+from auraclaw.projection.approval.projector import CompositeProjection
+from auraclaw.projection.relay import OutboxRelay
 from auraclaw.runtime.harness import AgentHarness
 from auraclaw.runtime.ports import ModelPolicy, ModelRequest
 
@@ -276,6 +279,9 @@ def test_activity_api_is_tenant_scoped_and_returns_version_headers() -> None:
                 ],
                 command_result={"ok": True},
             )
+            await OutboxRelay(
+                store, CompositeProjection(*session_outbox_projectors())
+            ).relay_once()
 
         asyncio.run(append_activity())
         response = client.get(
@@ -285,6 +291,7 @@ def test_activity_api_is_tenant_scoped_and_returns_version_headers() -> None:
         assert response.status_code == 200
         assert response.headers["cache-control"] == "private, no-store"
         assert response.headers["x-activity-version"] == "3"
+        assert response.headers["x-activity-cache"] == "hit"
         assert response.json()["source_version"] == 3
         assert {node["type"] for node in response.json()["nodes"]} >= {
             "user_prompt",

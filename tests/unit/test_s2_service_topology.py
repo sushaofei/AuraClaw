@@ -476,6 +476,7 @@ def test_container_build_excludes_secrets_and_runs_unprivileged() -> None:
 
 def test_session_outbox_projectors_include_approval_and_collaboration() -> None:
     from auraclaw.composition.providers import (
+        get_activity_projection,
         get_approval_projection,
         get_collaboration_projection,
         get_task_projection,
@@ -487,6 +488,7 @@ def test_session_outbox_projectors_include_approval_and_collaboration() -> None:
         get_task_projection(),
         get_approval_projection(),
         get_collaboration_projection(),
+        get_activity_projection(),
     )
 
 

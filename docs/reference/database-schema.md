@@ -83,6 +83,7 @@ uv run auraclaw migrate up
 | `0068` | Operations 审计检索与 Projection poison 管理的 tenant/time 索引 |
 | `0069` | Approval 多人会签、委托、升级和 SLA 投影字段与到期扫描索引 |
 | `0070` | Streaming Gateway generation 所有权、drain 状态和孤儿连接回收索引 |
+| `0071` | 可重建 Activity state/node 预计算投影与增量分页索引 |
 
 PostgreSQL / Kingbase 序列保留 `0017` 版本号空位，后续迁移继续按既有编号递增。
 不要为了填补编号而重命名已经发布的迁移。

@@ -59,6 +59,9 @@ from auraclaw.infrastructure.persistence.postgres_mcp_registry import (
 from auraclaw.infrastructure.persistence.postgres_skill_lifecycle import (
     PostgresSkillLifecycleStore,
 )
+from auraclaw.infrastructure.projection.postgres_activity_store import (
+    PostgresActivityProjection,
+)
 from auraclaw.infrastructure.projection.postgres_approval_store import (
     PostgresApprovalProjection,
 )
@@ -101,6 +104,7 @@ def build_task_api_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
     task_projection = PostgresTaskProjection(settings.resolved_database_url)
     approval_projection = PostgresApprovalProjection(settings.resolved_database_url)
     collaboration_projection = PostgresCollaborationProjection(settings.resolved_database_url)
+    activity_projection = PostgresActivityProjection(settings.resolved_database_url)
     task_service = TaskService(
         runtime_budget=settings.runtime_budget_snapshot(),
         event_store=remote_session,
@@ -111,7 +115,12 @@ def build_task_api_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         approval_notifier=policy,
     )
     gateway = TaskCommandGateway(task_service)
-    query = TaskQueryService(task_projection, collaboration_projection, remote_session)
+    query = TaskQueryService(
+        task_projection,
+        collaboration_projection,
+        remote_session,
+        activity_projection,
+    )
     waiter = TaskResultWaiter(
         query,
         poll_interval=settings.sync_invoke_poll_interval_seconds,
@@ -148,6 +157,7 @@ def build_task_api_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         task_projection,
         approval_projection,
         collaboration_projection,
+        activity_projection,
         observability_store,
     )
     mcp_registry, mcp_store = _mcp_registry_service(settings)

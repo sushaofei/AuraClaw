@@ -141,6 +141,18 @@ async def _assert_catalog_role(
                     table,
                     privilege,
                 )
+    if expected_role == "auraclaw_projection":
+        for table in (
+            "projection.activity_state",
+            "projection.activity_node",
+        ):
+            for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE"):
+                assert await connection.fetchval(
+                    "SELECT has_table_privilege($1,$2,$3)",
+                    expected_role,
+                    table,
+                    privilege,
+                )
     for foreign_table in tables:
         if foreign_table == owner_table:
             continue
@@ -186,6 +198,13 @@ async def _assert_task_api_privileges(connection: asyncpg.Connection) -> None:
     assert not await connection.fetchval(
         "SELECT has_table_privilege($1,'observability.audit_event','UPDATE')", role
     )
+    for table in ("projection.activity_state", "projection.activity_node"):
+        assert await connection.fetchval(
+            "SELECT has_table_privilege($1,$2,'SELECT')", role, table
+        )
+        assert not await connection.fetchval(
+            "SELECT has_table_privilege($1,$2,'UPDATE')", role, table
+        )
     for table in (
         "session_core.session_head",
         "control.runtime_lease",
@@ -242,6 +261,12 @@ def test_production_roles_enforce_owner_and_task_api_boundaries() -> None:
                         connection,
                         "streaming.gateway_instance",
                         "owner_id",
+                    )
+                if expected_role == "auraclaw_projection":
+                    await _assert_owner_dml(
+                        connection,
+                        "projection.activity_state",
+                        "source_version",
                     )
                 for foreign_table in tables:
                     if foreign_table == owner_table:

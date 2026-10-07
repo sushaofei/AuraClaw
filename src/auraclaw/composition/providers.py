@@ -23,6 +23,9 @@ from auraclaw.infrastructure.observability.stores import (
 )
 from auraclaw.infrastructure.persistence.memory_event_store import InMemoryEventStore
 from auraclaw.infrastructure.persistence.postgres_event_store import PostgresEventStore
+from auraclaw.infrastructure.projection.postgres_activity_store import (
+    PostgresActivityProjection,
+)
 from auraclaw.infrastructure.projection.postgres_approval_store import (
     PostgresApprovalProjection,
 )
@@ -31,6 +34,7 @@ from auraclaw.infrastructure.projection.postgres_collaboration_store import (
 )
 from auraclaw.infrastructure.projection.postgres_task_store import PostgresTaskProjection
 from auraclaw.observability.service import ObservabilityProjector, ObservabilityService
+from auraclaw.projection.activity import InMemoryActivityProjection
 from auraclaw.projection.approval.projector import CompositeProjection, InMemoryApprovalProjection
 from auraclaw.projection.collaboration.projector import InMemoryCollaborationProjection
 from auraclaw.projection.ports import ProjectionWriter
@@ -46,6 +50,7 @@ ApprovalProjection = InMemoryApprovalProjection | PostgresApprovalProjection
 CollaborationProjection = InMemoryCollaborationProjection | PostgresCollaborationProjection
 ObservabilityStore = InMemoryObservabilityStore | PostgresObservabilityStore
 RuntimeReplayStore = ReplayRuntimeEventBus | PostgresRuntimeEventStore
+ActivityProjection = InMemoryActivityProjection | PostgresActivityProjection
 
 
 @lru_cache
@@ -80,12 +85,21 @@ def get_collaboration_projection() -> CollaborationProjection:
     return InMemoryCollaborationProjection()
 
 
+@lru_cache
+def get_activity_projection() -> ActivityProjection:
+    settings = get_settings()
+    if settings.sql_storage_enabled:
+        return PostgresActivityProjection(settings.resolved_database_url)
+    return InMemoryActivityProjection()
+
+
 def session_outbox_projectors() -> tuple[ProjectionWriter, ...]:
     """Projectors that must consume Session outbox in every topology."""
     return (
         get_task_projection(),
         get_approval_projection(),
         get_collaboration_projection(),
+        get_activity_projection(),
     )
 
 
@@ -120,6 +134,7 @@ def get_task_query_service() -> TaskQueryService:
         get_task_projection(),
         get_collaboration_projection(),
         get_event_store(),
+        get_activity_projection(),
     )
 
 

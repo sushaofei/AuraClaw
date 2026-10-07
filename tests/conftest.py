@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from auraclaw.composition.providers import get_activity_projection
 from auraclaw.config import get_settings
 
 
@@ -11,5 +12,7 @@ from auraclaw.config import get_settings
 def _disable_repo_env_files(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AURACLAW_DISABLE_ENV_FILE", "1")
     get_settings.cache_clear()
+    get_activity_projection.cache_clear()
     yield
+    get_activity_projection.cache_clear()
     get_settings.cache_clear()
