@@ -31,6 +31,7 @@ REQUIRED = (
     ROOT / "compose.prod.yml",
     ROOT / "compose.test.yml",
     ROOT / "docs/operations/production-deployment.md",
+    ROOT / "docs/operations/content-scanning.md",
 )
 CURRENT_RELEASE_DOCS = (
     ROOT / "docs/operations/production-deployment.md",
@@ -146,6 +147,9 @@ def _check_production_compose(failures: list[str]) -> None:
     runtime_environment = services.get("agent-runtime", {}).get("environment", {})
     if runtime_environment.get("AURACLAW_RUNTIME_EVENT_BACKEND") == "memory":
         failures.append("agent-runtime production runtime events cannot use memory")
+    artifact_environment = services.get("artifact-service", {}).get("environment", {})
+    if "AURACLAW_ARTIFACT_SCANNER_BASE_URL" not in artifact_environment:
+        failures.append("artifact-service production content scanner is not configured")
 
     production_env = dotenv_values(ROOT / ".env.prod.example")
     database_variables = [

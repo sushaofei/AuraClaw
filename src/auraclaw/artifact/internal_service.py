@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
 from auraclaw.artifact.ports import (
+    ArtifactContentScanner,
     ObjectMultipartClient,
     ObjectPresigner,
     ObjectVerifier,
@@ -202,6 +203,7 @@ class ArtifactInternalService:
         object_verifier: ObjectVerifier | None = None,
         policy: ArtifactPolicyValidator | None = None,
         multipart: ObjectMultipartClient | None = None,
+        content_scanner: ArtifactContentScanner | None = None,
         multipart_threshold: int = 16 * 1024 * 1024,
         multipart_part_size: int = 8 * 1024 * 1024,
         claim_ttl: timedelta = timedelta(seconds=30),
@@ -212,6 +214,7 @@ class ArtifactInternalService:
         self._object_verifier = object_verifier
         self._policy = policy
         self._multipart = multipart
+        self._content_scanner = content_scanner
         self._multipart_threshold = multipart_threshold
         self._multipart_part_size = multipart_part_size
         self._claim_ttl = claim_ttl
@@ -523,6 +526,31 @@ class ArtifactInternalService:
                     raise ArtifactAccessError(f"artifact object scan failed: {scan}")
                 if scan != "clean":
                     raise ArtifactAccessError(f"artifact object is not ready: {scan}")
+            if self._content_scanner is not None:
+                await self._assert_claim(pending, "finalize", claim_lost)
+                download_url, _ = self._presigner.presign(
+                    "GET", pending.object_key, ttl=timedelta(minutes=5)
+                )
+                try:
+                    content_scan = await self._content_scanner.scan(
+                        pending, download_url=download_url
+                    )
+                except Exception as exc:
+                    if self._repository is not None and not await self._repository.mark_quarantined(
+                        pending, "content_scanner_unavailable"
+                    ):
+                        raise ArtifactAccessError("artifact finalization lease was lost") from exc
+                    raise ArtifactAccessError(
+                        "artifact content scanner is unavailable"
+                    ) from exc
+                await self._assert_claim(pending, "finalize", claim_lost)
+                if content_scan.verdict != "clean":
+                    reason = f"content_{content_scan.finding_code or 'policy_denied'}"
+                    if self._repository is not None and not await self._repository.mark_quarantined(
+                        pending, reason
+                    ):
+                        raise ArtifactAccessError("artifact finalization lease was lost")
+                    raise ArtifactAccessError("artifact content scan quarantined the object")
             await self._assert_claim(pending, "finalize", claim_lost)
             if self._repository is not None:
                 if not await self._repository.mark_ready(pending, request.version):

@@ -303,6 +303,24 @@ def test_policy_enforcement_services_fail_production_startup_without_policy_url(
         create_service_app(command, settings)
 
 
+def test_artifact_service_requires_content_scanner_in_production() -> None:
+    settings = _settings(
+        deployment_profile="production",
+        storage_backend="postgres",
+        database_url="postgresql://artifact:test@postgres.test/auraclaw",
+        artifact_backend="obs",
+        OBS_ENDPOINT="obs.example.internal",
+        OBS_AK="access",
+        OBS_SK="secret",
+        task_api_workload_token="task-token",
+        action_hands_workload_token="hands-token",
+        delivery_workload_token="delivery-token",
+        artifact_service_workload_token="artifact-token",
+    )
+    with pytest.raises(ValueError, match="requires an artifact content scanner"):
+        create_service_app("artifact", settings)
+
+
 def test_credential_proxy_production_requires_external_vault_and_forbids_debug() -> None:
     values = {
         "deployment_profile": "production",

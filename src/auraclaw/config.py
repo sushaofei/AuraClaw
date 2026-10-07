@@ -421,6 +421,11 @@ class Settings(BaseSettings):
     )
     artifact_claim_ttl_seconds: float = Field(default=30.0, ge=3.0, le=3600.0)
     artifact_orphan_claim_limit: int = Field(default=1, ge=1, le=100)
+    artifact_scanner_base_url: str | None = None
+    artifact_scanner_policy_version: str = Field(
+        default="artifact-content-v1", pattern=r"^[a-z0-9][a-z0-9._-]{0,127}$"
+    )
+    artifact_scanner_timeout_seconds: float = Field(default=30.0, gt=0, le=300)
     hands_max_concurrent: int = Field(default=32, ge=1, le=10_000)
     hands_max_concurrent_per_tenant: int = Field(default=8, ge=1, le=10_000)
     hands_max_queued: int = Field(default=256, ge=1, le=100_000)

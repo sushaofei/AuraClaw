@@ -155,6 +155,13 @@ def test_production_compose_mounts_least_privilege_secrets() -> None:
         for service in APPLICATION_SERVICES - {"credential-proxy"}
     )
     assert {"obs_ak", "obs_sk"} <= secret_sources("artifact-service")
+    assert services["artifact-service"]["environment"][
+        "AURACLAW_ARTIFACT_SCANNER_BASE_URL"
+    ]
+    assert all(
+        "AURACLAW_ARTIFACT_SCANNER_BASE_URL" not in services[service]["environment"]
+        for service in APPLICATION_SERVICES - {"artifact-service"}
+    )
     assert all(
         "obs_ak" not in secret_sources(service) and "obs_sk" not in secret_sources(service)
         for service in APPLICATION_SERVICES - {"artifact-service"}
@@ -360,7 +367,8 @@ def test_production_preflight_accepts_role_scoped_database_urls_and_unique_token
         "AURACLAW_MODEL_NAME=test-model",
         "AURACLAW_CREDENTIAL_VAULT_ADDR=https://vault.example",
         "AURACLAW_CREDENTIAL_VAULT_TOKEN=test-vault-secret",
-        "AURACLAW_ARTIFACT_BACKEND=obs",
+            "AURACLAW_ARTIFACT_BACKEND=obs",
+            "AURACLAW_ARTIFACT_SCANNER_BASE_URL=https://scanner.example.internal",
         "OBS_ENDPOINT=obsv3.example.com",
         "OBS_BUCKET=auraclaw-artifacts",
         "OBS_AK=test-obs-access",

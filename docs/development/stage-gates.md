@@ -3561,3 +3561,12 @@ Ruff、Mypy（248 文件）、10 条架构合同通过。迁移不适用，部�
 - [x] prod-like 作业失败时输出 SeaweedFS 容器诊断日志，作业结束时无条件清理临时容器。
 - [x] SeaweedFS 就绪探针要求 S3 端口返回完整 HTTP 响应，不能以监听 socket 代替服务就绪。
 - [x] Release gate、Ruff、Mypy、针对性测试与完整 CI profile 通过并推送；GitHub Actions `prod-like-integration` 复跑状态单独留证。
+
+## 生产化 P0-E：Skill/Artifact 内容扫描与隔离（Issue #104）
+
+- [x] Skill 发布保留可插拔 `SkillPackageContentScanner` port，规则命中写入 quarantined 准入证据且不创建可信 Publication。
+- [x] Artifact finalize 新增可插拔 `ArtifactContentScanner` port 和远端 HTTP adapter；扫描请求只传短期只读 URL 与有界元数据。
+- [x] Artifact 仅在完整性与内容扫描均 clean 后进入 ready；恶意/DLP 命中、超时、协议错误及策略版本漂移持久化为 quarantined。
+- [x] production 组合和 Compose/preflight 强制显式扫描器 URL，Artifact Service readiness 同时检查对象存储与扫描器。
+- [x] 单元测试覆盖远端契约、响应值约束、恶意命中和扫描器不可用的 fail-closed 行为；运维文档固定接口、安全边界和发布检查。
+- [x] Release gate、Ruff、Mypy、66 项针对性测试及完整 CI profile（889 passed、68 skipped）通过；本阶段作为单一 intentional commit 提交并 push，Issue #104 更新验证证据。

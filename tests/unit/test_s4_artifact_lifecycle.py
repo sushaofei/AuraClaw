@@ -7,6 +7,7 @@ import httpx
 import pytest
 
 from auraclaw.artifact.internal_service import ArtifactInternalService, PendingUpload
+from auraclaw.artifact.ports import ArtifactScanResult
 from auraclaw.contracts.errors import ArtifactAccessError, NotFoundError
 from auraclaw.contracts.internal import (
     ArtifactCreateUploadRequest,
@@ -44,6 +45,7 @@ class _RecoveryRepository:
         self.finalize_renewals = 0
         self.gc_renewals = 0
         self.get_ready_error = False
+        self.quarantine_reason: str | None = None
 
     async def get_upload(self, tenant_id: str, artifact_id: str, upload_id: str):
         del tenant_id, artifact_id, upload_id
@@ -81,6 +83,11 @@ class _RecoveryRepository:
         del pending, version
         self.ready = self.mark_ready_success
         return self.mark_ready_success
+
+    async def mark_quarantined(self, pending: PendingUpload, reason: str) -> bool:
+        del pending
+        self.quarantine_reason = reason
+        return True
 
     async def expired_uploads(self, *, limit: int = 100, **_kwargs: object):
         del limit
@@ -226,6 +233,99 @@ class _AllowPolicy:
 class _UnavailablePolicy:
     async def validate_decision(self, **_parameters: object) -> bool:
         raise TimeoutError("policy timed out")
+
+
+class _ContentScanner:
+    def __init__(self, result: ArtifactScanResult | Exception) -> None:
+        self.result = result
+        self.download_urls: list[str] = []
+
+    async def scan(
+        self, pending: PendingUpload, *, download_url: str
+    ) -> ArtifactScanResult:
+        del pending
+        self.download_urls.append(download_url)
+        if isinstance(self.result, Exception):
+            raise self.result
+        return self.result
+
+    async def readiness(self) -> tuple[bool, str]:
+        return True, "ready"
+
+    async def aclose(self) -> None:
+        pass
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("scanner_result", "reason", "message"),
+    [
+        (
+            ArtifactScanResult(
+                verdict="quarantined",
+                policy_version="artifact-content-v1",
+                finding_code="malware_detected",
+            ),
+            "content_malware_detected",
+            "quarantined",
+        ),
+        (TimeoutError("scanner timeout"), "content_scanner_unavailable", "unavailable"),
+    ],
+)
+async def test_artifact_content_scan_fails_closed_into_quarantine(
+    scanner_result: ArtifactScanResult | Exception,
+    reason: str,
+    message: str,
+) -> None:
+    pending = PendingUpload(
+        tenant_id="tenant-s4",
+        artifact_id="artifact-scan",
+        upload_id="upload-scan",
+        object_key="tenant/artifact/scan",
+        root_session_id="root-s4",
+        session_id="session-s4",
+        name="payload.bin",
+        media_type="application/octet-stream",
+        expected_size=6,
+        expected_checksum="checksum",
+        classification="internal",
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+    )
+    repository = _RecoveryRepository(pending)
+    scanner = _ContentScanner(scanner_result)
+    service = ArtifactInternalService(
+        SeaweedFSS3Presigner(
+            "http://seaweed.test:8333",
+            access_key="access",
+            secret_key="secret",
+            bucket="artifacts",
+            region="us-east-1",
+        ),
+        repository=repository,  # type: ignore[arg-type]
+        object_verifier=_RecoveryVerifier(),  # type: ignore[arg-type]
+        content_scanner=scanner,
+    )
+
+    with pytest.raises(ArtifactAccessError, match=message):
+        await service.finalize(
+            ArtifactFinalizeRequest(
+                context=InternalRequestContext(
+                    tenant_id=pending.tenant_id,
+                    service_identity=ServiceIdentity.ACTION_HANDS,
+                    request_id="scan-s4",
+                    correlation_id="scan-s4",
+                    causation_id="scan-s4",
+                ),
+                artifact_id=pending.artifact_id,
+                version=1,
+                upload_id=pending.upload_id,
+                size=pending.expected_size,
+                checksum=pending.expected_checksum,
+            )
+        )
+    assert repository.quarantine_reason == reason
+    assert repository.ready is False
+    assert scanner.download_urls[0].startswith("http://seaweed.test:8333/artifacts/")
 
 
 @pytest.mark.asyncio

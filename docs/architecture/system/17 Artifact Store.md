@@ -112,10 +112,13 @@ PostgreSQL metadata 是 ready、deleted、quarantined、retention、legal hold �
 - 已实现 pending upload、单段/分段预签名、checksum/size 验证、finalize claim heartbeat、ready/quarantine、
   retention/legal hold、删除/GC reconciliation、访问审计和 Skill publication/orphan 绑定。
 - 对象后端支持本地开发、SeaweedFS S3 与 OBS/S3 兼容实现；业务元数据由 PostgreSQL 权威保存。
+- 内容扫描通过稳定 `ArtifactContentScanner` port 接入；生产组合必须配置远端扫描器。Artifact 只有在
+  完整性校验和内容策略均返回 clean 后才能进入 ready。恶意/DLP 命中、扫描器超时、协议错误或策略
+  版本漂移都会 fail closed 到持久化 quarantined 状态。
 
 ## 现有缺陷与待完善
 
-- `scan_status` 和 quarantine 状态已存在，但通用病毒/恶意内容/DLP 扫描器与异步扫描队列尚未形成完整闭环。
+- 当前远端扫描接口是 finalize 路径的同步门禁；高吞吐异步扫描队列、人工复核和解除隔离流程仍需完善。
 - 当前主要通过内部 API 使用，面向用户的下载/预览、range、内容处置与 CDN 策略不完整。
 - 对象存储跨区域复制、版本化、WORM 和备份恢复由环境负责，仓库缺少端到端验证。
-- 待补：扫描插件、生命周期批处理容量、孤儿对象对账、密钥轮换和大文件/多段故障演练。
+- 待补：扫描队列容量、人工复核、孤儿对象对账、密钥轮换和大文件/多段故障演练。
