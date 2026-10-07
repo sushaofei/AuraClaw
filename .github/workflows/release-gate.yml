@@ -4,12 +4,15 @@ on:
   pull_request:
   push:
 
+permissions:
+  contents: read
+
 jobs:
   quality-and-reliability:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff # v6
         with:
           enable-cache: true
       - name: Install
@@ -25,3 +28,65 @@ jobs:
           AURACLAW_RUNTIME_EVENT_BACKEND: memory
       - name: Release artifacts and secret scan
         run: uv run python scripts/release_gate.py
+
+  supply-chain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff # v6
+        with:
+          enable-cache: true
+      - name: Generate locked runtime SBOM and audit input
+        run: |
+          mkdir -p artifacts
+          uv export --quiet --locked --no-dev --no-emit-project --format cyclonedx1.5 --output-file artifacts/auraclaw.cdx.json
+          uv export --quiet --locked --no-dev --no-emit-project --format requirements-txt --output-file artifacts/runtime-requirements.txt
+      - name: Audit locked Python dependencies
+        id: dependency-audit
+        continue-on-error: true
+        run: uvx --from pip-audit==2.10.1 pip-audit --requirement artifacts/runtime-requirements.txt --disable-pip --format json --output artifacts/pip-audit.json
+      - name: Build reproducible runtime image
+        id: image-build
+        run: docker build --tag "auraclaw:${GITHUB_SHA}" .
+      - name: Inventory all high and critical image vulnerabilities
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        with:
+          image-ref: auraclaw:${{ github.sha }}
+          version: v0.75.0
+          scanners: vuln
+          format: json
+          output: artifacts/trivy-all.json
+          severity: HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: "0"
+      - name: Block fixable high and critical image vulnerabilities
+        id: image-scan
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        with:
+          image-ref: auraclaw:${{ github.sha }}
+          version: v0.75.0
+          scanners: vuln
+          format: sarif
+          output: artifacts/trivy-gate.sarif
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+      - name: Upload release evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: supply-chain-${{ github.sha }}
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 30
+      - name: Enforce dependency and image scan results
+        if: always()
+        env:
+          DEPENDENCY_AUDIT_OUTCOME: ${{ steps.dependency-audit.outcome }}
+          IMAGE_BUILD_OUTCOME: ${{ steps.image-build.outcome }}
+          IMAGE_SCAN_OUTCOME: ${{ steps.image-scan.outcome }}
+        run: |
+          test "$DEPENDENCY_AUDIT_OUTCOME" = success
+          test "$IMAGE_BUILD_OUTCOME" = success
+          test "$IMAGE_SCAN_OUTCOME" = success

@@ -299,7 +299,7 @@ def test_migration_runner_is_locked_idempotent_and_detects_drift(tmp_path: Path)
         connection = await asyncpg.connect(database_url)
         try:
             await connection.execute((ROOT / "deploy/postgres/roles.sql").read_text())
-            readonly_url = database_url.replace("postgres@", "auraclaw_task_query_ro@")
+            readonly_url = database_url.replace("postgres@", "auraclaw_task_api@")
             await PostgresMigrationRunner(readonly_url, migration_dir).check()
             readonly = await asyncpg.connect(readonly_url)
             try:

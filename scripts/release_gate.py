@@ -23,6 +23,7 @@ SECRET_PATTERNS = {
     "unredacted bearer token": re.compile(r"(?i)bearer\s+(?!\[REDACTED\])[a-z0-9._~+/=-]{16,}"),
 }
 REQUIRED = (
+    ROOT / "uv.lock",
     ROOT / "migrations/0007_m6_observability_reliability.sql",
     ROOT / "migrations/0007_m6_observability_reliability.down.sql",
     ROOT / "docs/development/stage-gates.md",
@@ -151,6 +152,38 @@ def _check_production_compose(failures: list[str]) -> None:
         failures.append("production env template reuses a database URL across services")
 
 
+def _check_supply_chain(failures: list[str]) -> None:
+    dockerfile = (ROOT / "Dockerfile").read_text()
+    required_fragments = (
+        "COPY pyproject.toml uv.lock README.md ./",
+        "uv sync --locked --no-dev --no-editable",
+        "python:3.13-slim@sha256:",
+        "ghcr.io/astral-sh/uv:0.11.3@sha256:",
+        "/usr/local/lib/python3.13/ensurepip",
+        "/usr/local/lib/python3.13/site-packages/pip-*.dist-info",
+        "USER auraclaw",
+    )
+    for fragment in required_fragments:
+        if fragment not in dockerfile:
+            failures.append(f"Dockerfile is missing reproducible build contract: {fragment}")
+    if "pip install" in dockerfile:
+        failures.append("Dockerfile bypasses uv.lock with pip install")
+
+    workflow = (ROOT / ".github/workflows/release-gate.yml").read_text()
+    for required in (
+        "cyclonedx1.5",
+        "pip-audit==",
+        "trivy-all.json",
+        "trivy-gate.sarif",
+        "upload-artifact@",
+    ):
+        if required not in workflow:
+            failures.append(f"release workflow is missing supply-chain gate: {required}")
+    mutable_action = re.search(r"uses:\s+[^\s]+@(v?\d+(?:\.\d+){0,2})\s*(?:#.*)?$", workflow, re.M)
+    if mutable_action:
+        failures.append(f"release workflow uses mutable action tag: {mutable_action.group(0)}")
+
+
 def main() -> int:
     failures: list[str] = []
     for path in REQUIRED:
@@ -180,6 +213,7 @@ def main() -> int:
                 failures.append(f"architecture boundary violation: {path.relative_to(ROOT)}")
     _check_release_truth(failures)
     _check_production_compose(failures)
+    _check_supply_chain(failures)
     if failures:
         print("release gate failed")
         for failure in failures:

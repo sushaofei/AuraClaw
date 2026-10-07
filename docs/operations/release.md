@@ -88,6 +88,19 @@ docker compose --env-file .env.test -f compose.test.yml down
 
 ## B. 生产发布（`compose.prod.yml`）
 
+### B0. 供应链门禁
+
+只允许发布 `release-gate` 两个 job 均通过的提交。`supply-chain` job 使用 `uv.lock` 生成
+CycloneDX SBOM 和带哈希的运行时依赖清单，以 `pip-audit` 阻断已知 Python 依赖漏洞。Trivy 保存全部
+HIGH/CRITICAL 镜像漏洞清单，并阻断其中已有上游修复版本的漏洞；尚无修复版本的基础层发现继续进入
+证据，不得从清单中隐藏，后续通过更新固定 digest 消除。SBOM、依赖审计和两份镜像扫描报告作为
+GitHub Actions artifact 保留 30 天。
+
+Dockerfile 的 Python 与 uv 基础镜像均固定到 OCI digest，应用依赖必须通过
+`uv sync --locked --no-dev --no-editable` 安装。更新 Python、uv 或依赖时必须在同一变更中更新 digest、
+`uv.lock` 和扫描证据；最终运行镜像删除 pip/ensurepip 等安装工具。禁止临时改回可变 tag 或
+`pip install` 绕过锁文件。未修复项一旦上游发布修复，下一次门禁即会转为阻断项。
+
 ### B1. 前置检查
 
 ```bash
@@ -228,6 +241,7 @@ curl --fail http://127.0.0.1:8080/health/ready
 - `action-hands` 起不来导致 Runtime 无 MCP
 - Policy / Credential fail-open 或 Secret 出现在日志
 - Canary 任务无 Canonical Result / 重复副作用
+- SBOM、依赖审计、镜像扫描缺失或未通过
 
 ---
 

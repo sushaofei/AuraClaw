@@ -3521,3 +3521,16 @@ Ruff、Mypy（248 文件）、10 条架构合同通过。迁移不适用，部�
 - [x] 针对性生产部署、信任边界与迁移门禁测试通过；Ruff、Mypy 与 release gate 通过。
 - [x] `.env.prod`、Secret、`.vscode/launch.json` 和 `docs/tmp/` 不进入本阶段提交。
 - [x] 本阶段作为单一 intentional commit 提交并 push，Issue #104 更新验证证据。
+
+## 生产化 P0-B：可复现构建、结构化日志与供应链门禁（Issue #104）
+
+- [x] Docker 多阶段构建使用 `uv.lock` 和 `uv sync --locked --no-dev --no-editable`，不再以 `pip install` 解析浮动依赖。
+- [x] Python 与 uv 基础镜像固定 OCI digest，最终镜像保持非 root 运行且不携带构建工具。
+- [x] 所有服务进程统一输出单行 JSON 日志，包含 UTC 时间、级别、服务、logger 与消息，结构化敏感字段继续脱敏。
+- [x] CI Action 固定到完整 commit SHA，并以最小 `contents: read` 权限运行。
+- [x] CI 从锁文件生成 CycloneDX SBOM 与带哈希依赖清单，执行固定版本 `pip-audit` 并保留报告。
+- [x] 最终运行镜像删除 pip/ensurepip 等非运行时安装工具，减少供应链与攻击面。
+- [x] CI 以 Trivy 记录全部 HIGH/CRITICAL，并阻断其中已有修复版本的漏洞；未修复基础层项保留证据并随 digest 更新治理。
+- [x] SBOM、依赖审计与两类镜像扫描证据保留 30 天。
+- [x] Release gate、Ruff、Mypy、全量测试、容器构建、依赖审计与可修复漏洞镜像阻断扫描全部通过；完整镜像清单保留 44 个暂无修复版本的 Debian 基础层发现。
+- [x] 本阶段作为单一 intentional commit 提交并 push，Issue #104 更新验证证据。

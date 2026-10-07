@@ -61,7 +61,7 @@ async def check_approval_modes(connection, database_url: str, migration_dir: Pat
         accepted = await service.create_task(
             goal="read a sensitive report",
             context=ctx,
-            interaction_mode=InteractionMode.NON_STREAMING,
+            interaction_mode=InteractionMode.STREAMING,
             approval_mode=ApprovalMode.AUTO_REVIEW,
         )
         with pytest.raises(VersionConflictError):

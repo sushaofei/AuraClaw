@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import sys
 from dataclasses import asdict
 from datetime import UTC, datetime
 from typing import Any
@@ -26,6 +27,48 @@ from auraclaw.infrastructure.persistence.postgres_common import (
 from auraclaw.observability.redaction import redact_sensitive
 
 
+class JsonLogFormatter(logging.Formatter):
+    """Format process logs as one redacted JSON object per line."""
+
+    def __init__(self, *, service: str) -> None:
+        super().__init__()
+        self._service = service
+
+    def format(self, record: logging.LogRecord) -> str:
+        fields = getattr(record, "structured_fields", {})
+        safe_fields = redact_sensitive(fields) if isinstance(fields, dict) else {}
+        payload: dict[str, Any] = {
+            "timestamp": datetime.fromtimestamp(record.created, UTC).isoformat(),
+            "level": record.levelname.lower(),
+            "service": self._service,
+            "logger": record.name,
+            "message": record.getMessage(),
+            **safe_fields,
+        }
+        if record.exc_info is not None:
+            exception = record.exc_info[1]
+            payload["exception"] = {
+                "type": type(exception).__name__ if exception is not None else "Exception",
+                "message": str(exception) if exception is not None else "",
+            }
+        return json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def configure_json_logging(*, level: str, service: str) -> None:
+    """Install the process-wide production log contract."""
+
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(JsonLogFormatter(service=service))
+    root = logging.getLogger()
+    root.handlers.clear()
+    root.addHandler(handler)
+    root.setLevel(getattr(logging, level.upper(), logging.INFO))
+    for logger_name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+        uvicorn_logger = logging.getLogger(logger_name)
+        uvicorn_logger.handlers.clear()
+        uvicorn_logger.propagate = True
+
+
 class StructuredLogger:
     def __init__(self, name: str = "auraclaw") -> None:
         self._logger = logging.getLogger(name)
@@ -37,7 +80,11 @@ class StructuredLogger:
             "message": message,
             **redact_sensitive(fields),
         }
-        self._logger.log(level, json.dumps(record, sort_keys=True, separators=(",", ":")))
+        self._logger.log(
+            level,
+            message,
+            extra={"structured_fields": redact_sensitive(fields)},
+        )
         return record
 
 

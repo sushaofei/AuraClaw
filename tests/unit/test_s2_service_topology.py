@@ -443,9 +443,17 @@ def test_container_build_excludes_secrets_and_runs_unprivileged() -> None:
     dockerfile = (ROOT / "Dockerfile").read_text()
     dockerignore = (ROOT / ".dockerignore").read_text().splitlines()
     assert "USER auraclaw" in dockerfile
+    assert "COPY pyproject.toml uv.lock README.md ./" in dockerfile
+    assert "uv sync --locked --no-dev --no-editable" in dockerfile
+    assert "pip install" not in dockerfile
+    assert "/usr/local/lib/python3.13/ensurepip" in dockerfile
+    assert "site-packages/pip-*.dist-info" in dockerfile
+    assert dockerfile.count("python:3.13-slim@sha256:") == 2
+    assert "ghcr.io/astral-sh/uv:0.11.3@sha256:" in dockerfile
     assert ".env" in dockerignore
     assert ".venv" in dockerignore
     assert "__pycache__" in dockerignore
+    assert "artifacts" in dockerignore
 
 
 def test_session_outbox_projectors_include_approval_and_collaboration() -> None:

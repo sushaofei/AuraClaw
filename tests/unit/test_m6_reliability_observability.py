@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from time import perf_counter
@@ -23,6 +24,7 @@ from auraclaw.gateways.task.admission import AllowAllAdmissionController
 from auraclaw.infrastructure.artifacts.store import ArtifactStore, InMemoryObjectStorage
 from auraclaw.infrastructure.observability.stores import (
     InMemoryObservabilityStore,
+    JsonLogFormatter,
     PostgresObservabilityStore,
     StructuredLogger,
 )
@@ -476,6 +478,31 @@ def test_structured_logging_and_trace_secret_scan_have_zero_hits() -> None:
     assert not contains_sensitive(
         record, known_secrets=("real-super-secret", "real-api-key")
     )
+
+
+def test_json_log_contract_carries_service_context_and_redacts_fields() -> None:
+    log_record = logging.LogRecord(
+        name="auraclaw.worker",
+        level=logging.WARNING,
+        pathname=__file__,
+        lineno=1,
+        msg="work delayed",
+        args=(),
+        exc_info=None,
+    )
+    log_record.structured_fields = {
+        "tenant_id": "tenant-m6",
+        "authorization": "Bearer real-super-secret",
+    }
+    payload = json.loads(JsonLogFormatter(service="projection-worker").format(log_record))
+
+    assert payload["service"] == "projection-worker"
+    assert payload["logger"] == "auraclaw.worker"
+    assert payload["level"] == "warning"
+    assert payload["message"] == "work delayed"
+    assert payload["tenant_id"] == "tenant-m6"
+    assert payload["authorization"] == "[REDACTED]"
+    assert "timestamp" in payload
 
 
 def test_architecture_completion_standards_have_automated_regression_coverage() -> None:
