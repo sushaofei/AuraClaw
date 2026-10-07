@@ -3505,4 +3505,5 @@ Ruff、Mypy（248 文件）、10 条架构合同通过。迁移不适用，部�
 - [x] 移除特定产品的身份命名、请求头、配置、业务 Tool、数据源、场景文档和测试样例；身份边界统一为 AuraClaw 与受信上游语义。
 - [x] 新增 `0066` durable Child wakeup 与 `0067` bounded metric snapshot 迁移，并同步 Compose、环境模板和部署脚本迁移目标。
 - [x] Ruff、Mypy、完整单元测试及品牌/产品残留扫描通过；依赖 PostgreSQL、Kafka、Vault、S3 的集成用例已执行并确认仅因本机服务未启动而不可用。
+- [x] 深度复核受控文件名、测试夹具、环境键、HTTP Header、数据库标识和本地 Git 引用；清除遗留品牌缩写测试值及工作区旧品牌资产。
 - [x] 用户已有 `.vscode/launch.json`、`docs/tmp/` 与本地未跟踪目录不纳入本阶段提交；本阶段作为一个意图明确的提交推送当前分支。

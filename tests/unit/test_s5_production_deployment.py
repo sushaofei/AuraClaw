@@ -340,7 +340,7 @@ def test_production_preflight_accepts_shared_database_url_and_unique_tokens(
         "OBS_AK=test-obs-access",
         "OBS_SK=test-obs-secret",
         "OBS_REGION=example-region",
-        "AURACLAW_UPSTREAM_WORKLOAD_TOKEN=ct-" + "t" * 40,
+        "AURACLAW_UPSTREAM_WORKLOAD_TOKEN=upstream-" + "t" * 40,
         'AURACLAW_AGENT_CONTEXT_SIGNING_KEYS_JSON={"k1":"upstream-agent-context-signing-key-01"}',
     ]
     lines.extend(
