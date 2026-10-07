@@ -15,7 +15,10 @@ from auraclaw.api.models import (
     ActivityPageResponse,
     AppendMessageRequest,
     ApprovalCommandResponse,
+    ApprovalDelegationRequest,
+    ApprovalEscalationRequest,
     ApprovalResponseRequest,
+    ApprovalWorkflowResponse,
     CancelTaskRequest,
     CloseSessionRequest,
     CommandResponse,
@@ -374,4 +377,60 @@ async def record_approval_response(
         decision=request.decision,
         feedback=request.feedback,
         context=context,
+    )
+
+
+@router.post(
+    "/sessions/{session_id}/approvals/{approval_id}/delegations",
+    response_model=ApprovalWorkflowResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def delegate_approval(
+    session_id: str,
+    approval_id: str,
+    request: ApprovalDelegationRequest,
+    identity: Identity,
+    service: TaskCommandDependency,
+    idempotency_key: str = Header(alias="Idempotency-Key", min_length=1),
+    expected_version: int = Header(alias="X-Expected-Version"),
+) -> dict[str, Any]:
+    return await service.delegate_approval(
+        session_id=session_id,
+        approval_id=approval_id,
+        to_approver=request.to_approver,
+        reason=request.reason,
+        context=command_context(
+            identity=identity,
+            command_id=idempotency_key,
+            expected_version=expected_version,
+            operation="delegate_approval",
+        ),
+    )
+
+
+@router.post(
+    "/sessions/{session_id}/approvals/{approval_id}/escalations",
+    response_model=ApprovalWorkflowResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def escalate_approval(
+    session_id: str,
+    approval_id: str,
+    request: ApprovalEscalationRequest,
+    identity: Identity,
+    service: TaskCommandDependency,
+    idempotency_key: str = Header(alias="Idempotency-Key", min_length=1),
+    expected_version: int = Header(alias="X-Expected-Version"),
+) -> dict[str, Any]:
+    return await service.escalate_approval(
+        session_id=session_id,
+        approval_id=approval_id,
+        approvers=request.approvers,
+        reason=request.reason,
+        context=command_context(
+            identity=identity,
+            command_id=idempotency_key,
+            expected_version=expected_version,
+            operation="escalate_approval",
+        ),
     )

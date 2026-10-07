@@ -75,6 +75,26 @@ class ApprovalResponseRequest(BaseModel):
     feedback: str | None = Field(default=None, max_length=10_000)
 
 
+class ApprovalDelegationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    to_approver: str = Field(min_length=1, max_length=256)
+    reason: str = Field(min_length=1, max_length=2_000)
+
+
+class ApprovalEscalationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    approvers: tuple[str, ...] = Field(min_length=1, max_length=20)
+    reason: str = Field(min_length=1, max_length=2_000)
+
+    @field_validator("approvers")
+    @classmethod
+    def unique_approvers(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        normalized = tuple(item.strip() for item in value)
+        if any(not item for item in normalized) or len(set(normalized)) != len(normalized):
+            raise ValueError("approvers must be non-empty and unique")
+        return normalized
+
+
 class TaskAcceptedResponse(ApprovalConfiguration):
     model_config = ConfigDict(extra="ignore")
     session_id: str
@@ -96,6 +116,14 @@ class CommandResponse(ApprovalConfiguration):
 class ApprovalCommandResponse(CommandResponse):
     approval_id: str
     decision: str
+
+
+class ApprovalWorkflowResponse(BaseModel):
+    session_id: str
+    approval_id: str
+    status: Literal["waiting"]
+    assigned_approvers: list[str]
+    escalation_level: int | None = None
 
 
 class TaskView(ApprovalConfiguration):

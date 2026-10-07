@@ -31,7 +31,12 @@ COLLABORATION_CONTROL_EVENTS = {
     "run.cancelled",
 }
 
-APPROVAL_RESUME_EVENTS = {"approval.approved", "approval.rejected"}
+APPROVAL_RESUME_EVENTS = {
+    "approval.approved",
+    "approval.rejected",
+    "approval.expired",
+    "approval.cancelled",
+}
 
 
 class ControlFeedSource(Protocol):
@@ -192,7 +197,7 @@ class RunnableFeedConsumer:
             events = await self._source.load(assignment.tenant_id, assignment.session_id)
             decided = any(
                 event.run_id == assignment.run_id
-                and event.type in {"approval.approved", "approval.rejected"}
+                and event.type in APPROVAL_RESUME_EVENTS
                 for event in events
             )
             if decided:

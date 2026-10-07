@@ -91,3 +91,37 @@ class TaskCommandGateway:
             feedback=feedback,
             context=context,
         )
+
+    async def delegate_approval(
+        self,
+        *,
+        session_id: str,
+        approval_id: str,
+        to_approver: str,
+        reason: str,
+        context: CommandContext,
+    ) -> dict[str, Any]:
+        return await self._service.delegate_approval(
+            session_id=session_id,
+            approval_id=approval_id,
+            to_approver=to_approver,
+            reason=reason,
+            context=context,
+        )
+
+    async def escalate_approval(
+        self,
+        *,
+        session_id: str,
+        approval_id: str,
+        approvers: tuple[str, ...],
+        reason: str,
+        context: CommandContext,
+    ) -> dict[str, Any]:
+        return await self._service.escalate_approval(
+            session_id=session_id,
+            approval_id=approval_id,
+            approvers=approvers,
+            reason=reason,
+            context=context,
+        )

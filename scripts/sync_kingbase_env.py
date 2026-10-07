@@ -9,7 +9,7 @@ from urllib.parse import quote
 from dotenv import dotenv_values
 
 DEFAULT_DATABASE = "auraclaw"
-CURRENT_MIGRATION_TARGET = "0068"
+CURRENT_MIGRATION_TARGET = "0069"
 
 
 def _required(values: dict[str, str | None], *names: str) -> str:

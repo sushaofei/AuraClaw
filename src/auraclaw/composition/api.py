@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime
 from typing import Literal
@@ -100,10 +100,31 @@ def install_public_cors(app: FastAPI, settings: Settings) -> None:
 async def task_api_lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.service_name = "task-api"
     app.state.service_ready = bool(getattr(app.state, "config_ready", True))
+    maintenance_tasks: list[asyncio.Task[None]] = []
+    for tick in getattr(app.state, "maintenance_ticks", ()):
+
+        async def run_maintenance(
+            worker: Callable[[], Awaitable[object]] = tick,
+        ) -> None:
+            while True:
+                try:
+                    await worker()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logging.getLogger(__name__).exception("task-api maintenance tick failed")
+                await asyncio.sleep(getattr(app.state, "maintenance_interval", 30.0))
+
+        maintenance_tasks.append(asyncio.create_task(run_maintenance()))
     try:
         yield
     finally:
         app.state.service_ready = False
+        for task in maintenance_tasks:
+            task.cancel()
+        for task in maintenance_tasks:
+            with suppress(asyncio.CancelledError):
+                await task
         for closeable in getattr(app.state, "closeables", ()):
             close = getattr(closeable, "aclose", None)
             if close is None:

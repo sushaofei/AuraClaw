@@ -20,10 +20,14 @@ from auraclaw.session.ports import (
 )
 
 DELIVERY_TRIGGER_EVENTS = {
+    "approval.requested",
+    "approval.delegated",
+    "approval.escalated",
+    "approval.expired",
+    "approval.cancelled",
     "run.completed",
     "run.failed",
     "run.cancelled",
-    "approval.requested",
     "child.result_published",
 }
 CONTROL_TRIGGER_EVENTS = {
@@ -32,6 +36,8 @@ CONTROL_TRIGGER_EVENTS = {
     "session.resumed",
     "approval.approved",
     "approval.rejected",
+    "approval.expired",
+    "approval.cancelled",
     "dependency.changed",
     "child.result_published",
     "review.completed",

@@ -19,7 +19,7 @@ Docker Compose 不提供 Kubernetes HPA、PDB 或 NetworkPolicy。本方案以�
 - 生产主存储固定为 KingBase V9 PostgreSQL 兼容模式；migration owner 与 11 个持久化服务
   分别使用独立的 `postgresql+asyncpg://` DSN；
 - migration owner 完成迁移后必须执行 `deploy/postgres/roles.sql`，并由平台分别设置角色密码；
-- Compose `migrate` 使用 `/app/migrations`，当前目标 `0068`；
+- Compose `migrate` 使用 `/app/migrations`，当前目标 `0069`；
 - Kafka/Replay Router、华为 OBS、Vault 和模型出口可从 `auraclaw-platform` 网络访问；
 - 部署机存在被 `.gitignore` 排除的 `.env.prod`，从 `.env.prod.example` 复制后填真实密钥；
 - Secret 不写入 Compose、镜像、命令参数或日志。
@@ -75,19 +75,19 @@ docker compose --env-file .env.prod -f compose.prod.yml stop
 
 docker compose --env-file .env.prod \
   -f compose.prod.yml run --rm migrate migrate up \
-  --target 0068 --directory /app/migrations
+  --target 0069 --directory /app/migrations
 
 # 由 migration owner 执行，确保现有对象和 default privileges 同时收敛
 psql "$AURACLAW_MIGRATION_DATABASE_URL" -f deploy/postgres/roles.sql
 
 docker compose --env-file .env.prod -f compose.prod.yml \
-  run --rm migrate migrate check --target 0068 --directory /app/migrations
+  run --rm migrate migrate check --target 0069 --directory /app/migrations
 ```
 
 迁移进程只挂载 migration admin DSN。KingBase 使用 PostgreSQL advisory lock 防止并发迁移，
 checksum ledger 阻止已执行文件漂移；重复运行是幂等的。`0058` 删除 MCP Tool 前缀字段，必须
 先停止所有旧实例，在维护窗口内迁移，再强制重建全部服务，不能滚动混跑。
-运行迁移前应已准备好同一不可变镜像，并核对其 `migrate latest` 为 `0068`。
+运行迁移前应已准备好同一不可变镜像，并核对其 `migrate latest` 为 `0069`。
 迁移或 `migrate check` 失败时禁止继续启动。
 
 数据库服务在开始监听前会只读校验完整迁移账本，缺失、checksum 漂移、版本不匹配均拒绝启动。
@@ -101,7 +101,7 @@ Secret 生成目录必须与 `.env.prod` 的 `AURACLAW_SECRET_DIR` 一致；目�
 ```bash
 docker compose --env-file .env.prod -f compose.prod.yml \
   --profile migrate run --rm migrate migrate baseline \
-  --target 0068 --confirm-existing-schema --directory /app/migrations
+  --target 0069 --confirm-existing-schema --directory /app/migrations
 ```
 
 全新库、未知来源库、部分迁移库或 checksum 不一致时禁止 baseline。
@@ -258,11 +258,11 @@ digest、实际环境、操作员和带时区的起止时间；每项 `evidence_
 
 演练按以下顺序进行，任一步失败立即恢复流量并保留现场：
 
-1. 在隔离恢复库执行 KingBase/PostgreSQL 一致性备份并恢复，运行 `migrate check --target 0068`，抽样核对
+1. 在隔离恢复库执行 KingBase/PostgreSQL 一致性备份并恢复，运行 `migrate check --target 0069`，抽样核对
    Canonical Session、Projection、Approval、Invocation、Audit 与 Artifact metadata；对象存储版本/校验和
    同步核对。不得用生产库本身充当“恢复目标”。
-2. 在恢复库对最新可逆迁移执行 `0068_operations_search_indexes.down.sql`，验证旧镜像只读/回滚契约，再重新
-   `migrate up --target 0068`。任何 destructive migration 必须采用向前补偿，不能把 down SQL 直接用于生产。
+2. 在恢复库依次执行 `0069_approval_workflow_governance.down.sql` 与 `0068_operations_search_indexes.down.sql`，验证旧镜像只读/回滚契约，再重新
+   `migrate up --target 0069`。任何 destructive migration 必须采用向前补偿，不能把 down SQL 直接用于生产。
 3. 停止隔离环境消费者，记录 Kafka topic/partition/offset，复制 consumer group 后从记录 offset 重放；Runtime
    Event 只核对 SSE/replay 行为，不能据此补写业务结果。Skill lifecycle 重放必须得到相同 generation/digest。
 4. 在空 Projection schema 或隔离租户执行 `auraclaw projection rebuild --tenant TENANT`，重建前后对比任务、
@@ -291,10 +291,23 @@ Owner Admin 操作先持久 claim 再执行。重复 `operation_id` 在 active c
 跨角色数据库写入成功、Canonical Result 丢失、
 Delivery 重复副作用、OBS 对象与 metadata 无法收敛，或 Secret 出现在日志/config。
 
-## Skill / MCP 联合修复发布（0068 基线）
+## 审批治理上线检查
 
-当前迁移基线为 0068；0058 至 0063 涉及 Tool 前缀、审批模式、本地目录 generation 和 Skill 升级清理，
-0064 至 0068 增加 Runtime 成本预算、Skill admission 清理、持久 Child wakeup、有界指标快照与运维检索索引。
+1. 在 Policy 配置中填入来自受信组织目录的稳定审批主体 ID，确认 quorum 不超过主体数，且升级时间严格
+   小于审批 TTL；生产不得保留示例中的 `replace-with-*` 值。
+2. 执行 `0069` 后核对 `projection.approval_view` 的 quorum、votes、escalation 字段和两个 due index；按租户
+   重建 Approval Projection，确认旧事件以 quorum=1 兼容读取。
+3. 为生产租户注册受监控的 Delivery sink，验证 approval.requested、delegated、escalated、expired 与
+   cancelled 的投递、重试和 DLQ 告警。通知成功不是 Tool 授权条件，通知失败也不能删除审批事实。
+4. 用两名不同主体完成一次会签，并验证重复投票、越权委托、重复 Idempotency-Key 换参数均被拒绝；再用
+   缩短的升级/过期窗口验证 SLA worker 只升级一次且过期后 Session 恢复 runnable。
+5. 监控 Task API maintenance 日志、Delivery dead letter、审批等待时间和过期数；Projection 不可用时扫描
+   fail closed，不允许从 Canonical Event 之外推断批准。
+
+## Skill / MCP 联合修复发布（0069 基线）
+
+当前迁移基线为 0069；0058 至 0063 涉及 Tool 前缀、审批模式、本地目录 generation 和 Skill 升级清理，
+0064 至 0069 增加 Runtime 成本预算、Skill admission 清理、持久 Child wakeup、有界指标快照、运维检索索引与审批治理字段。
 协调发布全部服务，避免严格 DTO 及旧 Runtime 行为混跑。启用新 Hands 的自动清理之前，必须先确认旧 Runtime
 的在途写调用已结束或人工核对其结果；没有 Canonical invocation 记录的旧调用不能自动推断已完成。
 参见 [Skill 升级](skill-upgrade.md)、[工作流恢复](skill-workflow-recovery.md) 和各阶段门禁。

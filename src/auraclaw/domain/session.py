@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 from auraclaw.contracts.approval_mode import (
@@ -311,6 +312,7 @@ class SessionAggregate:
         actor_id: str,
         decision: str,
         feedback: str | None,
+        terminal: bool = True,
     ) -> None:
         self._require_existing()
         if self.status is not SessionStatus.WAITING_FOR_HUMAN:
@@ -331,14 +333,104 @@ class SessionAggregate:
                 },
             )
         )
+        if not terminal:
+            self._raise(
+                NewEvent(
+                    type="approval.vote.recorded",
+                    visibility=Visibility.USER,
+                    payload={
+                        "approval_id": approval_id,
+                        "actor_id": actor_id,
+                        "decision": decision,
+                        "feedback": feedback,
+                    },
+                )
+            )
+            return
         self._raise(
             NewEvent(
                 type=f"approval.{decision}",
                 visibility=Visibility.USER,
                 payload={
                     "approval_id": approval_id,
+                    "actor_id": actor_id,
                     "decision": decision,
                     "feedback": feedback,
+                },
+            )
+        )
+
+    def delegate_approval(
+        self,
+        *,
+        approval_id: str,
+        from_approver: str,
+        to_approver: str,
+        delegated_by: str,
+        reason: str,
+    ) -> None:
+        self._require_existing()
+        if self.status is not SessionStatus.WAITING_FOR_HUMAN:
+            raise InvalidTransitionError("approval delegation requires a waiting Session")
+        self._raise(
+            NewEvent(
+                type="approval.delegated",
+                visibility=Visibility.USER,
+                payload={
+                    "approval_id": approval_id,
+                    "from_approver": from_approver,
+                    "to_approver": to_approver,
+                    "delegated_by": delegated_by,
+                    "reason": reason,
+                },
+            )
+        )
+
+    def escalate_approval(
+        self,
+        *,
+        approval_id: str,
+        approvers: tuple[str, ...],
+        escalation_level: int,
+        escalated_by: str,
+        reason: str,
+        next_escalation_at: datetime | None = None,
+    ) -> None:
+        self._require_existing()
+        if self.status is not SessionStatus.WAITING_FOR_HUMAN:
+            raise InvalidTransitionError("approval escalation requires a waiting Session")
+        self._raise(
+            NewEvent(
+                type="approval.escalated",
+                visibility=Visibility.USER,
+                payload={
+                    "approval_id": approval_id,
+                    "approvers": list(approvers),
+                    "escalation_level": escalation_level,
+                    "escalated_by": escalated_by,
+                    "reason": reason,
+                    "next_escalation_at": (
+                        next_escalation_at.isoformat()
+                        if next_escalation_at is not None
+                        else None
+                    ),
+                },
+            )
+        )
+
+    def expire_approval(self, *, approval_id: str, expired_at: datetime) -> None:
+        self._require_existing()
+        if self.status is not SessionStatus.WAITING_FOR_HUMAN:
+            raise InvalidTransitionError("approval expiry requires a waiting Session")
+        self._raise(
+            NewEvent(
+                type="approval.expired",
+                visibility=Visibility.USER,
+                payload={
+                    "approval_id": approval_id,
+                    "decision": "expired",
+                    "expired_at": expired_at.isoformat(),
+                    "reason": "approval_sla_expired",
                 },
             )
         )
@@ -398,7 +490,7 @@ class SessionAggregate:
         elif event_type == "approval.approved":
             self.status = SessionStatus.RUNNABLE
             self.run_status = RunStatus.RUNNABLE
-        elif event_type == "approval.rejected":
+        elif event_type in {"approval.rejected", "approval.expired", "approval.cancelled"}:
             self.status = SessionStatus.RUNNABLE
             self.run_status = RunStatus.RUNNABLE
         elif event_type == "run.retry_scheduled":

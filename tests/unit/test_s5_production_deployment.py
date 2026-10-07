@@ -326,6 +326,8 @@ def test_env_templates_are_ready_to_copy() -> None:
         "AURACLAW_MODEL_API_KEY",
         "AURACLAW_MODEL_BASE_URL",
         "AURACLAW_MODEL_NAME",
+        "AURACLAW_POLICY_APPROVAL_APPROVERS",
+        "AURACLAW_POLICY_APPROVAL_REQUIRED_APPROVALS",
         # Deployment profiles may still override this explicitly.
         "AURACLAW_ARTIFACT_BACKEND",
         "AURACLAW_CREDENTIAL_VAULT_ADDR",

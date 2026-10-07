@@ -86,7 +86,8 @@ child.created / dependency.changed / delegated
 model.output.completed
 tool.call.requested / completed / failed
 artifact.attached
-approval.requested / human.response.recorded
+approval.requested / human.response.recorded / approval.vote.recorded
+approval.delegated / approval.escalated / approved / rejected / expired / cancelled
 session.paused / resumed / handed_off / closed
 run.completed / failed / cancelled
 delivery.succeeded / retrying / dead_lettered

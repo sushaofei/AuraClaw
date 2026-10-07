@@ -1,4 +1,5 @@
 from collections.abc import Sequence
+from datetime import datetime
 from typing import Protocol
 
 from auraclaw.contracts.events import CanonicalEvent
@@ -43,3 +44,5 @@ class ProjectionRebuilder(Protocol):
 
 class ApprovalViewReader(Protocol):
     async def get(self, tenant_id: str, approval_id: str) -> ApprovalRecord | None: ...
+
+    async def list_due(self, now: datetime, *, limit: int = 100) -> list[ApprovalRecord]: ...

@@ -454,6 +454,7 @@ class Settings(BaseSettings):
     stream_heartbeat_interval_seconds: float = Field(default=15.0, gt=0.0, le=300.0)
     cors_allow_origins: str = ""
     runtime_poll_interval: float = 0.05
+    approval_sla_scan_interval_seconds: float = Field(default=30.0, ge=1.0, le=3600.0)
     # Shared production-topology worker ticks (Outbox → Feed / Projection).
     # Keep identical semantics across compose.test and compose.prod.
     # With worker_wake_enabled, idle uses worker_idle_interval; busy ticks drain
@@ -506,6 +507,10 @@ class Settings(BaseSettings):
     model_provider: str = "openai_compatible"
     model_data_region: str = "local"
     policy_allowed_data_regions: str = "local"
+    policy_approval_approvers: str = ""
+    policy_approval_required_approvals: int = Field(default=1, ge=1, le=20)
+    policy_approval_ttl_seconds: int = Field(default=3600, ge=60, le=604800)
+    policy_approval_escalation_after_seconds: int = Field(default=900, ge=60, le=86400)
     model_timeout_seconds: float = 120.0
     model_retry_attempts: int = Field(default=5, ge=1, le=5)
     model_retry_base_delay_seconds: float = Field(default=1.0, ge=0.0, le=5.0)
@@ -653,6 +658,19 @@ class Settings(BaseSettings):
             missing.append("OBS_REGION")
         if missing:
             raise ValueError(f"OBS backend requires: {', '.join(missing)}")
+        return self
+
+    @model_validator(mode="after")
+    def validate_approval_policy(self) -> Settings:
+        if self.approval_approvers and self.policy_approval_required_approvals > len(
+            self.approval_approvers
+        ):
+            raise ValueError("approval quorum exceeds configured approvers")
+        if (
+            self.policy_approval_escalation_after_seconds
+            >= self.policy_approval_ttl_seconds
+        ):
+            raise ValueError("approval escalation must occur before approval expiry")
         return self
 
     @property
@@ -818,6 +836,16 @@ class Settings(BaseSettings):
             value.strip()
             for value in self.artifact_share_classifications.split(",")
             if value.strip()
+        )
+
+    @property
+    def approval_approvers(self) -> tuple[str, ...]:
+        return tuple(
+            dict.fromkeys(
+                value.strip()
+                for value in self.policy_approval_approvers.split(",")
+                if value.strip()
+            )
         )
 
     @property

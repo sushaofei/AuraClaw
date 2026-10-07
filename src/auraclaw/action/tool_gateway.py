@@ -816,7 +816,31 @@ class ToolGateway:
                         ),
                         expected_effect=invocation.expected_side_effect,
                         policy_version=policy_version,
-                        ttl=self._approval_ttl,
+                        assigned_approvers=tuple(
+                            str(value)
+                            for value in approval_evidence.get("assigned_approvers", ())
+                        ),
+                        required_approvals=int(
+                            approval_evidence.get("required_approvals", 1)
+                        ),
+                        ttl=timedelta(
+                            seconds=min(
+                                self._approval_ttl.total_seconds(),
+                                float(
+                                    approval_evidence.get(
+                                        "approval_ttl_seconds",
+                                        self._approval_ttl.total_seconds(),
+                                    )
+                                ),
+                            )
+                        ),
+                        escalation_after=(
+                            timedelta(
+                                seconds=float(approval_evidence["escalation_after_seconds"])
+                            )
+                            if approval_evidence.get("escalation_after_seconds") is not None
+                            else None
+                        ),
                     )
                     self._pending_approvals[pending_key] = pending
                     if self._approval_controller is not None:

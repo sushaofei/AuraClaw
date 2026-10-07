@@ -135,6 +135,8 @@ def build_task_api_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
     app.dependency_overrides[get_collaboration_projection] = lambda: collaboration_projection
     app.dependency_overrides[get_observability_service] = lambda: observability
     app.state.observability_service = observability
+    app.state.maintenance_ticks = (task_service.process_due_approval_slas,)
+    app.state.maintenance_interval = settings.approval_sla_scan_interval_seconds
     identity_closeables = (
         (app.state.identity_verifier,) if hasattr(app.state.identity_verifier, "close") else ()
     )

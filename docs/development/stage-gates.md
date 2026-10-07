@@ -589,7 +589,7 @@ Git 提交与推送是阶段完成条件，不是可选收尾动作。
 - [x] 鉴权失败、限流/配额耗尽、超时和 Provider 故障映射为稳定应用错误。
 - [x] Model Gateway 是唯一 CredentialResolver 调用方，Harness、Session 与 Orchestrator 不接触 Secret。
 - [x] development Runtime 继续独占确定性 Model Client 与进程内 Replay Bus 路径。
-- [x] 非开发环境启动同进程 MVP production Worker，并按 storage backend 选择 Control Store。
+- [x] 非开发环境启动同进程早期 production Worker，并按 storage backend 选择 Control Store。
 - [x] production Harness 经 Runtime Event Producer SDK 发布到 Kafka 或内存降级总线。
 - [x] Kafka producer 与 Streaming Ingestor 共同参与 Runtime Event Bus 就绪判定。
 - [x] Runtime Event 失败不影响 Canonical model output 与 run completion。
@@ -3622,3 +3622,15 @@ Ruff、Mypy（248 文件）、10 条架构合同通过。迁移不适用，部�
 - [x] Artifact 分享由 Policy 约束 audience、允许 classification 和最大 TTL，不提供永久公开链接。
 - [x] 开发、测试和生产模板包含明确的区域与分享策略配置，运维文档记录执行点和拒绝语义。
 - [x] Release gate、Ruff、Mypy、89 项针对性测试及完整测试（905 passed、68 skipped）通过；本阶段作为单一 intentional commit 提交并 push，Issue #104 更新验证证据。
+
+## 生产化 P1-C：审批治理与 SLA（Issue #104）
+
+- [x] Policy 对 require_approval 下发稳定审批主体、quorum、TTL 和升级时间约束，非法 quorum 或升级窗口 fail closed。
+- [x] Canonical Approval 支持逐票审计、多人会签、任一拒绝终止；未达 quorum 时 Session/Run 保持 waiting_for_human。
+- [x] Task API 提供带身份、expected version 和 command 幂等约束的委托与人工升级接口；已投票主体不能委托。
+- [x] Task API maintenance worker 从可重建 Approval Projection 扫描 SLA，到升级点写一次 approval.escalated，到期写 approval.expired。
+- [x] 请求、委托、升级、过期和取消进入 durable Delivery outbox，复用 sink retry/DLQ；通知结果不成为执行授权事实。
+- [x] Approval Projection 和 `0069` 迁移保存 quorum、votes、升级时间与级别，并提供 expiry/escalation partial indexes。
+- [x] Task、Approval、PostgreSQL Projection 均识别新增 Canonical Events；过期/取消进入 control feed 恢复调度。
+- [x] 架构真源、审批运维手册、生产上线检查、环境模板和当前迁移基线同步为 `0069`。
+- [x] Release gate、Ruff、Mypy、61 项针对性测试及完整测试（908 passed、68 skipped）通过；本阶段作为单一 intentional commit 提交并 push，Issue #104 更新验证证据。

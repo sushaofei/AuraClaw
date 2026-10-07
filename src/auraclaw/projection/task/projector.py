@@ -43,6 +43,9 @@ KNOWN_TASK_EVENTS = {
     "session.paused",
     "approval.requested",
     "human.response.recorded",
+    "approval.vote.recorded",
+    "approval.delegated",
+    "approval.escalated",
     "approval.approved",
     "approval.rejected",
     "approval.expired",
@@ -332,7 +335,7 @@ class InMemoryTaskProjection:
                 run_status=RunStatus.RUNNABLE.value,
                 current_stage="scheduling",
             )
-        elif event.type == "approval.rejected":
+        elif event.type in {"approval.rejected", "approval.expired", "approval.cancelled"}:
             view.update(
                 status=SessionStatus.RUNNABLE.value,
                 run_status=RunStatus.RUNNABLE.value,

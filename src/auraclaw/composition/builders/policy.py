@@ -52,6 +52,12 @@ def build_policy_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
                     allowed_data_regions=settings.allowed_model_data_regions,
                     artifact_share_max_ttl_seconds=settings.artifact_share_max_ttl_seconds,
                     artifact_share_classifications=(settings.shareable_artifact_classifications),
+                    approval_approvers=settings.approval_approvers,
+                    approval_required_approvals=settings.policy_approval_required_approvals,
+                    approval_ttl_seconds=settings.policy_approval_ttl_seconds,
+                    approval_escalation_after_seconds=(
+                        settings.policy_approval_escalation_after_seconds
+                    ),
                 ),
             )
         ),

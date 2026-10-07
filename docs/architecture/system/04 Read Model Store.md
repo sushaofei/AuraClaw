@@ -33,7 +33,9 @@ started_at, completed_at, source_version
 
 ```text
 approval_id, session_id, action_digest, risk
-status, requested_by, expires_at, decision, source_version
+assigned_approvers, required_approvals, votes
+escalation_at, escalation_level
+status, expires_at, decision, source_version
 ```
 
 ## 核心功能模块

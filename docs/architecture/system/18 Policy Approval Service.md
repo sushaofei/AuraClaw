@@ -10,7 +10,7 @@ Policy / Approval Service 是横切入口、模型、调度、工具和交付的
 |---|---|
 | Policy Engine | 依据主体、资源、动作、上下文和策略版本决策 |
 | Risk Classifier | 对工具、参数、数据和副作用分类 |
-| Approval Request Manager | 创建、去重、过期和取消审批 |
+| Approval Request Manager | 创建、去重、升级、委托、过期和取消审批 |
 | Decision Store / Projector | 保存批准、拒绝和策略证据 |
 | Human Assignment | 指定允许审批的用户、组或岗位 |
 | Action Digest | 规范化动作并计算不可变摘要 |
@@ -24,6 +24,8 @@ Policy / Approval Service 是横切入口、模型、调度、工具和交付的
 evaluate(subject, action, resource, context)
 requestApproval(actionDigest, allowedDecisions, expiresAt)
 recordHumanResponse(approvalId, actor, decision, feedback)
+delegateApproval(approvalId, actor, delegate, reason)
+escalateApproval(approvalId, actor, additionalApprovers, reason)
 validateApproval(approvalId, sessionId, actionDigest)
 cancelApproval(approvalId, reason)
 ```
@@ -48,6 +50,8 @@ tool_name + redacted_arguments
 risk / reason / expected_effect
 allowed_decisions
 assigned_approvers
+required_approvals / votes
+escalation_at / escalation_level
 policy_version
 expires_at
 request_digest / generation
@@ -79,16 +83,28 @@ decision / feedback / decided_by / decided_at
 Tool Gateway -> Policy: evaluate
 Policy -> Session: approval.requested + waiting_for_human
 Session/Runtime Bus -> Streaming Gateway -> Web: 通知
-Human -> Task Gateway: response
-Task Gateway -> Session: human.response (durable first)
+Human -> Task Gateway: response / delegation / escalation
+Task Gateway -> Session: human.response + vote (durable first)
 Task Gateway -> Policy: idempotent CAS notification
 Projection -> Approval View
-Orchestrator: 恢复 runnable Session
+Quorum reached or any rejection -> terminal approval event
+Orchestrator: only after terminal event, resume runnable Session
 Tool Gateway -> Policy: validateApproval
 Tool Gateway: 执行动作
 ```
 
 Streaming Gateway 只通知，不接收审批结果。
+
+`required_approvals` 定义同一 Approval generation 的会签票数；每位当前 assigned approver 只能投票一次，
+任一拒绝立即终止，批准票达到 quorum 才产生 `approval.approved`。未达 quorum 的
+`approval.vote.recorded` 不改变 Session/Run 的 `waiting_for_human`。已投票者不能再委托；委托只能把
+自己的席位交给尚未分配的主体。升级可加入新的审批人，SLA worker 到达 `escalation_at` 时产生一次
+`approval.escalated` 通知事实，到达 `expires_at` 时产生 `approval.expired` 并恢复可调度状态，由 Agent
+决定改计划或结束，绝不把超时解释为批准。
+
+通知复用 Result Delivery 的 durable sink/job/retry/DLQ 管线。`approval.requested`、`delegated`、
+`escalated`、`expired`、`cancelled` 都进入 Delivery outbox；通知失败不回滚 Canonical Event，也不授权
+Tool 执行。
 
 ## 策略执行点
 
@@ -115,6 +131,7 @@ Streaming Gateway 只通知，不接收审批结果。
 policy_decisions_by_result
 approval_wait_time
 approval_expired
+approval_escalated
 action_digest_mismatch
 deny_reason
 policy_evaluation_latency
@@ -142,8 +159,9 @@ budget_exceeded
 
 - Policy Engine 目前是基于 ToolPermission 的简单内建规则，不是通用策略 DSL/OPA，也没有租户级版本化规则编辑闭环。
 - 当前产品约束来自部署配置，尚未提供租户自助规则编辑、组织级配额层次和通用策略 DSL。
-- Approval 通知渠道、升级、委托、多人会签和组织目录集成未实现。
-- 待补：策略包签名/发布/回滚、决策 explain、属性来源可信度、审批 SLA 与过期扫描 worker。
+- 通知、升级、委托、多人会签、一次性 SLA 升级和过期扫描已实现；组织目录同步仍由部署侧把稳定主体 ID
+  写入 Policy 配置，尚未提供目录连接器。
+- 待补：策略包签名/发布/回滚、决策 explain、属性来源可信度和租户级组织目录连接器。
 
 ## 三档审批模式（#92）
 
