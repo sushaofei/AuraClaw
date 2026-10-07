@@ -452,6 +452,13 @@ class Settings(BaseSettings):
     stream_connection_queue_size: int = 128
     stream_delta_min_interval_seconds: float = Field(default=0.02, ge=0.0, le=0.1)
     stream_heartbeat_interval_seconds: float = Field(default=15.0, gt=0.0, le=300.0)
+    streaming_gateway_instance_id: str | None = None
+    streaming_connection_ttl_seconds: int = Field(default=30, ge=10, le=300)
+    streaming_gateway_heartbeat_interval_seconds: float = Field(
+        default=5.0, ge=1.0, le=60.0
+    )
+    streaming_drain_timeout_seconds: int = Field(default=30, ge=5, le=300)
+    streaming_drain_retry_after_seconds: int = Field(default=5, ge=1, le=60)
     cors_allow_origins: str = ""
     runtime_poll_interval: float = 0.05
     approval_sla_scan_interval_seconds: float = Field(default=30.0, ge=1.0, le=3600.0)
@@ -671,6 +678,17 @@ class Settings(BaseSettings):
             >= self.policy_approval_ttl_seconds
         ):
             raise ValueError("approval escalation must occur before approval expiry")
+        return self
+
+    @model_validator(mode="after")
+    def validate_streaming_ownership(self) -> Settings:
+        if (
+            self.streaming_gateway_heartbeat_interval_seconds * 2
+            >= self.streaming_connection_ttl_seconds
+        ):
+            raise ValueError("streaming gateway TTL must exceed two heartbeat intervals")
+        if self.streaming_drain_retry_after_seconds > self.streaming_drain_timeout_seconds:
+            raise ValueError("streaming retry delay cannot exceed drain timeout")
         return self
 
     @property

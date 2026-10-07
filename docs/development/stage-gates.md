@@ -3634,3 +3634,14 @@ Ruff、Mypy（248 文件）、10 条架构合同通过。迁移不适用，部�
 - [x] Task、Approval、PostgreSQL Projection 均识别新增 Canonical Events；过期/取消进入 control feed 恢复调度。
 - [x] 架构真源、审批运维手册、生产上线检查、环境模板和当前迁移基线同步为 `0069`。
 - [x] Release gate、Ruff、Mypy、61 项针对性测试及完整测试（908 passed、68 skipped）通过；本阶段作为单一 intentional commit 提交并 push，Issue #104 更新验证证据。
+
+## 生产化 P1-D：Streaming drain、接管与孤儿连接治理（Issue #104）
+
+- [x] Streaming Gateway 以 owner id + generation 注册实例；活跃 owner 冲突 fail closed，TTL 过期后才允许新 generation 接管。
+- [x] 实例 heartbeat 与连接 heartbeat 分离持久化；连接续租同时校验 owner generation，失去所有权后动态 readiness 降级。
+- [x] drain 先拒绝新订阅并返回 503/Retry-After，再关闭本地 SSE；客户端以 Last-Event-ID 在其他副本续接。
+- [x] 活跃 Gateway 周期清理过期、owner 缺失和 generation 不匹配的孤儿连接；正常关闭只删除自身 generation。
+- [x] `0070` 正反迁移提供 gateway_instance、owner_generation 与回收索引；Compose 为 Streaming Gateway 保留 90 秒退出窗口。
+- [x] 环境模板明确 TTL、heartbeat、drain timeout 与 retry delay，并校验 TTL 大于两倍 heartbeat。
+- [x] 架构真源、横向恢复与生产部署手册明确摘流、接管、游标重连和 Result API 最终事实边界。
+- [x] Release gate、Ruff、Mypy、97 项通过且 3 项因本机无 PostgreSQL 跳过的针对性测试，以及完整测试（914 passed、69 skipped）通过；本阶段作为单一 intentional commit 提交并 push，Issue #104 更新验证证据。

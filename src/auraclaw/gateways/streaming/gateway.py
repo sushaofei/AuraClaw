@@ -18,6 +18,8 @@ class StreamSubscription(Protocol):
 
 
 class RuntimeReplayBus(Protocol):
+    async def ensure_accepting(self) -> None: ...
+
     async def subscribe(
         self, tenant_id: str, session_id: str, *, after_sequence: int | None = None
     ) -> StreamSubscription: ...
@@ -74,6 +76,9 @@ class StreamingGateway:
         )
 
     async def authorize(self, *, tenant_id: str, session_id: str) -> None:
+        ensure_accepting = getattr(self._bus, "ensure_accepting", None)
+        if ensure_accepting is not None:
+            await ensure_accepting()
         if await self._reader.get_task(tenant_id, session_id) is None:
             raise NotFoundError(f"Session not found: {session_id}")
 

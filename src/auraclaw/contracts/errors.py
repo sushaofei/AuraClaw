@@ -23,6 +23,11 @@ class NotFoundError(AuraClawError):
     status_code = 404
 
 
+class ServiceDrainingError(AuraClawError):
+    code = "service_draining"
+    status_code = 503
+
+
 class VersionConflictError(AuraClawError):
     code = "version_conflict"
     status_code = 409

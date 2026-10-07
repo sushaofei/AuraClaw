@@ -7,6 +7,7 @@ import asyncpg
 import pytest
 
 from auraclaw.config import get_settings
+from auraclaw.contracts.errors import ServiceDrainingError
 from auraclaw.infrastructure.kafka.runtime_events import PostgresRuntimeEventStore
 from auraclaw.infrastructure.persistence.postgres_common import asyncpg_url
 from auraclaw.runtime.ports import RuntimeEvent
@@ -15,6 +16,9 @@ SETTINGS = get_settings()
 DATABASE_URL = asyncpg_url(SETTINGS.resolved_database_url) if SETTINGS.postgres_enabled else None
 ROOT = Path(__file__).resolve().parents[2]
 MIGRATION = (ROOT / "migrations/0011_s4_streaming_state.sql").read_text()
+OWNERSHIP_MIGRATION = (
+    ROOT / "migrations/0070_streaming_connection_ownership.sql"
+).read_text()
 pytestmark = pytest.mark.skipif(DATABASE_URL is None, reason="PostgreSQL test URL not configured")
 
 
@@ -26,6 +30,10 @@ async def _apply_migration() -> None:
             "SELECT to_regclass('streaming.runtime_event')"
         ) is None:
             await connection.execute(MIGRATION)
+        if await connection.fetchval(
+            "SELECT to_regclass('streaming.gateway_instance')"
+        ) is None:
+            await connection.execute(OWNERSHIP_MIGRATION)
     finally:
         await connection.close()
 
@@ -140,5 +148,79 @@ def test_postgres_streaming_wakes_immediately_and_preserves_slow_deltas() -> Non
             await stream.aclose()
         finally:
             await store.close()
+
+    asyncio.run(scenario())
+
+
+def test_postgres_streaming_fences_live_owner_and_sweeps_orphans_on_takeover() -> None:
+    async def scenario() -> None:
+        assert DATABASE_URL is not None
+        await _apply_migration()
+        suffix = uuid4().hex
+        owner_id = f"gateway-takeover-{suffix}"
+        tenant_id = f"tenant-takeover-{suffix}"
+        session_id = f"session-takeover-{suffix}"
+        first = PostgresRuntimeEventStore(
+            DATABASE_URL,
+            owner_id=owner_id,
+            gateway_heartbeat_interval=60,
+            poll_interval=0.01,
+        )
+        replacement = PostgresRuntimeEventStore(
+            DATABASE_URL,
+            owner_id=owner_id,
+            gateway_heartbeat_interval=60,
+            poll_interval=0.01,
+        )
+        connection = await asyncpg.connect(DATABASE_URL)
+        subscription = None
+        try:
+            await first.start()
+            with pytest.raises(RuntimeError, match="already active"):
+                await replacement.start()
+            generation = await connection.fetchval(
+                "SELECT generation FROM streaming.gateway_instance WHERE owner_id=$1",
+                owner_id,
+            )
+            await connection.execute(
+                """INSERT INTO streaming.connection_registry
+                       (connection_id, tenant_id, session_id, owner_id,
+                        owner_generation, expires_at)
+                   VALUES ($1,$2,$3,$4,$5,now() + interval '1 hour')""",
+                f"orphan-{suffix}",
+                tenant_id,
+                session_id,
+                owner_id,
+                generation,
+            )
+            await connection.execute(
+                """UPDATE streaming.gateway_instance
+                   SET expires_at=now() - interval '1 second'
+                   WHERE owner_id=$1""",
+                owner_id,
+            )
+            await replacement.start()
+            assert await connection.fetchval(
+                "SELECT count(*) FROM streaming.connection_registry WHERE owner_id=$1",
+                owner_id,
+            ) == 0
+            with pytest.raises(ServiceDrainingError, match="ownership was lost"):
+                await first.ensure_accepting()
+
+            subscription = await replacement.subscribe(
+                tenant_id, session_id, after_sequence=0
+            )
+            events = subscription.events()
+            assert await replacement.begin_drain(retry_after_seconds=7) == 1
+            with pytest.raises(ServiceDrainingError, match="draining"):
+                await replacement.ensure_accepting()
+            with pytest.raises(StopAsyncIteration):
+                await anext(events)
+        finally:
+            if subscription is not None:
+                await subscription.close()
+            await first.close()
+            await replacement.close()
+            await connection.close()
 
     asyncio.run(scenario())

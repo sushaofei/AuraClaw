@@ -136,19 +136,35 @@ async def task_api_lifespan(app: FastAPI) -> AsyncIterator[None]:
 async def streaming_lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.service_name = "streaming-gateway"
     app.state.service_ready = False
-    ingestor = providers.get_streaming_ingestor()
-    if ingestor is not None:
-        await asyncio.wait_for(ingestor.start(), timeout=10)
-    app.state.runtime_event_bus_ready = True
-    app.state.service_ready = True
+    replay = providers.get_runtime_replay_bus()
+    ingestor = None
     try:
+        start_replay = getattr(replay, "start", None)
+        if start_replay is not None:
+            await asyncio.wait_for(start_replay(), timeout=10)
+        app.state.readiness_probe = getattr(replay, "readiness", None)
+        ingestor = providers.get_streaming_ingestor()
+        if ingestor is not None:
+            await asyncio.wait_for(ingestor.start(), timeout=10)
+        app.state.runtime_event_bus_ready = True
+        app.state.service_ready = True
         yield
     finally:
         app.state.service_ready = False
+        begin_drain = getattr(replay, "begin_drain", None)
+        if begin_drain is not None:
+            with suppress(Exception):
+                await asyncio.wait_for(
+                    begin_drain(
+                        retry_after_seconds=get_settings().streaming_drain_retry_after_seconds
+                    ),
+                    timeout=10,
+                )
         if ingestor is not None:
             with suppress(Exception):
                 await asyncio.wait_for(ingestor.close(), timeout=10)
-        await providers.get_runtime_replay_bus().close()
+        with suppress(Exception):
+            await replay.close()
         close_identity = getattr(app.state.identity_verifier, "close", None)
         if close_identity is not None:
             await close_identity()

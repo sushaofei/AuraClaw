@@ -1,3 +1,4 @@
+from datetime import timedelta
 from functools import lru_cache
 
 from auraclaw.config import get_settings
@@ -145,8 +146,17 @@ def get_runtime_replay_bus() -> RuntimeReplayStore:
     if settings.sql_storage_enabled:
         return PostgresRuntimeEventStore(
             settings.resolved_database_url,
+            owner_id=settings.streaming_gateway_instance_id,
             retention_events=settings.runtime_event_retention_events,
             connection_queue_size=settings.stream_connection_queue_size,
+            connection_ttl=timedelta(
+                seconds=settings.streaming_connection_ttl_seconds
+            ),
+            gateway_heartbeat_interval=(
+                settings.streaming_gateway_heartbeat_interval_seconds
+            ),
+            drain_timeout=timedelta(seconds=settings.streaming_drain_timeout_seconds),
+            drain_retry_after_seconds=settings.streaming_drain_retry_after_seconds,
         )
     return ReplayRuntimeEventBus(
         retention_events=settings.runtime_event_retention_events,

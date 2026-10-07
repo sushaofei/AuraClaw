@@ -1,5 +1,16 @@
 # S4 横向扩展与恢复运行说明
 
+## Streaming Gateway 所有权与摘流
+
+- Gateway 实例使用进程 generation 注册；同一 owner 的活跃 generation 不允许第二个进程覆盖。实例
+  heartbeat 失败或所有权被接管时 readiness 返回 503，新订阅返回 `service_draining` 与 Retry-After。
+- 发布时先从 LB 摘除旧实例并观察 readiness，再发送终止信号。终止钩子把实例标为 draining、关闭本地
+  SSE；客户端携带最后一个 `Last-Event-ID` 重连其他副本。不要把断开解释为任务取消或结果丢失。
+- active owner 缺失、generation 不匹配或 TTL 到期的连接由活跃 Gateway 周期清理。正常关闭的删除条件
+  同时包含 owner 和 generation，避免旧进程删除新进程接管后的记录。
+- 验收至少覆盖：活跃 owner 冲突拒绝、TTL 后接管、孤儿清除、drain 拒绝新连接、现有 SSE 结束、游标
+  重连无重复/倒序，以及最终结果继续从 Task Result API 读取。
+
 ## 生产拓扑建议
 
 S4 的进程均为无本地业务状态实例；Canonical Event、Control、Projection、Delivery、Hands、

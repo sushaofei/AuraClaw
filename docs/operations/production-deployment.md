@@ -19,7 +19,7 @@ Docker Compose 不提供 Kubernetes HPA、PDB 或 NetworkPolicy。本方案以�
 - 生产主存储固定为 KingBase V9 PostgreSQL 兼容模式；migration owner 与 11 个持久化服务
   分别使用独立的 `postgresql+asyncpg://` DSN；
 - migration owner 完成迁移后必须执行 `deploy/postgres/roles.sql`，并由平台分别设置角色密码；
-- Compose `migrate` 使用 `/app/migrations`，当前目标 `0069`；
+- Compose `migrate` 使用 `/app/migrations`，当前目标 `0070`；
 - Kafka/Replay Router、华为 OBS、Vault 和模型出口可从 `auraclaw-platform` 网络访问；
 - 部署机存在被 `.gitignore` 排除的 `.env.prod`，从 `.env.prod.example` 复制后填真实密钥；
 - Secret 不写入 Compose、镜像、命令参数或日志。
@@ -75,19 +75,19 @@ docker compose --env-file .env.prod -f compose.prod.yml stop
 
 docker compose --env-file .env.prod \
   -f compose.prod.yml run --rm migrate migrate up \
-  --target 0069 --directory /app/migrations
+  --target 0070 --directory /app/migrations
 
 # 由 migration owner 执行，确保现有对象和 default privileges 同时收敛
 psql "$AURACLAW_MIGRATION_DATABASE_URL" -f deploy/postgres/roles.sql
 
 docker compose --env-file .env.prod -f compose.prod.yml \
-  run --rm migrate migrate check --target 0069 --directory /app/migrations
+  run --rm migrate migrate check --target 0070 --directory /app/migrations
 ```
 
 迁移进程只挂载 migration admin DSN。KingBase 使用 PostgreSQL advisory lock 防止并发迁移，
 checksum ledger 阻止已执行文件漂移；重复运行是幂等的。`0058` 删除 MCP Tool 前缀字段，必须
 先停止所有旧实例，在维护窗口内迁移，再强制重建全部服务，不能滚动混跑。
-运行迁移前应已准备好同一不可变镜像，并核对其 `migrate latest` 为 `0069`。
+运行迁移前应已准备好同一不可变镜像，并核对其 `migrate latest` 为 `0070`。
 迁移或 `migrate check` 失败时禁止继续启动。
 
 数据库服务在开始监听前会只读校验完整迁移账本，缺失、checksum 漂移、版本不匹配均拒绝启动。
@@ -101,7 +101,7 @@ Secret 生成目录必须与 `.env.prod` 的 `AURACLAW_SECRET_DIR` 一致；目�
 ```bash
 docker compose --env-file .env.prod -f compose.prod.yml \
   --profile migrate run --rm migrate migrate baseline \
-  --target 0069 --confirm-existing-schema --directory /app/migrations
+  --target 0070 --confirm-existing-schema --directory /app/migrations
 ```
 
 全新库、未知来源库、部分迁移库或 checksum 不一致时禁止 baseline。
@@ -148,6 +148,11 @@ Gateway 可用。健康请求周期 10 秒、超时不高于 5 秒，连续 3 �
 | 普通 HTTP | 上游连接 3 秒、发送 30 秒、读取 120 秒；只在响应发送前对连接/502/503/504 最多换副本 1 次 |
 | SSE | 关闭 proxy buffering/cache；15 秒应用 heartbeat，代理 read timeout 75 秒；客户端必须支持 `Last-Event-ID` 重连 |
 | 优雅退出 | 外部 LB 先摘流，等待至少 75 秒；Nginx `stop_grace_period` 90 秒；断开的 SSE 依游标重连，最终结果仍查询 Result API |
+
+Streaming Gateway readiness 同时检查数据库中的 owner generation。摘流后进程进入 draining，新订阅返回
+503 与 Retry-After，现有 SSE 被关闭并由客户端通过 Last-Event-ID 接到其他副本。活跃 generation 不可被
+同 owner 覆盖；只有 TTL 到期才允许接管。部署验收须查询 `streaming.gateway_instance` 与
+`streaming.connection_registry`，确认旧 generation 和孤儿连接已清理，不能只看容器退出状态。
 
 外部负载均衡器的 idle timeout 必须大于 75 秒，请求总超时不得小于 120 秒；同步 Task 调用的客户端
 超时还必须大于其 `timeout_seconds`。413、408、502/503/504、SSE 断连和慢请求分别纳入指标与告警。
@@ -258,11 +263,11 @@ digest、实际环境、操作员和带时区的起止时间；每项 `evidence_
 
 演练按以下顺序进行，任一步失败立即恢复流量并保留现场：
 
-1. 在隔离恢复库执行 KingBase/PostgreSQL 一致性备份并恢复，运行 `migrate check --target 0069`，抽样核对
+1. 在隔离恢复库执行 KingBase/PostgreSQL 一致性备份并恢复，运行 `migrate check --target 0070`，抽样核对
    Canonical Session、Projection、Approval、Invocation、Audit 与 Artifact metadata；对象存储版本/校验和
    同步核对。不得用生产库本身充当“恢复目标”。
-2. 在恢复库依次执行 `0069_approval_workflow_governance.down.sql` 与 `0068_operations_search_indexes.down.sql`，验证旧镜像只读/回滚契约，再重新
-   `migrate up --target 0069`。任何 destructive migration 必须采用向前补偿，不能把 down SQL 直接用于生产。
+2. 在恢复库依次执行 `0070_streaming_connection_ownership.down.sql`、`0069_approval_workflow_governance.down.sql` 与 `0068_operations_search_indexes.down.sql`，验证旧镜像只读/回滚契约，再重新
+   `migrate up --target 0070`。任何 destructive migration 必须采用向前补偿，不能把 down SQL 直接用于生产。
 3. 停止隔离环境消费者，记录 Kafka topic/partition/offset，复制 consumer group 后从记录 offset 重放；Runtime
    Event 只核对 SSE/replay 行为，不能据此补写业务结果。Skill lifecycle 重放必须得到相同 generation/digest。
 4. 在空 Projection schema 或隔离租户执行 `auraclaw projection rebuild --tenant TENANT`，重建前后对比任务、
@@ -304,10 +309,10 @@ Delivery 重复副作用、OBS 对象与 metadata 无法收敛，或 Secret 出�
 5. 监控 Task API maintenance 日志、Delivery dead letter、审批等待时间和过期数；Projection 不可用时扫描
    fail closed，不允许从 Canonical Event 之外推断批准。
 
-## Skill / MCP 联合修复发布（0069 基线）
+## Skill / MCP 联合修复发布（0070 基线）
 
-当前迁移基线为 0069；0058 至 0063 涉及 Tool 前缀、审批模式、本地目录 generation 和 Skill 升级清理，
-0064 至 0069 增加 Runtime 成本预算、Skill admission 清理、持久 Child wakeup、有界指标快照、运维检索索引与审批治理字段。
+当前迁移基线为 0070；0058 至 0063 涉及 Tool 前缀、审批模式、本地目录 generation 和 Skill 升级清理，
+0064 至 0070 增加 Runtime 成本预算、Skill admission 清理、持久 Child wakeup、有界指标快照、运维检索、审批治理与 Streaming 所有权字段。
 协调发布全部服务，避免严格 DTO 及旧 Runtime 行为混跑。启用新 Hands 的自动清理之前，必须先确认旧 Runtime
 的在途写调用已结束或人工核对其结果；没有 Canonical invocation 记录的旧调用不能自动推断已完成。
 参见 [Skill 升级](skill-upgrade.md)、[工作流恢复](skill-workflow-recovery.md) 和各阶段门禁。

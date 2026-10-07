@@ -576,3 +576,19 @@ def test_model_gateway_mounts_policy_caller_identity_for_auto_review(profile: st
 def test_production_model_gateway_disables_hidden_reasoning_by_default() -> None:
     gateway = _render_compose()["services"]["model-gateway"]
     assert gateway["environment"]["AURACLAW_MODEL_THINKING_ENABLED"] == "false"
+
+
+@pytest.mark.parametrize("profile", ["test", "prod"])
+def test_streaming_gateway_compose_has_generation_drain_contract(profile: str) -> None:
+    import yaml
+
+    compose = yaml.safe_load((ROOT / f"compose.{profile}.yml").read_text())
+    gateway = compose["services"]["streaming-gateway"]
+    assert gateway["stop_grace_period"] == "90s"
+    environment = gateway["environment"]
+    assert environment["AURACLAW_STREAMING_CONNECTION_TTL_SECONDS"].endswith("-30}")
+    assert environment[
+        "AURACLAW_STREAMING_GATEWAY_HEARTBEAT_INTERVAL_SECONDS"
+    ].endswith("-5}")
+    assert environment["AURACLAW_STREAMING_DRAIN_TIMEOUT_SECONDS"].endswith("-30}")
+    assert environment["AURACLAW_STREAMING_DRAIN_RETRY_AFTER_SECONDS"].endswith("-5}")

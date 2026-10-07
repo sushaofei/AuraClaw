@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import socket
 from collections import defaultdict, deque
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
@@ -14,6 +15,7 @@ from uuid import uuid4
 import asyncpg  # type: ignore[import-untyped]
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer  # type: ignore[import-untyped]
 
+from auraclaw.contracts.errors import ServiceDrainingError
 from auraclaw.contracts.observability import MetricPoint
 from auraclaw.infrastructure.persistence.postgres_common import (
     LazyPool,
@@ -461,6 +463,39 @@ class ReplayRuntimeEventBus:
             defaultdict(set)
         )
         self._lock = asyncio.Lock()
+        self._draining = False
+        self._drain_retry_after_seconds = 5
+
+    async def start(self) -> None:
+        if self._draining:
+            raise ServiceDrainingError(
+                "streaming gateway is draining",
+                retry_after=self._drain_retry_after_seconds,
+            )
+
+    async def ensure_accepting(self) -> None:
+        if self._draining:
+            raise ServiceDrainingError(
+                "streaming gateway is draining",
+                retry_after=self._drain_retry_after_seconds,
+            )
+
+    async def readiness(self) -> tuple[bool, str]:
+        return (not self._draining, "active" if not self._draining else "draining")
+
+    async def begin_drain(self, *, retry_after_seconds: int = 5) -> int:
+        async with self._lock:
+            self._draining = True
+            self._drain_retry_after_seconds = retry_after_seconds
+            closed = 0
+            for subscribers in self._subscribers.values():
+                for queue in subscribers:
+                    while not queue.empty():
+                        with suppress(asyncio.QueueEmpty):
+                            queue.get_nowait()
+                    queue.put_nowait(None)
+                    closed += 1
+            return closed
 
     async def publish(self, event: RuntimeEvent) -> None:
         if event.visibility == "secret":
@@ -489,6 +524,7 @@ class ReplayRuntimeEventBus:
     async def subscribe(
         self, tenant_id: str, session_id: str, *, after_sequence: int | None = None
     ) -> RuntimeSubscription:
+        await self.ensure_accepting()
         key = (tenant_id, session_id)
         queue: asyncio.Queue[RuntimeEvent | None] = asyncio.Queue(maxsize=self._queue_size)
         async with self._lock:
@@ -517,11 +553,8 @@ class ReplayRuntimeEventBus:
             return list(self._events[(tenant_id, session_id)])
 
     async def close(self) -> None:
+        await self.begin_drain()
         async with self._lock:
-            for subscribers in self._subscribers.values():
-                for queue in subscribers:
-                    with suppress(asyncio.QueueFull):
-                        queue.put_nowait(None)
             self._subscribers.clear()
 
 
@@ -536,18 +569,182 @@ class PostgresRuntimeEventStore(LazyPool):
         retention_events: int = 1_000,
         connection_queue_size: int = 128,
         connection_ttl: timedelta = timedelta(seconds=30),
+        gateway_heartbeat_interval: float = 5.0,
+        drain_timeout: timedelta = timedelta(seconds=30),
+        drain_retry_after_seconds: int = 5,
         poll_interval: float = 0.1,
     ) -> None:
         super().__init__(database_url)
-        self._owner_id = owner_id or f"streaming-{uuid4().hex}"
+        self._owner_id = owner_id or f"streaming-{socket.gethostname()}"
+        self._generation = f"gen_{uuid4().hex}"
         self._retention_events = retention_events
         self._queue_size = connection_queue_size
         self._connection_ttl = connection_ttl
+        self._gateway_heartbeat_interval = gateway_heartbeat_interval
+        self._drain_timeout = drain_timeout
+        self._drain_retry_after_seconds = drain_retry_after_seconds
         self._poll_interval = poll_interval
         self._subscriptions: dict[str, asyncio.Task[None]] = {}
         self._subscription_keys: dict[str, tuple[str, str]] = {}
         self._subscription_wakeups: dict[str, asyncio.Event] = {}
+        self._subscription_queues: dict[str, asyncio.Queue[RuntimeEvent | None]] = {}
+        self._lifecycle_task: asyncio.Task[None] | None = None
+        self._lifecycle_lock = asyncio.Lock()
+        self._started = False
+        self._draining = False
         self._closed = False
+
+    async def start(self) -> None:
+        async with self._lifecycle_lock:
+            if self._started:
+                return
+            if self._closed:
+                raise RuntimeError("runtime event store is closed")
+            pool = await self.pool()
+            row = await pool.fetchrow(
+                """INSERT INTO streaming.gateway_instance
+                       (owner_id, generation, state, expires_at)
+                   VALUES ($1, $2, 'active', now() + $3::interval)
+                   ON CONFLICT (owner_id) DO UPDATE SET
+                       generation=EXCLUDED.generation, state='active',
+                       started_at=now(), heartbeat_at=now(),
+                       drain_started_at=NULL, drain_deadline=NULL,
+                       expires_at=EXCLUDED.expires_at
+                   WHERE streaming.gateway_instance.expires_at <= now()
+                      OR streaming.gateway_instance.generation = EXCLUDED.generation
+                   RETURNING owner_id""",
+                self._owner_id,
+                self._generation,
+                self._connection_ttl,
+            )
+            if row is None:
+                raise RuntimeError("streaming gateway instance identity is already active")
+            self._draining = False
+            try:
+                await self.sweep_orphan_connections()
+            except Exception:
+                await pool.execute(
+                    """DELETE FROM streaming.gateway_instance
+                       WHERE owner_id=$1 AND generation=$2""",
+                    self._owner_id,
+                    self._generation,
+                )
+                raise
+            self._started = True
+            self._lifecycle_task = asyncio.create_task(self._heartbeat_gateway())
+
+    async def ensure_accepting(self) -> None:
+        await self.start()
+        if self._draining:
+            raise ServiceDrainingError(
+                "streaming gateway is draining",
+                retry_after=self._drain_retry_after_seconds,
+            )
+        pool = await self.pool()
+        active = await pool.fetchval(
+            """SELECT EXISTS (
+                SELECT 1 FROM streaming.gateway_instance
+                WHERE owner_id=$1 AND generation=$2 AND state='active'
+                  AND expires_at > now())""",
+            self._owner_id,
+            self._generation,
+        )
+        if not active:
+            self._draining = True
+            raise ServiceDrainingError(
+                "streaming gateway ownership was lost",
+                retry_after=self._drain_retry_after_seconds,
+            )
+
+    async def readiness(self) -> tuple[bool, str]:
+        try:
+            await self.ensure_accepting()
+        except (RuntimeError, ServiceDrainingError) as exc:
+            return False, str(exc)
+        except Exception:
+            logging.getLogger(__name__).exception("streaming ownership check failed")
+            return False, "streaming ownership check failed"
+        return True, "active"
+
+    async def begin_drain(self, *, retry_after_seconds: int | None = None) -> int:
+        if not self._started or self._draining:
+            return 0
+        self._draining = True
+        if retry_after_seconds is not None:
+            self._drain_retry_after_seconds = retry_after_seconds
+        if self._lifecycle_task is not None:
+            self._lifecycle_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._lifecycle_task
+            self._lifecycle_task = None
+        try:
+            pool = await self.pool()
+            await pool.execute(
+                """UPDATE streaming.gateway_instance
+                   SET state='draining', heartbeat_at=now(), drain_started_at=now(),
+                       drain_deadline=now() + $3::interval,
+                       expires_at=now() + $3::interval
+                   WHERE owner_id=$1 AND generation=$2""",
+                self._owner_id,
+                self._generation,
+                self._drain_timeout,
+            )
+        finally:
+            closed = self._close_subscription_queues()
+        return closed
+
+    def _close_subscription_queues(self) -> int:
+        closed = 0
+        for queue in tuple(self._subscription_queues.values()):
+            while not queue.empty():
+                with suppress(asyncio.QueueEmpty):
+                    queue.get_nowait()
+            queue.put_nowait(None)
+            closed += 1
+        return closed
+
+    async def sweep_orphan_connections(self) -> int:
+        pool = await self.pool()
+        rows = await pool.fetch(
+            """DELETE FROM streaming.connection_registry AS target
+               WHERE target.expires_at <= now()
+                  OR NOT EXISTS (
+                      SELECT 1 FROM streaming.gateway_instance AS gateway
+                      WHERE gateway.owner_id=target.owner_id
+                        AND gateway.generation=target.owner_generation
+                        AND gateway.expires_at > now())
+               RETURNING connection_id"""
+        )
+        await pool.execute(
+            "DELETE FROM streaming.gateway_instance WHERE expires_at <= now()"
+        )
+        return len(rows)
+
+    async def _heartbeat_gateway(self) -> None:
+        pool = await self.pool()
+        try:
+            while True:
+                await asyncio.sleep(self._gateway_heartbeat_interval)
+                status = await pool.execute(
+                    """UPDATE streaming.gateway_instance
+                       SET heartbeat_at=now(), expires_at=now() + $3::interval
+                       WHERE owner_id=$1 AND generation=$2 AND state='active'
+                         AND expires_at > now()""",
+                    self._owner_id,
+                    self._generation,
+                    self._connection_ttl,
+                )
+                if status.rsplit(" ", 1)[-1] == "0":
+                    self._draining = True
+                    self._close_subscription_queues()
+                    return
+                await self.sweep_orphan_connections()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logging.getLogger(__name__).exception("streaming gateway heartbeat failed")
+            self._draining = True
+            self._close_subscription_queues()
 
     async def next_sequence(self, tenant_id: str, session_id: str) -> int:
         pool = await self.pool()
@@ -626,8 +823,7 @@ class PostgresRuntimeEventStore(LazyPool):
     async def subscribe(
         self, tenant_id: str, session_id: str, *, after_sequence: int | None = None
     ) -> RuntimeSubscription:
-        if self._closed:
-            raise RuntimeError("runtime event store is closed")
+        await self.ensure_accepting()
         pool = await self.pool()
         connection_id = f"conn_{uuid4().hex}"
         queue: asyncio.Queue[RuntimeEvent | None] = asyncio.Queue(maxsize=self._queue_size)
@@ -661,18 +857,20 @@ class PostgresRuntimeEventStore(LazyPool):
             await connection.execute(
                 """INSERT INTO streaming.connection_registry
                        (connection_id, tenant_id, session_id, owner_id,
-                        cursor_sequence, expires_at)
-                   VALUES ($1, $2, $3, $4, $5, now() + $6::interval)""",
+                        owner_generation, cursor_sequence, expires_at)
+                   VALUES ($1, $2, $3, $4, $5, $6, now() + $7::interval)""",
                 connection_id,
                 tenant_id,
                 session_id,
                 self._owner_id,
+                self._generation,
                 cursor,
                 self._connection_ttl,
             )
         wakeup = asyncio.Event()
         self._subscription_keys[connection_id] = (tenant_id, session_id)
         self._subscription_wakeups[connection_id] = wakeup
+        self._subscription_queues[connection_id] = queue
         task = asyncio.create_task(
             self._poll(connection_id, tenant_id, session_id, cursor, queue, wakeup)
         )
@@ -682,14 +880,18 @@ class PostgresRuntimeEventStore(LazyPool):
             polling = self._subscriptions.pop(connection_id, None)
             self._subscription_keys.pop(connection_id, None)
             self._subscription_wakeups.pop(connection_id, None)
+            self._subscription_queues.pop(connection_id, None)
             if polling is not None and polling is not asyncio.current_task():
                 polling.cancel()
                 with suppress(asyncio.CancelledError):
                     await polling
             current_pool = await self.pool()
             await current_pool.execute(
-                "DELETE FROM streaming.connection_registry WHERE connection_id = $1",
+                """DELETE FROM streaming.connection_registry
+                   WHERE connection_id = $1 AND owner_id=$2 AND owner_generation=$3""",
                 connection_id,
+                self._owner_id,
+                self._generation,
             )
 
         return RuntimeSubscription(
@@ -740,11 +942,18 @@ class PostgresRuntimeEventStore(LazyPool):
                     """UPDATE streaming.connection_registry
                        SET cursor_sequence = $2, heartbeat_at = now(),
                            expires_at = now() + $3::interval
-                       WHERE connection_id = $1 AND owner_id = $4""",
+                       WHERE connection_id = $1 AND owner_id = $4
+                         AND owner_generation = $5
+                         AND EXISTS (
+                             SELECT 1 FROM streaming.gateway_instance
+                             WHERE owner_id=$4 AND generation=$5
+                               AND state IN ('active','draining')
+                               AND expires_at > now())""",
                     connection_id,
                     cursor,
                     self._connection_ttl,
                     self._owner_id,
+                    self._generation,
                 )
                 if rows and not queue.full() and cursor < self._event(rows[-1]).sequence:
                     continue
@@ -755,8 +964,10 @@ class PostgresRuntimeEventStore(LazyPool):
         except asyncio.CancelledError:
             raise
         except Exception:
-            with suppress(asyncio.QueueFull):
-                queue.put_nowait(None)
+            while not queue.empty():
+                with suppress(asyncio.QueueEmpty):
+                    queue.get_nowait()
+            queue.put_nowait(None)
 
     async def events(self, tenant_id: str, session_id: str) -> list[RuntimeEvent]:
         pool = await self.pool()
@@ -769,11 +980,14 @@ class PostgresRuntimeEventStore(LazyPool):
         return [self._event(row) for row in rows]
 
     async def close(self) -> None:
+        with suppress(Exception):
+            await self.begin_drain()
         self._closed = True
         tasks = tuple(self._subscriptions.values())
         self._subscriptions.clear()
         self._subscription_keys.clear()
         self._subscription_wakeups.clear()
+        self._subscription_queues.clear()
         for task in tasks:
             task.cancel()
         for task in tasks:
@@ -781,8 +995,16 @@ class PostgresRuntimeEventStore(LazyPool):
                 await task
         if self._pool is not None:
             await self._pool.execute(
-                "DELETE FROM streaming.connection_registry WHERE owner_id = $1",
+                """DELETE FROM streaming.connection_registry
+                   WHERE owner_id = $1 AND owner_generation=$2""",
                 self._owner_id,
+                self._generation,
+            )
+            await self._pool.execute(
+                """DELETE FROM streaming.gateway_instance
+                   WHERE owner_id = $1 AND generation=$2""",
+                self._owner_id,
+                self._generation,
             )
         await super().close()
 

@@ -199,7 +199,8 @@ def _check_supply_chain(failures: list[str]) -> None:
         "--http-url http://127.0.0.1:8333/",
         "docker logs prod-like-seaweedfs",
         "scripts/prod_like_gate.py verify-junit",
-        "--minimum-tests 8",
+        "tests/integration/test_postgres_s4_streaming.py",
+        "--minimum-tests 11",
     ):
         if required not in workflow:
             failures.append(f"release workflow is missing prod-like gate: {required}")

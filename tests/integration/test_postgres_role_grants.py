@@ -129,6 +129,18 @@ async def _assert_catalog_role(
             owner_table,
             privilege,
         )
+    if expected_role == "auraclaw_streaming":
+        for table in (
+            "streaming.gateway_instance",
+            "streaming.connection_registry",
+        ):
+            for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE"):
+                assert await connection.fetchval(
+                    "SELECT has_table_privilege($1,$2,$3)",
+                    expected_role,
+                    table,
+                    privilege,
+                )
     for foreign_table in tables:
         if foreign_table == owner_table:
             continue
@@ -182,6 +194,7 @@ async def _assert_task_api_privileges(connection: asyncpg.Connection) -> None:
         "credential.reference",
         "artifact.metadata",
         "streaming.runtime_event",
+        "streaming.gateway_instance",
         "model_gateway.model_call",
     ):
         assert not await connection.fetchval(
@@ -224,6 +237,12 @@ def test_production_roles_enforce_owner_and_task_api_boundaries() -> None:
             try:
                 await _assert_hardened_login(connection, expected_role)
                 await _assert_owner_dml(connection, owner_table, update_column)
+                if expected_role == "auraclaw_streaming":
+                    await _assert_owner_dml(
+                        connection,
+                        "streaming.gateway_instance",
+                        "owner_id",
+                    )
                 for foreign_table in tables:
                     if foreign_table == owner_table:
                         continue
