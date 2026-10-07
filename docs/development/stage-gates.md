@@ -3554,3 +3554,9 @@ Ruff、Mypy（248 文件）、10 条架构合同通过。迁移不适用，部�
 - [x] JUnit 证据要求至少 8 项测试且 failures、errors、skipped 均为零；依赖缺失或配置漂移不能静默跳过。
 - [x] 数据库角色测试改用当前 `AURACLAW_*_DATABASE_URL` 名称，并验证 `auraclaw_task_api` 的 Projection 只读、Hands 读写、Observability 只读及跨域拒绝矩阵。
 - [x] 本地等价 prod-like 拓扑、Release gate、Ruff、Mypy、针对性测试和完整 CI profile 通过；本阶段作为单一 intentional commit 提交并 push，Issue #104 更新验证证据。
+
+### P0-D 远端 Runner 修正
+
+- [x] 根据首次 GitHub Actions 实跑结果，将本机 PostgreSQL、Kafka、SeaweedFS 连接固定为 IPv4 loopback，并同时设置大小写 `NO_PROXY`，避免托管 Runner 代理截获预签名 S3 请求。
+- [x] prod-like 作业失败时输出 SeaweedFS 容器诊断日志，作业结束时无条件清理临时容器。
+- [x] Release gate、Ruff、Mypy、针对性测试与完整 CI profile 通过并推送；GitHub Actions `prod-like-integration` 复跑状态单独留证。

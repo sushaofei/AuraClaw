@@ -127,14 +127,18 @@ jobs:
       AURACLAW_DISABLE_ENV_FILE: "1"
       AURACLAW_POSTGRESQL_ENV_FILE: /dev/null
       AURACLAW_KINGBASE_ENV_FILE: /dev/null
+      # Hosted runners may inject HTTP(S)_PROXY. Keep loopback integration
+      # traffic direct so signed S3 requests cannot escape to that proxy.
+      NO_PROXY: localhost,127.0.0.1,::1
+      no_proxy: localhost,127.0.0.1,::1
       AURACLAW_STORAGE_BACKEND: postgres
-      AURACLAW_DATABASE_URL: postgresql+asyncpg://auraclaw_migration:prod-like-migration-password@localhost:5432/auraclaw
-      AURACLAW_MIGRATION_DATABASE_URL: postgresql+asyncpg://auraclaw_migration:prod-like-migration-password@localhost:5432/auraclaw
+      AURACLAW_DATABASE_URL: postgresql+asyncpg://auraclaw_migration:prod-like-migration-password@127.0.0.1:5432/auraclaw
+      AURACLAW_MIGRATION_DATABASE_URL: postgresql+asyncpg://auraclaw_migration:prod-like-migration-password@127.0.0.1:5432/auraclaw
       AURACLAW_RUNTIME_EVENT_BACKEND: kafka
-      KAFKA_HOST: localhost
+      KAFKA_HOST: 127.0.0.1
       KAFKA_PORT: "9092"
       AURACLAW_ARTIFACT_BACKEND: seaweedfs
-      SEAWEEDFS_HOST: localhost
+      SEAWEEDFS_HOST: 127.0.0.1
       SEAWEEDFS_S3_PORT: "8333"
       SEAWEEDFS_ACCESS_KEY: prod-like-access-key
       SEAWEEDFS_SECRET_KEY: prod-like-secret-key
@@ -158,9 +162,9 @@ jobs:
       - name: Require every external dependency
         run: >-
           uv run python scripts/prod_like_gate.py wait
-          --endpoint localhost:5432
-          --endpoint localhost:9092
-          --endpoint localhost:8333
+          --endpoint 127.0.0.1:5432
+          --endpoint 127.0.0.1:9092
+          --endpoint 127.0.0.1:8333
       - name: Migrate schema and install production role matrix
         run: |
           uv run auraclaw migrate up --directory migrations
@@ -186,3 +190,9 @@ jobs:
           path: artifacts/prod-like-junit.xml
           if-no-files-found: error
           retention-days: 30
+      - name: Capture object-storage diagnostics
+        if: failure()
+        run: docker logs prod-like-seaweedfs
+      - name: Remove object-storage container
+        if: always()
+        run: docker rm --force prod-like-seaweedfs
