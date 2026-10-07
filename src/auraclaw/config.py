@@ -36,6 +36,8 @@ _SECRET_FILE_VARIABLES = {
     "AURACLAW_LEASE_SIGNING_KEY",
     "AURACLAW_MODEL_API_KEY",
     "AURACLAW_SKILL_SIGNING_KEY",
+    "AURACLAW_OBSERVABILITY_EXPORTER_TOKEN",
+    "AURACLAW_ALERT_RECEIVER_TOKEN",
     "AURACLAW_CREDENTIAL_VAULT_TOKEN",
     "AURACLAW_CREDENTIAL_VAULT_APPROLE_SECRET_ID",
     "SEAWEEDFS_ACCESS_KEY",
@@ -367,6 +369,13 @@ class Settings(BaseSettings):
     delivery_circuit_reset_seconds: float = Field(default=30.0, ge=0.1, le=3600.0)
     delivery_circuit_probe_ttl_seconds: float = Field(default=10.0, ge=0.1, le=300.0)
     log_level: str = "INFO"
+    observability_otlp_http_endpoint: str | None = None
+    observability_exporter_token: SecretStr | None = None
+    alert_receiver_url: str | None = None
+    alert_receiver_token: SecretStr | None = None
+    observability_export_timeout_seconds: float = Field(default=2.0, gt=0, le=30)
+    observability_export_retry_attempts: int = Field(default=2, ge=1, le=5)
+    observability_export_queue_capacity: int = Field(default=2048, ge=1, le=100_000)
     storage_backend: Literal["auto", "memory", "postgres", "kingbase"] = "auto"
     db_dialect: Literal["postgres"] = "postgres"
     database_url: str = "postgresql+asyncpg://auraclaw:auraclaw@localhost:5432/auraclaw"
@@ -583,6 +592,18 @@ class Settings(BaseSettings):
             and self.allow_insecure_identity_headers is True
         ):
             raise ValueError("insecure identity headers cannot be enabled in production")
+        return self
+
+    @model_validator(mode="after")
+    def validate_observability_export(self) -> Settings:
+        configured = (
+            self.observability_otlp_http_endpoint,
+            self.alert_receiver_url,
+        )
+        if self.deployment_profile == "production":
+            insecure = [url for url in configured if url and not url.startswith("https://")]
+            if insecure:
+                raise ValueError("production observability endpoints must use HTTPS")
         return self
 
     @model_validator(mode="after")

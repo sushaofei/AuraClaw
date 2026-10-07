@@ -7,6 +7,7 @@ from fastapi import FastAPI
 
 from auraclaw.admin.internal_service import OwnerAdminService
 from auraclaw.composition import providers
+from auraclaw.composition.observability import exporting_observability_store
 from auraclaw.composition.services import (
     ServiceSpec,
     _base_service_app,
@@ -56,7 +57,11 @@ def build_projection_app(
         worker_id="projection-worker",
         wait_seconds=claim_wait,
     )
-    observability_store = providers.get_observability_store()
+    observability_store = exporting_observability_store(
+        settings,
+        service_name="projection-worker",
+        store=providers.get_observability_store(),
+    )
     projector = CompositeProjection(
         *providers.session_outbox_projectors(),
         ObservabilityProjector(ObservabilityService(observability_store, remote_session)),

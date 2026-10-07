@@ -27,6 +27,7 @@ from auraclaw.api.dependencies import (
 from auraclaw.api.routes.admin_mcp import create_mcp_admin_router
 from auraclaw.api.routes.admin_skills import create_skill_admin_router
 from auraclaw.composition.api import create_app
+from auraclaw.composition.observability import exporting_observability_store
 from auraclaw.composition.services import (
     ServiceSpec,
     _capability_catalog_store,
@@ -113,7 +114,11 @@ def build_task_api_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         max_timeout_seconds=settings.sync_invoke_max_timeout_seconds,
     )
     invocations = SyncInvocationGateway(gateway, waiter)
-    observability_store = PostgresObservabilityStore(settings.resolved_database_url)
+    observability_store = exporting_observability_store(
+        settings,
+        service_name="task-api",
+        store=PostgresObservabilityStore(settings.resolved_database_url),
+    )
     observability = ObservabilityService(observability_store, remote_session)
     app.dependency_overrides[get_task_command_gateway] = lambda: gateway
     app.dependency_overrides[get_task_projection] = lambda: task_projection

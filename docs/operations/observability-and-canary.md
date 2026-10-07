@@ -16,7 +16,30 @@ GET /v1/operations/metrics/summary?window_hours=24
 ```
 
 `metrics/summary` 在 tenant 边界内按指标返回 count、sum、average、min、max、p50、p95、p99，窗口限制
-1～720 小时。Skill 加载灰度至少观察以下门禁：
+1～720 小时。
+
+## 外部观测出口
+
+生产部署必须显式配置 `AURACLAW_OBSERVABILITY_OTLP_HTTP_ENDPOINT` 和
+`AURACLAW_ALERT_RECEIVER_URL`。Trace 与 Metric 使用 OTLP/HTTP JSON，分别投递到 Collector 的
+`/v1/traces`、`/v1/metrics`；规则告警使用 Alertmanager v2 `POST /api/v2/alerts`。两个地址在
+production profile 下必须使用 HTTPS。若平台需要应用层令牌，分别通过
+`AURACLAW_OBSERVABILITY_EXPORTER_TOKEN_FILE`、`AURACLAW_ALERT_RECEIVER_TOKEN_FILE` 注入，令牌不写入
+环境模板、日志或告警标签。
+
+投递顺序固定为先写 PostgreSQL 观测表，再进入有界异步队列执行外部投递。超时、重试和队列容量由
+`AURACLAW_OBSERVABILITY_EXPORT_TIMEOUT_SECONDS`、
+`AURACLAW_OBSERVABILITY_EXPORT_RETRY_ATTEMPTS`、
+`AURACLAW_OBSERVABILITY_EXPORT_QUEUE_CAPACITY` 控制。Collector 或 Alertmanager 不可用时记录
+`observability_export_failed` 结构化错误，但不得回滚 Canonical Event、改变 Session 状态或触发工具重放；
+PostgreSQL 中的 Trace、Metric、Alert 仍是补采和事故审计依据。告警接收端按 `alertname`、`tenant_id`、
+`session_id` 和稳定 `alert_id` 聚合，禁止将 Prompt、Response、凭据或 Artifact 正文复制进标签。
+
+发布前至少验证：Collector 对两类 OTLP 请求返回 2xx、Alertmanager 对合成告警返回 2xx、应用日志中没有
+Authorization 值、关闭外部端点后业务请求仍只产生可观测性降级而非业务失败。连续投递失败必须由平台侧
+日志告警捕获；恢复后根据 PostgreSQL 保留窗口补采缺口，补采不得写回业务事件。
+
+Skill 加载灰度至少观察以下门禁：
 
 - 同一 run 第二轮后的 `skill.runtime.content_cache.miss.count` 应为 0；持续非零停止放量。
 - `skill.runtime.prompt.rejected.count` 应为 0；出现时按 prompt budget 处理，不复制正文到工单。

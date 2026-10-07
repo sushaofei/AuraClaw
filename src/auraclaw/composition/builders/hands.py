@@ -60,6 +60,7 @@ from auraclaw.action.skill_rebuild import SkillStateRebuilder
 from auraclaw.action.skill_reliability import SkillPublicationReliabilityWorker
 from auraclaw.action.skill_upgrade_cleanup import SkillUpgradeCleanupWorker
 from auraclaw.action.tool_gateway import ToolGateway, ToolRegistry
+from auraclaw.composition.observability import exporting_observability_store
 from auraclaw.composition.services import (
     EmptyApprovalReader,
     ServiceSpec,
@@ -128,6 +129,7 @@ from auraclaw.infrastructure.persistence.postgres_tool_registry import (
 from auraclaw.internal.http import create_contract_app
 from auraclaw.internal.routes import mcp_registry_routes, skill_publication_routes
 from auraclaw.internal.security import LeaseAssertionVerifier
+from auraclaw.observability.service import ObservabilityStore
 
 logger = logging.getLogger(__name__)
 
@@ -176,12 +178,16 @@ def build_action_hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
     )
     invocation_store: PostgresInvocationStore | None = None
     tool_registry_store: PostgresToolRegistryStore | None = None
-    hands_metric_store: PostgresObservabilityStore | None = None
+    hands_metric_store: ObservabilityStore | None = None
     skill_publisher_store: PostgresSkillPublisherStore | InMemorySkillPublisherStore
     if settings.sql_storage_enabled:
         invocation_store = PostgresInvocationStore(settings.resolved_database_url)
         tool_registry_store = PostgresToolRegistryStore(settings.resolved_database_url)
-        hands_metric_store = PostgresObservabilityStore(settings.resolved_database_url)
+        hands_metric_store = exporting_observability_store(
+            settings,
+            service_name="action-hands",
+            store=PostgresObservabilityStore(settings.resolved_database_url),
+        )
         skill_lifecycle: SkillLifecycleStore = PostgresSkillLifecycleStore(
             settings.resolved_database_url,
             transaction_retry_attempts=settings.skill_transaction_retry_attempts,

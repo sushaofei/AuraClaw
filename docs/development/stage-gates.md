@@ -3570,3 +3570,13 @@ Ruff、Mypy（248 文件）、10 条架构合同通过。迁移不适用，部�
 - [x] production 组合和 Compose/preflight 强制显式扫描器 URL，Artifact Service readiness 同时检查对象存储与扫描器。
 - [x] 单元测试覆盖远端契约、响应值约束、恶意命中和扫描器不可用的 fail-closed 行为；运维文档固定接口、安全边界和发布检查。
 - [x] Release gate、Ruff、Mypy、66 项针对性测试及完整 CI profile（889 passed、68 skipped）通过；本阶段作为单一 intentional commit 提交并 push，Issue #104 更新验证证据。
+
+## 生产化 P0-F：外部可观测性出口（Issue #104）
+
+- [x] 所有服务继续输出带 service、UTC 时间、级别和脱敏字段的单行 JSON 日志。
+- [x] Trace 与 Metric 通过 OTLP/HTTP JSON 导出，规则告警通过 Alertmanager v2 接收器投递。
+- [x] Task API、Projection Worker、Model Gateway、Action Hands 与 Delivery Worker 的直接观测写入均在组合边界接入导出器。
+- [x] 观测数据先持久化再有界投递；外部端点失败不会改变 Canonical Event、Session 状态或重放副作用。
+- [x] 生产 Compose 与 preflight 强制显式 OTLP 和告警地址，production profile 拒绝明文 HTTP 端点。
+- [x] 单元测试覆盖 OTLP/Alertmanager payload、Bearer 隔离、重试上限和持久化优先语义；运维文档包含故障与补采契约。
+- [x] Release gate、Ruff、Mypy、79 项针对性测试及完整测试（892 passed、68 skipped）通过；本阶段作为单一 intentional commit 提交并 push，Issue #104 更新验证证据。

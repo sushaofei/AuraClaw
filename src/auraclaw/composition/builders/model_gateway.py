@@ -5,6 +5,7 @@ import secrets
 from fastapi import FastAPI
 
 from auraclaw.composition import providers
+from auraclaw.composition.observability import exporting_observability_store
 from auraclaw.composition.services import (
     ServiceSpec,
     UnavailableModelClient,
@@ -29,7 +30,11 @@ def build_model_gateway_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         else None
     )
     metric_store = (
-        PostgresObservabilityStore(settings.resolved_database_url)
+        exporting_observability_store(
+            settings,
+            service_name="model-gateway",
+            store=PostgresObservabilityStore(settings.resolved_database_url),
+        )
         if settings.sql_storage_enabled
         else None
     )

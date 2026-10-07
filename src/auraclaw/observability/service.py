@@ -38,6 +38,16 @@ class ObservabilityStore(Protocol):
     async def metric_summary(self, tenant_id: str, *, window_hours: int) -> list[MetricSummary]: ...
 
 
+class TelemetryExporter(Protocol):
+    """Outbound observability port implemented by infrastructure adapters."""
+
+    async def export_span(self, span: TraceSpan) -> None: ...
+
+    async def export_metric(self, metric: MetricPoint) -> None: ...
+
+    async def deliver_alert(self, alert: Alert) -> None: ...
+
+
 class EventReader(Protocol):
     async def load(
         self,
@@ -163,21 +173,20 @@ class ObservabilityService:
             threshold, severity, summary = rule
             identity = ":".join((name, point.tenant_id or "global", point.session_id or "global"))
             digest = hashlib.sha256(identity.encode()).hexdigest()[:24]
-            await self._store.write_alert(
-                Alert(
-                    alert_id=f"alt_{digest}",
-                    rule=name,
-                    severity=severity,
-                    status="firing",
-                    summary=summary,
-                    fired_at=point.observed_at,
-                    tenant_id=point.tenant_id,
-                    root_session_id=point.root_session_id,
-                    session_id=point.session_id,
-                    run_id=point.run_id,
-                    labels={"threshold": str(threshold), **point.labels},
-                )
+            alert = Alert(
+                alert_id=f"alt_{digest}",
+                rule=name,
+                severity=severity,
+                status="firing",
+                summary=summary,
+                fired_at=point.observed_at,
+                tenant_id=point.tenant_id,
+                root_session_id=point.root_session_id,
+                session_id=point.session_id,
+                run_id=point.run_id,
+                labels={"threshold": str(threshold), **point.labels},
             )
+            await self._store.write_alert(alert)
         return point
 
     async def timeline(self, tenant_id: str, session_id: str) -> dict[str, Any]:
