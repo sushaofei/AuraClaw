@@ -596,7 +596,7 @@ services:
     user: "101:101"
     read_only: true
     restart: unless-stopped
-    stop_grace_period: 30s
+    stop_grace_period: 90s
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     tmpfs:
@@ -606,7 +606,7 @@ services:
     depends_on:
       task-api: {condition: service_healthy}
       streaming-gateway: {condition: service_healthy}
-    ports: ["${AURACLAW_INGRESS_PORT:-8080}:8080"]
+    ports: ["${AURACLAW_INGRESS_BIND_ADDRESS:-127.0.0.1}:${AURACLAW_INGRESS_PORT:-8080}:8080"]
     volumes:
       - ./deploy/nginx.conf:/etc/nginx/conf.d/default.conf:ro
     networks: [auraclaw, edge]

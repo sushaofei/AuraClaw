@@ -126,6 +126,33 @@ Compose 的 `deploy.replicas`、resources、restart policy 会由 Compose v2 应
 Ingress 使用 Docker DNS 动态重解析 Task API 与 Streaming Gateway；副本扩缩容或替换后
 不需要重启 Nginx。
 
+### 4.1 外部 TLS、健康检查与连接契约
+
+仓库内 Nginx 是集群内 L7 路由，不保存公网证书，也不应直接暴露到公网。生产默认把 ingress
+绑定到 `127.0.0.1:8080`；外部负载均衡不在同一主机时，才将
+`AURACLAW_INGRESS_BIND_ADDRESS` 改为专用私网地址，并用主机防火墙只允许负载均衡器源网段。
+公网入口必须在受管负载均衡器终止 TLS 1.2/1.3、自动轮换证书、HTTP 跳转 HTTPS，并覆盖写入
+`X-Forwarded-Proto=https`、`X-Forwarded-For` 与 `X-Forwarded-Host`。不得信任来自任意公网源的
+Forwarded Header，也不得把 AuraClaw workload token 放到 L7 配置或访问日志。
+
+负载均衡器使用 `/health/live` 判断进程存活、`/health/ready` 判断 Task API 是否接收新流量；发布
+门禁还必须主动建立一条带有效身份的 SSE canary，不能只凭 Task API readiness 推断 Streaming
+Gateway 可用。健康请求周期 10 秒、超时不高于 5 秒，连续 3 次失败摘流，连续 2 次成功才恢复。
+
+仓库内 ingress 契约如下：
+
+| 项目 | 契约 |
+|---|---|
+| 请求体 | 最大 25 MiB；Header 最多 4 × 16 KiB；Header 10 秒、Body 30 秒内完成 |
+| 普通 HTTP | 上游连接 3 秒、发送 30 秒、读取 120 秒；只在响应发送前对连接/502/503/504 最多换副本 1 次 |
+| SSE | 关闭 proxy buffering/cache；15 秒应用 heartbeat，代理 read timeout 75 秒；客户端必须支持 `Last-Event-ID` 重连 |
+| 优雅退出 | 外部 LB 先摘流，等待至少 75 秒；Nginx `stop_grace_period` 90 秒；断开的 SSE 依游标重连，最终结果仍查询 Result API |
+
+外部负载均衡器的 idle timeout 必须大于 75 秒，请求总超时不得小于 120 秒；同步 Task 调用的客户端
+超时还必须大于其 `timeout_seconds`。413、408、502/503/504、SSE 断连和慢请求分别纳入指标与告警。
+任何代理重试不得启用 `proxy_next_upstream non_idempotent`；写请求重试只能由客户端复用原
+`Idempotency-Key` 发起。
+
 ## 5. 蓝绿发布与回滚
 
 当前启动检查要求镜像与数据库 schema 完全一致。本节仅用于相同 schema 的代码更新；
@@ -150,8 +177,9 @@ curl --fail http://127.0.0.1:18080/health/ready
 ```
 
 随后执行一条真实的只读查询和一条隔离租户的 canary 任务，确认 Runnable、Assignment、
-Model/MCP、Canonical Result、SSE 和 Delivery 均完成。上游负载均衡切到 green 后，先等待
-最长请求时限和 60 秒优雅退出窗口，再停止 blue：
+Model/MCP、Canonical Result、SSE 和 Delivery 均完成。上游负载均衡切到 green 后，先将 blue
+摘流并等待至少 75 秒（以及仍在处理的最长普通请求时限）；Nginx 90 秒优雅退出窗口内不再接收
+新连接，然后再停止 blue：
 
 ```bash
 docker compose -p auraclaw-blue --env-file .env.prod \

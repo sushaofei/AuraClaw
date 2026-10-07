@@ -3580,3 +3580,13 @@ Ruff、Mypy（248 文件）、10 条架构合同通过。迁移不适用，部�
 - [x] 生产 Compose 与 preflight 强制显式 OTLP 和告警地址，production profile 拒绝明文 HTTP 端点。
 - [x] 单元测试覆盖 OTLP/Alertmanager payload、Bearer 隔离、重试上限和持久化优先语义；运维文档包含故障与补采契约。
 - [x] Release gate、Ruff、Mypy、79 项针对性测试及完整测试（892 passed、68 skipped）通过；本阶段作为单一 intentional commit 提交并 push，Issue #104 更新验证证据。
+
+## 生产化 P0-G：外部入口与长连接契约（Issue #104）
+
+- [x] 生产 ingress 默认仅绑定 loopback；跨主机接入只能绑定专用私网地址并由防火墙限制负载均衡器源网段。
+- [x] 外部负载均衡器 TLS 终止、证书轮换、Forwarded Header 覆盖和健康摘流契约已明确，仓库内不保存公网证书。
+- [x] Nginx 明确请求体/Header 上限、连接/发送/读取超时、有限安全换副本策略和上游动态解析。
+- [x] SSE 关闭 buffering/cache，代理超时覆盖 heartbeat，客户端以 Last-Event-ID 重连且最终结果继续以 Result API 为准。
+- [x] 蓝绿切流先摘流再等待 75 秒，Nginx 优雅退出窗口提升为 90 秒；禁止代理自动重放非幂等写请求。
+- [x] 静态部署回归覆盖默认 bind address、资源/安全边界和完整 ingress 契约；运行时本地 ingress 回归保持通过。
+- [x] Release gate、Ruff、Mypy、38 项针对性测试及完整测试（893 passed、68 skipped）通过；本阶段作为单一 intentional commit 提交并 push，Issue #104 更新验证证据。

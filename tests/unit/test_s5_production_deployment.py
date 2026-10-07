@@ -102,7 +102,13 @@ def test_production_compose_enforces_replica_resource_and_security_boundaries() 
     assert rendered["networks"]["edge"].get("internal", False) is False
     assert rendered["networks"]["platform"]["external"] is True
     assert services["ingress"]["ports"] == [
-        {"mode": "ingress", "target": 8080, "published": "8080", "protocol": "tcp"}
+        {
+            "mode": "ingress",
+            "host_ip": "127.0.0.1",
+            "target": 8080,
+            "published": "8080",
+            "protocol": "tcp",
+        }
     ]
     assert services["ingress"]["healthcheck"]
     assert set(services["ingress"]["networks"]) == {"auraclaw", "edge"}
@@ -111,10 +117,27 @@ def test_production_compose_enforces_replica_resource_and_security_boundaries() 
 def test_ingress_reresolves_scaled_and_replaced_upstreams() -> None:
     configuration = (ROOT / "deploy/nginx.conf").read_text()
     assert "resolver 127.0.0.11" in configuration
-    assert "zone auraclaw_task_api" in configuration
+    assert "zone auraclaw_task_api 256k;" in configuration
     assert "server task-api:8000 resolve;" in configuration
-    assert "zone auraclaw_streaming_gateway" in configuration
+    assert "zone auraclaw_streaming_gateway 256k;" in configuration
     assert "server streaming-gateway:8010 resolve;" in configuration
+
+
+def test_ingress_contract_bounds_requests_and_preserves_sse() -> None:
+    configuration = (ROOT / "deploy/nginx.conf").read_text()
+    for contract in (
+        "client_max_body_size 25m;",
+        "client_header_timeout 10s;",
+        "client_body_timeout 30s;",
+        "proxy_connect_timeout 3s;",
+        "proxy_read_timeout 120s;",
+        "proxy_next_upstream_tries 2;",
+        "proxy_set_header X-Forwarded-Proto $auraclaw_forwarded_proto;",
+        "proxy_buffering off;",
+        "proxy_read_timeout 75s;",
+        'add_header X-Accel-Buffering "no" always;',
+    ):
+        assert contract in configuration
 
 
 def test_production_compose_mounts_least_privilege_secrets() -> None:
