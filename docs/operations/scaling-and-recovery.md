@@ -109,8 +109,8 @@ registration lease 内仍活跃时，新进程注册会 fail closed。因此显�
 
 1. 依次应用 PostgreSQL/KingBase `0010`～`0053` migration。`0040`
    `0022` 增加 registration 与 execution claim 字段和索引；先迁移 Control 数据库，再滚动升级
-   Orchestrator，最后升级 Agent Runtime。可选执行 `deploy/postgres/roles.sql` 做硬化，
-   当前部署不按服务注入分角色 DSN。
+   Orchestrator，最后升级 Agent Runtime。生产迁移后必须由 migration owner 执行
+   `deploy/postgres/roles.sql`，再以分服务 DSN 启动应用；migration owner 凭据不得挂载到应用服务。
    `0041` 将 MCP observed health 扩为实例级主键，并加入 Catalog generation；必须在滚动 Action Hands
    前应用。升级后观察每个 Server 至少一个 active instance、active generation 单调增长和 stale 告警。
    `0042` 增加 Session、Control、Hands fencing 高水位表；必须先迁移数据库，再滚动三个服务，
@@ -139,8 +139,8 @@ registration lease 内仍活跃时，新进程注册会 fail closed。因此显�
    非 active generation 的 Capability 残留；迁移后滚动 Action Hands，确认
    `capability.catalog.backing_missing` 不持续增长。该数据清理不可通过 down migration 恢复，若需恢复
    Provider，必须重新注册并发布经过完整校验的新 snapshot。
-2. 各服务共享统一 `AURACLAW_DATABASE_URL`（Compose `database_url` secret）；migration 使用
-   独立的 `AURACLAW_MIGRATION_DATABASE_URL`。
+2. 生产中的每个持久化服务使用独立 `AURACLAW_<SERVICE>_DATABASE_URL` Secret；migration 使用
+   独立的 `AURACLAW_MIGRATION_DATABASE_URL`，且 migration owner 凭据不得挂载到应用服务。
 3. 所有 Control、Session 与 Hands 副本必须使用相同的 `AURACLAW_LEASE_SIGNING_KEY`，并通过平台
    Secret mount 注入。
 4. OBS bucket 权限只授予 Artifact Service；Vault token 只授予 Credential Proxy。Vault KV

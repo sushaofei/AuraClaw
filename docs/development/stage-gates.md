@@ -3507,3 +3507,17 @@ Ruff、Mypy（248 文件）、10 条架构合同通过。迁移不适用，部�
 - [x] Ruff、Mypy、完整单元测试及品牌/产品残留扫描通过；依赖 PostgreSQL、Kafka、Vault、S3 的集成用例已执行并确认仅因本机服务未启动而不可用。
 - [x] 深度复核受控文件名、测试夹具、环境键、HTTP Header、数据库标识和本地 Git 引用；清除遗留品牌缩写测试值及工作区旧品牌资产。
 - [x] 用户已有 `.vscode/launch.json`、`docs/tmp/` 与本地未跟踪目录不纳入本阶段提交；本阶段作为一个意图明确的提交推送当前分支。
+
+## 生产化 P0-A：发布事实、Fail-closed 与数据库角色隔离（Issue #104）
+
+- [x] 正式生产基线固定为双独立 Compose 集群、外部 TLS/L7 负载均衡与托管 KingBase/Kafka/Vault/对象存储；单套 Compose 不宣称跨故障域高可用。
+- [x] README、架构真源与当前运维手册清除 MVP/单进程遗留描述，当前迁移基线统一为 `0067`。
+- [x] Release gate 自动发现最新迁移并校验当前文档、生产模板、角色 DSN、Compose 重复 YAML key 和共享数据库 Secret 回归。
+- [x] 所有持久化生产入口在统一装配边界拒绝 memory storage；Runtime、Hands 与 Streaming 在生产拒绝 memory Runtime Event Bus。
+- [x] 生产 Compose 为 11 个持久化服务挂载独立 DSN Secret 和数据库角色标签；migration owner 凭据只挂载 migration job。
+- [x] `deploy/postgres/roles.sql` 成为生产必需步骤，包含现有对象、序列、默认权限、迁移账本只读权限和 Observability 访问矩阵。
+- [x] Secret materializer 与 preflight 对生产强制分服务 DSN 和唯一账号，同时保留服务器测试环境共享 DSN 的兼容路径。
+- [x] 生产部署、发布、扩缩容与恢复文档同步分服务数据库角色和授权顺序。
+- [x] 针对性生产部署、信任边界与迁移门禁测试通过；Ruff、Mypy 与 release gate 通过。
+- [x] `.env.prod`、Secret、`.vscode/launch.json` 和 `docs/tmp/` 不进入本阶段提交。
+- [x] 本阶段作为单一 intentional commit 提交并 push，Issue #104 更新验证证据。

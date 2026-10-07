@@ -237,6 +237,47 @@ def test_production_task_api_rejects_memory_storage() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "session",
+        "projection",
+        "orchestrator",
+        "model-gateway",
+        "hands",
+        "policy",
+        "credential-proxy",
+        "artifact",
+        "streaming",
+        "delivery",
+    ],
+)
+def test_production_database_services_reject_memory_storage(command: str) -> None:
+    with pytest.raises(ValueError, match="production composition requires SQL storage"):
+        create_service_app(
+            command,
+            _settings(
+                deployment_profile="production",
+                storage_backend="memory",
+                runtime_event_backend="kafka",
+                kafka_host="kafka.internal",
+            ),
+        )
+
+
+@pytest.mark.parametrize("command", ["runtime", "hands", "streaming"])
+def test_production_event_services_reject_memory_runtime_events(command: str) -> None:
+    with pytest.raises(ValueError, match="production composition requires Kafka"):
+        create_service_app(
+            command,
+            _settings(
+                deployment_profile="production",
+                storage_backend=("memory" if command == "runtime" else "postgres"),
+                runtime_event_backend="memory",
+            ),
+        )
+
+
 @pytest.mark.asyncio
 async def test_runtime_model_client_has_only_http_contract_and_workload_identity() -> None:
     service = ModelGatewayInternalService(_DeterministicModel())
@@ -486,7 +527,8 @@ def test_production_runtime_composition_is_remote_only_and_has_no_provider_secre
         _settings(
             deployment_profile="production",
             storage_backend="memory",
-            runtime_event_backend="memory",
+            runtime_event_backend="kafka",
+            kafka_host="kafka.internal",
             runtime_workload_token="runtime-token",
         ),
     )
@@ -893,7 +935,7 @@ def test_compose_injects_secrets_only_into_their_owner_services() -> None:
 def test_s3_database_roles_and_ops_clients_preserve_owner_boundaries() -> None:
     roles = (ROOT / "deploy/postgres/roles.sql").read_text()
     assert "NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT" in roles
-    assert "GRANT SELECT ON ALL TABLES IN SCHEMA projection TO auraclaw_task_query_ro" in roles
+    assert "GRANT SELECT ON ALL TABLES IN SCHEMA projection TO auraclaw_task_api" in roles
     assert "session_core TO auraclaw_session" in roles
     assert "hands TO auraclaw_hands" in roles
     assert "credential TO auraclaw_credential" in roles

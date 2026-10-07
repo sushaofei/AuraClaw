@@ -23,9 +23,21 @@ WORKLOAD_TOKENS = (
     "AURACLAW_DELIVERY_WORKLOAD_TOKEN",
     "AURACLAW_STREAMING_GATEWAY_WORKLOAD_TOKEN",
 )
+SERVICE_DATABASE_URLS = (
+    "AURACLAW_TASK_API_DATABASE_URL",
+    "AURACLAW_SESSION_DATABASE_URL",
+    "AURACLAW_PROJECTION_DATABASE_URL",
+    "AURACLAW_ORCHESTRATOR_DATABASE_URL",
+    "AURACLAW_MODEL_GATEWAY_DATABASE_URL",
+    "AURACLAW_ACTION_HANDS_DATABASE_URL",
+    "AURACLAW_POLICY_DATABASE_URL",
+    "AURACLAW_CREDENTIAL_PROXY_DATABASE_URL",
+    "AURACLAW_ARTIFACT_DATABASE_URL",
+    "AURACLAW_STREAMING_DATABASE_URL",
+    "AURACLAW_DELIVERY_DATABASE_URL",
+)
 BASE_REQUIRED = (
     "AURACLAW_IMAGE",
-    "AURACLAW_DATABASE_URL",
     "AURACLAW_MIGRATION_DATABASE_URL",
     *WORKLOAD_TOKENS,
     "AURACLAW_LEASE_SIGNING_KEY",
@@ -72,13 +84,20 @@ def _resolved_artifact_backend(values: dict[str, str]) -> str:
     return "obs"
 
 
-def required_variables(values: dict[str, str]) -> tuple[str, ...]:
+def required_variables(
+    values: dict[str, str], *, role_scoped_database: bool | None = None
+) -> tuple[str, ...]:
     backend = _resolved_artifact_backend(values)
+    if role_scoped_database is None:
+        role_scoped_database = any(values.get(name) for name in SERVICE_DATABASE_URLS)
+    database_variables = (
+        SERVICE_DATABASE_URLS if role_scoped_database else ("AURACLAW_DATABASE_URL",)
+    )
     if backend == "obs":
-        return (*BASE_REQUIRED, *OBS_REQUIRED)
+        return (*BASE_REQUIRED, *database_variables, *OBS_REQUIRED)
     if backend == "local":
-        return BASE_REQUIRED
-    return (*BASE_REQUIRED, *SEAWEEDFS_REQUIRED)
+        return (*BASE_REQUIRED, *database_variables)
+    return (*BASE_REQUIRED, *database_variables, *SEAWEEDFS_REQUIRED)
 
 
 def main() -> int:
@@ -107,13 +126,18 @@ def main() -> int:
             *BASE_REQUIRED,
             *SEAWEEDFS_REQUIRED,
             *OBS_REQUIRED,
+            *SERVICE_DATABASE_URLS,
+            "AURACLAW_DATABASE_URL",
             "AURACLAW_ARTIFACT_BACKEND",
             "AURACLAW_CREDENTIAL_VAULT_TOKEN",
             "AURACLAW_CREDENTIAL_VAULT_APPROLE_ROLE_ID",
             "AURACLAW_CREDENTIAL_VAULT_APPROLE_SECRET_ID",
         )
     }
-    required = required_variables(backend_inputs)
+    role_scoped_database = compose_path.name == "compose.prod.yml"
+    required = required_variables(
+        backend_inputs, role_scoped_database=role_scoped_database
+    )
     values = {
         name: os.environ.get(name) or file_values.get(name) or "" for name in required
     }
@@ -141,6 +165,9 @@ def main() -> int:
         failures.append("workload tokens must contain at least 32 characters")
     if len(token_values) != len(set(token_values)):
         failures.append("workload tokens must be unique per service identity")
+    database_values = [values[name] for name in SERVICE_DATABASE_URLS if values.get(name)]
+    if role_scoped_database and len(database_values) != len(set(database_values)):
+        failures.append("database URLs must use unique least-privilege service accounts")
     lease_key = values["AURACLAW_LEASE_SIGNING_KEY"]
     if lease_key and len(lease_key) < 32:
         failures.append("AURACLAW_LEASE_SIGNING_KEY must contain at least 32 characters")

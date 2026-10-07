@@ -7,9 +7,9 @@
 
 ## 背景
 
-AuraClaw 已完成 MVP 与模块化单体包边界重构。当前 `auraclaw serve` 仍在同一进程装配 Task API、
-Session 写路径、Streaming、Orchestrator、Agent Runtime 和 Model Gateway；Projection 只有独立 CLI，
-Delivery、Hands、Policy、Credential Proxy 与 Artifact 尚无生产服务入口。
+AuraClaw 已完成模块化服务边界重构。开发与生产均通过 12 个独立入口装配 Task API、Session、
+Projection、Streaming、Orchestrator、Agent Runtime、Model Gateway、Delivery、Hands、Policy、
+Credential Proxy 与 Artifact；本地环境可以在同一宿主机运行这些入口，但不改变服务所有权。
 
 包边界已经降低拆分成本，但它不能提供进程故障隔离、独立扩缩容、数据库写权限隔离或 Secret 信任域。
 Issue #12 将生产部署边界固定为 12 服务。本 ADR 先冻结服务所有权、通信方式、数据边界、兼容策略和迁移顺序，
@@ -36,8 +36,7 @@ Issue #12 将生产部署边界固定为 12 服务。本 ADR 先冻结服务所�
 | streaming-gateway | `auraclaw streaming run` | Runtime Event Replay/Router 与 SSE；不接收业务命令 |
 | delivery-worker | `auraclaw delivery run` | Delivery Outbox、Job/Attempt、Retry/DLQ 与 Sink |
 
-`auraclaw serve` 只保留为 development combined profile，不是生产拓扑。服务可以共享 PostgreSQL/Kafka 集群，
-但不能共享 schema owner、超级用户凭证或跨 Store 事务。
+服务可以共享 PostgreSQL/Kafka 集群，但不能共享 schema owner、超级用户凭证或跨 Store 事务。
 
 ### 2. 同步与异步通信
 
@@ -173,7 +172,7 @@ claim 保证跨副本唯一，不能用 Worker 内存计数决定生产外呼。
 | 数据域 | 唯一写入身份 | 其他访问 |
 |---|---|---|
 | Session/Event/Snapshot/Outbox | session | 只经 Session API/feed |
-| Projection/Runnable Outbox | projection-worker | task_query_ro 只读；Runnable Relay 投递 API |
+| Projection/Runnable Outbox | projection-worker | task-api、streaming-gateway 只读；Runnable Relay 投递 API |
 | Control/Lease/Assignment/Checkpoint | orchestrator | Runtime 只经 Control API |
 | Hands Invocation/Attempt | action-hands | Runtime 只经 Hands Contract |
 | Policy/Decision/Approval Control | policy | Canonical 审批事实经 Session API |
@@ -181,8 +180,8 @@ claim 保证跨副本唯一，不能用 Worker 内存计数决定生产外呼。
 | Artifact Metadata | artifact-service | Object bytes 在 S3-compatible Object Store |
 | Delivery Job/Attempt/DLQ | delivery-worker | Ops 经 Admin API |
 
-每个生产服务使用独立 workload identity；数据库连接使用统一应用 DSN（不再按服务注入分角色
-DSN）。自动化仍须验证跨 tenant、伪造 Actor、过期 Lease、旧 fencing token、Credential 泄漏和
+每个生产服务使用独立 workload identity；每个持久化服务使用独立、最小权限数据库角色与 DSN，
+migration owner 凭据不挂载到应用服务。自动化仍须验证跨 tenant、伪造 Actor、过期 Lease、旧 fencing token、Credential 泄漏和
 Artifact ACL 均被拒绝。
 
 ## 兼容、迁移与回滚

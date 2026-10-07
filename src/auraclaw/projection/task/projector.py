@@ -77,7 +77,7 @@ KNOWN_TASK_EVENTS = {
 
 
 class InMemoryTaskProjection:
-    """Disposable Control/Result read model used by the first vertical slice."""
+    """Disposable Control/Result read model for development and isolated tests."""
 
     def __init__(self) -> None:
         self._tasks: dict[tuple[str, str], dict[str, Any]] = {}

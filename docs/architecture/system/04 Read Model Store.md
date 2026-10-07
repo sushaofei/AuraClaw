@@ -66,7 +66,7 @@ searchTimeline(filters, cursor)
 
 ## 数据库实现建议
 
-MVP 可使用 PostgreSQL：
+当前实现使用 PostgreSQL 兼容存储：
 
 - 不同 Projection 使用独立表或 Schema。
 - 不建立指向 Canonical Event 表的跨边界外键。

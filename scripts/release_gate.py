@@ -3,6 +3,10 @@ from __future__ import annotations
 import re
 import sys
 from pathlib import Path
+from typing import Any
+
+import yaml
+from dotenv import dotenv_values
 
 ROOT = Path(__file__).parents[1]
 SCAN_ROOTS = (ROOT / "src", ROOT / "migrations", ROOT / "deploy")
@@ -27,6 +31,124 @@ REQUIRED = (
     ROOT / "compose.test.yml",
     ROOT / "docs/operations/production-deployment.md",
 )
+CURRENT_RELEASE_DOCS = (
+    ROOT / "docs/operations/production-deployment.md",
+    ROOT / "docs/operations/release.md",
+    ROOT / "docs/operations/dev-service-deployment.md",
+)
+DATABASE_SECRET_BY_SERVICE = {
+    "task-api": "task_api_database_url",
+    "session": "session_database_url",
+    "projection-worker": "projection_database_url",
+    "orchestrator": "orchestrator_database_url",
+    "model-gateway": "model_gateway_database_url",
+    "action-hands": "action_hands_database_url",
+    "policy": "policy_database_url",
+    "credential-proxy": "credential_proxy_database_url",
+    "artifact-service": "artifact_database_url",
+    "streaming-gateway": "streaming_database_url",
+    "delivery-worker": "delivery_database_url",
+}
+
+
+class _UniqueKeyLoader(yaml.SafeLoader):
+    pass
+
+
+def _construct_unique_mapping(
+    loader: _UniqueKeyLoader, node: yaml.MappingNode, deep: bool = False
+) -> dict[Any, Any]:
+    seen: set[Any] = set()
+    for key_node, _ in node.value:
+        if key_node.tag == "tag:yaml.org,2002:merge":
+            continue
+        key = loader.construct_object(key_node, deep=deep)
+        if key in seen:
+            raise ValueError(f"duplicate YAML key {key!r} at line {key_node.start_mark.line + 1}")
+        seen.add(key)
+    loader.flatten_mapping(node)
+    return yaml.SafeLoader.construct_mapping(loader, node, deep=deep)
+
+
+_UniqueKeyLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    _construct_unique_mapping,
+)
+
+
+def _latest_migration() -> str:
+    versions = sorted(
+        path.name.split("_", 1)[0]
+        for path in (ROOT / "migrations").glob("[0-9][0-9][0-9][0-9]_*.sql")
+        if not path.name.endswith(".down.sql")
+    )
+    if not versions:
+        raise ValueError("no schema migrations found")
+    return versions[-1]
+
+
+def _check_release_truth(failures: list[str]) -> None:
+    latest = _latest_migration()
+    for path in CURRENT_RELEASE_DOCS:
+        content = path.read_text()
+        if f"当前目标为 `{latest}`" not in content and f"当前目标 `{latest}`" not in content:
+            if f"当前迁移基线为 {latest}" not in content:
+                failures.append(
+                    f"current migration {latest} is missing from {path.relative_to(ROOT)}"
+                )
+    for path in (ROOT / "compose.prod.yml", ROOT / ".env.prod.example"):
+        if latest not in path.read_text():
+            failures.append(
+                f"current migration {latest} is missing from {path.relative_to(ROOT)}"
+            )
+
+    canonical_text = "\n".join(
+        path.read_text()
+        for path in (
+            ROOT / "README.md",
+            ROOT / "docs/architecture/system/00 Managed Agent 系统架构总览.md",
+            ROOT / "docs/architecture/system/04 Read Model Store.md",
+            ROOT / "docs/architecture/decisions/ADR-001-production-service-boundaries.md",
+        )
+    )
+    if re.search(r"\bMVP\b|first vertical slice", canonical_text, re.IGNORECASE):
+        failures.append("canonical product documentation still contains MVP terminology")
+
+
+def _check_production_compose(failures: list[str]) -> None:
+    try:
+        compose = yaml.load((ROOT / "compose.prod.yml").read_text(), Loader=_UniqueKeyLoader)
+    except (yaml.YAMLError, ValueError) as exc:
+        failures.append(f"invalid production Compose YAML: {exc}")
+        return
+    services = compose.get("services", {})
+    secrets = compose.get("secrets", {})
+    for service_name, secret_name in DATABASE_SECRET_BY_SERVICE.items():
+        service = services.get(service_name, {})
+        environment = service.get("environment", {})
+        mounted = service.get("secrets", [])
+        if environment.get("AURACLAW_DATABASE_URL_FILE") != f"/run/secrets/{secret_name}":
+            failures.append(f"{service_name} does not use its role-scoped database secret")
+        if secret_name not in mounted or secret_name not in secrets:
+            failures.append(f"{service_name} database secret {secret_name} is not mounted")
+        role = service.get("labels", {}).get("auraclaw.database-role")
+        if not role:
+            failures.append(f"{service_name} is missing auraclaw.database-role")
+    if "database_url" in secrets:
+        failures.append("production Compose still defines a shared database_url secret")
+    runtime_environment = services.get("agent-runtime", {}).get("environment", {})
+    if runtime_environment.get("AURACLAW_RUNTIME_EVENT_BACKEND") == "memory":
+        failures.append("agent-runtime production runtime events cannot use memory")
+
+    production_env = dotenv_values(ROOT / ".env.prod.example")
+    database_variables = [
+        f"AURACLAW_{secret_name.upper()}" for secret_name in DATABASE_SECRET_BY_SERVICE.values()
+    ]
+    database_urls = [production_env.get(name) for name in database_variables]
+    if not all(database_urls):
+        failures.append("production env template is missing role-scoped database URLs")
+    elif len(database_urls) != len(set(database_urls)):
+        failures.append("production env template reuses a database URL across services")
 
 
 def main() -> int:
@@ -56,6 +178,8 @@ def main() -> int:
             content = path.read_text()
             if "from fastapi" in content or "import fastapi" in content or "asyncpg" in content:
                 failures.append(f"architecture boundary violation: {path.relative_to(ROOT)}")
+    _check_release_truth(failures)
+    _check_production_compose(failures)
     if failures:
         print("release gate failed")
         for failure in failures:

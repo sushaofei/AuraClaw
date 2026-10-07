@@ -238,6 +238,7 @@ WORKER_SERVICES = {
 }
 
 DATABASE_SERVICES = {
+    "task-api",
     "session",
     "projection-worker",
     "orchestrator",
@@ -248,6 +249,12 @@ DATABASE_SERVICES = {
     "model-gateway",
     "streaming-gateway",
     "delivery-worker",
+}
+
+KAFKA_SERVICES = {
+    "agent-runtime",
+    "action-hands",
+    "streaming-gateway",
 }
 
 
@@ -979,5 +986,10 @@ def create_service_app(
 ) -> FastAPI:
     selected = settings or get_settings()
     spec = service_spec(command, selected)
+    if selected.deployment_profile == "production":
+        if spec.name in DATABASE_SERVICES and not selected.sql_storage_enabled:
+            raise ValueError(f"{spec.name} production composition requires SQL storage")
+        if spec.name in KAFKA_SERVICES and not selected.kafka_enabled:
+            raise ValueError(f"{spec.name} production composition requires Kafka")
     builder = SERVICE_BUILDERS.get(spec.name, SERVICE_BUILDERS["default"])
     return builder(spec, selected, worker_interval)

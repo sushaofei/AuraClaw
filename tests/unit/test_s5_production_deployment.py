@@ -28,6 +28,19 @@ APPLICATION_SERVICES = {
     "streaming-gateway",
     "delivery-worker",
 }
+DATABASE_ROLE_BY_SERVICE = {
+    "task-api": ("task_api_database_url", "auraclaw_task_api"),
+    "session": ("session_database_url", "auraclaw_session"),
+    "projection-worker": ("projection_database_url", "auraclaw_projection"),
+    "orchestrator": ("orchestrator_database_url", "auraclaw_control"),
+    "model-gateway": ("model_gateway_database_url", "auraclaw_model"),
+    "action-hands": ("action_hands_database_url", "auraclaw_hands"),
+    "policy": ("policy_database_url", "auraclaw_policy"),
+    "credential-proxy": ("credential_proxy_database_url", "auraclaw_credential"),
+    "artifact-service": ("artifact_database_url", "auraclaw_artifact"),
+    "streaming-gateway": ("streaming_database_url", "auraclaw_streaming"),
+    "delivery-worker": ("delivery_database_url", "auraclaw_delivery"),
+}
 
 
 def _render_compose() -> dict[str, object]:
@@ -78,7 +91,12 @@ def test_production_compose_enforces_replica_resource_and_security_boundaries() 
         identity = service["labels"]["auraclaw.service-identity"]
         assert identity == name
         identities.add(identity)
-        assert "auraclaw.database-role" not in service.get("labels", {})
+        if name in DATABASE_ROLE_BY_SERVICE:
+            assert service["labels"]["auraclaw.database-role"] == (
+                DATABASE_ROLE_BY_SERVICE[name][1]
+            )
+        else:
+            assert "auraclaw.database-role" not in service.get("labels", {})
     assert identities == APPLICATION_SERVICES
     assert rendered["networks"]["auraclaw"]["internal"] is True
     assert rendered["networks"]["edge"].get("internal", False) is False
@@ -111,10 +129,14 @@ def test_production_compose_mounts_least_privilege_secrets() -> None:
     assert all(
         "migration_database_url" not in secret_sources(service) for service in APPLICATION_SERVICES
     )
-    db_services = APPLICATION_SERVICES - {"agent-runtime"}
-    assert all("database_url" in secret_sources(service) for service in db_services)
-    assert "database_url" not in secret_sources("agent-runtime")
-    assert secrets["database_url"]["file"].endswith("/database_url")
+    for service, (secret_name, _) in DATABASE_ROLE_BY_SERVICE.items():
+        assert secret_name in secret_sources(service)
+        assert secrets[secret_name]["file"].endswith(f"/{secret_name}")
+        assert all(
+            secret_name not in secret_sources(other)
+            for other in APPLICATION_SERVICES - {service}
+        )
+    assert "database_url" not in secrets
     assert "model_api_key" in secret_sources("model-gateway")
     assert all(
         "model_api_key" not in secret_sources(service)
@@ -256,8 +278,13 @@ def test_env_templates_are_ready_to_copy() -> None:
         assert missing == [], f"{label} missing {missing}"
         assert values["AURACLAW_DEPLOYMENT_PROFILE"] == "production"
         assert values["AURACLAW_ALLOW_INSECURE_IDENTITY_HEADERS"] == "false"
-        assert values["AURACLAW_DATABASE_URL"]
-        assert "SESSION_DATABASE_URL" not in values
+        if label == "production":
+            assert all(values[name] for name in module.SERVICE_DATABASE_URLS)
+            assert len({values[name] for name in module.SERVICE_DATABASE_URLS}) == len(
+                module.SERVICE_DATABASE_URLS
+            )
+        else:
+            assert values["AURACLAW_DATABASE_URL"]
         assert "TASK_QUERY_DATABASE_URL" not in values
 
     local_only = {
@@ -308,7 +335,7 @@ def test_env_templates_are_ready_to_copy() -> None:
     assert len(set(tokens)) == len(tokens)
 
 
-def test_production_preflight_accepts_shared_database_url_and_unique_tokens(
+def test_production_preflight_accepts_role_scoped_database_urls_and_unique_tokens(
     tmp_path: Path,
 ) -> None:
     tokens = (
@@ -326,7 +353,6 @@ def test_production_preflight_accepts_shared_database_url_and_unique_tokens(
     )
     lines = [
         "AURACLAW_IMAGE=registry.example/auraclaw:sha-0123456789",
-        "AURACLAW_DATABASE_URL=postgresql://auraclaw:secret@db/auraclaw",
         "AURACLAW_MIGRATION_DATABASE_URL=postgresql://migration:secret@db/auraclaw",
         "AURACLAW_LEASE_SIGNING_KEY=" + "l" * 48,
         "AURACLAW_MODEL_API_KEY=test-model-secret",
@@ -343,6 +369,10 @@ def test_production_preflight_accepts_shared_database_url_and_unique_tokens(
         "AURACLAW_UPSTREAM_WORKLOAD_TOKEN=upstream-" + "t" * 40,
         'AURACLAW_AGENT_CONTEXT_SIGNING_KEYS_JSON={"k1":"upstream-agent-context-signing-key-01"}',
     ]
+    lines.extend(
+        f"AURACLAW_{secret_name.upper()}=postgresql://{role}:secret@db/auraclaw"
+        for secret_name, role in DATABASE_ROLE_BY_SERVICE.values()
+    )
     lines.extend(
         f"AURACLAW_{name}_WORKLOAD_TOKEN={index:02d}-" + "t" * 40
         for index, name in enumerate(tokens)
@@ -366,9 +396,12 @@ def test_production_preflight_accepts_shared_database_url_and_unique_tokens(
         text=True,
     )
     assert materialized.returncode == 0, materialized.stdout + materialized.stderr
-    assert (secret_dir / "database_url").is_file()
+    assert all(
+        (secret_dir / secret_name).is_file()
+        for secret_name, _ in DATABASE_ROLE_BY_SERVICE.values()
+    )
     assert (secret_dir / "vault_approle_secret_id").is_file()
-    assert not (secret_dir / "session_database_url").exists()
+    assert not (secret_dir / "database_url").read_text()
     result = subprocess.run(
         [
             sys.executable,

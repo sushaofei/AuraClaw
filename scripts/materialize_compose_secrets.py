@@ -9,6 +9,17 @@ from dotenv import dotenv_values
 
 SECRET_VARIABLES = {
     "database_url": "AURACLAW_DATABASE_URL",
+    "task_api_database_url": "AURACLAW_TASK_API_DATABASE_URL",
+    "session_database_url": "AURACLAW_SESSION_DATABASE_URL",
+    "projection_database_url": "AURACLAW_PROJECTION_DATABASE_URL",
+    "orchestrator_database_url": "AURACLAW_ORCHESTRATOR_DATABASE_URL",
+    "model_gateway_database_url": "AURACLAW_MODEL_GATEWAY_DATABASE_URL",
+    "action_hands_database_url": "AURACLAW_ACTION_HANDS_DATABASE_URL",
+    "policy_database_url": "AURACLAW_POLICY_DATABASE_URL",
+    "credential_proxy_database_url": "AURACLAW_CREDENTIAL_PROXY_DATABASE_URL",
+    "artifact_database_url": "AURACLAW_ARTIFACT_DATABASE_URL",
+    "streaming_database_url": "AURACLAW_STREAMING_DATABASE_URL",
+    "delivery_database_url": "AURACLAW_DELIVERY_DATABASE_URL",
     "migration_database_url": "AURACLAW_MIGRATION_DATABASE_URL",
     "task_api_workload_token": "AURACLAW_TASK_API_WORKLOAD_TOKEN",
     "projection_workload_token": "AURACLAW_PROJECTION_WORKLOAD_TOKEN",
@@ -34,6 +45,11 @@ OPTIONAL_VARIABLES = {
     "AURACLAW_CREDENTIAL_VAULT_TOKEN",
     "AURACLAW_CREDENTIAL_VAULT_APPROLE_SECRET_ID",
 }
+ROLE_SCOPED_DATABASE_VARIABLES = {
+    variable
+    for filename, variable in SECRET_VARIABLES.items()
+    if filename.endswith("_database_url") and filename != "migration_database_url"
+}
 
 
 def main() -> int:
@@ -52,10 +68,18 @@ def main() -> int:
         variable: os.environ.get(variable) or configured.get(variable) or ""
         for variable in SECRET_VARIABLES.values()
     }
+    test_profile = env_file.name in {".env.test", ".env.test.example"} or env_file.name.endswith(
+        ".test"
+    )
+    profile_optional = (
+        ROLE_SCOPED_DATABASE_VARIABLES if test_profile else {"AURACLAW_DATABASE_URL"}
+    )
     missing = [
         variable
         for variable in SECRET_VARIABLES.values()
-        if variable not in OPTIONAL_VARIABLES and not values[variable]
+        if variable not in OPTIONAL_VARIABLES
+        and variable not in profile_optional
+        and not values[variable]
     ]
     role_id = os.environ.get("AURACLAW_CREDENTIAL_VAULT_APPROLE_ROLE_ID") or configured.get(
         "AURACLAW_CREDENTIAL_VAULT_APPROLE_ROLE_ID"
