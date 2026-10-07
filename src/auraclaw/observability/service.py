@@ -37,6 +37,19 @@ class ObservabilityStore(Protocol):
 
     async def metric_summary(self, tenant_id: str, *, window_hours: int) -> list[MetricSummary]: ...
 
+    async def search_audits(
+        self,
+        tenant_id: str,
+        *,
+        action: str | None = None,
+        outcome: str | None = None,
+        actor_id: str | None = None,
+        session_id: str | None = None,
+        before: datetime | None = None,
+        before_id: str | None = None,
+        limit: int = 50,
+    ) -> list[AuditEvent]: ...
+
 
 class TelemetryExporter(Protocol):
     """Outbound observability port implemented by infrastructure adapters."""
@@ -262,6 +275,42 @@ class ObservabilityService:
         if window_hours < 1 or window_hours > 720:
             raise ValueError("metric summary window must be between 1 and 720 hours")
         return await self._store.metric_summary(tenant_id, window_hours=window_hours)
+
+    async def search_audits(
+        self,
+        tenant_id: str,
+        *,
+        action: str | None = None,
+        outcome: str | None = None,
+        actor_id: str | None = None,
+        session_id: str | None = None,
+        before: datetime | None = None,
+        before_id: str | None = None,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        if (before is None) != (before_id is None):
+            raise ValueError("audit cursor requires before and before_id")
+        records = await self._store.search_audits(
+            tenant_id,
+            action=action,
+            outcome=outcome,
+            actor_id=actor_id,
+            session_id=session_id,
+            before=before,
+            before_id=before_id,
+            limit=limit + 1,
+        )
+        page = records[:limit]
+        has_more = len(records) > len(page)
+        last = page[-1] if has_more and page else None
+        return {
+            "tenant_id": tenant_id,
+            "audits": [
+                self._json_safe(redact_sensitive(asdict(record))) for record in page
+            ],
+            "next_before": last.occurred_at.isoformat() if last else None,
+            "next_before_id": last.audit_id if last else None,
+        }
 
     @staticmethod
     def _as_mapping(value: Any) -> dict[str, Any]:

@@ -107,6 +107,35 @@ class PostgresApprovalProjection(LazyPool):
         )
         return self._record(row) if row is not None else None
 
+    async def rebuild(
+        self, events: Sequence[CanonicalEvent], tenant_id: str | None = None
+    ) -> int:
+        pool = await self.pool()
+        selected = [
+            event
+            for event in events
+            if tenant_id is None or event.tenant_id == tenant_id
+        ]
+        event_ids = [event.event_id for event in selected]
+        async with pool.acquire() as connection, connection.transaction():
+            if tenant_id is None:
+                await connection.execute("DELETE FROM projection.approval_view")
+                await connection.execute(
+                    "DELETE FROM projection.processed_event WHERE projector_id='approval'"
+                )
+            else:
+                await connection.execute(
+                    "DELETE FROM projection.approval_view WHERE tenant_id=$1", tenant_id
+                )
+                if event_ids:
+                    await connection.execute(
+                        """DELETE FROM projection.processed_event
+                        WHERE projector_id='approval' AND event_id=ANY($1::text[])""",
+                        event_ids,
+                    )
+        await self.project(selected)
+        return len(selected)
+
     @staticmethod
     def _record(row: asyncpg.Record) -> ApprovalRecord:
         return ApprovalRecord(

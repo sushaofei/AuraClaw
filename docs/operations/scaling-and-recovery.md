@@ -34,7 +34,8 @@ registration lease 内仍活跃时，新进程注册会 fail closed。因此显�
 - 无可用 Runtime 槽位是背压而非故障。Orchestrator 将原队列项延迟 100–500ms（带 jitter）后按原
   priority/partition 重排，避免多副本热循环且不改变公平顺序。
 - Projection Outbox 每个 destination/tenant/session 只释放最早未完成记录。claim、retry delay 或
-  poison 会阻断后续版本，避免多个 Worker 产生 version gap。
+  poison 会阻断后续版本，避免多个 Worker 产生 version gap。连续 5 次失败后 Session owner 将记录
+  隔离为 poison，停止自动领取；修复后只能由 Projection Worker 的 owner 管理操作显式 redrive。
 - Delivery 在 Outbox ingestion 后按 tenant/session/sink 串行领取 Job；attempting、retry_wait 和过期
   claim 均可恢复，DLQ 与人工 redelivery 使用稳定 delivery ID。Sink 熔断状态按 tenant/sink 共享，
   半开探针通过持久 claim 保证全局至多一个，不随 Worker 重启丢失。每轮只领取副本空闲容量，

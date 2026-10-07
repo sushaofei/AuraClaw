@@ -56,6 +56,15 @@ class EventStore(Protocol):
 
     async def load_all(self, tenant_id: str | None = None) -> list[CanonicalEvent]: ...
 
+    async def load_tenant_page(
+        self,
+        tenant_id: str,
+        *,
+        after_session_id: str | None = None,
+        after_version: int | None = None,
+        limit: int = 1000,
+    ) -> list[CanonicalEvent]: ...
+
     async def has_skill_package_reference(
         self, tenant_id: str, package_digest: str
     ) -> bool: ...
@@ -111,6 +120,8 @@ class EventStore(Protocol):
         disposition: str,
         reason: str | None = None,
     ) -> bool: ...
+
+    async def redrive_outbox(self, destination: str, event_id: str) -> bool: ...
 
 
 class AtomicBatchEventStore(EventStore, Protocol):

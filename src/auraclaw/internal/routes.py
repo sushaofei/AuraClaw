@@ -60,6 +60,8 @@ from auraclaw.contracts.internal import (
     OutboxClaimResponse,
     OutboxDispositionRequest,
     OutboxDispositionResponse,
+    OutboxRedriveRequest,
+    OutboxRedriveResponse,
     PolicyEvaluateRequest,
     PolicyEvaluateResponse,
     PolicyValidateDecisionRequest,
@@ -74,6 +76,8 @@ from auraclaw.contracts.internal import (
     SessionFeedResponse,
     SessionRootFeedRequest,
     SessionRootFeedResponse,
+    SessionTenantFeedRequest,
+    SessionTenantFeedResponse,
     SkillActiveBindingReferenceRequest,
     SkillActiveBindingReferenceResponse,
     SkillAdminSnapshotInternalRequest,
@@ -133,6 +137,11 @@ def session_routes(service: SessionInternalService) -> dict[str, ContractRoute]:
         "/internal/v1/session/root-feed": contract_route(
             SessionRootFeedRequest, SessionRootFeedResponse, service.root_feed
         ),
+        "/internal/v1/session/tenant-feed": contract_route(
+            SessionTenantFeedRequest,
+            SessionTenantFeedResponse,
+            service.tenant_feed,
+        ),
         "/internal/v1/session/skill-bindings/reference": contract_route(
             SkillBindingReferenceRequest,
             SkillBindingReferenceResponse,
@@ -150,6 +159,11 @@ def session_routes(service: SessionInternalService) -> dict[str, ContractRoute]:
             OutboxDispositionRequest,
             OutboxDispositionResponse,
             service.disposition_outbox,
+        ),
+        "/internal/v1/session/outbox/redrive": contract_route(
+            OutboxRedriveRequest,
+            OutboxRedriveResponse,
+            service.redrive_outbox,
         ),
     }
 

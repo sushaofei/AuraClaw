@@ -208,6 +208,7 @@ X-Actor-ID: local-user
 | `GET` | `/v1/tasks/{session_id}/children` | 子 Session 图 |
 | `GET` | `/v1/operations/sessions/{session_id}/timeline` | 运维时间线 |
 | `GET` | `/v1/operations/metrics` | 当前租户可见指标 |
+| `GET` | `/v1/operations/audits` | 当前租户结构化审计检索 |
 
 ### 实时流
 

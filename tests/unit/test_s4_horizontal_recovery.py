@@ -81,6 +81,52 @@ async def test_outbox_replicas_preserve_per_session_order() -> None:
 
 
 @pytest.mark.asyncio
+async def test_outbox_poison_requires_explicit_redrive_after_five_failures() -> None:
+    events = InMemoryEventStore()
+    appended = await events.append(
+        root_session_id="session-poison",
+        session_id="session-poison",
+        run_id=None,
+        context=CommandContext(
+            command_id="poison-event",
+            tenant_id="tenant-poison",
+            actor=Actor(type="user", id="operator"),
+            correlation_id="poison-event",
+            expected_version=0,
+            operation="test.poison",
+        ),
+        events=(NewEvent(type="session.created", payload={"goal": "test"}),),
+        command_result={},
+    )
+    event_id = appended.events[0].event_id
+
+    for attempt in range(1, 6):
+        claimed = await events.claim_outbox(
+            "projection", "projection-a", limit=1, claim_ttl=timedelta(seconds=30)
+        )
+        assert claimed[0].attempt == attempt
+        assert await events.disposition_outbox(
+            "projection",
+            "projection-a",
+            claimed[0].outbox_id,
+            claimed[0].claim_token,
+            "nack",
+            "projection failed",
+        )
+
+    assert await events.claim_outbox(
+        "projection", "projection-a", limit=1, claim_ttl=timedelta(seconds=30)
+    ) == []
+    assert not await events.redrive_outbox("projection", "missing-event")
+    assert await events.redrive_outbox("projection", event_id)
+    replay = await events.claim_outbox(
+        "projection", "projection-b", limit=1, claim_ttl=timedelta(seconds=30)
+    )
+    assert replay[0].event_id == event_id
+    assert replay[0].attempt == 1
+
+
+@pytest.mark.asyncio
 async def test_control_claim_expiry_fences_old_orchestrator_replica() -> None:
     store = InMemoryControlStateStore()
     item = RunnableItem(

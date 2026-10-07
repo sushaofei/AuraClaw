@@ -3511,7 +3511,7 @@ Ruff、Mypy（248 文件）、10 条架构合同通过。迁移不适用，部�
 ## 生产化 P0-A：发布事实、Fail-closed 与数据库角色隔离（Issue #104）
 
 - [x] 正式生产基线固定为双独立 Compose 集群、外部 TLS/L7 负载均衡与托管 KingBase/Kafka/Vault/对象存储；单套 Compose 不宣称跨故障域高可用。
-- [x] README、架构真源与当前运维手册清除 MVP/单进程遗留描述，当前迁移基线统一为 `0067`。
+- [x] README、架构真源与当时运维手册清除 MVP/单进程遗留描述，迁移基线统一为 `0067`。
 - [x] Release gate 自动发现最新迁移并校验当前文档、生产模板、角色 DSN、Compose 重复 YAML key 和共享数据库 Secret 回归。
 - [x] 所有持久化生产入口在统一装配边界拒绝 memory storage；Runtime、Hands 与 Streaming 在生产拒绝 memory Runtime Event Bus。
 - [x] 生产 Compose 为 11 个持久化服务挂载独立 DSN Secret 和数据库角色标签；migration owner 凭据只挂载 migration job。
@@ -3600,3 +3600,15 @@ Ruff、Mypy（248 文件）、10 条架构合同通过。迁移不适用，部�
 - [x] Compose preflight 可串联真实 readiness evidence；运维手册明确隔离恢复、可逆迁移、Kafka offset 和 Projection 对账边界。
 - [x] 单元测试覆盖完整证据通过、缺失场景、占位值、SLO 越界和 CLI fail-closed；真实生产演练仍须在获得环境后执行，未执行前不得勾选 #104 对应两项。
 - [x] Release gate、Ruff、Mypy、38 项针对性测试及完整测试（896 passed、68 skipped）通过；本阶段作为单一 intentional commit 提交并 push。
+
+## 生产化 P1-A：审计检索与 Projection 恢复治理（Issue #104）
+
+- [x] 公共 Operations API 提供 tenant 强隔离的结构化审计检索，支持 action、outcome、actor、session、稳定游标和有界分页。
+- [x] 审计查询仅返回脱敏后的结构化字段，不返回 Canonical Event payload、Secret 或跨租户记录。
+- [x] Session owner 在 Projection outbox 连续 5 次失败后持久 poison 并停止自动领取；只有 Projection Worker workload identity 可显式 redrive。
+- [x] Projection 管理状态提供有界 poison 清单；redrive 先验证 tenant 下 poison 记录，再通过 Session owner 恢复 outbox，不直接删除隔离证据。
+- [x] 成功重放自动清理 Projection poison；不支持事件、版本 gap 和安全的投影数据错误均进入隔离记录。
+- [x] 租户全量重建从 Session owner 的分页 Canonical tenant feed 发现事实，不依赖现存 Task View，且同时重建 Task、Approval、Collaboration。
+- [x] 全量 Projection 重建必须显式提供 tenant；owner admin claim、心跳和 operation idempotency 继续约束并发管理操作。
+- [x] `0068` 正反迁移为审计检索和 poison 清单提供 tenant/time 索引，不改变 Canonical Event 或业务状态。
+- [x] Release gate、Ruff、Mypy、57 项针对性测试及完整测试（899 passed、68 skipped）通过；本阶段作为单一 intentional commit 提交并 push，Issue #104 更新验证证据。

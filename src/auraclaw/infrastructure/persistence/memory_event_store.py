@@ -96,6 +96,24 @@ class InMemoryEventStore:
             key=lambda event: (event.tenant_id, event.session_id, event.aggregate_version),
         )
 
+    async def load_tenant_page(
+        self,
+        tenant_id: str,
+        *,
+        after_session_id: str | None = None,
+        after_version: int | None = None,
+        limit: int = 1000,
+    ) -> list[CanonicalEvent]:
+        events = await self.load_all(tenant_id)
+        if after_session_id is not None and after_version is not None:
+            events = [
+                event
+                for event in events
+                if (event.session_id, event.aggregate_version)
+                > (after_session_id, after_version)
+            ]
+        return events[:limit]
+
     async def has_skill_package_reference(self, tenant_id: str, package_digest: str) -> bool:
         for event in await self.load_all(tenant_id):
             if event.type != "skill.activated":
@@ -354,14 +372,18 @@ class InMemoryEventStore:
         return [
             record
             for record in self._outbox
-            if not record.published and record.destination == "projection"
+            if not record.published
+            and not record.poisoned
+            and record.destination == "projection"
         ]
 
     async def pending_delivery_outbox(self) -> list[OutboxRecord]:
         return [
             record
             for record in self._outbox
-            if not record.published and record.destination == "delivery"
+            if not record.published
+            and not record.poisoned
+            and record.destination == "delivery"
         ]
 
     async def mark_outbox_published(self, outbox_id: int) -> None:
@@ -376,6 +398,8 @@ class InMemoryEventStore:
             for record in self._outbox:
                 if record.outbox_id == outbox_id:
                     record.publish_attempt += 1
+                    if record.destination == "projection" and record.publish_attempt >= 5:
+                        record.poisoned = True
                     return
 
     async def claim_outbox(
@@ -474,8 +498,33 @@ class InMemoryEventStore:
                 record.published = True
             elif disposition == "poison":
                 record.poisoned = True
-            elif disposition != "nack":
+            elif disposition == "nack":
+                if destination == "projection" and record.publish_attempt >= 5:
+                    record.poisoned = True
+            else:
                 return False
+            record.claimed_by = None
+            record.claim_token = None
+            record.claim_expires_at = None
+            return True
+
+    async def redrive_outbox(self, destination: str, event_id: str) -> bool:
+        async with self._lock:
+            record = next(
+                (
+                    item
+                    for item in self._outbox
+                    if item.destination == destination
+                    and item.event_id == event_id
+                    and item.poisoned
+                    and not item.published
+                ),
+                None,
+            )
+            if record is None:
+                return False
+            record.poisoned = False
+            record.publish_attempt = 0
             record.claimed_by = None
             record.claim_token = None
             record.claim_expires_at = None

@@ -185,6 +185,38 @@ class InMemoryObservabilityStore:
             for name, values in sorted(grouped.items())
         ]
 
+    async def search_audits(
+        self,
+        tenant_id: str,
+        *,
+        action: str | None = None,
+        outcome: str | None = None,
+        actor_id: str | None = None,
+        session_id: str | None = None,
+        before: datetime | None = None,
+        before_id: str | None = None,
+        limit: int = 50,
+    ) -> list[AuditEvent]:
+        records = [
+            event
+            for event in self._audits.values()
+            if event.tenant_id == tenant_id
+            and (action is None or event.action == action)
+            and (outcome is None or event.outcome == outcome)
+            and (actor_id is None or event.actor_id == actor_id)
+            and (
+                session_id is None
+                or event.session_id == session_id
+                or event.root_session_id == session_id
+            )
+            and (
+                before is None
+                or (event.occurred_at, event.audit_id) < (before, before_id or "")
+            )
+        ]
+        records.sort(key=lambda event: (event.occurred_at, event.audit_id), reverse=True)
+        return records[:limit]
+
 
 class PostgresObservabilityStore(_LazyPool):
     async def write_span(self, span: TraceSpan) -> None:
@@ -386,6 +418,62 @@ class PostgresObservabilityStore(_LazyPool):
                 p50=float(row["p50"]),
                 p95=float(row["p95"]),
                 p99=float(row["p99"]),
+            )
+            for row in rows
+        ]
+
+    async def search_audits(
+        self,
+        tenant_id: str,
+        *,
+        action: str | None = None,
+        outcome: str | None = None,
+        actor_id: str | None = None,
+        session_id: str | None = None,
+        before: datetime | None = None,
+        before_id: str | None = None,
+        limit: int = 50,
+    ) -> list[AuditEvent]:
+        pool = await self.pool()
+        rows = await pool.fetch(
+            """SELECT * FROM observability.audit_event
+            WHERE tenant_id=$1
+              AND ($2::text IS NULL OR action=$2)
+              AND ($3::text IS NULL OR outcome=$3)
+              AND ($4::text IS NULL OR actor_id=$4)
+              AND ($5::text IS NULL OR session_id=$5 OR root_session_id=$5)
+              AND ($6::timestamptz IS NULL OR (occurred_at,audit_id) < ($6,$7::text))
+            ORDER BY occurred_at DESC,audit_id DESC LIMIT $8""",
+            tenant_id,
+            action,
+            outcome,
+            actor_id,
+            session_id,
+            before,
+            before_id,
+            limit,
+        )
+        return [
+            AuditEvent(
+                audit_id=str(row["audit_id"]),
+                occurred_at=row["occurred_at"],
+                action=str(row["action"]),
+                outcome=str(row["outcome"]),
+                actor_type=str(row["actor_type"]),
+                actor_id=str(row["actor_id"]),
+                tenant_id=str(row["tenant_id"]),
+                trace_id=str(row["trace_id"]),
+                root_session_id=row["root_session_id"],
+                session_id=row["session_id"],
+                run_id=row["run_id"],
+                event_id=row["event_id"],
+                command_id=row["command_id"],
+                tool_invocation_id=row["tool_invocation_id"],
+                delivery_id=row["delivery_id"],
+                approval_id=row["approval_id"],
+                resource_ref=row["resource_ref"],
+                payload_ref=row["payload_ref"],
+                metadata=dict(_decode_json(row["metadata"])),
             )
             for row in rows
         ]

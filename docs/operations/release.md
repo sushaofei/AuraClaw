@@ -41,7 +41,7 @@ docker compose version
 
 在本机执行 `./scripts/dev_service_deploy.sh`。脚本在构建后核对镜像要求的迁移版本，
 再进入维护窗口，执行 stop → migrate up → migrate check → up --force-recreate。
-默认目标为 `0067`，不再要求额外传入 `--migrate`。详情见生产部署手册。
+默认目标为 `0068`，不再要求额外传入 `--migrate`。详情见生产部署手册。
 
 ### A3. 验收
 
@@ -153,7 +153,7 @@ Secret 目录权限：目录 `0700`，文件 `0600`。
 
 ### B3. 数据库迁移（先于应用）
 
-先准备本次不可变镜像，核对 `migrate latest` 为 `0067`。已有集群升级时先停止所有旧实例；
+先准备本次不可变镜像，核对 `migrate latest` 为 `0068`。已有集群升级时先停止所有旧实例；
 `0058` 删除字段，不允许与旧实例混跑。升级后须按
 [MCP Tool 前缀移除升级](mcp-tool-prefix-upgrade.md) 完成全量对账与各副本路由验证。
 
@@ -168,11 +168,11 @@ docker compose --env-file .env.prod -f compose.prod.yml stop
 
 docker compose --env-file .env.prod \
   -f compose.prod.yml --profile migrate run --rm migrate \
-  migrate up --target 0067 --directory /app/migrations
+  migrate up --target 0068 --directory /app/migrations
 
 docker compose --env-file .env.prod -f compose.prod.yml \
   --profile migrate run --rm migrate migrate check \
-  --target 0067 --directory /app/migrations
+  --target 0068 --directory /app/migrations
 ```
 
 迁移或校验失败时保持停服并排查，禁止跳过检查启动。进程监听前也会只读校验迁移账本的版本和 checksum；
@@ -269,10 +269,10 @@ curl --fail http://127.0.0.1:8080/health/ready
 测试环境完整发布：`./scripts/dev_service_deploy.sh`。
 生产按 B1–B5 执行，不能省略 B3 的停服、迁移与校验步骤。
 
-## Skill / MCP 联合修复发布（0067 基线）
+## Skill / MCP 联合修复发布（0068 基线）
 
-当前迁移基线为 0067；0058 至 0063 涉及 Tool 前缀、审批模式、本地目录 generation 和 Skill 升级清理，
-0064 至 0067 增加 Runtime 成本预算、Skill admission 清理、持久 Child wakeup 与有界指标快照。
+当前迁移基线为 0068；0058 至 0063 涉及 Tool 前缀、审批模式、本地目录 generation 和 Skill 升级清理，
+0064 至 0068 增加 Runtime 成本预算、Skill admission 清理、持久 Child wakeup、有界指标快照与运维检索索引。
 协调发布全部服务，避免严格 DTO 及旧 Runtime 行为混跑。启用新 Hands 的自动清理之前，必须先确认旧 Runtime
 的在途写调用已结束或人工核对其结果；没有 Canonical invocation 记录的旧调用不能自动推断已完成。
 参见 [Skill 升级](skill-upgrade.md)、[工作流恢复](skill-workflow-recovery.md) 和各阶段门禁。

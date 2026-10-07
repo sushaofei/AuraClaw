@@ -16,6 +16,8 @@ from auraclaw.contracts.internal import (
     OutboxClaimResponse,
     OutboxDispositionRequest,
     OutboxDispositionResponse,
+    OutboxRedriveRequest,
+    OutboxRedriveResponse,
     ServiceIdentity,
     SessionAppendRequest,
     SessionAppendResponse,
@@ -23,6 +25,8 @@ from auraclaw.contracts.internal import (
     SessionFeedResponse,
     SessionRootFeedRequest,
     SessionRootFeedResponse,
+    SessionTenantFeedRequest,
+    SessionTenantFeedResponse,
     SkillActiveBindingReferenceRequest,
     SkillActiveBindingReferenceResponse,
     SkillBindingReferenceRequest,
@@ -177,8 +181,69 @@ class RemoteSessionEventStore:
         )
 
     async def load_all(self, tenant_id: str | None = None) -> list[CanonicalEvent]:
-        del tenant_id
-        self._unsupported("load_all")
+        if tenant_id is None or self._identity is not ServiceIdentity.PROJECTION_WORKER:
+            self._unsupported("load_all")
+        events: list[CanonicalEvent] = []
+        after_session_id: str | None = None
+        after_version: int | None = None
+        while True:
+            request_id = (
+                f"tenant-feed:{tenant_id}:{after_session_id or 'start'}:"
+                f"{after_version or 0}"
+            )
+            response = await self._contract.call(
+                "/internal/v1/session/tenant-feed",
+                SessionTenantFeedRequest(
+                    context=InternalRequestContext(
+                        tenant_id=tenant_id,
+                        service_identity=self._identity,
+                        request_id=request_id,
+                        correlation_id=f"tenant-feed:{tenant_id}",
+                        causation_id=request_id,
+                    ),
+                    after_session_id=after_session_id,
+                    after_version=after_version,
+                    limit=1000,
+                ),
+                SessionTenantFeedResponse,
+            )
+            events.extend(canonical_event_from_dict(dict(event)) for event in response.events)
+            if response.next_session_id is None or response.next_version is None:
+                return events
+            after_session_id = response.next_session_id
+            after_version = response.next_version
+
+    async def load_tenant_page(
+        self,
+        tenant_id: str,
+        *,
+        after_session_id: str | None = None,
+        after_version: int | None = None,
+        limit: int = 1000,
+    ) -> list[CanonicalEvent]:
+        if self._identity is not ServiceIdentity.PROJECTION_WORKER:
+            self._unsupported("load_tenant_page")
+        request_id = (
+            f"tenant-feed:{tenant_id}:{after_session_id or 'start'}:"
+            f"{after_version or 0}"
+        )
+        response = await self._contract.call(
+            "/internal/v1/session/tenant-feed",
+            SessionTenantFeedRequest(
+                context=InternalRequestContext(
+                    tenant_id=tenant_id,
+                    service_identity=self._identity,
+                    request_id=request_id,
+                    correlation_id=f"tenant-feed:{tenant_id}",
+                    causation_id=request_id,
+                ),
+                after_session_id=after_session_id,
+                after_version=after_version,
+                limit=limit,
+            ),
+            SessionTenantFeedResponse,
+        )
+        return [canonical_event_from_dict(dict(event)) for event in response.events]
 
     async def has_skill_package_reference(
         self, tenant_id: str, package_digest: str
@@ -338,6 +403,25 @@ class RemoteSessionEventStore:
                 reason=reason,
             ),
             OutboxDispositionResponse,
+        )
+        return response.accepted
+
+    async def redrive_outbox(self, destination: str, event_id: str) -> bool:
+        request_id = f"redrive:{destination}:{event_id}"
+        response = await self._contract.call(
+            "/internal/v1/session/outbox/redrive",
+            OutboxRedriveRequest(
+                context=InternalRequestContext(
+                    tenant_id="system",
+                    service_identity=self._identity,
+                    request_id=request_id,
+                    correlation_id=f"outbox:{destination}",
+                    causation_id=request_id,
+                ),
+                destination=destination,
+                event_id=event_id,
+            ),
+            OutboxRedriveResponse,
         )
         return response.accepted
 

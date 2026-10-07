@@ -151,6 +151,61 @@ def test_metric_summary_is_windowed_and_tenant_isolated() -> None:
     asyncio.run(scenario())
 
 
+def test_audit_search_is_tenant_scoped_filtered_paginated_and_redacted() -> None:
+    async def scenario() -> None:
+        store = InMemoryObservabilityStore()
+        service = ObservabilityService(store, InMemoryEventStore())
+        tenant = TraceContext(
+            trace_id="a" * 32,
+            span_id="b" * 16,
+            tenant_id="tenant-audit",
+            session_id="session-audit",
+        )
+        other = TraceContext(
+            trace_id="c" * 32,
+            span_id="d" * 16,
+            tenant_id="other-tenant",
+            session_id="session-audit",
+        )
+        for audit_id, outcome in (("audit-1", "allowed"), ("audit-2", "denied")):
+            await service.audit(
+                context=tenant,
+                action="tool.execute",
+                outcome=outcome,
+                actor_type="runtime",
+                actor_id="runtime-audit",
+                metadata={"token": "secret", "reason": outcome},
+                audit_id=audit_id,
+            )
+        await service.audit(
+            context=other,
+            action="tool.execute",
+            outcome="denied",
+            actor_type="runtime",
+            actor_id="runtime-audit",
+            audit_id="audit-other",
+        )
+
+        first = await service.search_audits(
+            "tenant-audit", action="tool.execute", session_id="session-audit", limit=1
+        )
+        assert len(first["audits"]) == 1
+        assert first["next_before"] is not None
+        assert "secret" not in json.dumps(first)
+        second = await service.search_audits(
+            "tenant-audit",
+            action="tool.execute",
+            session_id="session-audit",
+            before=datetime.fromisoformat(str(first["next_before"])),
+            before_id=str(first["next_before_id"]),
+            limit=1,
+        )
+        assert len(second["audits"]) == 1
+        assert second["audits"][0]["audit_id"] != first["audits"][0]["audit_id"]
+
+    asyncio.run(scenario())
+
+
 def test_metric_snapshot_is_bounded_and_tenant_isolated() -> None:
     async def scenario() -> None:
         store = InMemoryObservabilityStore()
@@ -411,6 +466,17 @@ def test_http_trace_context_is_returned_and_tenant_timeline_is_authorized(
         )
         assert metrics.status_code == 200
         assert metrics.json()["window_hours"] == 24
+        audits = client.get(
+            "/v1/operations/audits?limit=10",
+            headers={"X-Tenant-ID": "tenant-m6-api"},
+        )
+        assert audits.status_code == 200
+        assert audits.json()["tenant_id"] == "tenant-m6-api"
+        invalid_cursor = client.get(
+            "/v1/operations/audits?before_id=audit-only",
+            headers={"X-Tenant-ID": "tenant-m6-api"},
+        )
+        assert invalid_cursor.status_code == 422
     get_settings.cache_clear()
 
 

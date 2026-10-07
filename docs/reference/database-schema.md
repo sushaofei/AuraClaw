@@ -80,6 +80,7 @@ uv run auraclaw migrate up
 | `0056` | 移除 Skill Source、同步/租约/来源选择表及各生命周期表的 `source_id` |
 | `0055` | Purged Skill 同版本重发、历史 Package tombstone 与可延迟 Publication FK |
 | `0066` | Child 终态先于 Root 等待登记时的持久化一次性唤醒锁存 |
+| `0068` | Operations 审计检索与 Projection poison 管理的 tenant/time 索引 |
 
 PostgreSQL / Kingbase 序列保留 `0017` 版本号空位，后续迁移继续按既有编号递增。
 不要为了填补编号而重命名已经发布的迁移。

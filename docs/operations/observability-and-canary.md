@@ -13,10 +13,15 @@ Response、凭证或 Secret；敏感 Payload 只允许保存受控 `payload_ref`
 GET /v1/operations/sessions/{session_id}/timeline
 GET /v1/operations/metrics
 GET /v1/operations/metrics/summary?window_hours=24
+GET /v1/operations/audits?action=tool.execute&outcome=denied&limit=50
 ```
 
 `metrics/summary` 在 tenant 边界内按指标返回 count、sum、average、min、max、p50、p95、p99，窗口限制
 1～720 小时。
+
+审计检索始终使用请求身份中的 tenant，支持 action、outcome、actor、session 和稳定时间游标过滤；响应
+只包含结构化、脱敏后的审计字段，不返回 Canonical Event payload 或 Secret。分页时同时回传
+`next_before` 与 `next_before_id`，下一页必须成对提交。
 
 ## 外部观测出口
 
@@ -95,7 +100,9 @@ uv run auraclaw operations redrive --tenant TENANT --queue projection --item-id 
 uv run auraclaw projection rebuild --tenant TENANT
 ```
 
-重建前后抽样比对 Task/Approval/Collaboration View；Canonical Event 不删除、不改写。
+重建前后抽样比对 Task/Approval/Collaboration View；Canonical Event 不删除、不改写。租户全量重建从
+Session owner 的分页 tenant feed 发现事实，不依赖当前 Task View 的 session 清单；空表、漏行或损坏的
+Projection 仍可恢复。未传 `--tenant` 的全局重建会被拒绝。
 
 ### Runtime 崩溃或 Lease 丢失
 

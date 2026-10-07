@@ -137,6 +137,20 @@ class SessionRootFeedResponse(ContractModel):
     events: tuple[dict[str, Any], ...]
 
 
+class SessionTenantFeedRequest(ContractModel):
+    context: InternalRequestContext
+    after_session_id: str | None = None
+    after_version: int | None = Field(default=None, ge=1)
+    limit: int = Field(default=1000, ge=1, le=1000)
+
+
+class SessionTenantFeedResponse(ContractModel):
+    api_version: str = INTERNAL_API_VERSION
+    events: tuple[dict[str, Any], ...]
+    next_session_id: str | None = None
+    next_version: int | None = None
+
+
 class SkillBindingReferenceRequest(ContractModel):
     context: InternalRequestContext
     package_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
@@ -217,6 +231,17 @@ class OutboxDispositionRequest(ContractModel):
 
 
 class OutboxDispositionResponse(ContractModel):
+    api_version: str = INTERNAL_API_VERSION
+    accepted: bool
+
+
+class OutboxRedriveRequest(ContractModel):
+    context: InternalRequestContext
+    destination: Literal["projection", "delivery", "control"]
+    event_id: str
+
+
+class OutboxRedriveResponse(ContractModel):
     api_version: str = INTERNAL_API_VERSION
     accepted: bool
 

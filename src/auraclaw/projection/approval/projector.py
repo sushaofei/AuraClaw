@@ -89,6 +89,30 @@ class InMemoryApprovalProjection:
                 return record
         return None
 
+    async def rebuild(
+        self, events: Sequence[CanonicalEvent], tenant_id: str | None = None
+    ) -> int:
+        async with self._lock:
+            if tenant_id is None:
+                self._records.clear()
+                self._event_ids.clear()
+            else:
+                self._records = {
+                    key: record
+                    for key, record in self._records.items()
+                    if key[0] != tenant_id
+                }
+                self._event_ids.difference_update(
+                    event.event_id for event in events if event.tenant_id == tenant_id
+                )
+        selected = [
+            event
+            for event in events
+            if tenant_id is None or event.tenant_id == tenant_id
+        ]
+        await self.project(selected)
+        return len(selected)
+
 
 class CompositeProjection:
     def __init__(self, *projectors: ProjectionWriter) -> None:

@@ -1,7 +1,8 @@
 from dataclasses import asdict
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import AwareDatetime
 
 from auraclaw.api.dependencies import (
     RequestIdentity,
@@ -17,6 +18,35 @@ router = APIRouter(prefix="/v1/operations", tags=["operations"])
 Identity = Annotated[RequestIdentity, Depends(request_identity)]
 Service = Annotated[ObservabilityService, Depends(get_observability_service)]
 Reader = Annotated[TaskReader, Depends(get_task_projection)]
+
+
+@router.get("/audits")
+async def audit_search(
+    identity: Identity,
+    service: Service,
+    action: str | None = Query(default=None, min_length=1, max_length=128),
+    outcome: str | None = Query(default=None, min_length=1, max_length=64),
+    actor_id: str | None = Query(default=None, min_length=1, max_length=256),
+    session_id: str | None = Query(default=None, min_length=1, max_length=256),
+    before: AwareDatetime | None = None,
+    before_id: str | None = Query(default=None, min_length=1, max_length=256),
+    limit: int = Query(default=50, ge=1, le=200),
+) -> dict[str, object]:
+    if (before is None) != (before_id is None):
+        raise HTTPException(
+            status_code=422,
+            detail="audit cursor requires both before and before_id",
+        )
+    return await service.search_audits(
+        identity.tenant_id,
+        action=action,
+        outcome=outcome,
+        actor_id=actor_id,
+        session_id=session_id,
+        before=before,
+        before_id=before_id,
+        limit=limit,
+    )
 
 
 @router.get("/sessions/{session_id}/timeline")

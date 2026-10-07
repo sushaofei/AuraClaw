@@ -85,6 +85,27 @@ class PostgresEventStore(LazyPool):
             )
         return [event_from_record(row) for row in rows]
 
+    async def load_tenant_page(
+        self,
+        tenant_id: str,
+        *,
+        after_session_id: str | None = None,
+        after_version: int | None = None,
+        limit: int = 1000,
+    ) -> list[CanonicalEvent]:
+        pool = await self.pool()
+        rows = await pool.fetch(
+            """SELECT * FROM session_core.canonical_event
+            WHERE tenant_id=$1
+              AND ($2::text IS NULL OR (session_id,aggregate_version) > ($2::text,$3::int))
+            ORDER BY session_id,aggregate_version LIMIT $4""",
+            tenant_id,
+            after_session_id,
+            after_version,
+            limit,
+        )
+        return [event_from_record(row) for row in rows]
+
     async def has_skill_package_reference(self, tenant_id: str, package_digest: str) -> bool:
         pool = await self.pool()
         query = """SELECT EXISTS(SELECT 1 FROM session_core.canonical_event
@@ -575,6 +596,7 @@ class PostgresEventStore(LazyPool):
             FROM session_core.outbox o
             JOIN session_core.canonical_event e ON e.event_id = o.event_id
             WHERE o.destination = 'projection' AND o.published_at IS NULL
+              AND o.poisoned_at IS NULL
               AND o.next_attempt_at <= now()
             ORDER BY o.outbox_id LIMIT 100"""
         )
@@ -594,6 +616,7 @@ class PostgresEventStore(LazyPool):
             FROM session_core.outbox o
             JOIN session_core.canonical_event e ON e.event_id = o.event_id
             WHERE o.destination = 'delivery' AND o.published_at IS NULL
+              AND o.poisoned_at IS NULL
               AND o.next_attempt_at <= now()
             ORDER BY o.outbox_id LIMIT 100"""
         )
@@ -619,7 +642,9 @@ class PostgresEventStore(LazyPool):
             """UPDATE session_core.outbox SET publish_attempt = publish_attempt + 1,
             next_attempt_at = now() + interval '1 second' * LEAST(
                 60, power(2, LEAST(publish_attempt, 6))
-            )
+            ), poisoned_at = CASE WHEN destination='projection'
+                                    AND publish_attempt + 1 >= 5 THEN now()
+                                  ELSE poisoned_at END
             WHERE outbox_id = $1""",
             outbox_id,
         )
@@ -720,7 +745,10 @@ class PostgresEventStore(LazyPool):
             "ack": "published_at=now()",
             "nack": (
                 "next_attempt_at=now() + interval '1 second' * "
-                "LEAST(60, power(2, LEAST(publish_attempt, 6)))"
+                "LEAST(60, power(2, LEAST(publish_attempt, 6))), "
+                "poisoned_at=CASE WHEN destination='projection' "
+                "AND publish_attempt >= 5 THEN now() "
+                "ELSE poisoned_at END"
             ),
             "poison": "poisoned_at=now()",
         }
@@ -738,5 +766,18 @@ class PostgresEventStore(LazyPool):
             worker_id,
             claim_token,
             None if disposition == "ack" else reason,
+        )
+        return str(result) == "UPDATE 1"
+
+    async def redrive_outbox(self, destination: str, event_id: str) -> bool:
+        pool = await self.pool()
+        result = await pool.execute(
+            """UPDATE session_core.outbox
+            SET poisoned_at=NULL,publish_attempt=0,next_attempt_at=now(),last_error=NULL,
+                claimed_by=NULL,claim_token=NULL,claim_expires_at=NULL
+            WHERE destination=$1 AND event_id=$2 AND published_at IS NULL
+              AND poisoned_at IS NOT NULL""",
+            destination,
+            event_id,
         )
         return str(result) == "UPDATE 1"

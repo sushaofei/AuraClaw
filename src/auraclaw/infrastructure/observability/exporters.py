@@ -317,6 +317,29 @@ class ExportingObservabilityStore:
     ) -> list[MetricSummary]:
         return await self._store.metric_summary(tenant_id, window_hours=window_hours)
 
+    async def search_audits(
+        self,
+        tenant_id: str,
+        *,
+        action: str | None = None,
+        outcome: str | None = None,
+        actor_id: str | None = None,
+        session_id: str | None = None,
+        before: datetime | None = None,
+        before_id: str | None = None,
+        limit: int = 50,
+    ) -> list[AuditEvent]:
+        return await self._store.search_audits(
+            tenant_id,
+            action=action,
+            outcome=outcome,
+            actor_id=actor_id,
+            session_id=session_id,
+            before=before,
+            before_id=before_id,
+            limit=limit,
+        )
+
     @staticmethod
     async def _export_safely(kind: str, operation: Any) -> None:
         try:
