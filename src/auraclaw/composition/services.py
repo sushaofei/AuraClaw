@@ -571,7 +571,7 @@ def _readiness(name: str, settings: Settings) -> tuple[bool, dict[str, str]]:
         identity_ready = (
             settings.insecure_identity_headers_enabled or settings.signed_identity_configured
         )
-        dependencies["chaintower_identity"] = (
+        dependencies["upstream_identity"] = (
             "insecure-headers"
             if settings.insecure_identity_headers_enabled
             else "ready"

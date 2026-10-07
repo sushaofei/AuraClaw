@@ -74,6 +74,7 @@ def build_delivery_worker_app(
         settings.credential_proxy_base_url,
         bearer_token=bearer_token,
         service_identity=ServiceIdentity.DELIVERY_WORKER,
+        timeout=settings.credential_proxy_request_timeout_seconds,
     )
     worker = ResultDeliveryWorker(
         outbox=outbox,

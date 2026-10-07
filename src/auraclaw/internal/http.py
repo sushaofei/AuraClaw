@@ -211,9 +211,39 @@ def create_contract_app(
             _authenticate(request_model, raw_request)
 
             async def event_stream() -> AsyncIterator[str]:
-                async for event in route.handler(request_model):
-                    validated = route.event_model.model_validate(event)
-                    yield f"data: {validated.model_dump_json()}\n\n"
+                sequence = 0
+                try:
+                    async for event in route.handler(request_model):
+                        validated = route.event_model.model_validate(event)
+                        sequence = int(getattr(validated, "sequence", sequence))
+                        yield f"data: {validated.model_dump_json()}\n\n"
+                except Exception as exc:
+                    managed = exc if isinstance(exc, AuraClawError) else None
+                    error_event = route.event_model.model_validate(
+                        {
+                            "model_call_id": getattr(request_model, "model_call_id", "unknown"),
+                            "sequence": sequence + 1,
+                            "type": "error",
+                            "payload": {
+                                "code": (
+                                    managed.code
+                                    if managed is not None
+                                    else "model_provider_error"
+                                ),
+                                "message": (
+                                    managed.message
+                                    if managed is not None
+                                    else "model provider request failed"
+                                ),
+                                "retryable": (
+                                    managed.status_code >= 500
+                                    if managed is not None
+                                    else False
+                                ),
+                            },
+                        }
+                    )
+                    yield f"data: {error_event.model_dump_json()}\n\n"
                 yield "data: [DONE]\n\n"
 
             return StreamingResponse(

@@ -97,7 +97,7 @@ def test_activity_folds_lifecycles_redacts_and_isolates_runs() -> None:
             "skill.activated",
             {
                 "skill_activation_id": "skill-1",
-                "skill_name": "price-insight",
+                "skill_name": "inventory-analysis",
                 "skill_version": "1.0.0",
             },
         ),
@@ -106,7 +106,7 @@ def test_activity_folds_lifecycles_redacts_and_isolates_runs() -> None:
             "skill.completed",
             {
                 "skill_activation_id": "skill-1",
-                "skill_name": "price-insight",
+                "skill_name": "inventory-analysis",
                 "output_summary": "分析完成",
             },
         ),

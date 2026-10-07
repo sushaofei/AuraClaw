@@ -18,6 +18,14 @@ class AppendResult:
 
 
 @dataclass(frozen=True)
+class StreamAppend:
+    session_id: str
+    run_id: str | None
+    expected_version: int
+    events: tuple[NewEvent, ...]
+
+
+@dataclass(frozen=True)
 class SessionSnapshot:
     tenant_id: str
     session_id: str
@@ -103,6 +111,17 @@ class EventStore(Protocol):
         disposition: str,
         reason: str | None = None,
     ) -> bool: ...
+
+
+class AtomicBatchEventStore(EventStore, Protocol):
+    async def append_batch(
+        self,
+        *,
+        root_session_id: str,
+        context: CommandContext,
+        appends: Sequence[StreamAppend],
+        command_result: dict[str, Any],
+    ) -> AppendResult: ...
 
 
 class OutboxRelayPort(Protocol):

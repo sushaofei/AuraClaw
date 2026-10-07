@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import re
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -49,6 +50,8 @@ from auraclaw.infrastructure.clients.credential import RemoteCredentialProxy
 from auraclaw.infrastructure.clients.model import RemoteModelClient
 from auraclaw.infrastructure.clients.policy import RemotePolicyClient
 from auraclaw.infrastructure.clients.runtime import (
+    RemoteCollaborationClient,
+    RemoteOrchestratorSessionClient,
     RemoteRuntimeControlClient,
     RemoteRuntimeSessionClient,
 )
@@ -75,6 +78,31 @@ from auraclaw.model_gateway.internal_service import ModelGatewayInternalService
 from auraclaw.policy.internal_service import PolicyInternalService
 from auraclaw.runtime.ports import ModelRequest, ModelResponse
 from auraclaw.session.internal_service import SessionInternalService
+
+
+def test_runtime_internal_clients_retry_transient_transport_failures() -> None:
+    async def scenario() -> None:
+        clients = (
+            RemoteRuntimeSessionClient("http://session.test", bearer_token="token"),
+            RemoteCollaborationClient("http://collaboration.test", bearer_token="token"),
+            RemoteOrchestratorSessionClient("http://orchestrator.test", bearer_token="token"),
+            RemoteRuntimeControlClient(
+                "http://control.test",
+                bearer_token="token",
+                runtime_id="runtime-test",
+                role="root",
+                node_id="node-test",
+                capacity=1,
+            ),
+        )
+        try:
+            assert all(client._contract._retry_attempts == 3 for client in clients)
+            assert all(client._contract._retry_backoff_seconds == 0.05 for client in clients)
+        finally:
+            for client in clients:
+                await client.aclose()
+
+    asyncio.run(scenario())
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -622,6 +650,43 @@ async def test_hands_uses_authenticated_remote_policy_and_credential_boundaries(
     await policy.aclose()
 
 
+@pytest.mark.asyncio
+async def test_policy_decision_validation_retries_transient_transport_failure() -> None:
+    attempts = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise httpx.ConnectError("policy replica disconnected", request=request)
+        return httpx.Response(
+            200,
+            json={
+                "valid": True,
+                "decision": "allow",
+                "policy_version": "production-v1",
+                "constraints": {},
+                "expires_at": (datetime.now(UTC) + timedelta(minutes=5)).isoformat(),
+            },
+        )
+
+    policy = RemotePolicyClient(
+        "http://policy.test",
+        bearer_token="credential-token",
+        service_identity=ServiceIdentity.CREDENTIAL_PROXY,
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert await policy.validate_decision(
+        tenant_id="tenant-a",
+        decision_id="decision-a",
+        action="read",
+        resource="mcp.remote.invoke",
+    )
+    assert attempts == 2
+    await policy.aclose()
+
+
 class _UnavailablePolicy:
     async def validate_decision(self, **_parameters: object) -> bool:
         raise TimeoutError("policy timed out")
@@ -883,5 +948,52 @@ async def test_mcp_error_classification_survives_credential_http_boundary() -> N
         assert caught.value.side_effect_status == "unknown"
         assert caught.value.metadata["error_details"]["remote_code"] == 503
         assert proxy.usage_audit()[0]["status"] == "failed"
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_remote_credential_proxy_uses_bounded_long_running_timeout() -> None:
+    client = RemoteCredentialProxy(
+        "http://credential.test",
+        bearer_token="hands-token",
+        timeout=91.0,
+    )
+    try:
+        assert client._client.timeout.connect == 91.0
+        assert client._client.timeout.read == 91.0
+        assert client._client.timeout.write == 91.0
+        assert client._client.timeout.pool == 91.0
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_remote_credential_proxy_maps_mcp_timeout_to_connector_error() -> None:
+    from auraclaw.contracts.errors import ConnectorExecutionError
+
+    async def timeout(_request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("injected timeout")
+
+    client = RemoteCredentialProxy(
+        "http://credential.test",
+        bearer_token="hands-token",
+        timeout=91.0,
+        transport=httpx.MockTransport(timeout),
+    )
+    try:
+        with pytest.raises(ConnectorExecutionError) as caught:
+            await client.invoke(
+                tenant_id="tenant-a",
+                session_id="session-a",
+                tool_name="mcp:fixture",
+                credential_ref="vault/fixture#workload",
+                operation="mcp.invoke",
+                request={"config_revision": 1},
+                policy_decision_id="fixture-policy",
+            )
+        assert caught.value.code == "mcp_timeout"
+        assert caught.value.status == "timeout"
+        assert caught.value.metadata == {"stage": "credential_proxy"}
     finally:
         await client.aclose()

@@ -108,7 +108,6 @@ flowchart TD
 - [[16 Hands Service]]
 - [[23 MCP Runtime 能力平面]]
 - [[25 Skill 生命周期与发布控制平面]]
-- [[24 Model Skill 转换服务]]
 
 ### 安全与治理
 

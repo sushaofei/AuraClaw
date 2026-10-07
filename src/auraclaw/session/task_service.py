@@ -72,9 +72,14 @@ class TaskService:
         interaction_mode: InteractionMode | None = None,
         approval_mode: ApprovalMode | None = None,
         read_refresh: list[dict[str, Any]] | None = None,
+        skill_names: list[str] | None = None,
     ) -> dict[str, Any]:
-        interaction = interaction_mode or (
-            InteractionMode.NON_STREAMING if source == "schedule" else InteractionMode.STREAMING
+        # Schedulers do not have a user interaction channel. Ignore contradictory
+        # caller input instead of creating an unresolvable human-approval wait.
+        interaction = (
+            InteractionMode.NON_STREAMING
+            if source == "schedule"
+            else interaction_mode or InteractionMode.STREAMING
         )
         approval = ApprovalConfiguration.resolve(interaction, approval_mode)
         started = time.perf_counter()
@@ -92,6 +97,7 @@ class TaskService:
             approval=approval,
             runtime_budget=self._runtime_budget,
             read_refresh=self._refresh_snapshots(read_refresh),
+            skill_names=skill_names,
         )
         response = {
             "session_id": session_id,
@@ -106,6 +112,7 @@ class TaskService:
                         "occurrence_id": occurrence_id,
                         **approval.public_dict(),
                         **({"read_refresh": read_refresh} if read_refresh else {}),
+                        **({"skill_names": skill_names} if skill_names else {}),
                     },
                     sort_keys=True,
                 ).encode()

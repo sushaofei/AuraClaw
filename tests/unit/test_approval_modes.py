@@ -113,6 +113,32 @@ async def test_defaults_durable_and_idempotent(interaction, expected):
     ] == expected
 
 
+@pytest.mark.parametrize("requested", list(ApprovalMode))
+async def test_non_streaming_calls_never_wait_for_human(requested):
+    events, _, task, accepted, request = await setup(
+        mode=requested,
+        interaction=InteractionMode.NON_STREAMING,
+    )
+    assert accepted["effective_approval_mode"] == ApprovalMode.FULL_ACCESS
+    assert accepted["approval_mode_source"] == "default"
+
+    await events.append(
+        root_session_id=request.session_id,
+        session_id=request.session_id,
+        run_id=request.run_id,
+        context=context("complete-non-streaming", 2, "complete"),
+        events=[NewEvent(type="run.completed", payload={})],
+        command_result={},
+    )
+    next_run = await task.request_run(
+        session_id=request.session_id,
+        context=context("next-non-streaming", 3, "request_run"),
+        approval_mode=ApprovalMode.REQUEST_APPROVAL,
+    )
+    assert next_run["effective_approval_mode"] == ApprovalMode.FULL_ACCESS
+    assert next_run["interaction_mode"] == InteractionMode.NON_STREAMING
+
+
 @pytest.mark.parametrize("mode", list(ApprovalMode))
 @pytest.mark.parametrize("decision", list(PolicyDecision))
 async def test_all_policy_decisions_and_non_write_action(mode, decision):
@@ -473,6 +499,17 @@ async def test_schedule_default_and_child_inheritance_ignore_metadata_mode():
         context=context("schedule"),
     )
     assert scheduled["effective_approval_mode"] == "full_access"
+    forced_interactive = await task.create_task(
+        goal="scheduled work cannot pause for approval",
+        source="schedule",
+        schedule_id="schedule",
+        occurrence_id="two",
+        interaction_mode=InteractionMode.STREAMING,
+        approval_mode=ApprovalMode.REQUEST_APPROVAL,
+        context=context("schedule-forced-non-interactive"),
+    )
+    assert forced_interactive["interaction_mode"] == "non_streaming"
+    assert forced_interactive["effective_approval_mode"] == "full_access"
     parent = await task.create_task(
         goal="parent", context=context("parent"), approval_mode=ApprovalMode.AUTO_REVIEW
     )

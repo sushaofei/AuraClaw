@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-from auraclaw.contracts.errors import SyncInvokeBusyError
+from auraclaw.contracts.errors import NotFoundError, SyncInvokeBusyError
 from auraclaw.gateways.query.waiter import TaskResultWaiter, classify_result
 
 
@@ -28,6 +28,20 @@ class GateQuery:
         self.entered.set()
         await self.release.wait()
         return {"status": "completed", "session_status": "ready"}
+
+
+class InitiallyMissingQuery:
+    def __init__(self, missing_calls: int, result: dict[str, object]) -> None:
+        self._missing_calls = missing_calls
+        self._result = result
+        self.calls = 0
+
+    async def get_result(self, tenant_id: str, session_id: str) -> dict[str, object]:
+        del tenant_id
+        self.calls += 1
+        if self.calls <= self._missing_calls:
+            raise NotFoundError(f"Session not found: {session_id}")
+        return dict(self._result)
 
 
 def test_classify_result_stops_on_terminal_and_human_gates() -> None:
@@ -67,6 +81,42 @@ def test_waiter_times_out_without_mutating_result() -> None:
         waited = await waiter.wait("tenant-1", "ses_1", timeout_seconds=0.05)
         assert waited.outcome == "timeout"
         assert waited.result["status"] == "running"
+
+    asyncio.run(scenario())
+
+
+def test_waiter_tolerates_projection_not_found_after_create() -> None:
+    async def scenario() -> None:
+        query = InitiallyMissingQuery(
+            2,
+            {"status": "completed", "session_status": "ready", "result_summary": "done"},
+        )
+        waiter = TaskResultWaiter(query, poll_interval=0.01)
+        waited = await waiter.wait(
+            "tenant-1",
+            "ses_1",
+            timeout_seconds=1,
+            initial_result={"status": "pending", "session_status": "pending"},
+        )
+        assert waited.outcome == "completed"
+        assert waited.result["result_summary"] == "done"
+        assert query.calls == 3
+
+    asyncio.run(scenario())
+
+
+def test_waiter_returns_initial_result_when_projection_stays_missing() -> None:
+    async def scenario() -> None:
+        query = InitiallyMissingQuery(100, {"status": "completed"})
+        waiter = TaskResultWaiter(query, poll_interval=0.01)
+        waited = await waiter.wait(
+            "tenant-1",
+            "ses_1",
+            timeout_seconds=0.03,
+            initial_result={"status": "pending", "session_status": "pending"},
+        )
+        assert waited.outcome == "timeout"
+        assert waited.result["status"] == "pending"
 
     asyncio.run(scenario())
 

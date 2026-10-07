@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import math
 import time
 from collections.abc import AsyncIterator
@@ -14,6 +15,7 @@ from uuid import uuid4
 
 from auraclaw.action.ports import PolicyEvaluation
 from auraclaw.contracts.errors import (
+    AuraClawError,
     AuthorizationError,
     BudgetExceededError,
     LeaseConflictError,
@@ -43,6 +45,8 @@ from auraclaw.runtime.ports import (
     ModelResponse,
     ProviderCancellationResult,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -79,6 +83,30 @@ _RUNTIME_METRICS = frozenset(
         "skill.runtime.content_cache.miss.count",
         "skill.runtime.trusted_messages.latency.seconds",
         "skill.runtime.prompt.rejected.count",
+        "skill.resolve_and_activate.count",
+        "skill.resolve_and_activate.latency.seconds",
+        "skill.resolve_and_activate.result.activated.count",
+        "skill.resolve_and_activate.result.ambiguous.count",
+        "skill.resolve_and_activate.result.denied.count",
+        "skill.resolve_and_activate.result.error.count",
+        "skill.resolve_and_activate.result.invalid.count",
+        "skill.resolve_and_activate.result.load_failed.count",
+        "skill.resolve_and_activate.result.not_found.count",
+        "skill.resolve_and_activate.result.search_failed.count",
+        "router.requests.count",
+        "router.fast_path.count",
+        "router.shadow.count",
+        "router.fallback.count",
+        "router.latency.seconds",
+        "router.candidate.count",
+        "router.confidence",
+        "router.plan.steps",
+        "router.plan.depth",
+        "router.plan.width",
+        "router.semantic_planner.calls",
+        "router.semantic_planner.accepted.count",
+        "router.semantic_planner.rejected.count",
+        "router.semantic_planner.latency.seconds",
     }
 )
 
@@ -195,6 +223,7 @@ class ModelGatewayInternalService:
         )
         sequence = 0
         response: ModelResponse | None = None
+        stream_error: Exception | None = None
         provider_started = time.monotonic()
         first_output_recorded = False
         metric_tasks = [asyncio.create_task(self._emit_runtime_metrics(request))]
@@ -224,11 +253,26 @@ class ModelGatewayInternalService:
                         continue
                     if not first_output_recorded:
                         first_output_recorded = True
+                        first_forward_seconds = time.monotonic() - provider_started
+                        logger.info(
+                            "ttft.gateway_first_forward model_call=%s elapsed_ms=%.2f",
+                            request.model_call_id,
+                            first_forward_seconds * 1_000,
+                        )
                         metric_tasks.append(
                             asyncio.create_task(
                                 self._emit_metric(
                                     "model.ttft.seconds",
-                                    time.monotonic() - provider_started,
+                                    first_forward_seconds,
+                                    request,
+                                )
+                            )
+                        )
+                        metric_tasks.append(
+                            asyncio.create_task(
+                                self._emit_metric(
+                                    "model.gateway.first_forward.seconds",
+                                    first_forward_seconds,
                                     request,
                                 )
                             )
@@ -307,10 +351,12 @@ class ModelGatewayInternalService:
                 await self._state.fail(
                     tenant_id=request.context.tenant_id,
                     model_call_id=request.model_call_id,
-                    error_code=type(exc).__name__,
+                    error_code=(
+                        exc.code if isinstance(exc, AuraClawError) else type(exc).__name__
+                    ),
                     claim_token=claim_token,
                 )
-            raise
+            stream_error = exc
         finally:
             monitor_stop.set()
             if monitor is not None:
@@ -318,6 +364,10 @@ class ModelGatewayInternalService:
                 with suppress(asyncio.CancelledError):
                     await monitor
             await asyncio.gather(*metric_tasks, return_exceptions=True)
+        if stream_error is not None:
+            sequence += 1
+            yield self._stream_error_event(request.model_call_id, sequence, stream_error)
+            return
         if response is None:
             if self._state is not None:
                 await self._state.fail(
@@ -373,12 +423,34 @@ class ModelGatewayInternalService:
                             error_code="completion_persistence_failed",
                         )
                 raise
+        # Live deltas are best-effort; the completed response remains the durable,
+        # authoritative result used for reconnect and final convergence.
         sequence += 1
         yield ModelStreamEvent(
             model_call_id=request.model_call_id,
             sequence=sequence,
             type="completed",
             payload=result.model_dump(mode="json"),
+        )
+
+    @staticmethod
+    def _stream_error_event(
+        model_call_id: str,
+        sequence: int,
+        error: Exception,
+    ) -> ModelStreamEvent:
+        managed = error if isinstance(error, AuraClawError) else None
+        return ModelStreamEvent(
+            model_call_id=model_call_id,
+            sequence=sequence,
+            type="error",
+            payload={
+                "code": managed.code if managed is not None else "model_provider_error",
+                "message": (
+                    managed.message if managed is not None else "model provider request failed"
+                ),
+                "retryable": managed.status_code >= 500 if managed is not None else False,
+            },
         )
 
     async def cancel(self, request: ModelCancelRequest) -> ModelCancelResponse:
@@ -546,12 +618,34 @@ class ModelGatewayInternalService:
             raise PolicyDeniedError("Model policy denied generation")
 
     async def _emit_runtime_metrics(self, request: ModelGenerateRequest) -> None:
-        await asyncio.gather(
-            *(
-                self._emit_metric(name, float(value), request)
-                for name, value in request.runtime_metrics.items()
-                if name in _RUNTIME_METRICS and math.isfinite(float(value)) and float(value) >= 0
+        if self._metric_writer is None:
+            return
+        metrics = [
+            MetricPoint(
+                name=name,
+                value=float(value),
+                observed_at=datetime.now(UTC),
+                tenant_id=request.context.tenant_id,
+                session_id=request.session_id,
+                run_id=request.run_id,
+                deduplication_key=f"{request.context.tenant_id}:{request.model_call_id}:{name}",
             )
+            for name, value in request.runtime_metrics.items()
+            if name in _RUNTIME_METRICS
+            and math.isfinite(float(value))
+            and float(value) >= 0
+        ]
+        if not metrics:
+            return
+        bulk_writer = getattr(self._metric_writer, "write_metrics", None)
+        if callable(bulk_writer):
+            try:
+                await asyncio.wait_for(bulk_writer(metrics), timeout=0.25)
+            except Exception:
+                return
+            return
+        await asyncio.gather(
+            *(self._emit_metric(metric.name, metric.value, request) for metric in metrics)
         )
 
     async def _emit_metric(self, name: str, value: float, request: ModelGenerateRequest) -> None:

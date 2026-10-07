@@ -4,7 +4,11 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
-from auraclaw.contracts.approval_mode import ApprovalConfiguration, ApprovalMode
+from auraclaw.contracts.approval_mode import (
+    ApprovalConfiguration,
+    ApprovalMode,
+    InteractionMode,
+)
 from auraclaw.contracts.errors import InvalidTransitionError
 from auraclaw.contracts.events import CanonicalEvent, NewEvent
 from auraclaw.contracts.state import (
@@ -35,6 +39,7 @@ class SessionAggregate:
     output_contract: dict[str, Any] = field(default_factory=dict)
     owner: str | None = None
     dept_id: str | None = None
+    skill_names: list[str] = field(default_factory=list)
     approval: ApprovalConfiguration = field(default_factory=ApprovalConfiguration)
     _pending: list[NewEvent] = field(default_factory=list, repr=False)
 
@@ -90,6 +95,7 @@ class SessionAggregate:
             output_contract=dict(state.get("output_contract", {})),
             owner=state.get("owner"),
             dept_id=None if state.get("dept_id") is None else str(state.get("dept_id")),
+            skill_names=[str(item) for item in state.get("skill_names", [])],
         )
         return aggregate
 
@@ -125,6 +131,7 @@ class SessionAggregate:
             "output_contract": dict(self.output_contract),
             "owner": self.owner,
             "dept_id": self.dept_id,
+            "skill_names": list(self.skill_names),
         }
 
     def create(
@@ -139,10 +146,12 @@ class SessionAggregate:
         approval: ApprovalConfiguration | None = None,
         runtime_budget: dict[str, Any] | None = None,
         read_refresh: list[dict[str, Any]] | None = None,
+        skill_names: list[str] | None = None,
     ) -> None:
         if self.version or self.status is not None:
             raise InvalidTransitionError("Session already exists")
         self.dept_id = dept_id
+        self.skill_names = list(dict.fromkeys(skill_names or []))
         self.approval = approval or ApprovalConfiguration()
         created_payload: dict[str, Any] = {
             "goal": goal,
@@ -154,6 +163,8 @@ class SessionAggregate:
         }
         if dept_id:
             created_payload["dept_id"] = dept_id
+        if self.skill_names:
+            created_payload["skill_names"] = list(self.skill_names)
         if source == "schedule":
             created_payload["schedule_id"] = schedule_id
             created_payload["occurrence_id"] = occurrence_id
@@ -168,9 +179,12 @@ class SessionAggregate:
             NewEvent(
                 type="run.requested",
                 visibility=Visibility.USER,
-                payload={**self._run_payload(run_id),
-                         **({"budget": dict(runtime_budget)} if runtime_budget else {}),
-                         **({"read_refresh": read_refresh} if read_refresh else {})},
+                payload={
+                    **self._run_payload(run_id),
+                    **({"budget": dict(runtime_budget)} if runtime_budget else {}),
+                    **({"read_refresh": read_refresh} if read_refresh else {}),
+                    **({"skill_names": list(self.skill_names)} if self.skill_names else {}),
+                },
             )
         )
 
@@ -217,17 +231,25 @@ class SessionAggregate:
         assert status is not None
         if status not in {SessionStatus.CREATED, SessionStatus.READY, SessionStatus.PAUSED}:
             raise InvalidTransitionError(f"cannot request run for Session in {status.value}")
-        if approval_mode is not None:
+        resolved_approval = ApprovalConfiguration.resolve(
+            self.approval.interaction_mode or InteractionMode.STREAMING,
+            approval_mode,
+        )
+        if approval_mode is not None or (
+            self.approval.interaction_mode == InteractionMode.NON_STREAMING
+            and self.approval.effective_approval_mode != ApprovalMode.FULL_ACCESS
+        ):
             self._raise(
                 NewEvent(
                     type="session.approval_mode_changed",
                     visibility=Visibility.USER,
                     payload={
-                        "approval": ApprovalConfiguration(
-                            effective_approval_mode=approval_mode,
-                            interaction_mode=self.approval.interaction_mode,
-                            approval_mode_source="explicit",
-                            approval_mode_revision=self.approval.approval_mode_revision + 1,
+                        "approval": resolved_approval.model_copy(
+                            update={
+                                "approval_mode_revision": (
+                                    self.approval.approval_mode_revision + 1
+                                ),
+                            }
                         ).public_dict()
                     },
                 )
@@ -241,7 +263,8 @@ class SessionAggregate:
                     "command_id": command_id,
                     "request_fingerprint": request_fingerprint,
                     **({"budget": dict(runtime_budget)} if runtime_budget else {}),
-                         **({"read_refresh": read_refresh} if read_refresh else {}),
+                    **({"read_refresh": read_refresh} if read_refresh else {}),
+                    **({"skill_names": list(self.skill_names)} if self.skill_names else {}),
                 },
             )
         )
@@ -340,6 +363,7 @@ class SessionAggregate:
             self.parent_session_id = payload.get("parent_session_id")
             self.role = str(payload.get("role", "root"))
             self.dept_id = _optional_str(payload.get("dept_id"))
+            self.skill_names = [str(item) for item in payload.get("skill_names", [])]
             self.status = SessionStatus.CREATED
         elif event_type == "child.created":
             self.goal = str(payload["goal"])

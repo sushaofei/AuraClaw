@@ -32,7 +32,7 @@ def test_sync_environment_replaces_postgresql_database_settings(
             "KINGBASE_PORT": "54321",
             "KINGBASE_USER": "kb-user",
             "KINGBASE_PWD": "P@ss word",
-            "KINGBASE_AURACLAW_DB": "chaintower_agent",
+            "KINGBASE_AURACLAW_DB": "auraclaw",
         },
     )
 
@@ -41,11 +41,11 @@ def test_sync_environment_replaces_postgresql_database_settings(
     assert values["AURACLAW_DB_DIALECT"] == "postgres"
     assert values["DB_HOST"] == "10.244.72.1"
     assert values["DB_PORT"] == "54321"
-    assert values["DB_NAME"] == "chaintower_agent"
+    assert values["DB_NAME"] == "auraclaw"
     assert values["AURACLAW_MIGRATIONS_DIRECTORY"] == "/app/migrations"
-    assert values["AURACLAW_MIGRATE_TARGET"] == "0065"
+    assert values["AURACLAW_MIGRATE_TARGET"] == "0067"
     assert values["AURACLAW_DATABASE_URL"] == (
-        "postgresql+asyncpg://kb-user:P%40ss%20word@10.244.72.1:54321/chaintower_agent"
+        "postgresql+asyncpg://kb-user:P%40ss%20word@10.244.72.1:54321/auraclaw"
     )
     assert values["AURACLAW_MIGRATION_DATABASE_URL"] == values["AURACLAW_DATABASE_URL"]
     assert values["AURACLAW_RUNTIME_WORKLOAD_TOKEN"] == "test-token"
@@ -59,6 +59,6 @@ def test_ensure_database_name_adds_safe_default(tmp_path: Path) -> None:
     ensure_database_name(host_env, values)
     ensure_database_name(host_env, values)
 
-    assert values["KINGBASE_AURACLAW_DB"] == "chaintower_agent"
+    assert values["KINGBASE_AURACLAW_DB"] == "auraclaw"
     assert host_env.read_text(encoding="utf-8").count("KINGBASE_AURACLAW_DB=") == 1
     assert host_env.stat().st_mode & 0o777 == 0o600

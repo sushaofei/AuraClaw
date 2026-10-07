@@ -15,7 +15,7 @@ DO_SYNC=1
 DO_BUILD=1
 DO_UP=1
 DO_HEALTH=1
-MIGRATE_TARGET="${AURACLAW_MIGRATE_TARGET:-0065}"
+MIGRATE_TARGET="${AURACLAW_MIGRATE_TARGET:-0067}"
 
 usage() {
   cat <<'EOF'
@@ -99,7 +99,7 @@ if [[ "${DO_SYNC}" -eq 1 ]]; then
     --exclude '.host.env' \
     --exclude 'compose.kafka-fix.yml' \
     --exclude 'compose.hotfix-errors.yml' \
-    --exclude '.chaintower' \
+    --exclude '.upstream' \
     --exclude '.DS_Store' \
     --exclude '__pycache__/' \
     --exclude '.pytest_cache/' \

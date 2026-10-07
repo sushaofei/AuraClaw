@@ -232,6 +232,8 @@ def test_mcp_admin_invokes_capability_test_with_simulated_input() -> None:
                 "status": "passed",
                 "kind": "tool",
                 "output": {"accepted": True, "order_id": "order-42"},
+                "transport_reachable": True,
+                "business_success": True,
                 "schema_valid": True,
                 "expectation_matched": True,
                 "duration_ms": 7,
@@ -263,6 +265,8 @@ def test_mcp_admin_invokes_capability_test_with_simulated_input() -> None:
         )
     assert tested.status_code == 200, tested.text
     assert tested.json()["status"] == "passed"
+    assert tested.json()["transport_reachable"] is True
+    assert tested.json()["business_success"] is True
     assert tested.json()["schema_valid"] is True
     assert tested.json()["expectation_matched"] is True
 

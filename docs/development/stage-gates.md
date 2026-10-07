@@ -905,74 +905,6 @@ runner 隔离复跑通过，SeaweedFS multipart 隔离复跑通过。剩余 M2 o
 常驻 projection worker 在测试重命名 destination 前消费，隔离复跑仍可复现，属于共享
 测试环境冲突；清理该 worker 后需重新执行全量测试，故最终质量门禁保持未勾选。
 
-## 阶段 M10：Model Skill 转换服务
-
-状态：M10a 配置 → Skill → MCP → Runtime Client 最小闭环与单进程周期同步已完成；
-生产级持久化、多副本协调和确定性执行仍在后续阶段。
-
-依据：[Model Skill 转换服务](../architecture/system/24%20Model%20Skill%20转换服务.md)。
-
-### Phase 0：源发布契约
-
-- [ ] 固定 `config_snapshot_json` Schema、公式 AST、版本发布事务和定义 Outbox 事件。
-- [ ] 修复跨模型版本引用、依赖环、阈值重叠、输出缺失和重复量化配置。
-- [ ] 建立 PostgreSQL 只读身份、tenant 强制过滤、连接超时和凭证托管。
-
-### 最小闭环
-
-- [x] 使用固定、tenant-scoped `SELECT` 读取 `ct_model_*`，不执行数据库写操作。
-- [x] Draft 配置可编译为带预览版本标识的签名 Skill Package。
-- [x] `manifest.json`、`SKILL.md` 和 `references/config.json` 可通过 `skill://` MCP Resource 读取。
-- [x] Runtime `HandsMcpClient` 可加载生成的 manifest、说明和配置。
-- [x] 真实 PostgreSQL 冒烟生成两套 Skill、8 个 Resource，且 manifest 以 JSON 文本返回。
-- [x] 预览 Skill 明确禁止权威计算、自由解释公式和业务回写。
-
-### Phase 1：验证与编译
-
-- [ ] `ModelDefinitionSource` 能在一致快照中装载一个 tenant/model/version。
-- [ ] Validator 覆盖引用、DAG、权重、阈值、Schema、开关、Sink 和文本安全。
-- [x] Compiler 对相同源快照生成字节一致的 `manifest.json`、`SKILL.md`、references 和 digest。
-- [x] Draft 仅生成明确标记的预览 Skill，不声明模型执行 Tool。
-
-### Phase 2：持久发布
-
-- [ ] Skill Publication 和 Sync State 持久化，多副本重启后可恢复。
-- [ ] Artifact、签名、Catalog、`skill://` Resource、撤销和不可变版本冲突接入完成。
-- [x] 单进程周期全量对账、幂等发布、失效撤销和失败重试完成（Issue #30）。
-- [ ] Outbox 提示、持久 Sync State、多副本租约和 Quarantine 完成。
-
-### Phase 3：确定性模型 Tools
-
-- [ ] `ct.model.inputs.read/evaluate/result.get/writeback` 使用固定 Schema 和版本 digest。
-- [ ] 公式仅由有界 DSL 执行器计算；禁止 LLM、`eval`、任意 SQL 和动态 Sink。
-- [ ] writeback 经过 Policy、Approval、Invocation Store、幂等、Fencing 和副作用审计。
-- [ ] Skill Resolver 固定 Tool schema、模型 source digest 和上游模型版本。
-
-### Phase 4：安全、恢复与交付
-
-- [ ] 跨 tenant、提示注入、Secret/PII、依赖环、版本漂移和恶意 Sink 测试通过。
-- [ ] PostgreSQL/Artifact/Catalog/Policy 短暂不可用、消息丢失/重复/乱序和多副本恢复通过。
-- [ ] Ruff、Mypy、Pytest、import-linter、真实 MCP 冒烟和生产回滚演练全部通过。
-- [ ] `.env`、凭证、缓存和虚拟环境不进入暂存；M10 作为 intentional commit 提交并 push。
-
-### M10a / Issue #30 交付门禁
-
-- [x] 功能：启动全量同步、周期扫描、幂等发布、失效撤销、重新激活和失败重试完成。
-- [x] 生命周期：进程内重叠扫描串行化，服务退出时周期 worker 正常停止。
-- [x] 数据：真实 PostgreSQL `REPEATABLE READ READ ONLY` 成功装载两套模型。
-- [x] 安全：Runtime/Agent 不接触数据库地址、SQL 或凭证；Draft 明确禁止权威执行和回写。
-- [x] 架构：Ruff、Mypy 和 10 条 import-linter contract 全部通过。
-- [x] 测试：后端全量 167 项、Model Skill 定向 8 项、前端 16 项全部通过。
-- [x] 文档：README、环境变量、转换服务设计、页面和阶段清单已同步。
-- [x] 迁移：本子阶段只使用内存 Registry，不新增持久结构，因此无数据库迁移。
-- [x] 交付范围：暂存不含 `.env`、Secret、缓存或虚拟环境；intentional commit 范围已复核，
-  commit/push 结果在 Issue #30 记录。
-
-2026-07-24 M10a 记录：真实 PostgreSQL 只读冒烟把两套 Draft 编译为
-`model.supplier-risk-warning/1.0.0-draft.1` 与
-`model.supplier-score/1.0.0-draft.2`，MCP 共列出 8 个对应 Resource，manifest 以 JSON
-文本成功读取。隔离本机常驻 projection/orchestrator/runtime 容器后，后端全量 167 项全部通过；
-随后已恢复所有临时停止的容器。
 
 ## 阶段 M11：Capability-Aware Agent Loop
 
@@ -1021,113 +953,6 @@ runner 隔离复跑通过，SeaweedFS multipart 隔离复跑通过。剩余 M2 o
 search/load/Tool、签名 Skill resolve、Resource Context Policy、multi-turn Transcript 和
 Checkpoint 崩溃恢复。
 
-## 阶段 M12：价格洞察业务 Skill 端到端样板（Issue #39）
-
-状态：实现完成，等待最终质量门禁与交付。
-
-依据：[Issue #39](https://github.com/sushaofei/AuraClaw/issues/39) 与
-[MCP 开发手册](../guides/mcp-development.md)。
-
-### 业务、数据与能力契约
-
-- [x] 固定历史、区域、市场三维比价和八项首版关键指标。
-- [x] DWD 增加 tenant、稳定价格行/匹配对 ID、基准统计类型、物料匹配证据和规则版本表。
-- [x] 黄金数据与 PostgreSQL 固定 SQL 适配器遵循同一 `PriceInsightSource` 契约。
-- [x] 数据访问强制租户与月份条件，Agent 不接收 SQL、表名或数据库凭证。
-- [x] 数据质量覆盖重复粒度、单位/物料缺失、金额不一致、孤儿基准和统计口径缺失。
-
-### Skill、Tool、Resource 与 Agent Loop
-
-- [x] 平台签名 `procurement.price-insight.generate@1.0.0` 携带说明、规则、输出契约和黄金数据。
-- [x] snapshot、drilldown、data_quality 三个只读 Tool 完成注册与路由。
-- [x] 指标定义、可比规则和输出契约以三个受治理 Resource 暴露。
-- [x] Skill 激活按解析 binding 自动 hydration 依赖，失败或超预算时 fail closed。
-- [x] Runtime 没有价格场景分支；无关库存 Skill 回归复用同一自动装载机制。
-
-### 测试、安全、文档与交付
-
-- [x] 真实 in-process MCP 流程覆盖 search、load、activate、依赖装载和 snapshot。
-- [x] 黄金样本断言八项 KPI、质量状态，以及正负影响金额不抵消。
-- [x] `skill-creator` 的 `quick_validate.py` 校验通过。
-- [x] Ruff、Mypy、Pytest 与 import-linter 全部门禁通过。
-- [x] README、环境变量、DDL、实施运维和阶段清单同步。
-- [x] 暂存不含 `.env`、Secret、缓存或虚拟环境；intentional commit 已 push。
-
-2026-07-30 M12 记录：`skill-creator quick_validate`、仓库全量 Ruff、171 个源码文件
-Mypy、10 条 import-linter contract 和全量 Pytest 通过；PostgreSQL、SeaweedFS、Vault 集成集为
-18 passed、16 skipped。Action Hands fixture 模式真实进程启动成功，
-`/health/ready` 返回 200 并正常关闭；wheel 已确认包含完整 Skill 包。
-
-### M12a：本地真实 DWD 与前端调试闭环
-
-- [x] DDL/黄金数据脚本可重复初始化本机 PostgreSQL，且只清理稳定验证 ID。
-- [x] PostgreSQL Source 按稳定业务键读取最新 `dt/etl_load_time` 快照，修订摘要覆盖完整数据内容。
-- [x] development combined server 装载同一 Capability/Skill/Tool 能力平面。
-- [x] 可选脚本模型在外部模型不可用时仍通过标准 Agent Harness 驱动完整 Loop。
-- [x] `/price-insight` 可创建标准 Task，并从 Canonical Timeline 展示五步证据和八项 KPI。
-- [x] 浏览器真实联调显示 `PostgreSQL DWD`、`completed`、质量 `pass` 和 `8 / 8`。
-- [x] Ruff、Mypy、Pytest、import-linter、前端 lint/build 全部门禁通过。
-- [x] `.env`、Secret 和用户资料未暂存；M12a intentional commit 已 push。
-
-### M12b：数据中心化原子 Tool 与 Skill SOP
-
-- [x] Skill 2.0 将范围画像、质量门禁、逐项指标计算和证据下钻拆成明确 SOP。
-- [x] `metric.compute` 每次只允许计算八项指标中的一个 `metric_key`。
-- [x] Agent 必须校验所有原子结果的 `source_revision`，禁止拼接跨版本结论。
-- [x] Tool 数据表边界硬限制为价格洞察 DDL 声明的四张表。
-- [ ] TODO：创建远程 DWD 专用只读账号，仅授予四张白名单表 `SELECT` 并增加授权自检。
-- [x] In-process MCP 覆盖 Skill 激活、范围、质量、八次单指标计算和有界证据调用。
-- [x] 前端从 Canonical Timeline 聚合原子结果，lint、build 与渲染测试通过。
-- [ ] 远程 DWD 完成当前 DDL 对齐后，以真实模型 Provider 执行端到端前端验收。
-
-### M12c：ct_model 配置驱动 Skill
-
-- [x] `PRICE_IMPACT@2.0.0` 配置覆盖四个数据源、请求特征、十个输出和控制塔场景开关。
-- [x] `config_snapshot_json.auraclaw_skill` 定义 Skill、原子 Tool、表边界、指标顺序和 Schema。
-- [x] 编译器仅接受代码注册执行模板，拒绝未知模板、越界表、Tool 或指标。
-- [x] Model Skill Source 启用时不再发布同名平台内置 Skill，避免双来源选择歧义。
-- [x] PostgreSQL Source 将四张 DWD 表纳入一致只读快照和 `source_revision`。
-- [x] 配置脚本默认 validate、显式 plan/apply，并拒绝覆盖内容不同的已发布同版本。
-- [x] tenant 1 的 `PRICE_IMPACT` model id 3 已发布 version id 4 / `2.0.0`。
-- [ ] 远程 DWD Schema 对齐后完成原子 Tool 与真实模型 Provider 的端到端验收。
-
-### M12d：可复用原子 Tool 与组合 Skill
-
-- [x] 八项价格指标拆为八个固定 Tool，不再通过 `metric_key` 在一个 Tool 内分派计算。
-- [x] 新增数据校验和价格指标两个平台签名子 Skill，场景 Skill 通过 `required_skills` 组合。
-- [x] Resolver 递归解析父子 Skill，检测循环并去重固定 Tool、Resource 和子 Skill 版本。
-- [x] Runtime 分批加载超过单次 MCP 上限的依赖，并注入所有已解析子 Skill 的签名 SOP。
-- [x] `auraclaw.model-skill/v2` 配置以子 Skill 为依赖，拒绝直接 Tool 扩张和未知组合。
-- [x] 开发模型和价格洞察前端使用 3.0 原子 Tool Timeline。
-- [x] tenant 1 已发布 `PRICE_IMPACT` version id 6 / `3.0.0`，远端快照编译为两个子 Skill。
-- [ ] 远程 DWD Schema 对齐后，用真实模型 Provider 完成父子 Skill 端到端验收。
-
-### M12e：模型参数、标签、开关与 DWD 规则治理
-
-- [x] `PRICE_IMPACT@4.0.0` 配置八项解释优先级权重，精确合计为 1，且明确禁止参与 KPI 计算。
-- [x] 四组受控发现标签进入 Skill `applies_when`，编译器拒绝未知标签和任意规则文本。
-- [x] 控制塔场景只允许一个 `price_insight_agent` 启用开关，优先级固定为 100。
-- [x] 配置脚本在事务写入前校验权重、标签和开关，并安全迁移租户全局标签与场景唯一开关。
-- [x] DWD 规则驱动默认偏离阈值、最小样本量和最低匹配分；请求覆盖值显式记录来源。
-- [x] 多条规则同时匹配时 fail closed，弱市场证据被排除并产生确定性质量告警。
-- [x] tenant 1 已发布 model id 3 / version id 7 / `4.0.0`；远端回读为 8 权重、4 标签、1 开关，
-  并成功编译 `ct-model/procurement.price-insight.generate@4.0.0`。
-- [x] 只读审计确认远端三个同名 DWD 表仍为旧 Schema 且规则表缺失，未覆盖或重建现有数据。
-- [ ] 数据侧按当前 DDL 完成兼容迁移后，用真实模型 Provider 和前端完成最终验收。
-
-### M12f：旧 DWD 兼容迁移与数据可信门禁
-
-- [x] 只读审计覆盖行数、分区、来源键、benchmark 关联完整性和上游质量标记。
-- [x] 远端 87 条成交、87 条比对、46 条 benchmark 可确定性补稳定 ID，关联口径无不一致。
-- [x] 识别全部行业 benchmark 为模拟内部派生数据，禁止将 Schema 对齐误判为权威数据就绪。
-- [x] 数据质量 Tool 对模拟市场 benchmark 返回 blocked，对成交未确认和税价未知返回 finding。
-- [x] 新增默认只读的兼容迁移工具；apply 要求完整业务语义、目标库确认和演示数据显式覆盖。
-- [x] 迁移在远端数据的本机临时克隆演练通过，87/87/46 行保留并由真实 PostgreSQL Source 回读。
-- [x] 价格 Tool 的同 idempotency replay 不重复读取 DWD，Policy deny 在 DWD 访问前生效。
-- [x] development 脚本模型发现跨 Tool `source_revision` 漂移时停止拼接指标。
-- [ ] 经数据所有者确认后，在远端执行增量 Schema 迁移。
-- [ ] 用真实外部行业 benchmark 替换模拟内部派生 benchmark，并修复成交确认和税价口径。
-- [ ] 使用真实模型 Provider、远端 DWD 和前端完成最终端到端验收。
 
 ## 阶段 M9a：MCP 2026-07-28 无状态协议升级
 
@@ -1192,29 +1017,29 @@ Mypy、10 条 import-linter contract 和全量 Pytest 通过；PostgreSQL、Seaw
 - [x] `ruff check src tests`、`mypy src/auraclaw`、`pytest tests/unit` 与 `lint-imports` 通过。
 - [x] 阶段 intentional commit 已 push，暂存不含 `.env`、Secret 或虚拟环境。
 
-## 阶段 I44：用户身份归属 chaintower（Issue #44）
+## 阶段 I44：用户身份归属 upstream（Issue #44）
 
 状态：完成。
 
 ### 范围
 
-- chaintower 是用户身份权威；AuraClaw 只验证 workload + 短期 Assertion。
+- upstream 是用户身份权威；AuraClaw 只验证 workload + 短期 Assertion。
 - 生产 Task API 不信任裸 `X-Tenant-ID` / `X-Actor-ID`。
 - MCP Server 执行最终业务鉴权；OAuth 仅为可选 Connector 策略。
 - 不实现通用 OAuth Authorization Server，不持久化终端用户 token。
-- chaintower 仓库改造见 [chaintower 身份联调](../guides/chaintower-identity-integration.md)。
+- upstream 仓库改造见 [upstream 身份联调](../guides/upstream-identity-integration.md)。
 
 ### 功能校验
 
 - [x] ADR-003 冻结三段调用链、信任边界、HMAC Assertion、密钥轮换与回滚。
 - [x] `TrustedUserContext` / `IdentityContextVerifier` 位于 contracts，不依赖 FastAPI/JWT SDK。
-- [x] 生产入口要求 chaintower workload + signed context；development 可显式使用 Header adapter。
+- [x] 生产入口要求 upstream workload + signed context；development 可显式使用 Header adapter。
 - [x] Header/body tenant 冲突返回 403；认证失败 401。
 - [x] jti+command_id 通过 PostgreSQL 唯一约束跨 Task API 副本防重放；N/N-1 kid 轮换可用。
 - [x] 已有 Session 强制要求 Assertion session_id 与路径完全一致。
 - [x] Runnable 用户从根 Session canonical 创建事实恢复，不能被 runtime/coordinator 最新 actor 覆盖。
 - [x] tenant/user 从 CommandContext / HandsTrustedContext 传播，模型参数不能覆盖。
-- [x] chaintower MCP 支持 `workload_trusted_context`，OAuth 不再是必选项。
+- [x] upstream MCP 支持 `workload_trusted_context`，OAuth 不再是必选项。
 - [x] Assertion/workload/OAuth token 不进入 Event、Artifact 或业务日志。
 
 ### 架构与安全
@@ -1229,40 +1054,6 @@ Mypy、10 条 import-linter contract 和全量 Pytest 通过；PostgreSQL、Seaw
 - [x] `ruff check src tests`、`mypy src/auraclaw`、`pytest tests/unit` 与 `lint-imports` 通过。
 - [x] Git 暂存不含 `.env`、Secret 或虚拟环境。
 
-## 阶段 I47：本地智问 Ingress 与 Java MCP 价格洞察联调（Issue #47）
-
-状态：完成，待 intentional commit 与 push。
-
-### 范围
-
-- 本地 `auraclaw serve` 增加 `:8080` Ingress，按生产规则分流 Task API 与 Streaming Gateway。
-- Java MCP 工具名、输入包装、协议版本、可信用户身份和价格洞察 Skill 对齐。
-- 中文能力搜索、schema+json 资源、业务质量状态和 follow-up 加载修复。
-- 默认 Runtime 步骤预算统一为 48；显式任务预算仍优先。
-- 不提交 `.env.dev`、`.host.env`、Java MCP 私有配置或任何 Secret。
-
-### 功能与回归
-
-- [x] `/v1/streams/*` 进入 Streaming Gateway，其余路径进入 Task API。
-- [x] 多进程 Runtime Event 使用共享 SQL 或 Kafka；纯内存组合启动前失败。
-- [x] Java MCP canonical alias、`input` 包装和业务 `PASS` 状态有回归测试。
-- [x] 中文“价格洞察”搜索、Skill/文档发布和 follow-up capability load 有回归测试。
-- [x] Hands 到 MCP 的可信 `user_id` 传播有 contract 与 connector 测试。
-
-### 架构、安全与迁移
-
-- [x] Runtime 仍只通过 Hands 调用 MCP；未绕过 Tool Gateway、Policy 或 Credential Proxy。
-- [x] HTTP MCP 仅允许显式白名单中的私网/回环地址，公网 MCP 仍强制 HTTPS。
-- [x] 远端工具注解缺失时使用 `write-with-approval` + `high` 保守默认值。
-- [x] Canonical Session Event 仍是任务事实源；Runtime Event 不承担结果交付保证。
-- [x] 无数据库 Schema 或数据迁移；配置回滚可关闭 Ingress 并恢复原外部入口。
-- [x] README、S2 运行说明、MCP 手册和本次 Python 改动说明已同步。
-
-### 质量与交付
-
-- [x] `ruff check .`、`mypy src/auraclaw`、`pytest tests/unit` 与 `lint-imports` 通过。
-- [x] `git diff --check` 通过，暂存范围不含 `.env`、Secret、缓存或虚拟环境。
-- [x] 本阶段作为一个 intentional commit 提交并 push 到当前分支。
 
 ## 阶段 MCP-HC：MCP Server 热配置与本地连接
 
@@ -1313,29 +1104,29 @@ Mypy、10 条 import-linter contract 和全量 Pytest 通过；PostgreSQL、Seaw
 ### 范围
 
 - 创建 Root Session 时从已验签 Agent Context 固化 `dept_id`。
-- `dept_id` 随 Runnable / Lease / Hands 传到 chaintower MCP Tool、Resource、Prompt。
-- MCP 以 `X-CT-Dept-ID` 快照恢复数据权限，不再用用户表覆盖本次任务部门。
+- `dept_id` 随 Runnable / Lease / Hands 传到 upstream MCP Tool、Resource、Prompt。
+- MCP 以 `X-Aura-Dept-ID` 快照恢复数据权限，不再用用户表覆盖本次任务部门。
 - 不修改 `POST /v1/tasks` body；不在 AuraClaw 查询用户服务。
 
 ### 功能校验
 
 - [x] `session.created` 与后续 `run.requested` 携带部门快照。
 - [x] 子 Session 从 Root 恢复部门，不被 coordinator actor 覆盖。
-- [x] MCP 出站 Header 含 `X-CT-Tenant-ID` / `X-CT-User-ID` / `X-CT-Dept-ID`。
+- [x] MCP 出站 Header 含 `X-Aura-Tenant-ID` / `X-Aura-User-ID` / `X-Aura-Dept-ID`。
 - [x] Tool `_meta.io.auraclaw/deptId` 与 Header 一致；冲突 fail closed。
 - [x] 参数中的 `dept_id` 不能当授权来源。
 - [x] 无部门用户不伪造 `dept_id`。
 
 ### 架构与安全
 
-- [x] 身份来源仍是 chaintower Assertion，不是请求体。
+- [x] 身份来源仍是 upstream Assertion，不是请求体。
 - [x] 用户禁用仍由 MCP 实时校验 fail closed。
 - [x] Assertion 原文不进入 Event 或业务日志。
 
 ### 质量与交付
 
 - [x] AuraClaw `ruff` / 相关 pytest 通过。
-- [x] chaintower MCP 单测覆盖 Header 快照优先于用户表部门。
+- [x] upstream MCP 单测覆盖 Header 快照优先于用户表部门。
 
 ## 阶段 AuraMCP：Hands 登记扩展 MCP Server
 
@@ -2800,7 +2591,7 @@ ready Skill Artifact 建立带 fencing 的物理回收流程；不把成功命�
 
 ### 升级与契约
 
-- [x] `0053` 清除已移除的 `auraclaw-price-insight` Provider 和非 active generation Catalog 残留。
+- [x] `0053` 清除已移除的 legacy local Provider 和非 active generation Catalog 残留。
 - [x] 架构文档固定 Skill package reference 的 `skill://` URI 契约，禁止用 `repo://` 指向包内文件。
 - [x] 运维文档记录数据迁移不可逆、滚动顺序、恢复方式与健康指标。
 
@@ -3028,7 +2819,7 @@ active-reference barrier，并简化 AuraX 卸载入口。
 - [x] Coordinator Tool schema 将 Child 权限候选约束为 Root grant 的精确值；无授权时要求省略。
 - [x] Skill Descriptor 声明 Tool、Resource 与子 Skill 依赖；依赖的 MCP Catalog quarantined/stale、缺失或版本不兼容时，从对话可激活候选中移除，并在恢复后自动重新可见。
 - [x] Admin Skill Catalog 使用同一依赖健康判断，`/v1/admin/skills` 对不可解析依赖返回 `dependencies_unavailable`，避免 AuraX 选择器误报 available。
-- [x] MCP Schema Drift 恢复后，价格洞察只读工具的 permission/risk 元数据与服务端契约一致。
+- [x] MCP Schema Drift 恢复后，只读工具的 permission/risk 元数据与服务端契约一致。
 
 ### 产品、测试与交付
 
@@ -3667,9 +3458,6 @@ Ruff、Mypy（248 文件）、10 条架构合同通过。迁移不适用，部�
 - [x] 审批、恢复、取消等命令响应返回真实模式/来源/修订，不让 API 缺省值误报 legacy；加载工具提示澄清审批由 Gateway 执行，模型不能自行宣称待批准。
 - [x] 针对性 Runtime/审批/参数回归及预算/隔离回归通过；覆盖取消、持续冲突、有界重试、并发已提交去重。Ruff/Mypy 和 10 条导入架构合同通过。
 - [x] 无 DDL、凭据、权限放宽或业务调用重放；源码、测试与本门禁一起提交推送；三档现场复验单独记录。
-ners
-##gast 自动(closeավայր chìλή skeleton
-EOFBlur
 ## 自动审核部署身份接线（#92，2026-09-05）
 
 - [x] 现场确认 Policy 的审核模型请求返回 401：Model Gateway 代码允许 Policy，但 test/prod Compose 均漏挂该调用方凭据。
@@ -3688,7 +3476,7 @@ EOFBlur
 - [x] MCP 双 owner 在两个真实 Hands 副本正确路由；热更新、逐副本/同时冷启动、禁用及删除后，其他 owner 持续可用且旧 owner 无路由/元数据残留。
 - [x] 测试 KingbaseES 实际版本与迁移目标已核实；前缀移除后的 create/enable/reconcile/search/load/call 全链路完成，权限与审批保持生效。
 - [x] 三档审批真实联验：人工暂停/快速批准恢复、独立模型自动批准、full_access 模式证据均完成；无工具重放。
-- [x] Skill 工作流无未结算调用或重复终态；price-insight-deviation 2.0 缺参不猜测，resume 激活并将下游错误和重复抑制正确记录。
+- [x] Skill 工作流无未结算调用或重复终态；示例 Skill 2.0 缺参不猜测，resume 激活并将下游错误和重复抑制正确记录。
 - [x] Vault 测试 reader 按既有授权轮换为专用路径只读、无默认策略、不可续期、24 小时；未输出或提交 token。
 - [x] AuraX 工作台浏览器回归 33/33；真实分页历史、空租户、Skill 刷新、审批与 MCP 调用证据完成。
 - [x] 对应 AuraClaw #89/#91/#92/#94/#95/#96/#97/#98/#99 与 AuraX #12/#13 已更新最终证据并关闭；下游业务/输出 Schema 错误按用户确认边界保留在下游。
@@ -3709,3 +3497,12 @@ EOFBlur
 - [x] 强制意图进入命令幂等摘要、内部合同和操作结果；成功目录记录强制同步及覆盖数量。
 - [x] 强制发布后仍使用原子 generation 替换，后续各 Hands 副本通过普通对账收敛。
 - [x] 单元测试覆盖默认隔离、显式强制覆盖、API 参数校验及运行时标志传递。
+
+## AuraClaw 通用增强回迁与产品解耦（2026-10-07）
+
+- [x] 回迁模型流式重试、MCP 权威目录与混合检索、Skill 解析激活、审批恢复、确定性/语义路由和原子协作 DAG 等通用增强。
+- [x] 保持 Canonical Session Events、可重建投影、Runtime/业务状态隔离、Coordinator/Orchestrator 边界和稳定端口依赖规则。
+- [x] 移除特定产品的身份命名、请求头、配置、业务 Tool、数据源、场景文档和测试样例；身份边界统一为 AuraClaw 与受信上游语义。
+- [x] 新增 `0066` durable Child wakeup 与 `0067` bounded metric snapshot 迁移，并同步 Compose、环境模板和部署脚本迁移目标。
+- [x] Ruff、Mypy、完整单元测试及品牌/产品残留扫描通过；依赖 PostgreSQL、Kafka、Vault、S3 的集成用例已执行并确认仅因本机服务未启动而不可用。
+- [x] 用户已有 `.vscode/launch.json`、`docs/tmp/` 与本地未跟踪目录不纳入本阶段提交；本阶段作为一个意图明确的提交推送当前分支。

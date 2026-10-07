@@ -25,6 +25,7 @@ from auraclaw.infrastructure.connectors.mcp.wire import (
     McpTrustedContext,
 )
 from auraclaw.infrastructure.credentials.mcp_egress import (
+    HttpxPinnedMcpSender,
     ManagedMcpEgressAdapter,
     McpEgressResponse,
 )
@@ -39,6 +40,17 @@ class _Resolver:
     async def resolve(self, host: str, port: int) -> tuple[str, ...]:
         self.calls.append((host, port))
         return self.addresses
+
+
+def test_mcp_sender_default_covers_slow_governed_query_budget() -> None:
+    async def scenario() -> None:
+        sender = HttpxPinnedMcpSender()
+        try:
+            assert sender._client.timeout.read == 120.0
+        finally:
+            await sender.aclose()
+
+    asyncio.run(scenario())
 
 
 class _Sender:
@@ -572,9 +584,9 @@ def test_mcp_egress_sends_department_snapshot_headers() -> None:
         server = McpServerDefinition(
             server_id="github-mcp",
             tenant_id="tenant-a",
-            title="ChainTower MCP",
+            title="upstream service MCP",
             endpoint="https://mcp.example/v1/mcp",
-            credential_ref="vault/chaintower-mcp#workload",
+            credential_ref="vault/upstream-mcp#workload",
             auth_strategy=McpAuthStrategy.WORKLOAD_TRUSTED_CONTEXT,
             status=CapabilityStatus.ACTIVE,
             enabled=True,
@@ -598,10 +610,10 @@ def test_mcp_egress_sends_department_snapshot_headers() -> None:
         )
         headers = sender.calls[-1]["headers"]
         assert isinstance(headers, dict)
-        assert headers["X-CT-Tenant-ID"] == "1"
-        assert headers["X-CT-User-ID"] == "101"
-        assert headers["X-CT-Dept-ID"] == "9"
-        assert headers["X-CT-Session-ID"] == "ses-1"
+        assert headers["X-Aura-Tenant-ID"] == "1"
+        assert headers["X-Aura-User-ID"] == "101"
+        assert headers["X-Aura-Dept-ID"] == "9"
+        assert headers["X-Aura-Session-ID"] == "ses-1"
 
         await adapter(
             {
@@ -618,8 +630,8 @@ def test_mcp_egress_sends_department_snapshot_headers() -> None:
         )
         missing = sender.calls[-1]["headers"]
         assert isinstance(missing, dict)
-        assert "X-CT-Dept-ID" not in missing
-        assert missing["X-CT-User-ID"] == "101"
+        assert "X-Aura-Dept-ID" not in missing
+        assert missing["X-Aura-User-ID"] == "101"
 
     asyncio.run(scenario())
 

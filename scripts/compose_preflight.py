@@ -33,7 +33,7 @@ BASE_REQUIRED = (
     "AURACLAW_MODEL_BASE_URL",
     "AURACLAW_MODEL_NAME",
     "AURACLAW_CREDENTIAL_VAULT_ADDR",
-    "AURACLAW_CHAINTOWER_WORKLOAD_TOKEN",
+    "AURACLAW_UPSTREAM_WORKLOAD_TOKEN",
     "AURACLAW_AGENT_CONTEXT_SIGNING_KEYS_JSON",
 )
 SEAWEEDFS_REQUIRED = (
@@ -144,12 +144,12 @@ def main() -> int:
     lease_key = values["AURACLAW_LEASE_SIGNING_KEY"]
     if lease_key and len(lease_key) < 32:
         failures.append("AURACLAW_LEASE_SIGNING_KEY must contain at least 32 characters")
-    chaintower_token = values["AURACLAW_CHAINTOWER_WORKLOAD_TOKEN"]
-    if chaintower_token and len(chaintower_token) < 32:
-        failures.append("AURACLAW_CHAINTOWER_WORKLOAD_TOKEN must contain at least 32 characters")
-    if chaintower_token and chaintower_token in token_values:
+    upstream_token = values["AURACLAW_UPSTREAM_WORKLOAD_TOKEN"]
+    if upstream_token and len(upstream_token) < 32:
+        failures.append("AURACLAW_UPSTREAM_WORKLOAD_TOKEN must contain at least 32 characters")
+    if upstream_token and upstream_token in token_values:
         failures.append(
-            "AURACLAW_CHAINTOWER_WORKLOAD_TOKEN must differ from internal service tokens"
+            "AURACLAW_UPSTREAM_WORKLOAD_TOKEN must differ from internal service tokens"
         )
     signing_keys = values["AURACLAW_AGENT_CONTEXT_SIGNING_KEYS_JSON"]
     if signing_keys:

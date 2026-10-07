@@ -12,8 +12,11 @@ import httpx
 
 from auraclaw.contracts.errors import (
     ModelAuthenticationError,
+    ModelConnectError,
+    ModelProtocolError,
     ModelProviderError,
     ModelRateLimitError,
+    ModelReadError,
     ModelTimeoutError,
 )
 from auraclaw.runtime.ports import (
@@ -37,14 +40,22 @@ class OpenAICompatibleProvider:
         model: str,
         name: str = "openai_compatible",
         timeout_seconds: float = 120.0,
+        retry_attempts: int = 5,
+        retry_base_delay_seconds: float = 1.0,
         thinking_enabled: bool | None = None,
         prompt_cache_key_enabled: bool = False,
         client: httpx.AsyncClient | None = None,
     ) -> None:
+        if retry_attempts < 1:
+            raise ValueError("model retry attempts must be positive")
+        if retry_base_delay_seconds < 0:
+            raise ValueError("model retry base delay cannot be negative")
         self.name = name
         self._model = model
         self._endpoint = self._chat_completions_endpoint(base_url)
         self._timeout = timeout_seconds
+        self._retry_attempts = retry_attempts
+        self._retry_base_delay_seconds = retry_base_delay_seconds
         self._thinking_enabled = thinking_enabled
         self._prompt_cache_key_enabled = prompt_cache_key_enabled
         self._client = client
@@ -148,84 +159,196 @@ class OpenAICompatibleProvider:
             payload["prompt_cache_key"] = request.prompt_cache_key
 
         started = time.perf_counter()
-        first_delta_logged = False
-        deltas: list[str] = []
-        usage: dict[str, int | float] = {}
-        finish_reason = "stop"
-        tool_fragments: dict[int, dict[str, str]] = {}
-        client = self._ensure_client()
-        try:
-            async with client.stream(
-                "POST",
-                self._endpoint,
-                headers={
-                    "Authorization": f"Bearer {credential}",
-                    "Content-Type": "application/json",
-                },
-                json=payload,
-            ) as response:
-                if response.is_error:
-                    await response.aread()
-                self._raise_for_status(response)
-                async for data in self._stream_data(response):
-                    provider_usage = data.get("usage")
-                    if isinstance(provider_usage, dict):
-                        usage = self._normalize_usage(provider_usage)
-                    choices = data.get("choices", [])
-                    if not isinstance(choices, list):
-                        continue
-                    for choice in choices:
-                        if not isinstance(choice, dict):
+        for attempt in range(1, self._retry_attempts + 1):
+            attempt_started = time.perf_counter()
+            first_delta_logged = False
+            bytes_received = 0
+            deltas: list[str] = []
+            usage: dict[str, int | float] = {}
+            finish_reason = "stop"
+            tool_fragments: dict[int, dict[str, str]] = {}
+            client = self._ensure_client()
+            response: httpx.Response | None = None
+            try:
+                async with client.stream(
+                    "POST",
+                    self._endpoint,
+                    headers={
+                        "Authorization": f"Bearer {credential}",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                ) as response:
+                    if response.is_error:
+                        await response.aread()
+                    self._raise_for_status(response)
+                    async for data in self._stream_data(response):
+                        bytes_received = response.num_bytes_downloaded
+                        provider_usage = data.get("usage")
+                        if isinstance(provider_usage, dict):
+                            usage = self._normalize_usage(provider_usage)
+                        choices = data.get("choices", [])
+                        if not isinstance(choices, list):
                             continue
-                        reason = choice.get("finish_reason")
-                        if reason:
-                            finish_reason = str(reason)
-                        delta = choice.get("delta", {})
-                        if not isinstance(delta, dict):
-                            continue
-                        content = delta.get("content")
-                        if content is not None:
-                            text = str(content)
-                            deltas.append(text)
-                            if not first_delta_logged:
-                                first_delta_logged = True
-                                logger.info(
-                                    "provider_ttft_ms=%.2f provider=%s model=%s model_call=%s",
-                                    (time.perf_counter() - started) * 1_000,
-                                    self.name,
-                                    model,
-                                    request.model_call_id,
-                                )
-                            yield ModelStreamChunk(kind="delta", delta=text)
-                        self._merge_tool_calls(tool_fragments, delta.get("tool_calls"))
-        except httpx.TimeoutException as exc:
-            raise ModelTimeoutError("model provider request timed out") from exc
-        except httpx.HTTPError as exc:
-            raise ModelProviderError("model provider request failed") from exc
+                        for choice in choices:
+                            if not isinstance(choice, dict):
+                                continue
+                            reason = choice.get("finish_reason")
+                            if reason:
+                                finish_reason = str(reason)
+                            delta = choice.get("delta", {})
+                            if not isinstance(delta, dict):
+                                continue
+                            content = delta.get("content")
+                            if content is not None:
+                                text = str(content)
+                                deltas.append(text)
+                                if not first_delta_logged:
+                                    first_delta_logged = True
+                                    logger.info(
+                                        "provider_ttft_ms=%.2f provider=%s model=%s "
+                                        "model_call=%s attempt=%d",
+                                        (time.perf_counter() - started) * 1_000,
+                                        self.name,
+                                        model,
+                                        request.model_call_id,
+                                        attempt,
+                                    )
+                                # Once a delta is visible, this attempt can no longer be
+                                # retried transparently without duplicating user-visible text.
+                                yield ModelStreamChunk(kind="delta", delta=text)
+                            raw_tool_calls = delta.get("tool_calls")
+                            self._merge_tool_calls(tool_fragments, raw_tool_calls)
+            except (httpx.TimeoutException, httpx.TransportError) as exc:
+                if response is not None:
+                    bytes_received = response.num_bytes_downloaded
+                mapped = self._map_transport_error(exc)
+                retrying = attempt < self._retry_attempts and not first_delta_logged
+                logger.warning(
+                    "model provider transport failure provider=%s origin=%s model=%s "
+                    "model_call=%s attempt=%d stage=%s elapsed_ms=%.2f bytes_received=%d "
+                    "retrying=%s",
+                    self.name,
+                    self._provider_origin(),
+                    model,
+                    request.model_call_id,
+                    attempt,
+                    mapped.code,
+                    (time.perf_counter() - attempt_started) * 1_000,
+                    bytes_received,
+                    retrying,
+                )
+                if not retrying:
+                    raise mapped from exc
+                await self._discard_owned_client()
+                await self._retry_delay(attempt)
+                continue
+            except ModelProtocolError as exc:
+                retrying = attempt < self._retry_attempts and not first_delta_logged
+                logger.warning(
+                    "model provider stream failure provider=%s origin=%s model=%s "
+                    "model_call=%s attempt=%d stage=%s elapsed_ms=%.2f bytes_received=%d "
+                    "retrying=%s",
+                    self.name,
+                    self._provider_origin(),
+                    model,
+                    request.model_call_id,
+                    attempt,
+                    exc.code,
+                    (time.perf_counter() - attempt_started) * 1_000,
+                    response.num_bytes_downloaded if response is not None else bytes_received,
+                    retrying,
+                )
+                if not retrying:
+                    raise
+                await self._discard_owned_client()
+                await self._retry_delay(attempt)
+                continue
+            except ModelRateLimitError:
+                retrying = attempt < self._retry_attempts
+                logger.warning(
+                    "model provider rate limited provider=%s origin=%s model=%s "
+                    "model_call=%s attempt=%d elapsed_ms=%.2f retrying=%s",
+                    self.name,
+                    self._provider_origin(),
+                    model,
+                    request.model_call_id,
+                    attempt,
+                    (time.perf_counter() - attempt_started) * 1_000,
+                    retrying,
+                )
+                if not retrying:
+                    raise
+                await self._retry_delay(attempt, response=response)
+                continue
 
-        duration_ms = (time.perf_counter() - started) * 1_000
-        logger.info(
-            "model provider call completed provider=%s model=%s thinking=%s "
-            "duration_ms=%.2f usage=%s",
-            self.name,
-            model,
-            self._thinking_enabled,
-            duration_ms,
-            usage,
-        )
-        yield ModelStreamChunk(
-            kind="completed",
-            response=ModelResponse(
-                model_call_id=request.model_call_id,
-                provider=self.name,
-                model=model,
-                completed_output="".join(deltas),
-                deltas=tuple(deltas),
-                tool_calls=self._tool_calls(request, tool_fragments),
-                finish_reason=finish_reason,
-                usage=usage,
-            ),
-        )
+            duration_ms = (time.perf_counter() - started) * 1_000
+            logger.info(
+                "model provider call completed provider=%s model=%s thinking=%s "
+                "attempt=%d duration_ms=%.2f bytes_received=%d usage=%s",
+                self.name,
+                model,
+                self._thinking_enabled,
+                attempt,
+                duration_ms,
+                response.num_bytes_downloaded if response is not None else bytes_received,
+                usage,
+            )
+            if not deltas and not tool_fragments:
+                raise ModelProtocolError(
+                    "model provider completed without visible content or tool calls"
+                )
+            completed = ModelStreamChunk(
+                kind="completed",
+                response=ModelResponse(
+                    model_call_id=request.model_call_id,
+                    provider=self.name,
+                    model=model,
+                    completed_output="".join(deltas),
+                    deltas=tuple(deltas),
+                    tool_calls=self._tool_calls(request, tool_fragments),
+                    finish_reason=finish_reason,
+                    usage=usage,
+                ),
+            )
+            yield completed
+            return
+
+    async def _retry_delay(
+        self,
+        attempt: int,
+        *,
+        response: httpx.Response | None = None,
+    ) -> None:
+        delay = self._retry_base_delay_seconds * (2 ** (attempt - 1))
+        if response is not None:
+            retry_after = response.headers.get("retry-after")
+            if retry_after is not None:
+                try:
+                    delay = max(delay, float(retry_after))
+                except ValueError:
+                    pass
+        if delay:
+            await asyncio.sleep(delay)
+
+    async def _discard_owned_client(self) -> None:
+        if self._client is not None and self._owns_client:
+            await self._client.aclose()
+            self._client = None
+
+    @staticmethod
+    def _map_transport_error(
+        exc: httpx.HTTPError,
+    ) -> ModelProviderError | ModelTimeoutError:
+        if isinstance(exc, httpx.TimeoutException):
+            return ModelTimeoutError("model provider request timed out")
+        if isinstance(exc, httpx.ConnectError):
+            return ModelConnectError("model provider connection failed")
+        if isinstance(exc, httpx.ReadError):
+            return ModelReadError("model provider stream read failed")
+        if isinstance(exc, httpx.ProtocolError):
+            return ModelProtocolError("model provider protocol failed")
+        return ModelProviderError("model provider transport failed")
 
     @staticmethod
     def _chat_completions_endpoint(base_url: str) -> str:
@@ -278,7 +401,7 @@ class OpenAICompatibleProvider:
             try:
                 decoded = json.loads(value)
             except json.JSONDecodeError as exc:
-                raise ModelProviderError("model provider returned invalid stream JSON") from exc
+                raise ModelProtocolError("model provider returned invalid stream JSON") from exc
             if isinstance(decoded, dict):
                 yield decoded
 

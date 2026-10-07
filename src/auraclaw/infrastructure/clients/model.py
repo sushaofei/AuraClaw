@@ -1,11 +1,22 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import suppress
 
 import httpx
 
+from auraclaw.contracts.errors import (
+    BudgetExceededError,
+    ModelAuthenticationError,
+    ModelConnectError,
+    ModelProtocolError,
+    ModelProviderError,
+    ModelRateLimitError,
+    ModelReadError,
+    ModelTimeoutError,
+)
 from auraclaw.contracts.internal import (
     InternalRequestContext,
     ModelCancelRequest,
@@ -77,23 +88,46 @@ class RemoteModelClient:
         self, request: ModelRequest
     ) -> AsyncIterator[ModelStreamChunk]:
         payload = self._payload(request)
-        got_completed = False
-        async for chunk in self._consume_stream(payload):
-            if chunk.kind == "completed":
-                got_completed = True
-            yield chunk
-        if got_completed:
-            return
-        # Tail event can be lost after gateway has already finished (and cached).
-        # Reconnect once; forward only completed to avoid duplicate live deltas.
-        logger.warning(
-            "model stream ended without completed; reconnecting once model_call=%s",
-            request.model_call_id,
-        )
-        async for chunk in self._consume_stream(payload):
-            if chunk.kind == "completed":
-                yield chunk
+        retryable = (ModelConnectError, ModelProtocolError, ModelReadError, ModelTimeoutError)
+        last_error: Exception | None = None
+        emitted_delta = False
+        for attempt in range(3):
+            completed = False
+            try:
+                async for chunk in self._consume_stream(payload):
+                    if chunk.kind == "delta":
+                        emitted_delta = True
+                    if chunk.kind == "completed":
+                        completed = True
+                    yield chunk
+            except retryable as exc:
+                last_error = exc
+                if emitted_delta or attempt == 2:
+                    raise
+                logger.warning(
+                    "model gateway stream failed; reconnecting model_call=%s attempt=%s error=%s",
+                    request.model_call_id,
+                    attempt + 1,
+                    type(exc).__name__,
+                )
+                await asyncio.sleep(0.1 * (2**attempt))
+                continue
+            if completed:
                 return
+            if emitted_delta:
+                raise ModelProviderError(
+                    "model stream ended after partial output without a completed response"
+                )
+            logger.warning(
+                "model stream ended without completed; reconnecting model_call=%s attempt=%s",
+                request.model_call_id,
+                attempt + 1,
+            )
+            if attempt < 2:
+                await asyncio.sleep(0.1 * (2**attempt))
+        if last_error is not None:
+            raise last_error
+        raise ModelProviderError("model stream ended without a completed response")
 
     def _payload(self, request: ModelRequest) -> ModelGenerateRequest:
         return ModelGenerateRequest(
@@ -122,24 +156,46 @@ class RemoteModelClient:
     async def _consume_stream(
         self, payload: ModelGenerateRequest
     ) -> AsyncIterator[ModelStreamChunk]:
-        async for event in self._contract.stream(
-            "/internal/v1/model/stream",
-            payload,
-            ModelStreamEvent,
-        ):
-            if event.type == "delta":
-                delta = event.payload.get("delta")
-                if isinstance(delta, str) and delta:
-                    yield ModelStreamChunk(kind="delta", delta=delta)
-            elif event.type == "completed":
-                response = ModelGenerateResponse.model_validate(event.payload)
-                yield ModelStreamChunk(
-                    kind="completed",
-                    response=self._to_model_response(response),
-                )
-            elif event.type == "error":
-                message = event.payload.get("message") or "model stream reported an error"
-                raise RuntimeError(str(message))
+        try:
+            async for event in self._contract.stream(
+                "/internal/v1/model/stream",
+                payload,
+                ModelStreamEvent,
+            ):
+                if event.type == "delta":
+                    delta = event.payload.get("delta")
+                    if isinstance(delta, str) and delta:
+                        yield ModelStreamChunk(kind="delta", delta=delta)
+                elif event.type == "completed":
+                    response = ModelGenerateResponse.model_validate(event.payload)
+                    yield ModelStreamChunk(
+                        kind="completed",
+                        response=self._to_model_response(response),
+                    )
+                elif event.type == "error":
+                    message = event.payload.get("message") or "model stream reported an error"
+                    error_types = {
+                        "model_authentication_failed": ModelAuthenticationError,
+                        "model_connect_error": ModelConnectError,
+                        "model_protocol_error": ModelProtocolError,
+                        "model_provider_error": ModelProviderError,
+                        "model_rate_limited": ModelRateLimitError,
+                        "model_read_error": ModelReadError,
+                        "model_timeout": ModelTimeoutError,
+                        "runtime_budget_exceeded": BudgetExceededError,
+                    }
+                    error_type = error_types.get(str(event.payload.get("code")), ModelProviderError)
+                    raise error_type(str(message))
+        except httpx.TimeoutException as exc:
+            raise ModelTimeoutError("model gateway stream timed out") from exc
+        except httpx.ConnectError as exc:
+            raise ModelConnectError("model gateway connection failed") from exc
+        except httpx.ReadError as exc:
+            raise ModelReadError("model gateway stream read failed") from exc
+        except httpx.ProtocolError as exc:
+            raise ModelProtocolError("model gateway protocol failed") from exc
+        except httpx.TransportError as exc:
+            raise ModelProviderError("model gateway transport failed") from exc
 
     @staticmethod
     def _to_model_response(response: ModelGenerateResponse) -> ModelResponse:

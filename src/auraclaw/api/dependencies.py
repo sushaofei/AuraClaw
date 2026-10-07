@@ -52,7 +52,7 @@ def _declared_identity_fields(payload: Any) -> tuple[str | None, str | None, str
 async def request_identity(
     request: Request,
     authorization: str | None = Header(default=None),
-    agent_context: str | None = Header(default=None, alias="X-CT-Agent-Context"),
+    agent_context: str | None = Header(default=None, alias="X-Aura-Agent-Context"),
     tenant_id: str | None = Header(default=None, alias="X-Tenant-ID"),
     actor_id: str | None = Header(default=None, alias="X-Actor-ID"),
     dept_id: str | None = Header(default=None, alias="X-Dept-ID"),

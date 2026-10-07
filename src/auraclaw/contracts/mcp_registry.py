@@ -14,6 +14,8 @@ from auraclaw.contracts.capabilities import (
     McpNetworkMode,
     McpOAuthConfiguration,
     McpServerDefinition,
+    McpToolPolicyOverride,
+    McpTrustLevel,
 )
 from auraclaw.contracts.internal import ContractModel
 
@@ -69,6 +71,9 @@ class McpServerConfig(ContractModel):
     allowed_resource_schemes: tuple[str, ...] = ()
     allowed_prompt_prefixes: tuple[str, ...] = ()
     allowed_cidrs: tuple[str, ...] = ()
+    trust_level: McpTrustLevel = McpTrustLevel.EXTERNAL_UNTRUSTED
+    tool_admission_policy_version: str | None = Field(default=None, min_length=1, max_length=128)
+    tool_policy_overrides: dict[str, McpToolPolicyOverride] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
@@ -106,6 +111,22 @@ class McpServerConfig(ContractModel):
             raise ValueError("MCP server metadata uses a reserved key")
         if "_auraclaw_allowed_cidrs" in self.metadata:
             raise ValueError("MCP server metadata uses a reserved key")
+        if any(
+            key in self.metadata
+            for key in (
+                "_auraclaw_trust_level",
+                "_auraclaw_tool_admission_policy_version",
+                "_auraclaw_tool_policy_overrides",
+            )
+        ):
+            raise ValueError("MCP server metadata uses a reserved key")
+        if self.tool_policy_overrides and self.tool_admission_policy_version is None:
+            raise ValueError("MCP tool policy overrides require a policy version")
+        if (
+            self.trust_level is McpTrustLevel.EXTERNAL_UNTRUSTED
+            and any(item.permission == "read-only" for item in self.tool_policy_overrides.values())
+        ):
+            raise ValueError("untrusted MCP servers cannot admit read-only tools")
         return self
 
     def config_digest(self) -> str:
@@ -144,6 +165,9 @@ class McpServerConfig(ContractModel):
             allowed_private_hosts=private_hosts,
             network_mode=self.network_mode,
             allowed_cidrs=self.allowed_cidrs,
+            trust_level=self.trust_level,
+            tool_admission_policy_version=self.tool_admission_policy_version,
+            tool_policy_overrides=dict(self.tool_policy_overrides),
             config_revision=revision,
             status=status,
             enabled=enabled,

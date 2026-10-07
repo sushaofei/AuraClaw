@@ -19,6 +19,7 @@ from auraclaw.contracts.internal import (
     CollaborationCommandResponse,
     ServiceIdentity,
 )
+from auraclaw.contracts.routing import RoutingPlan
 from auraclaw.internal.security import LeaseAssertionVerifier
 from auraclaw.session.collaboration_service import CollaborationService
 from auraclaw.session.internal_service import outbox_wake_destinations
@@ -148,6 +149,12 @@ class CollaborationInternalService:
                 ),
                 context=context,
             )
+        if request.operation == "submit_plan":
+            return await self._collaboration.submit_plan(
+                root_session_id=request.root_session_id,
+                plan=RoutingPlan.model_validate(self._dict(arguments, "plan")),
+                context=context,
+            )
         if request.operation == "set_dependencies":
             return await self._collaboration.set_dependencies(
                 root_session_id=request.root_session_id,
@@ -226,6 +233,7 @@ class CollaborationInternalService:
         if operation in {
             "get_graph",
             "create_child",
+            "submit_plan",
             "set_dependencies",
             "request_review",
             "cancel_child",
@@ -258,6 +266,7 @@ class CollaborationInternalService:
     def _wake_destinations(operation: str) -> frozenset[str]:
         event_types = {
             "create_child": ("child.created", "run.requested"),
+            "submit_plan": ("child.created", "run.requested"),
             "set_dependencies": ("dependency.changed",),
             "request_review": ("child.created", "run.requested"),
             "cancel_child": ("run.cancelled",),

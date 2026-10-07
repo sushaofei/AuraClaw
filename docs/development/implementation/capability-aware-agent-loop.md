@@ -13,6 +13,11 @@ Session、Control 和内部 Action Hands Contract，不增加服务或外部凭�
 - `runtime/hands_adapter.py`：Capability、Resource 和 Skill 的单一受控 Hands 客户端；
 - `session/internal_service.py`：Runtime 写入 Skill 和 Resource 证据的身份边界。
 
+通用 Skill 快速路径 `auraclaw.skills.resolve_and_activate` 将模型可见的
+search、load、activate 三次交接合并成一次调用。Runtime 仍逐项执行策略可见搜索、权威契约加载、
+Resolver、依赖加载和激活；只有唯一候选才能自动激活，多候选返回 `ambiguous` 供下一轮选择。
+原三个控制工具继续保留，用于探索、诊断和兼容。
+
 未配置 Capability Controller 的旧测试 Harness 保持 one-step 兼容；生产 `agent-runtime`
 入口启用 Capability-Aware Loop。
 
@@ -40,6 +45,7 @@ Checkpoint 是恢复控制状态，不替代：
 - Assignment 声明的 `required_capabilities` 在首次模型调用前按 id/version/digest 直接加载；缺失时
   admission 明确失败，模型不能用自由文本搜索绕过固定依赖。
 - `capabilities.load` 只接受当前 Run 搜索结果中的 `capability_id`，每 Run 有数量上限。
+- `skills.resolve_and_activate` 只自动处理一个策略可见候选；零候选和多候选不产生 activation。
 - 未加载业务 Tool 即使由模型伪造 Tool Call，也以 `capability_not_loaded` 拒绝。
 - Skill 激活参数只有 `capability_id + inputs`；Role、tenant、Policy 和 publisher/version
   来自已加载契约与 Runtime Assignment。
@@ -70,6 +76,17 @@ Run 累计。搜索、加载、候选和已加载契约另有硬上限。相同�
 5. `context.resource.used` 的 digest、revision、Policy decision 和 Artifact Ref。
 
 不得在日志中记录完整 Skill 正文、Resource 正文、未经脱敏的 Tool 参数/结果或 Secret。
+
+Skill 静态正文按 `tenant + publisher + name + version + package_digest + path` 在 Runtime
+进程内做有界 LRU/TTL 缓存，允许跨 Run 复用不可变内容；Run 结束只清理运行指标及未完成读取。
+binding disposition、publication/installation 状态、Policy 和用户授权不以该内容缓存替代，仍在每次
+运行时检查。Hands 侧继续按 `tenant + package_digest` 缓存完整包并校验 digest。
+
+Capability Search 另有独立的每 Hands 副本 L1：key 绑定 tenant、Catalog revision、策略版本、环境、
+角色和完整过滤条件，默认 2048 条、15 秒 TTL，并合并同 key 冷 miss。Catalog revision 由可见 Server
+的 config revision、active generation、enabled/status 生成，因此发布、禁用和 quarantine 会立即换 key。
+该缓存只减少重复检索与 Query Embedding；`load`、`resolve_and_activate`、Policy、Approval 和执行时授权
+继续回读权威状态。已知 capability id、canonical name 或 server id 时走定向 Store 查询。
 
 ## 6. 验证与回滚
 

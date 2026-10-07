@@ -1,0 +1,107 @@
+{
+  "dataset": "managed-agent-business-expressions",
+  "version": "1.0.0",
+  "tenant_id": "tenant-a",
+  "capabilities": [
+    {
+      "canonical_name": "github.issue.create",
+      "title": "Create repository issue",
+      "description": "Create and register a software defect or issue in a governed source repository.",
+      "tags": ["bug", "缺陷"],
+      "permission": "write-with-approval",
+      "risk_level": "high"
+    },
+    {
+      "canonical_name": "supplier.risk.profile",
+      "title": "Supplier operational risk profile",
+      "description": "Inspect recent business, financial, legal and operational risk for a supplier.",
+      "permission": "read-only",
+      "risk_level": "low"
+    },
+    {
+      "canonical_name": "supplier.portrait.query",
+      "title": "Supplier portrait",
+      "description": "Read a supplier profile, attributes and performance portrait.",
+      "permission": "read-only",
+      "risk_level": "low"
+    },
+    {
+      "canonical_name": "semantic.dimension.members",
+      "title": "Dimension member lookup",
+      "description": "List real governed member values for a semantic business dimension before filtering.",
+      "permission": "read-only",
+      "risk_level": "low"
+    },
+    {
+      "canonical_name": "rag.knowledge.query",
+      "title": "Knowledge base retrieval",
+      "description": "Retrieve cited policy and document evidence from authorized knowledge bases.",
+      "permission": "read-only",
+      "risk_level": "low"
+    },
+    {
+      "canonical_name": "dashboard.chart.preview",
+      "title": "Dashboard chart preview",
+      "description": "Render a governed chart preview from a validated semantic query definition.",
+      "permission": "read-only",
+      "risk_level": "low"
+    },
+    {
+      "canonical_name": "inventory.alert.list",
+      "title": "Inventory alert list",
+      "description": "List current inventory warnings and alerts for operational review.",
+      "permission": "read-only",
+      "risk_level": "low"
+    },
+    {
+      "canonical_name": "inventory.history.turnover.query",
+      "title": "Historical inventory turnover",
+      "description": "Query historical inventory turnover for governed warehouses and categories.",
+      "permission": "read-only",
+      "risk_level": "low"
+    },
+    {
+      "canonical_name": "payment.execute",
+      "title": "Execute supplier payment",
+      "description": "Execute a financial payment to a supplier after explicit approval.",
+      "permission": "write-with-approval",
+      "risk_level": "critical",
+      "allowed_roles": ["finance-reviewer"]
+    }
+  ],
+  "hidden_tenant_capability": {
+    "canonical_name": "tenant.secret.lookup",
+    "title": "Confidential tenant lookup",
+    "description": "Read confidential records belonging only to another tenant.",
+    "permission": "read-only",
+    "risk_level": "high"
+  },
+  "cases": [
+    {"id": "zh-create-defect", "query": "登记一个程序缺陷", "expected": ["github.issue.create"]},
+    {"id": "colloquial-bug", "query": "帮我提个 bug", "expected": ["github.issue.create"]},
+    {"id": "supplier-business-risk", "query": "查一下供应商最近是否有经营风险", "expected": ["supplier.risk.profile"]},
+    {"id": "supplier-risk-en", "query": "recent vendor operational risk", "expected": ["supplier.risk.profile"]},
+    {"id": "dimension-values", "query": "先找出这个维度有哪些真实可选值", "expected": ["semantic.dimension.members"]},
+    {"id": "policy-evidence", "query": "从制度知识库找有引用的政策依据", "expected": ["rag.knowledge.query"]},
+    {"id": "chart", "query": "把查询结果生成一个图表预览", "expected": ["dashboard.chart.preview"]},
+    {"id": "inventory-warning", "query": "列出当前库存预警", "expected": ["inventory.alert.list"]},
+    {"id": "historical-turnover", "query": "查看这个仓库过去的库存周转", "expected": ["inventory.history.turnover.query"]},
+    {"id": "exact-name", "query": "supplier.portrait.query", "expected": ["supplier.portrait.query"]},
+    {
+      "id": "unrelated-negative",
+      "query": "写一首关于星空和海浪的诗",
+      "expected": [],
+      "expect_empty": true,
+      "forbidden": ["tenant.secret.lookup"],
+      "dangerous": ["payment.execute"]
+    },
+    {
+      "id": "hidden-tenant-negative",
+      "query": "读取另一个租户的机密记录",
+      "expected": [],
+      "expect_empty": true,
+      "forbidden": ["tenant.secret.lookup"],
+      "dangerous": ["payment.execute"]
+    }
+  ]
+}

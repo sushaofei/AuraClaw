@@ -12,6 +12,18 @@ from auraclaw.contracts.errors import (
     ModelOutputTruncatedError,
 )
 from auraclaw.contracts.events import NewEvent
+from auraclaw.contracts.routing import (
+    PlanAssignment,
+    PlanBudget,
+    PlanOutputContract,
+    PlanRiskClass,
+    RouteKind,
+    RouteOutcome,
+    RouterMode,
+    RoutingDecision,
+    RoutingPlan,
+    RoutingPlanStep,
+)
 from auraclaw.control.ports import RuntimeAssignment, RuntimeCheckpoint
 from auraclaw.runtime.clients import IdempotentToolClient
 from auraclaw.runtime.collaboration_controller import (
@@ -24,6 +36,7 @@ from auraclaw.runtime.collaboration_controller import (
 )
 from auraclaw.runtime.harness import AgentHarness
 from auraclaw.runtime.ports import ModelRequest, ModelResponse, ToolCall
+from auraclaw.runtime.task_router import RoutingExecution
 
 
 class _Control:
@@ -126,6 +139,7 @@ class _CollaborationClient:
     def __init__(self) -> None:
         self.children: list[dict[str, Any]] = []
         self.operations: list[str] = []
+        self.calls: list[tuple[str, dict[str, Any], str]] = []
 
     async def execute(
         self,
@@ -135,8 +149,9 @@ class _CollaborationClient:
         arguments: dict[str, Any],
         command_id: str,
     ) -> dict[str, Any]:
-        del assignment, command_id
+        del assignment
         self.operations.append(operation)
+        self.calls.append((operation, arguments, command_id))
         if operation == "get_graph":
             return {"root_session_id": "root", "children": list(self.children)}
         if operation == "create_child":
@@ -149,6 +164,18 @@ class _CollaborationClient:
             return child
         if operation == "publish_result":
             return {"status": "published", **arguments}
+        if operation == "submit_plan":
+            self.children = [
+                {
+                    "session_id": f"child-{index}",
+                    "status": "runnable",
+                    "task_key": step["task_key"],
+                }
+                for index, step in enumerate(arguments["plan"]["steps"], start=1)
+            ]
+            return {"status": "submitted", "children": list(self.children)}
+        if operation == "join":
+            return {"status": "completed", **arguments}
         raise AssertionError(operation)
 
 
@@ -176,6 +203,48 @@ def _response(*calls: ToolCall, output: str = "") -> ModelResponse:
         completed_output=output,
         tool_calls=tuple(calls),
     )
+
+
+def _router_dag() -> RoutingPlan:
+    return RoutingPlan.create(
+        route_kind=RouteKind.COORDINATOR_DAG,
+        success_criteria=("both child results are published",),
+        risk_class=PlanRiskClass.LOW,
+        steps=tuple(
+            RoutingPlanStep(
+                task_key=task_key,
+                goal=f"complete {task_key}",
+                output_contract=PlanOutputContract(
+                    result_kind="child_result",
+                    required_fields=("summary", "result_ref"),
+                ),
+                assignment=PlanAssignment(execution_scope="child", role="worker"),
+                budget=PlanBudget(fraction=0.4, max_steps=4, max_output_tokens=256),
+            )
+            for task_key in ("collect", "summarize")
+        ),
+    )
+
+
+class _AdoptedDagRouter:
+    def __init__(self, plan: RoutingPlan) -> None:
+        self._plan = plan
+
+    async def route(self, *args: Any, **kwargs: Any) -> RoutingExecution:
+        del args, kwargs
+        return RoutingExecution(
+            decision=RoutingDecision.create(
+                mode=RouterMode.ASSIST,
+                route_kind=RouteKind.COORDINATOR_DAG,
+                outcome=RouteOutcome.ADOPTED,
+                confidence=1.0,
+                reason_code="semantic_plan_validated_for_submit",
+                intent="coordinate a complex task",
+                plan=self._plan,
+            ),
+            capability_state={},
+            metrics={"router.semantic_planner.submit_candidate.count": 1.0},
+        )
 
 
 def test_root_model_can_create_children_then_suspend_without_completing_run() -> None:
@@ -228,6 +297,85 @@ def test_root_model_can_create_children_then_suspend_without_completing_run() ->
         assert CREATE_CHILD in {
             tool["function"]["name"] for tool in model.requests[0].tools
         }
+
+    asyncio.run(scenario())
+
+
+def test_router_adopted_dag_submits_atomically_and_suspends_before_agent_model() -> None:
+    async def scenario() -> None:
+        control = _Control()
+        session = _Session("coordinate a complex task")
+        client = _CollaborationClient()
+        model = _Model([])
+        plan = _router_dag()
+        harness = AgentHarness(
+            control_store=control,  # type: ignore[arg-type]
+            session=session,  # type: ignore[arg-type]
+            model=model,
+            tools=IdempotentToolClient(),
+            runtime_events=_RuntimeEvents(),
+            collaboration_controller=RuntimeCollaborationController(client),
+            task_router=_AdoptedDagRouter(plan),  # type: ignore[arg-type]
+        )
+
+        await harness.execute(_assignment())
+
+        assert model.requests == []
+        assert control.suspended == "waiting_children"
+        assert control.outcome is None
+        assert control.checkpoint is not None
+        assert control.checkpoint.phase == "agent.waiting_children"
+        assert control.checkpoint.state["waiting_child_ids"] == ["child-1", "child-2"]
+        assert control.checkpoint.state["router_plan_submission"] == {
+            "plan_digest": plan.plan_digest,
+            "child_session_ids": ["child-1", "child-2"],
+        }
+        submit_calls = [call for call in client.calls if call[0] == "submit_plan"]
+        assert len(submit_calls) == 1
+        assert submit_calls[0][2] == (
+            f"runtime:router:submit_plan:run-m13:{plan.plan_digest.removeprefix('sha256:')}"
+        )
+
+    asyncio.run(scenario())
+
+
+def test_router_owned_dag_joins_without_another_model_turn_after_children_complete() -> None:
+    async def scenario() -> None:
+        control = _Control()
+        session = _Session("coordinate a complex task")
+        client = _CollaborationClient()
+        model = _Model([])
+        plan = _router_dag()
+        harness = AgentHarness(
+            control_store=control,  # type: ignore[arg-type]
+            session=session,  # type: ignore[arg-type]
+            model=model,
+            tools=IdempotentToolClient(),
+            runtime_events=_RuntimeEvents(),
+            collaboration_controller=RuntimeCollaborationController(client),
+            task_router=_AdoptedDagRouter(plan),  # type: ignore[arg-type]
+        )
+
+        await harness.execute(_assignment())
+        for child in client.children:
+            child["status"] = "completed"
+            child["result"] = {
+                "summary": f"completed {child['task_key']}",
+                "result_ref": f"result://{child['session_id']}",
+            }
+        control.suspended = None
+
+        await harness.execute(_assignment())
+
+        assert model.requests == []
+        assert control.outcome == "completed"
+        assert control.checkpoint is not None
+        assert control.checkpoint.phase == "agent.completed"
+        join_calls = [call for call in client.calls if call[0] == "join"]
+        assert len(join_calls) == 1
+        assert join_calls[0][1]["child_session_ids"] == ["child-1", "child-2"]
+        assert "completed collect" in join_calls[0][1]["result_summary"]
+        assert "completed summarize" in join_calls[0][1]["result_summary"]
 
     asyncio.run(scenario())
 
@@ -451,7 +599,7 @@ def test_worker_model_receives_authoritative_child_goal_and_contract() -> None:
                         "required_fields": ["summary", "result_ref"],
                         "require_artifacts": True,
                     },
-                    "input_refs": ["skill://price-insight-deviation"],
+                    "input_refs": ["skill://inventory-deviation"],
                     "tool_permissions": ["price.read"],
                 },
                 run_id="run-m13",
@@ -566,6 +714,36 @@ def test_collaboration_tools_are_role_scoped_and_freeze_owner_operations() -> No
     assert "owner" not in spec_schema["properties"]
     assert "tenant_id" not in spec_schema["properties"]
     assert "tool_permissions" not in spec_schema["properties"]
+
+
+def test_empty_join_is_non_terminal_and_tells_root_to_answer_directly() -> None:
+    async def scenario() -> None:
+        client = _CollaborationClient()
+        controller = RuntimeCollaborationController(client)
+
+        execution = await controller.execute(
+            _assignment(),
+            ToolCall(
+                tool_invocation_id="join-empty",
+                name=JOIN,
+                arguments={"child_session_ids": [], "result_summary": "done"},
+            ),
+        )
+
+        assert execution.terminal is False
+        assert execution.result["status"] == "denied"
+        assert execution.result["error_code"] == "join_not_applicable"
+
+    asyncio.run(scenario())
+
+
+def test_root_prompt_forbids_join_when_graph_has_no_children() -> None:
+    async def scenario() -> None:
+        controller = RuntimeCollaborationController(_CollaborationClient())
+        messages = await controller.trusted_messages(_assignment())
+        assert "graph has no children, never call join" in messages[0]["content"]
+
+    asyncio.run(scenario())
 
 
 def test_child_tool_permissions_are_bounded_by_root_grant() -> None:

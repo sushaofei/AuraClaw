@@ -90,7 +90,7 @@ services:
         "migrate",
         "up",
         "--target",
-        "${AURACLAW_MIGRATE_TARGET:-0065}",
+        "${AURACLAW_MIGRATE_TARGET:-0067}",
         "--directory",
         "${AURACLAW_MIGRATIONS_DIRECTORY:-/app/migrations}",
       ]
@@ -111,15 +111,15 @@ services:
       AURACLAW_HEALTH_PORT: "8000"
       AURACLAW_DATABASE_URL_FILE: /run/secrets/database_url
       AURACLAW_TASK_API_WORKLOAD_TOKEN_FILE: /run/secrets/task_api_workload_token
-      AURACLAW_CHAINTOWER_WORKLOAD_TOKEN_FILE: /run/secrets/chaintower_workload_token
+      AURACLAW_UPSTREAM_WORKLOAD_TOKEN_FILE: /run/secrets/upstream_workload_token
       AURACLAW_AGENT_CONTEXT_SIGNING_KEYS_JSON_FILE: /run/secrets/agent_context_signing_keys_json
-      AURACLAW_AGENT_CONTEXT_ISSUER: ${AURACLAW_AGENT_CONTEXT_ISSUER:-chaintower}
+      AURACLAW_AGENT_CONTEXT_ISSUER: ${AURACLAW_AGENT_CONTEXT_ISSUER:-upstream}
       AURACLAW_AGENT_CONTEXT_AUDIENCE: ${AURACLAW_AGENT_CONTEXT_AUDIENCE:-auraclaw-task-api}
     secrets:
       [
         database_url,
         task_api_workload_token,
-        chaintower_workload_token,
+        upstream_workload_token,
         agent_context_signing_keys_json,
       ]
     command: ["api", "run", "--host", "0.0.0.0", "--port", "8000"]
@@ -257,6 +257,7 @@ services:
       AURACLAW_RUNTIME_SKILL_CONTENT_CACHE_TTL_SECONDS: ${AURACLAW_RUNTIME_SKILL_CONTENT_CACHE_TTL_SECONDS:-900}
       AURACLAW_RUNTIME_SKILL_PROMPT_MAX_BYTES: ${AURACLAW_RUNTIME_SKILL_PROMPT_MAX_BYTES:-262144}
       AURACLAW_RUNTIME_SKILL_PROMPT_MAX_ESTIMATED_TOKENS: ${AURACLAW_RUNTIME_SKILL_PROMPT_MAX_ESTIMATED_TOKENS:-65536}
+      AURACLAW_RUNTIME_SKILL_REFERENCE_READ_MAX_BYTES: ${AURACLAW_RUNTIME_SKILL_REFERENCE_READ_MAX_BYTES:-262144}
     secrets: [runtime_workload_token]
     command: ["runtime", "run", "--host", "0.0.0.0", "--port", "8004"]
     expose: ["8004"]
@@ -286,6 +287,8 @@ services:
       AURACLAW_MODEL_BASE_URL: ${AURACLAW_MODEL_BASE_URL:-}
       AURACLAW_MODEL_NAME: ${AURACLAW_MODEL_NAME:-}
       AURACLAW_MODEL_PROVIDER: ${AURACLAW_MODEL_PROVIDER:-openai_compatible}
+      AURACLAW_MODEL_RETRY_ATTEMPTS: ${AURACLAW_MODEL_RETRY_ATTEMPTS:-5}
+      AURACLAW_MODEL_RETRY_BASE_DELAY_SECONDS: ${AURACLAW_MODEL_RETRY_BASE_DELAY_SECONDS:-1.0}
       AURACLAW_MODEL_PROMPT_CACHE_KEY_ENABLED: ${AURACLAW_MODEL_PROMPT_CACHE_KEY_ENABLED:-false}
       AURACLAW_MODEL_TENANT_TOKEN_LIMIT_PER_HOUR: ${AURACLAW_MODEL_TENANT_TOKEN_LIMIT_PER_HOUR:-1000000}
     secrets:
@@ -324,6 +327,17 @@ services:
       AURACLAW_ACTION_HANDS_WORKLOAD_TOKEN_FILE: /run/secrets/action_hands_workload_token
       AURACLAW_TASK_API_WORKLOAD_TOKEN_FILE: /run/secrets/task_api_workload_token
       AURACLAW_CREDENTIAL_PROXY_WORKLOAD_TOKEN_FILE: /run/secrets/credential_proxy_workload_token
+      AURACLAW_CAPABILITY_SEARCH_SEMANTIC_ENABLED: ${AURACLAW_CAPABILITY_SEARCH_SEMANTIC_ENABLED:-false}
+      AURACLAW_CAPABILITY_SEARCH_EMBEDDING_URL: ${AURACLAW_CAPABILITY_SEARCH_EMBEDDING_URL:-}
+      AURACLAW_CAPABILITY_SEARCH_EMBEDDING_MODEL: ${AURACLAW_CAPABILITY_SEARCH_EMBEDDING_MODEL:-BAAI/bge-m3}
+      AURACLAW_CAPABILITY_SEARCH_EMBEDDING_DIMENSIONS: ${AURACLAW_CAPABILITY_SEARCH_EMBEDDING_DIMENSIONS:-1024}
+      AURACLAW_CAPABILITY_SEARCH_EMBEDDING_TIMEOUT_SECONDS: ${AURACLAW_CAPABILITY_SEARCH_EMBEDDING_TIMEOUT_SECONDS:-12}
+      AURACLAW_CAPABILITY_SEARCH_INDEX_EMBEDDING_TIMEOUT_SECONDS: ${AURACLAW_CAPABILITY_SEARCH_INDEX_EMBEDDING_TIMEOUT_SECONDS:-300}
+      AURACLAW_CAPABILITY_SEARCH_EMBEDDING_MAX_CONCURRENT: ${AURACLAW_CAPABILITY_SEARCH_EMBEDDING_MAX_CONCURRENT:-8}
+      AURACLAW_CAPABILITY_SEARCH_SEMANTIC_MIN_SIMILARITY: ${AURACLAW_CAPABILITY_SEARCH_SEMANTIC_MIN_SIMILARITY:-0.50}
+      AURACLAW_CAPABILITY_SEARCH_LEXICAL_MIN_SCORE: ${AURACLAW_CAPABILITY_SEARCH_LEXICAL_MIN_SCORE:-0.1}
+      AURACLAW_CAPABILITY_SEARCH_CACHE_MAX_ENTRIES: ${AURACLAW_CAPABILITY_SEARCH_CACHE_MAX_ENTRIES:-2048}
+      AURACLAW_CAPABILITY_SEARCH_CACHE_TTL_SECONDS: ${AURACLAW_CAPABILITY_SEARCH_CACHE_TTL_SECONDS:-15}
       AURACLAW_HANDS_MAX_CONCURRENT: ${AURACLAW_HANDS_MAX_CONCURRENT:-32}
       AURACLAW_HANDS_MAX_CONCURRENT_PER_TENANT: ${AURACLAW_HANDS_MAX_CONCURRENT_PER_TENANT:-8}
       AURACLAW_HANDS_MAX_QUEUED: ${AURACLAW_HANDS_MAX_QUEUED:-256}
@@ -500,9 +514,15 @@ services:
       KAFKA_HOST: ${KAFKA_HOST:-host.docker.internal}
       KAFKA_PORT: ${KAFKA_PORT:-9092}
       AURACLAW_STREAMING_GATEWAY_WORKLOAD_TOKEN_FILE: /run/secrets/streaming_gateway_workload_token
+      AURACLAW_UPSTREAM_WORKLOAD_TOKEN_FILE: /run/secrets/upstream_workload_token
+      AURACLAW_AGENT_CONTEXT_SIGNING_KEYS_JSON_FILE: /run/secrets/agent_context_signing_keys_json
+      AURACLAW_AGENT_CONTEXT_ISSUER: ${AURACLAW_AGENT_CONTEXT_ISSUER:-upstream}
+      AURACLAW_AGENT_CONTEXT_AUDIENCE: ${AURACLAW_AGENT_CONTEXT_AUDIENCE:-auraclaw-task-api}
     secrets:
       - database_url
       - streaming_gateway_workload_token
+      - upstream_workload_token
+      - agent_context_signing_keys_json
     command: ["streaming", "run", "--host", "0.0.0.0", "--port", "8010"]
     expose: ["8010"]
     healthcheck: *healthcheck
@@ -613,5 +633,5 @@ secrets:
   vault_approle_secret_id: {file: "${AURACLAW_SECRET_DIR:-.runtime/compose-secrets}/vault_approle_secret_id"}
   obs_ak: {file: "${AURACLAW_SECRET_DIR:-.runtime/compose-secrets}/obs_ak"}
   obs_sk: {file: "${AURACLAW_SECRET_DIR:-.runtime/compose-secrets}/obs_sk"}
-  chaintower_workload_token: {file: "${AURACLAW_SECRET_DIR:-.runtime/compose-secrets}/chaintower_workload_token"}
+  upstream_workload_token: {file: "${AURACLAW_SECRET_DIR:-.runtime/compose-secrets}/upstream_workload_token"}
   agent_context_signing_keys_json: {file: "${AURACLAW_SECRET_DIR:-.runtime/compose-secrets}/agent_context_signing_keys_json"}

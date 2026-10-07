@@ -66,6 +66,7 @@ KNOWN_TASK_EVENTS = {
     "skill.failed",
     "skill.cancelled",
     "context.resource.used",
+    "context.skill.reference.used",
     "delivery.attempting",
     "delivery.retrying",
     "delivery.succeeded",

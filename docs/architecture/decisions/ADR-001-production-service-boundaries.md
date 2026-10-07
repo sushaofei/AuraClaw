@@ -93,7 +93,7 @@ Runtime 的网络策略禁止直连第三方 MCP 或 Java API endpoint。下游 
 
 tenant、session、run、lease 与 fencing 只能从 workload identity 与 signed lease assertion 恢复，
 不能信任请求 body 或模型可控 arguments。公开 Task API 的 tenant/user 同样不能信任裸
-`X-Tenant-ID` / `X-Actor-ID` 或请求体；生产必须从 chaintower workload + 短期签名 Assertion
+`X-Tenant-ID` / `X-Actor-ID` 或请求体；生产必须从 upstream workload + 短期签名 Assertion
 恢复。决策见 [ADR-003](./ADR-003-trusted-identity-context.md)。`tool_invocation_id` 是业务幂等键。Hands Invocation Store
 持久保存 Invocation、Attempt、normalized argument digest、result/artifact refs、status、lease、
 deadline 和 `side_effect_status`。连接断开不等于取消。MCP Task/Progress 不替代该 Store、

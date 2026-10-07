@@ -1,4 +1,4 @@
-# ADR-003：用户身份归属 chaintower，AuraClaw 只消费可信上下文
+# ADR-003：用户身份归属 upstream，AuraClaw 只消费可信上下文
 
 - 状态：Accepted（Issue #44）
 - 日期：2026-08-19
@@ -8,7 +8,7 @@
 
 ## 背景
 
-AuraClaw 是 chaintower 在后台调用的 Managed Agent 服务，不应成为第二套用户身份系统。
+AuraClaw 是 upstream 在后台调用的 Managed Agent 服务，不应成为第二套用户身份系统。
 此前公开 Task API 生产路径直接读取 `X-Tenant-ID` / `X-Actor-ID` 并提供 `local` /
 `local-user` 默认值，浏览器、模型或普通请求体可以伪造租户与用户。
 
@@ -17,20 +17,20 @@ M9 曾把 MCP OAuth/OIDC `client_credentials` 当作远端认证的主要方式�
 
 ## 决策
 
-chaintower 是用户身份与业务权限的唯一权威来源。AuraClaw 不实现终端用户 OAuth/SSO，
-不管理用户 access/refresh token，不查询 chaintower 用户/部门/菜单 RBAC。
+upstream 是用户身份与业务权限的唯一权威来源。AuraClaw 不实现终端用户 OAuth/SSO，
+不管理用户 access/refresh token，不查询 upstream 用户/部门/菜单 RBAC。
 
 ### 1. 三段调用链
 
 | 调用段 | 身份/授权责任 |
 |---|---|
-| 用户 → chaintower | 登录、SSO/OAuth、账号/租户/部门校验和业务授权 |
-| chaintower → AuraClaw | AuraClaw 验证 chaintower workload identity，并验证短期可信身份上下文 |
+| 用户 → upstream | 登录、SSO/OAuth、账号/租户/部门校验和业务授权 |
+| upstream → AuraClaw | AuraClaw 验证 upstream workload identity，并验证短期可信身份上下文 |
 | AuraClaw Hands → MCP Server | MCP Server 验证 AuraClaw/Hands workload 与 per-request 委托上下文，并执行 Tool/Resource/Prompt 最终业务鉴权 |
 
 ```text
 User
-  -> chaintower authentication + authorization
+  -> upstream authentication + authorization
   -> trusted Agent identity context
   -> AuraClaw Task API
        -> Agent orchestration / policy / approval / lease / fencing / idempotency
@@ -43,7 +43,7 @@ User
 
 AuraClaw **信任**：
 
-- 已 allowlist 的 chaintower workload credential（与内部 12 服务 workload 不同）；
+- 已 allowlist 的 upstream workload credential（与内部 12 服务 workload 不同）；
 - 已验签、未过期、未重放、iss/aud/kid 命中 allowlist 的短期 Assertion；
 - 内部服务 workload token / mTLS 与 signed lease assertion；
 - Catalog/composition 提供的 Connector 认证策略，而非模型参数。
@@ -63,8 +63,8 @@ V1 冻结为 **HMAC-SHA256 签名的 JSON 声明信封**，不引入 JWT/PASETO 
 HTTP：
 
 ```http
-Authorization: Bearer <chaintower-workload-credential>
-X-CT-Agent-Context: <base64url(canonical-json)>.<base64url(hmac-sha256)>
+Authorization: Bearer <upstream-workload-credential>
+X-Aura-Agent-Context: <base64url(canonical-json)>.<base64url(hmac-sha256)>
 X-Correlation-ID: <id>
 ```
 
@@ -73,7 +73,7 @@ X-Correlation-ID: <id>
 
 约束：
 
-- `iss` 默认 `chaintower`，`aud` 默认 `auraclaw-task-api`，必须显式 allowlist；
+- `iss` 默认 `upstream`，`aud` 默认 `auraclaw-task-api`，必须显式 allowlist；
 - `exp - iat` 默认不超过 5 分钟，允许配置 clock skew（默认 30 秒）；
 - 写命令通过 SQL 唯一约束跨副本原子校验 `jti + command_id`：同一 Assertion 不能绑定不同 command；
 - create 后访问已有 Session 时 Assertion 必须携带 `session_id`，并与路径中的 Session 完全一致；
@@ -95,7 +95,7 @@ X-Correlation-ID: <id>
 ### 5. 下游 MCP
 
 OAuth `client_credentials` 是**可选 Connector 策略**，不是 AuraClaw 用户身份系统。
-chaintower MCP 默认使用 `workload_trusted_context`：
+upstream MCP 默认使用 `workload_trusted_context`：
 
 - workload credential 只证明调用方是 AuraClaw/Hands；
 - tenant/user 只从 `HandsTrustedContext` 构造受控 Header/`_meta`；
@@ -113,23 +113,23 @@ chaintower MCP 默认使用 `workload_trusted_context`：
 ### 7. 密钥轮换与回滚
 
 - 同时加载当前与上一 `kid`；验签命中任一把即成功。
-- 灰度：chaintower 先签发新 Assertion，AuraClaw 双读；Hands → MCP 再切 trusted context；
+- 灰度：upstream 先签发新 Assertion，AuraClaw 双读；Hands → MCP 再切 trusted context；
   最后关闭生产裸 Header。
-- 回滚窗口可切回旧 chaintower 调用方式，但**不得**重新开放公网裸 tenant/user Header。
+- 回滚窗口可切回旧 upstream 调用方式，但**不得**重新开放公网裸 tenant/user Header。
 - 不把用户 access token 写入 AuraClaw；回滚也不恢复该行为。
 
 ## 备选方案
 
-1. **AuraClaw 自建 OAuth/SSO。** 否决：复制 chaintower 身份系统。
+1. **AuraClaw 自建 OAuth/SSO。** 否决：复制 upstream 身份系统。
 2. **转发浏览器 access token 并在 Session 持久化。** 否决：扩大泄漏面，AuraClaw 变成 token 仓库。
 3. **只靠内网或网关 IP allowlist。** 否决：不能证明 tenant/user，也无法防 Header 伪造。
 4. **生产继续信任裸 `X-Tenant-ID`。** 否决：任意客户端可跨租户。
 
 ## 后果
 
-- 生产 Task API 必须持有 chaintower workload token 与 Assertion 验签密钥。
+- 生产 Task API 必须持有 upstream workload token 与 Assertion 验签密钥。
 - 现有开发/单测继续走 development insecure adapter，但生产 composition 拒绝该路径。
-- chaintower 仓库需签发 Assertion 并在 MCP Server 做最终鉴权（见跨仓任务文档）。
+- upstream 仓库需签发 Assertion 并在 MCP Server 做最终鉴权（见跨仓任务文档）。
 
 ## 验证入口
 

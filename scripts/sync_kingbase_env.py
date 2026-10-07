@@ -8,8 +8,8 @@ from urllib.parse import quote
 
 from dotenv import dotenv_values
 
-DEFAULT_DATABASE = "chaintower_agent"
-CURRENT_MIGRATION_TARGET = "0065"
+DEFAULT_DATABASE = "auraclaw"
+CURRENT_MIGRATION_TARGET = "0067"
 
 
 def _required(values: dict[str, str | None], *names: str) -> str:

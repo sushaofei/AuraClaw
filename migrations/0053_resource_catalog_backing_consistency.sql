@@ -3,7 +3,7 @@ BEGIN;
 -- This in-process provider was removed from the application before its catalog
 -- owner row was retired. Deleting the owner atomically removes its capabilities.
 DELETE FROM hands.downstream_mcp_server
-WHERE server_id = 'auraclaw-price-insight';
+WHERE server_id = 'legacy-local-provider';
 
 -- Only the active generation is authoritative. Rows from interrupted legacy
 -- publications must never become discoverable after an upgrade.

@@ -47,6 +47,26 @@ class McpNetworkMode(StrEnum):
     LOOPBACK = "loopback"
 
 
+class McpTrustLevel(StrEnum):
+    EXTERNAL_UNTRUSTED = "external_untrusted"
+    TENANT_VERIFIED = "tenant_verified"
+    PLATFORM = "platform"
+
+
+class McpToolPolicyOverride(ContractModel):
+    scope: Literal["server_exact_tool"] = "server_exact_tool"
+    permission: Literal["read-only", "write-with-approval", "sandbox-only"]
+    risk_level: Literal["low", "medium", "high", "critical"]
+    content_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    evidence_ref: str = Field(min_length=1, max_length=1024)
+    actor_id: str = Field(min_length=1, max_length=256)
+    reason: str = Field(min_length=1, max_length=1024)
+    revision: int = Field(ge=1)
+    correlation_id: str = Field(min_length=1, max_length=256)
+    causation_id: str = Field(min_length=1, max_length=256)
+    revoked: bool = False
+
+
 class McpOAuthConfiguration(ContractModel):
     protected_resource_metadata_url: str = Field(pattern=r"^https://")
     authorization_server_metadata_url: str = Field(pattern=r"^https://")
@@ -71,6 +91,9 @@ class McpServerDefinition(ContractModel):
     allowed_private_hosts: tuple[str, ...] = ()
     network_mode: McpNetworkMode | None = None
     allowed_cidrs: tuple[str, ...] = ()
+    trust_level: McpTrustLevel = McpTrustLevel.EXTERNAL_UNTRUSTED
+    tool_admission_policy_version: str | None = Field(default=None, min_length=1, max_length=128)
+    tool_policy_overrides: dict[str, McpToolPolicyOverride] = Field(default_factory=dict)
     config_revision: int | None = Field(default=None, ge=1)
     status: CapabilityStatus = CapabilityStatus.QUARANTINED
     enabled: bool = False
@@ -115,9 +138,37 @@ class McpServerDefinition(ContractModel):
             "_auraclaw_allowed_private_hosts",
             "_auraclaw_network_mode",
             "_auraclaw_allowed_cidrs",
+            "_auraclaw_trust_level",
+            "_auraclaw_tool_admission_policy_version",
+            "_auraclaw_tool_policy_overrides",
         }
         if reserved.intersection(self.metadata):
             raise ValueError("MCP server metadata uses a reserved key")
+        if self.tool_policy_overrides and self.tool_admission_policy_version is None:
+            raise ValueError("MCP tool policy overrides require a policy version")
+        aliases = self.metadata.get("search_aliases")
+        if aliases:
+            governance = self.metadata.get("search_alias_governance")
+            expected_tenant = self.tenant_id or "platform"
+            if (
+                not isinstance(aliases, (list, tuple))
+                or len(aliases) > 32
+                or not all(isinstance(value, str) and value.strip() for value in aliases)
+                or not isinstance(governance, dict)
+                or str(governance.get("tenant_id", "")) != expected_tenant
+                or not str(governance.get("actor_id", "")).strip()
+                or not str(governance.get("source", "")).strip()
+                or not isinstance(governance.get("revision"), int)
+                or isinstance(governance.get("revision"), bool)
+                or int(governance["revision"]) < 1
+            ):
+                raise ValueError(
+                    "MCP search aliases require tenant-scoped actor/source/revision governance"
+                )
+        if self.trust_level is McpTrustLevel.EXTERNAL_UNTRUSTED and any(
+            item.permission == "read-only" for item in self.tool_policy_overrides.values()
+        ):
+            raise ValueError("untrusted MCP servers cannot admit read-only tools")
         return self
 
     @property

@@ -16,6 +16,16 @@ from auraclaw.contracts.collaboration import (
 from auraclaw.contracts.commands import CommandContext
 from auraclaw.contracts.errors import AuthorizationError, CollaborationValidationError
 from auraclaw.contracts.events import Actor
+from auraclaw.contracts.routing import (
+    PlanAssignment,
+    PlanBudget,
+    PlanOutputContract,
+    PlanRiskClass,
+    RouteKind,
+    RouteTarget,
+    RoutingPlan,
+    RoutingPlanStep,
+)
 from auraclaw.gateways.task.admission import AllowAllAdmissionController
 from auraclaw.infrastructure.persistence.memory_event_store import InMemoryEventStore
 from auraclaw.projection.approval.projector import CompositeProjection
@@ -130,6 +140,145 @@ class M4Harness:
                 operation="collaboration.publish_result",
             ),
         )
+
+
+def _worker_plan(*, invalid_output: bool = False) -> RoutingPlan:
+    required = ("unsupported",) if invalid_output else ("summary", "result_ref")
+    return RoutingPlan.create(
+        route_kind=RouteKind.COORDINATOR_DAG,
+        success_criteria=("both child results are available",),
+        risk_class=PlanRiskClass.LOW,
+        steps=(
+            RoutingPlanStep(
+                task_key="collect",
+                goal="collect source facts",
+                output_contract=PlanOutputContract(
+                    result_kind="child_result",
+                    required_fields=required,
+                ),
+                assignment=PlanAssignment(execution_scope="child", role="worker"),
+                budget=PlanBudget(
+                    fraction=0.4,
+                    max_steps=4,
+                    max_output_tokens=512,
+                ),
+                capability=RouteTarget(
+                    kind="skill",
+                    name="inventory.collect",
+                    publisher="platform",
+                    version="1.2.0",
+                    binding_id="skb-collect",
+                    content_digest="sha256:" + "a" * 64,
+                ),
+            ),
+            RoutingPlanStep(
+                task_key="summarize",
+                goal="summarize source facts",
+                dependencies=("collect",),
+                output_contract=PlanOutputContract(
+                    result_kind="child_result",
+                    required_fields=("summary", "result_ref"),
+                ),
+                assignment=PlanAssignment(execution_scope="child", role="worker"),
+                budget=PlanBudget(
+                    fraction=0.4,
+                    max_steps=4,
+                    max_output_tokens=512,
+                ),
+                capability=RouteTarget(
+                    kind="skill",
+                    name="inventory.summarize",
+                    publisher="platform",
+                    version="1.3.0",
+                    binding_id="skb-summarize",
+                    content_digest="sha256:" + "b" * 64,
+                ),
+            ),
+        ),
+    )
+
+
+def test_submit_plan_atomically_materializes_and_reuses_a_child_dag() -> None:
+    async def scenario() -> None:
+        harness = M4Harness()
+        root = await harness.create_root()
+        context = CommandContext(
+            command_id="submit-plan",
+            tenant_id="tenant-m4",
+            actor=Actor(type="coordinator", id="coordinator-m4"),
+            correlation_id="corr-tenant-m4",
+            expected_version=0,
+            operation="collaboration.submit_plan",
+        )
+        response = await harness.service.submit_plan(
+            root_session_id=root,
+            plan=_worker_plan(),
+            context=context,
+        )
+        repeated = await harness.service.submit_plan(
+            root_session_id=root,
+            plan=_worker_plan(),
+            context=context,
+        )
+        assert repeated == response
+        assert [child["task_key"] for child in response["children"]] == [
+            "collect",
+            "summarize",
+        ]
+        collect, summarize = response["children"]
+        assert collect["status"] == "runnable"
+        assert summarize["status"] == "blocked"
+        assert summarize["dependency_ids"] == [collect["session_id"]]
+        events = await harness.store.load_all("tenant-m4")
+        child_events = [event for event in events if event.type == "child.created"]
+        assert len(child_events) == 2
+        assert {event.payload["metadata"]["routing_plan_digest"] for event in child_events} == {
+            response["plan_digest"]
+        }
+        collect_event = next(
+            event for event in child_events if event.payload["task_key"] == "collect"
+        )
+        assert collect_event.payload["skill_names"] == ["platform/inventory.collect"]
+        assert "required_capabilities" not in collect_event.payload["metadata"]
+        assert collect_event.payload["metadata"]["required_skills"] == [
+            {
+                "publisher": "platform",
+                "name": "inventory.collect",
+                "version": "1.2.0",
+                "package_digest": "sha256:" + "a" * 64,
+                "binding_id": "skb-collect",
+            }
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_submit_plan_validation_failure_leaves_no_partial_dag() -> None:
+    async def scenario() -> None:
+        harness = M4Harness()
+        root = await harness.create_root()
+        with pytest.raises(ValueError, match="unsupported Child Result fields"):
+            await harness.service.submit_plan(
+                root_session_id=root,
+                plan=_worker_plan(invalid_output=True),
+                context=CommandContext(
+                    command_id="submit-invalid-plan",
+                    tenant_id="tenant-m4",
+                    actor=Actor(type="coordinator", id="coordinator-m4"),
+                    correlation_id="corr-tenant-m4",
+                    expected_version=0,
+                    operation="collaboration.submit_plan",
+                ),
+            )
+        graph = await harness.service.graph("tenant-m4", root)
+        assert set(graph.nodes) == {root}
+        assert not [
+            event
+            for event in await harness.store.load_all("tenant-m4")
+            if event.type == "child.created"
+        ]
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("shape", ["serial", "parallel", "tree", "mixed"])

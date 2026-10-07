@@ -33,8 +33,8 @@ docker network inspect auraclaw-platform >/dev/null 2>&1 ||
 ```
 
 最低必填配置包括不可变 `AURACLAW_IMAGE`、统一应用 DSN、migration admin DSN、工作负载
-令牌、lease key、chaintower workload token、Agent Context 验签密钥、模型凭据、Vault 配置
-及 OBS 配置。Agent Runtime 没有数据库、模型、Vault 或 OBS Secret；chaintower
+令牌、lease key、upstream workload token、Agent Context 验签密钥、模型凭据、Vault 配置
+及 OBS 配置。Agent Runtime 没有数据库、模型、Vault 或 OBS Secret；upstream
 身份密钥只挂到 Task API。只有对应 owner service 获得这些凭据。
 
 Credential Proxy 的 production 入口要求外部 Vault 地址和 token，禁止 debug secret JSON。Artifact

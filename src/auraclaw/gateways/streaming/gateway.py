@@ -52,10 +52,12 @@ class StreamingGateway:
         reader: TaskReader,
         bus: RuntimeReplayBus,
         delta_min_interval: float = 0.0,
+        heartbeat_interval: float = 15.0,
     ) -> None:
         self._reader = reader
         self._bus = bus
         self._delta_min_interval = max(delta_min_interval, 0.0)
+        self._heartbeat_interval = max(heartbeat_interval, 0.001)
 
     async def subscribe(
         self,
@@ -98,18 +100,34 @@ class StreamingGateway:
             yield f"event: stream.reset\ndata: {data}\n\n"
         last_delta_sent_at: float | None = None
         loop = asyncio.get_running_loop()
-        async for event in subscription.events():
-            if event.visibility != "user":
-                continue
-            if event.type == "model.output.delta" and self._delta_min_interval > 0:
-                now = loop.time()
-                if last_delta_sent_at is not None:
-                    delay = self._delta_min_interval - (now - last_delta_sent_at)
-                    if delay > 0:
-                        await asyncio.sleep(delay)
-                last_delta_sent_at = loop.time()
-            data = json.dumps(_event_data(event), separators=(",", ":"))
-            yield f"id: {_public_cursor(event)}\nevent: {event.type}\ndata: {data}\n\n"
+        events = subscription.events()
+        pending: asyncio.Future[RuntimeEvent] = asyncio.ensure_future(anext(events))
+        try:
+            while True:
+                done, _ = await asyncio.wait({pending}, timeout=self._heartbeat_interval)
+                if not done:
+                    # SSE comments are ignored by clients but keep every proxy hop active.
+                    yield ": keepalive\n\n"
+                    continue
+                try:
+                    event = pending.result()
+                except StopAsyncIteration:
+                    break
+                if event.visibility == "user":
+                    if event.type == "model.output.delta" and self._delta_min_interval > 0:
+                        now = loop.time()
+                        if last_delta_sent_at is not None:
+                            delay = self._delta_min_interval - (now - last_delta_sent_at)
+                            if delay > 0:
+                                await asyncio.sleep(delay)
+                        last_delta_sent_at = loop.time()
+                    data = json.dumps(_event_data(event), separators=(",", ":"))
+                    yield f"id: {_public_cursor(event)}\nevent: {event.type}\ndata: {data}\n\n"
+                pending = asyncio.ensure_future(anext(events))
+        finally:
+            if not pending.done():
+                pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
 
     @staticmethod
     def _parse_cursor(session_id: str, value: str | None) -> int | None:

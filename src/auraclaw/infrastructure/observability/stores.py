@@ -20,6 +20,9 @@ from auraclaw.infrastructure.persistence.postgres_common import (
 from auraclaw.infrastructure.persistence.postgres_common import (
     json_dumps as _json,
 )
+from auraclaw.infrastructure.persistence.postgres_common import (
+    json_loads as _decode_json,
+)
 from auraclaw.observability.redaction import redact_sensitive
 
 
@@ -62,6 +65,18 @@ class InMemoryObservabilityStore:
             if metric.deduplication_key is not None:
                 self._metric_keys.add(metric.deduplication_key)
 
+    async def write_metrics(self, metrics: list[MetricPoint]) -> None:
+        async with self._lock:
+            for metric in metrics:
+                if (
+                    metric.deduplication_key is not None
+                    and metric.deduplication_key in self._metric_keys
+                ):
+                    continue
+                self._metrics.append(metric)
+                if metric.deduplication_key is not None:
+                    self._metric_keys.add(metric.deduplication_key)
+
     async def write_audit(self, event: AuditEvent) -> None:
         async with self._lock:
             self._audits[event.audit_id] = event
@@ -95,8 +110,17 @@ class InMemoryObservabilityStore:
             ],
         }
 
-    async def metric_snapshot(self) -> list[MetricPoint]:
-        return list(self._metrics)
+    async def metric_snapshot(
+        self, tenant_id: str | None = None, *, limit: int = 2000
+    ) -> list[MetricPoint]:
+        if limit < 1:
+            return []
+        visible = (
+            self._metrics
+            if tenant_id is None
+            else [point for point in self._metrics if point.tenant_id in {None, tenant_id}]
+        )
+        return list(visible[-limit:])
 
     async def metric_summary(
         self, tenant_id: str, *, window_hours: int
@@ -145,6 +169,32 @@ class PostgresObservabilityStore(_LazyPool):
             metric.name, metric.value, metric.observed_at, metric.tenant_id,
             metric.root_session_id, metric.session_id, metric.run_id, _json(metric.labels),
             metric.deduplication_key,
+        )
+
+    async def write_metrics(self, metrics: list[MetricPoint]) -> None:
+        if not metrics:
+            return
+        pool = await self.pool()
+        await pool.executemany(
+            """INSERT INTO observability.metric_point
+            (metric_name,value,observed_at,tenant_id,root_session_id,session_id,run_id,labels,
+             deduplication_key)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9)
+            ON CONFLICT (deduplication_key) DO NOTHING""",
+            [
+                (
+                    metric.name,
+                    metric.value,
+                    metric.observed_at,
+                    metric.tenant_id,
+                    metric.root_session_id,
+                    metric.session_id,
+                    metric.run_id,
+                    _json(metric.labels),
+                    metric.deduplication_key,
+                )
+                for metric in metrics
+            ],
         )
 
     async def write_audit(self, event: AuditEvent) -> None:
@@ -200,22 +250,61 @@ class PostgresObservabilityStore(_LazyPool):
             "alerts": [dict(row) for row in alerts],
         }
 
-    async def metric_snapshot(self) -> list[MetricPoint]:
+    async def metric_snapshot(
+        self, tenant_id: str | None = None, *, limit: int = 2000
+    ) -> list[MetricPoint]:
         pool = await self.pool()
-        rows = await pool.fetch(
-            """SELECT DISTINCT ON (
-                 metric_name, coalesce(tenant_id,''), coalesce(session_id,'')
-               )
-            * FROM observability.metric_point
-            ORDER BY metric_name, coalesce(tenant_id,''), coalesce(session_id,''),
-                     observed_at DESC"""
-        )
+        if limit < 1:
+            return []
+        if tenant_id is None:
+            rows = await pool.fetch(
+                """SELECT DISTINCT ON (
+                     metric_name, coalesce(tenant_id,''), coalesce(session_id,'')
+                   )
+                * FROM observability.metric_point
+                ORDER BY metric_name, coalesce(tenant_id,''), coalesce(session_id,''),
+                         observed_at DESC
+                LIMIT $1""",
+                limit,
+            )
+        else:
+            rows = await pool.fetch(
+                """WITH recent AS (
+                    SELECT * FROM (
+                        SELECT * FROM observability.metric_point
+                         WHERE tenant_id = $1
+                         ORDER BY observed_at DESC
+                         LIMIT $2
+                    ) tenant_points
+                    UNION ALL
+                    SELECT * FROM (
+                        SELECT * FROM observability.metric_point
+                         WHERE tenant_id IS NULL
+                         ORDER BY observed_at DESC
+                         LIMIT $2
+                    ) global_points
+                ), ranked AS (
+                    SELECT recent.*,
+                           row_number() OVER (
+                               PARTITION BY metric_name, coalesce(tenant_id,''),
+                                            coalesce(session_id,'')
+                               ORDER BY observed_at DESC
+                           ) AS snapshot_rank
+                      FROM recent
+                )
+                SELECT * FROM ranked
+                 WHERE snapshot_rank = 1
+                 ORDER BY observed_at DESC
+                 LIMIT $2""",
+                tenant_id,
+                limit,
+            )
         return [
             MetricPoint(
                 name=str(row["metric_name"]), value=float(row["value"]),
                 observed_at=row["observed_at"], tenant_id=row["tenant_id"],
                 root_session_id=row["root_session_id"], session_id=row["session_id"],
-                run_id=row["run_id"], labels=dict(row["labels"]),
+                run_id=row["run_id"], labels=dict(_decode_json(row["labels"])),
                 deduplication_key=row["deduplication_key"],
             )
             for row in rows

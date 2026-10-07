@@ -964,5 +964,4 @@ flowchart TD
 - `src/auraclaw/contracts/collaboration.py`：Output Contract 和 Reviewer Evidence。
 - `src/auraclaw/session/collaboration_service.py`：DAG、Worker/Reviewer 权限、Join 和 lineage。
 - `src/auraclaw/action/model_skill_compiler.py`：Model Skill 确定性预览编译。
-- `docs/architecture/system/24 Model Skill 转换服务.md`：确定性计算 Tool 和 DSL 的目标设计。
 - `docs/development/stage-gates.md`：M9、M10 和 M11 的实际完成状态。

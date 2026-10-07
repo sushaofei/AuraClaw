@@ -17,13 +17,13 @@
 
 | 你要做的事 | 正确做法 | 不要做 |
 |---|---|---|
-| 给 Agent 增加 AuraClaw **自己拥有** 的能力（如价格洞察） | 在 Hands 里注册 `ToolCapability` + `HandsExecutor` | 改内部 Hands HTTP 路由或 Runtime Client |
-| 给 Agent 增加 **扩展能力**（不属于内核，也不属于 chaintower 业务） | 在 AuraMCP 写 Extension；AuraClaw 只登记 `auramcp` MCP Server | Runtime / AuraX 直连 AuraMCP；把扩展写进 Hands 内核 |
+| 给 Agent 增加 AuraClaw **自己拥有** 的通用能力 | 在 Hands 里注册 `ToolCapability` + `HandsExecutor` | 改内部 Hands HTTP 路由或 Runtime Client |
+| 给 Agent 增加 **扩展能力**（不属于内核，也不属于 upstream 业务） | 在 AuraMCP 写 Extension；AuraClaw 只登记 `auramcp` MCP Server | Runtime / AuraX 直连 AuraMCP；把扩展写进 Hands 内核 |
 | 把 **已有 Java 服务** 交给 Agent 调用 | Java 暴露 MCP **或** 登记受管 Java API operation；AuraClaw 只登记 Connector | 在 `runtime/` 里直连 Java URL |
-| 本周必须打通 1～2 个内网接口，Java 还不能改 | 过渡：Credential Proxy adapter 出站，或 Java 旁挂独立 MCP Adapter | 按价格洞察模式把业务 HTTP Client 堆进 Hands |
+| 本周必须打通 1～2 个内网接口，Java 还不能改 | 过渡：Credential Proxy adapter 出站，或 Java 旁挂独立 MCP Adapter | 把业务 HTTP Client 堆进 Hands |
 
 判断标准：**业务契约属于谁，谁就拥有 Tool 定义。**  
-价格洞察的数据和计算在 AuraClaw，所以 Tool 写在 Python。订单/库存的数据和权限在 Java，所以 Tool 写在 Java MCP，AuraClaw 只做登记、策略、凭证和对账。
+平台通用能力可以写在 Python；业务数据和权限所属系统应通过 MCP 暴露 Tool，AuraClaw 只做登记、策略、凭证和对账。
 
 ```text
 Agent Runtime  ──Hands HTTP/JSON──►  Action Hands Gateway /internal/v1/hands/*
@@ -48,7 +48,7 @@ Runtime **只连** `AURACLAW_HANDS_URL`（默认 `http://127.0.0.1:8006`）。�
 3. `src/auraclaw/action/hands.py` / `action/hands_http.py` — Hands Gateway 与内部 HTTP
 4. `src/auraclaw/action/tool_gateway.py` — 校验、策略、审批、幂等
 5. `src/auraclaw/action/capability_catalog.py` 中的 `RoutedHandsExecutor` — 按名字找执行器
-6. 本地范例：`src/auraclaw/action/price_insight.py`
+6. 装配：`src/auraclaw/composition/services.py` 里的 Hands Registry 与 Router
 7. 装配：`src/auraclaw/composition/services.py` 里 Hands 的 Registry / Router
 
 ### 1.2 维护 Java 服务
@@ -58,7 +58,7 @@ Runtime **只连** `AURACLAW_HANDS_URL`（默认 `http://127.0.0.1:8006`）。�
 1. 把业务意图映射成 MCP Tool（不要一对一映射 Controller）
 2. 在 Java 进程或独立 Adapter 暴露 `POST /mcp`
 3. 实现 `server/discover`、`tools/list`、`tools/call`
-4. 准备 HTTPS、受管认证（chaintower：workload + trusted context；第三方：可选 OAuth）和稳定的工具名
+4. 准备 HTTPS、受管认证（upstream：workload + trusted context；第三方：可选 OAuth）和稳定的工具名
 5. 交给 AuraClaw 运维通过 `POST /v1/admin/mcp-servers` 热配置登记 + Vault `credential_ref`
 6. 用对账结果确认 Catalog / Registry 里出现了你的 Tool
 
@@ -88,7 +88,7 @@ MCP 规范只有三类 Server 原语。AuraClaw 的 Skill 不是第四类原语�
 | 数据 | Resource / Resource Template | Application / Runtime | `order://orders/123` |
 | 工具 | Tool | Model 选择，平台治理 | `order.order.cancel` |
 | 提示模板 | Prompt | 用户或产品显式选用 | `order.review` |
-| 技能 | Resource + Skill Manifest | Runtime Skill Runner | 价格洞察 SKILL.md |
+| 技能 | Resource + Skill Manifest | Runtime Skill Runner | 库存分析 SKILL.md |
 | 远端长调用句柄 | MCP Tasks（当前禁用） | — | 不是 AuraClaw Task/Session |
 
 映射规则：
@@ -212,76 +212,6 @@ Tool 名字
 | 平台 / 本地业务 Tool | `composition/services.py` 启动时写死 |
 | Java / 远端 MCP Tool | `CapabilityCatalogReconciler` 对账成功后动态 `replace_owner` |
 
-### 4.1 用例 A：本地 Tool `procurement.price.metric.evidence.list`
-
-这是「能力属于 AuraClaw」的范例。Agent 维护者加同类 Tool 就抄这条路径。
-
-**① 定义说明书**
-
-```python
-# src/auraclaw/action/price_insight.py
-PRICE_METRIC_EVIDENCE_LIST_TOOL = "procurement.price.metric.evidence.list"
-
-ToolCapability(
-    name=PRICE_METRIC_EVIDENCE_LIST_TOOL,
-    version="1.0.0",
-    description="List bounded evidence for one governed procurement-price metric; ...",
-    input_schema={...},
-    output_schema={...},
-    permission=ToolPermission.READ_ONLY,
-    risk_level=RiskLevel.LOW,
-    owner="business-skill:price-insight",
-)
-```
-
-**② 定义执行器**（多个价格 Tool 共用一个对象，内部再按名字分方法）
-
-```python
-class PriceInsightToolExecutor:
-    async def execute(self, invocation, capability):
-        filters = PriceInsightFilter.model_validate(invocation.arguments["filter"])
-        if capability.name == PRICE_METRIC_EVIDENCE_LIST_TOOL:
-            return await self.service.evidence(...)
-        ...
-```
-
-执行器签名必须符合 `HandsExecutor`：
-
-```python
-async def execute(self, invocation: ToolInvocation, capability: ToolCapability) -> Any
-```
-
-**③ 启动时同时写入两张表**
-
-```python
-# src/auraclaw/composition/services.py
-price_tools = price_insight_tools()
-registry = ToolRegistry((capability_search_tool(), ..., *price_tools))
-
-price_executor = PriceInsightToolExecutor(PriceInsightService(source))
-routed_hands = RoutedHandsExecutor(
-    LocalHandsService(...),
-    {
-        "auraclaw.capabilities.search": CapabilitySearchExecutor(...),
-        **{tool.name: price_executor for tool in price_tools},
-        # 展开后：
-        # "procurement.price.metric.evidence.list": price_executor
-    },
-)
-```
-
-`price_insight_source`（fixture JSON 或受管 PostgreSQL 读模型）在 new executor 时就已经注入。调用时不会再按名字去「发现服务」。
-
-**④ 发现**
-
-- MCP `tools/list` 遍历 `registry.discover()`，模型看到这串名字。
-- 价格洞察 Skill 文档也会写死该名字，Runtime 按 Skill 指导调用。
-
-**⑤ 调用时三次查找**
-
-1. `ToolRegistry.get(name, version)` → schema  
-2. `routes[name]` → 同一个 `PriceInsightToolExecutor`  
-3. executor 内 `if name == evidence.list` → `service.evidence()`
 
 ### 4.2 平台自带的三个 Tool
 
@@ -454,10 +384,10 @@ MCP 边界做名称转换；若远端 schema 要求单一 `input` 参数，也�
   "auth_strategy": "workload_trusted_context",
   "metadata": {
     "tool_name_aliases": {
-      "price_insight.dataset.profile": "procurement.price.dataset.profile",
-      "price_insight.metric.comparability": "procurement.price.metric.comparability"
+      "stock_profile": "inventory.stock.profile",
+      "stock_alerts": "inventory.stock.alerts.list"
     },
-    "search_tags": ["价格洞察", "采购价格", "price_insight"]
+    "search_tags": ["inventory", "stock", "warehouse"]
   }
 }
 ```
@@ -513,7 +443,7 @@ RoutedHandsExecutor._routes
   "order.order.cancel" → 同一个 RemoteMcpToolExecutor(order-mcp)
 ```
 
-这与价格洞察的 `{tool.name: price_executor for tool in price_tools}` 是同一模式，差别是：
+这与本地 Tool 的 `{tool.name: executor for tool in tools}` 是同一模式，差别是：
 
 - 名字来自 Java，不是 Python 常量
 - Executor 不跑业务，只是把 `tools/call` 转给这台 Server
@@ -647,14 +577,12 @@ AuraClaw 从不把 `order.order.get` 解析成 REST 路径。换一台 Java 服�
 | 下游 Java API Connector | `src/auraclaw/infrastructure/connectors/http` |
 | 目录对账 | `src/auraclaw/action/catalog_reconciler.py` |
 | OAuth / DNS pinning Egress | `src/auraclaw/infrastructure/credentials/mcp_egress.py` |
-| 本地业务范例 | `src/auraclaw/action/price_insight.py` |
 | 生产装配 | `src/auraclaw/composition/services.py` |
 | 配置 | `src/auraclaw/config.py`（`hands_url`、`java_api_servers_json`） |
 | Hands 契约单测 | `tests/unit/test_hands_contract.py` |
 | Java API Connector 单测 | `tests/unit/test_java_api_connector.py` |
 | Egress 单测 | `tests/unit/test_m9_mcp_egress.py` |
 | 对账单测 | `tests/unit/test_m9_catalog_reconciliation.py` |
-| 价格洞察单测 | `tests/unit/test_m12_price_insight_skill.py` |
 
 ---
 

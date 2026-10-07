@@ -854,30 +854,6 @@ AuraClaw 的架构完成标准不是“正常路径跑通”，而是关键组�
 
 ### 13.3 增量建设中的能力
 
-M10 Model Skill 转换已经完成：
-
-- 从 tenant-scoped PostgreSQL 读模型读取；
-- 编译签名 Skill Package；
-- 通过 `skill://` MCP Resource 暴露；
-- Runtime Client 加载；
-- 单进程周期全量对账和幂等发布。
-
-后续仍需完成：
-
-- 权威 Source Snapshot Schema；
-- 持久 Publication/Sync State；
-- 多副本租约和 Quarantine；
-- 确定性公式执行 Tool；
-- 受控 writeback；
-- 完整生产恢复与安全门禁。
-
-### 对进度的表达建议
-
-分享时避免笼统说“所有能力已经生产完成”。更准确的表述是：
-
-> 主体 Managed Agent 与生产服务边界已经形成；MCP 和 Capability Loop 已完成实现并在审阅收口；Model Skill 已跑通预览闭环，生产级持久化和确定性执行仍在建设。
-
----
 
 ## 14. Demo 脚本
 

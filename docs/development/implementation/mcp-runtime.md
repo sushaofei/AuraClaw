@@ -51,16 +51,16 @@ Canonical Session Event；目录、缓存、通知和步骤进度都可丢弃并
 ```
 
 OAuth `client_credentials` 是**可选 Connector 策略**，不是 AuraClaw 用户身份系统。
-第三方 MCP 可继续使用 OAuth；chaintower MCP 应使用 `auth_strategy: "workload_trusted_context"`，
+第三方 MCP 可继续使用 OAuth；upstream MCP 应使用 `auth_strategy: "workload_trusted_context"`，
 由 Hands 从 `HandsTrustedContext` 构造受控 Header/`_meta`，MCP Server 做最终业务鉴权。
 见 [ADR-003](../../architecture/decisions/ADR-003-trusted-identity-context.md)。
 
 ```json
 {
-  "server_id": "chaintower-mcp",
-  "title": "chaintower MCP",
-  "endpoint": "https://mcp.chaintower.example/mcp",
-  "credential_ref": "vault/chaintower-mcp#workload",
+  "server_id": "upstream-mcp",
+  "title": "upstream MCP",
+  "endpoint": "https://mcp.upstream.example/mcp",
+  "credential_ref": "vault/upstream-mcp#workload",
   "auth_strategy": "workload_trusted_context"
 }
 ```
@@ -175,7 +175,7 @@ uv run lint-imports
 
 ## 管理授权边界（2026-09-04）
 
-MCP 配置功能的管理授权由 AuraAPI / ChainTower 等上游执行，AuraClaw 不维护管理员角色，
+MCP 配置功能的管理授权由 AuraAPI / upstream service 等上游执行，AuraClaw 不维护管理员角色，
 也不再要求共享 MCP 的调用者使用字面量 `platform` 租户。已经通过入口身份验证的管理请求
 可以创建、修改 `tenant_id=null` 的共享 Server；审计和命令幂等仍绑定真实调用者租户/用户。
 外层必须在转发管理请求前完成授权，生产入口不能将管理接口无授权暴露给终端用户。

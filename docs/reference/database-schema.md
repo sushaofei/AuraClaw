@@ -79,6 +79,7 @@ uv run auraclaw migrate up
 | `0058` | 移除 MCP Tool 前缀派生列；历史 revision 保留，回滚恢复旧数组或停用不可恢复条目 |
 | `0056` | 移除 Skill Source、同步/租约/来源选择表及各生命周期表的 `source_id` |
 | `0055` | Purged Skill 同版本重发、历史 Package tombstone 与可延迟 Publication FK |
+| `0066` | Child 终态先于 Root 等待登记时的持久化一次性唤醒锁存 |
 
 PostgreSQL / Kingbase 序列保留 `0017` 版本号空位，后续迁移继续按既有编号递增。
 不要为了填补编号而重命名已经发布的迁移。

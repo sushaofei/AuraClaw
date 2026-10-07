@@ -31,7 +31,9 @@ class ObservabilityStore(Protocol):
 
     async def session_records(self, tenant_id: str, session_id: str) -> dict[str, list[Any]]: ...
 
-    async def metric_snapshot(self) -> list[MetricPoint]: ...
+    async def metric_snapshot(
+        self, tenant_id: str | None = None, *, limit: int = 2000
+    ) -> list[MetricPoint]: ...
 
     async def metric_summary(self, tenant_id: str, *, window_hours: int) -> list[MetricSummary]: ...
 
@@ -244,8 +246,8 @@ class ObservabilityService:
             "entries": [self._json_safe(item) for item in entries],
         }
 
-    async def metrics(self) -> list[MetricPoint]:
-        return await self._store.metric_snapshot()
+    async def metrics(self, tenant_id: str | None = None) -> list[MetricPoint]:
+        return await self._store.metric_snapshot(tenant_id)
 
     async def metric_summary(self, tenant_id: str, *, window_hours: int) -> list[MetricSummary]:
         if window_hours < 1 or window_hours > 720:

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -42,7 +44,8 @@ from auraclaw.contracts.errors import (
 )
 from auraclaw.contracts.events import NewEvent
 from auraclaw.contracts.hands import HandsToolResult
-from auraclaw.contracts.skills import SkillBinding, SkillManifest
+from auraclaw.contracts.routing import RouteKind, RouteOutcome, RouterMode
+from auraclaw.contracts.skills import ResolvedSkillTool, SkillBinding, SkillManifest
 from auraclaw.contracts.tools import (
     ArtifactRef,
     RiskLevel,
@@ -61,9 +64,12 @@ from auraclaw.infrastructure.artifacts.store import (
 )
 from auraclaw.internal.hands import InProcessHandsClient
 from auraclaw.runtime.capability_controller import (
+    SKILL_REFERENCE_READ,
+    SKILL_RESOLVE_AND_ACTIVATE,
     CapabilityAdmissionError,
     RuntimeCapabilityController,
 )
+from auraclaw.runtime.execution_engine import RuntimeExecutionEngine
 from auraclaw.runtime.hands_adapter import HandsRuntimeAdapter
 from auraclaw.runtime.harness import AgentHarness, InjectionPoint
 from auraclaw.runtime.ports import (
@@ -71,6 +77,11 @@ from auraclaw.runtime.ports import (
     ModelResponse,
     SkillResolutionOutcome,
     ToolCall,
+)
+from auraclaw.runtime.task_router import RuntimeTaskRouter
+
+_ROUTER_GOLDEN = (
+    Path(__file__).resolve().parents[1] / "fixtures/task_router_deterministic_golden_v1.json"
 )
 
 
@@ -209,14 +220,22 @@ class _Capabilities:
         del assignment
         self.calls.append(call.name)
         if call.name == "auraclaw.capabilities.search":
+            requested_name = str(call.arguments.get("canonical_name") or "")
+            canonical_name = (
+                requested_name
+                if requested_name in {"github.issue.get", "system.time.now"}
+                else "github.issue.get"
+            )
             return {
                 "capabilities": [
                     {
-                        "capability_id": "cap-one",
+                        "capability_id": (
+                            "cap-time" if canonical_name == "system.time.now" else "cap-one"
+                        ),
                         "server_id": "github",
                         "kind": self.kind,
                         "canonical_name": (
-                            "github.issue.get" if self.kind == "tool" else "release.prepare"
+                            canonical_name if self.kind == "tool" else "release.prepare"
                         ),
                         "version": "1.0.0",
                         "description": "test capability",
@@ -225,23 +244,32 @@ class _Capabilities:
             }
         if call.name == "auraclaw.capabilities.load":
             if self.kind == "tool":
+                capability_id = str(call.arguments["capability_ids"][0])
+                canonical_name = (
+                    "system.time.now" if capability_id == "cap-time" else "github.issue.get"
+                )
                 return {
                     "capabilities": [
                         {
-                            "capability_id": "cap-one",
+                            "capability_id": capability_id,
                             "server_id": "github",
                             "kind": "tool",
-                            "canonical_name": "github.issue.get",
+                            "canonical_name": canonical_name,
                             "version": "1.0.0",
+                            "content_digest": f"sha256:{'c' * 64}",
                             "permission": "read-only",
                             "model_tool": {
                                 "type": "function",
                                 "function": {
-                                    "name": "github.issue.get",
-                                    "description": "Get issue",
+                                    "name": canonical_name,
+                                    "description": "Read governed data",
                                     "parameters": {
                                         "type": "object",
-                                        "properties": {"number": {"type": "integer"}},
+                                        "properties": (
+                                            {"timezone": {"type": "string"}}
+                                            if canonical_name == "system.time.now"
+                                            else {"number": {"type": "integer"}}
+                                        ),
                                     },
                                 },
                             },
@@ -266,6 +294,8 @@ class _Capabilities:
             }
         if call.name == "github.issue.get":
             return {"status": "success", "number": call.arguments["number"]}
+        if call.name == "system.time.now":
+            return {"status": "success", "timezone": call.arguments["timezone"]}
         if call.name == "auraclaw.skills.binding-status":
             return {
                 "publication_status": (
@@ -581,6 +611,630 @@ def test_capability_controller_returns_resolver_denial_as_structured_result() ->
     asyncio.run(scenario())
 
 
+def test_resolve_and_activate_collapses_unique_skill_lifecycle() -> None:
+    async def scenario() -> None:
+        capabilities = _Capabilities(kind="skill")
+        controller = RuntimeCapabilityController(capabilities)
+
+        resolved = await controller.execute(
+            _assignment(role="root"),
+            ToolCall(
+                tool_invocation_id="resolve-activate-release",
+                name=SKILL_RESOLVE_AND_ACTIVATE,
+                arguments={"query": "prepare release", "inputs": {}},
+            ),
+            controller.empty_state(),
+        )
+
+        assert capabilities.calls == [
+            "auraclaw.capabilities.search",
+            "auraclaw.capabilities.load",
+        ]
+        assert resolved.result == {
+            "status": "activated",
+            "skill_activation_id": resolved.result["skill_activation_id"],
+            "skill_name": "release.prepare",
+            "skill_version": "1.4.0",
+            "loaded_dependency_ids": [],
+            "resolved_capability_id": "cap-one",
+            "lifecycle_mode": "resolve_and_activate",
+        }
+        assert len(resolved.state["active_skills"]) == 1
+        assert [event.type for event in resolved.events] == ["skill.activated"]
+        metrics = controller.trusted_message_metrics(_assignment(role="root"))
+        assert metrics["skill.resolve_and_activate.count"] == 1.0
+        assert metrics["skill.resolve_and_activate.result.activated.count"] == 1.0
+
+    asyncio.run(scenario())
+
+
+def test_resolve_and_activate_refuses_ambiguous_skill_candidates() -> None:
+    class AmbiguousCapabilities(_Capabilities):
+        async def execute(
+            self, assignment: RuntimeAssignment, call: ToolCall
+        ) -> dict[str, Any]:
+            if call.name != "auraclaw.capabilities.search":
+                return await super().execute(assignment, call)
+            self.calls.append(call.name)
+            return {
+                "capabilities": [
+                    {
+                        "capability_id": "cap-one",
+                        "kind": "skill",
+                        "canonical_name": "release.prepare",
+                        "version": "1.4.0",
+                        "description": "Prepare a release",
+                    },
+                    {
+                        "capability_id": "cap-two",
+                        "kind": "skill",
+                        "canonical_name": "release.verify",
+                        "version": "1.1.0",
+                        "description": "Verify a release",
+                    },
+                ]
+            }
+
+    async def scenario() -> None:
+        capabilities = AmbiguousCapabilities(kind="skill")
+        controller = RuntimeCapabilityController(capabilities)
+        resolved = await controller.execute(
+            _assignment(),
+            ToolCall(
+                tool_invocation_id="resolve-ambiguous-release",
+                name=SKILL_RESOLVE_AND_ACTIVATE,
+                arguments={"query": "release", "inputs": {}},
+            ),
+            controller.empty_state(),
+        )
+
+        assert resolved.result["status"] == "ambiguous"
+        assert resolved.result["error_code"] == "skill_resolution_ambiguous"
+        assert [item["capability_id"] for item in resolved.result["candidates"]] == [
+            "cap-one",
+            "cap-two",
+        ]
+        assert capabilities.calls == ["auraclaw.capabilities.search"]
+        assert resolved.state["active_skills"] == []
+        assert resolved.events == ()
+
+    asyncio.run(scenario())
+
+
+def test_task_router_adopts_one_trusted_skill_without_model_discovery() -> None:
+    async def scenario() -> None:
+        capabilities = _Capabilities(kind="skill")
+        controller = RuntimeCapabilityController(capabilities)
+        session = _Session("Use release.prepare to prepare a release")
+        session.events[0].payload["skill_names"] = ["release.prepare"]
+
+        routed = await RuntimeTaskRouter(controller).route(
+            _assignment(role="root"),
+            session.events,
+            controller.empty_state(),
+        )
+
+        assert routed.decision.route_kind is RouteKind.SINGLE_CAPABILITY
+        assert routed.decision.outcome is RouteOutcome.ADOPTED
+        assert routed.decision.confidence == 1.0
+        assert routed.decision.target is not None
+        assert routed.decision.target.name == "release.prepare"
+        assert len(routed.capability_state["active_skills"]) == 1
+        assert [event.type for event in routed.events] == ["skill.activated"]
+        assert routed.events[0].payload["activation_source"] == "agent_router"
+        assert routed.metrics is not None
+        assert routed.metrics["router.fast_path.count"] == 1.0
+        assert capabilities.calls == []
+
+    asyncio.run(scenario())
+
+
+def test_task_router_enforces_required_skill_version_and_digest() -> None:
+    async def scenario() -> None:
+        capabilities = _Capabilities(kind="skill")
+        controller = RuntimeCapabilityController(capabilities)
+        session = _Session("Use platform/release.prepare to prepare a release")
+        session.events[0].payload["skill_names"] = ["platform/release.prepare"]
+        assignment = _assignment(role="worker")
+        assignment.resource_profile = {
+            "tool_permissions": ["release.prepare"],
+            "required_skills": [
+                {
+                    "publisher": "platform",
+                    "name": "release.prepare",
+                    "version": "1.4.0",
+                    "package_digest": "sha256:" + "a" * 64,
+                    "binding_id": "skb-release",
+                }
+            ],
+        }
+
+        routed = await RuntimeTaskRouter(controller).route(
+            assignment,
+            session.events,
+            controller.empty_state(),
+        )
+
+        assert routed.decision.outcome is RouteOutcome.ADOPTED
+        assert routed.decision.target is not None
+        assert routed.decision.target.version == "1.4.0"
+        assert routed.decision.target.binding_id == "skb-release"
+        binding = routed.capability_state["active_skills"][0]["binding"]
+        assert binding["skill_version"] == "1.4.0"
+        assert binding["package_digest"] == "sha256:" + "a" * 64
+
+        assignment.resource_profile["required_skills"][0]["package_digest"] = (
+            "sha256:" + "f" * 64
+        )
+        rejected = await RuntimeTaskRouter(controller).route(
+            assignment,
+            session.events,
+            controller.empty_state(),
+        )
+        assert rejected.decision.outcome is RouteOutcome.FALLBACK
+        assert rejected.decision.reason_code == "required_skill_binding_mismatch"
+
+    asyncio.run(scenario())
+
+
+def test_task_router_shadows_or_falls_back_without_activation() -> None:
+    async def scenario() -> None:
+        capabilities = _Capabilities(kind="skill")
+        controller = RuntimeCapabilityController(capabilities)
+        assignment = _assignment(role="root")
+        session = _Session("Use release.prepare to prepare a release")
+        session.events[0].payload["skill_names"] = ["release.prepare"]
+        shadowed = await RuntimeTaskRouter(controller, mode=RouterMode.SHADOW).route(
+            assignment,
+            session.events,
+            controller.empty_state(),
+        )
+        assert shadowed.decision.outcome is RouteOutcome.SHADOWED
+        assert shadowed.capability_state["active_skills"] == []
+        assert shadowed.events == ()
+
+        session.events[0].payload["goal"] = "Prepare a release"
+        unselected = await RuntimeTaskRouter(controller).route(
+            assignment,
+            session.events,
+            controller.empty_state(),
+        )
+        assert unselected.decision.reason_code == "trusted_skill_not_selected_by_intent"
+        assert unselected.events == ()
+
+        session.events[0].payload["goal"] = "Use release skills to prepare a release"
+        session.events[0].payload["skill_names"] = ["release.prepare", "release.verify"]
+        ambiguous = await RuntimeTaskRouter(controller).route(
+            assignment,
+            session.events,
+            controller.empty_state(),
+        )
+        assert ambiguous.decision.route_kind is RouteKind.FALLBACK
+        assert ambiguous.decision.reason_code == "ambiguous_trusted_skill_hints"
+        assert ambiguous.events == ()
+        assert capabilities.calls == []
+
+    asyncio.run(scenario())
+
+
+def test_task_router_selects_only_the_explicit_skill_from_trusted_allowlist() -> None:
+    async def scenario() -> None:
+        capabilities = _Capabilities(kind="skill")
+        controller = RuntimeCapabilityController(capabilities)
+        session = _Session("Use release.verify to verify the release")
+        session.events[0].payload["skill_names"] = ["release.prepare", "release.verify"]
+
+        routed = await RuntimeTaskRouter(controller).route(
+            _assignment(role="root"),
+            session.events,
+            controller.empty_state(),
+        )
+
+        assert routed.decision.outcome is RouteOutcome.ADOPTED
+        assert routed.decision.target is not None
+        assert routed.decision.target.name == "release.verify"
+        assert routed.metrics is not None
+        assert routed.metrics["router.candidate.count"] == 1
+        assert routed.metrics["router.confidence"] == 1
+        assert len(routed.capability_state["active_skills"]) == 1
+
+    asyncio.run(scenario())
+
+
+def test_task_router_prepares_one_exact_policy_visible_tool() -> None:
+    async def scenario() -> None:
+        capabilities = _Capabilities(kind="tool")
+        controller = RuntimeCapabilityController(capabilities)
+        session = _Session("Call github.issue.get for issue 18")
+
+        routed = await RuntimeTaskRouter(controller).route(
+            _assignment(role="root"),
+            session.events,
+            controller.empty_state(),
+        )
+
+        assert routed.decision.route_kind is RouteKind.SINGLE_CAPABILITY
+        assert routed.decision.outcome is RouteOutcome.ADOPTED
+        assert routed.decision.reason_code == "unique_exact_capability_reference"
+        assert routed.decision.target is not None
+        assert routed.decision.target.kind == "tool"
+        assert routed.decision.target.name == "github.issue.get"
+        assert routed.decision.target.capability_id == "cap-one"
+        assert set(routed.capability_state["loaded"]) == {"cap-one"}
+        assert capabilities.calls == [
+            "auraclaw.capabilities.search",
+            "auraclaw.capabilities.load",
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_task_router_builds_bounded_plan_for_exact_read_only_tools() -> None:
+    async def scenario() -> None:
+        capabilities = _Capabilities(kind="tool")
+        controller = RuntimeCapabilityController(capabilities)
+        session = _Session("Call github.issue.get and then system.time.now")
+
+        routed = await RuntimeTaskRouter(controller).route(
+            _assignment(role="root"),
+            session.events,
+            controller.empty_state(),
+        )
+
+        assert routed.decision.route_kind is RouteKind.SEQUENTIAL_PLAN
+        assert routed.decision.outcome is RouteOutcome.ADOPTED
+        assert routed.decision.reason_code == "validated_exact_read_only_plan"
+        assert routed.decision.plan is not None
+        assert [step.capability.name for step in routed.decision.plan.steps if step.capability] == [
+            "github.issue.get",
+            "system.time.now",
+        ]
+        assert routed.decision.plan.steps[1].dependencies == (
+            routed.decision.plan.steps[0].task_key,
+        )
+        assert routed.metrics is not None
+        assert routed.metrics["router.candidate.count"] == 2
+        assert routed.metrics["router.plan.steps"] == 2
+        assert capabilities.calls == [
+            "auraclaw.capabilities.search",
+            "auraclaw.capabilities.load",
+            "auraclaw.capabilities.search",
+            "auraclaw.capabilities.load",
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_task_router_rejects_write_capability_from_deterministic_plan() -> None:
+    class WriteCapabilities(_Capabilities):
+        async def execute(
+            self, assignment: RuntimeAssignment, call: ToolCall
+        ) -> dict[str, Any]:
+            result = await super().execute(assignment, call)
+            if call.name == "auraclaw.capabilities.load":
+                result["capabilities"][0]["permission"] = "write-with-approval"
+            return result
+
+    async def scenario() -> None:
+        capabilities = WriteCapabilities(kind="tool")
+        controller = RuntimeCapabilityController(capabilities)
+        session = _Session("Call github.issue.get and then system.time.now")
+
+        routed = await RuntimeTaskRouter(controller).route(
+            _assignment(role="root"),
+            session.events,
+            controller.empty_state(),
+        )
+
+        assert routed.decision.route_kind is RouteKind.SEQUENTIAL_PLAN
+        assert routed.decision.outcome is RouteOutcome.FALLBACK
+        assert routed.decision.reason_code == "structured_plan_requires_read_only_tools"
+        assert routed.decision.plan is None
+        assert routed.capability_state["loaded"] == {}
+
+    asyncio.run(scenario())
+
+
+def test_task_router_fails_closed_when_exact_candidate_search_is_denied() -> None:
+    class DeniedCapabilities(_Capabilities):
+        async def execute(
+            self, assignment: RuntimeAssignment, call: ToolCall
+        ) -> dict[str, Any]:
+            if call.name == "auraclaw.capabilities.search":
+                self.calls.append(call.name)
+                return {
+                    "status": "denied",
+                    "error_code": "policy_denied",
+                    "side_effect_status": "not_started",
+                }
+            return await super().execute(assignment, call)
+
+    async def scenario() -> None:
+        capabilities = DeniedCapabilities(kind="tool")
+        controller = RuntimeCapabilityController(capabilities)
+        session = _Session("Call github.issue.get for issue 18")
+
+        routed = await RuntimeTaskRouter(controller).route(
+            _assignment(role="root"),
+            session.events,
+            controller.empty_state(),
+        )
+
+        assert routed.decision.route_kind is RouteKind.FALLBACK
+        assert routed.decision.outcome is RouteOutcome.FALLBACK
+        assert routed.decision.reason_code == "policy_denied"
+        assert routed.capability_state["loaded"] == {}
+        assert capabilities.calls == ["auraclaw.capabilities.search"]
+
+    asyncio.run(scenario())
+
+
+def test_task_router_deterministic_golden_set() -> None:
+    cases = json.loads(_ROUTER_GOLDEN.read_text())
+
+    async def scenario() -> None:
+        for case in cases:
+            capabilities = _Capabilities(kind=case["kind"])
+            controller = RuntimeCapabilityController(capabilities)
+            session = _Session(case["goal"])
+            if case.get("skill_names"):
+                session.events[0].payload["skill_names"] = case["skill_names"]
+
+            routed = await RuntimeTaskRouter(controller).route(
+                _assignment(role="root"),
+                session.events,
+                controller.empty_state(),
+            )
+
+            assert routed.decision.route_kind.value == case["route_kind"], case["case_id"]
+            assert routed.decision.outcome.value == case["outcome"], case["case_id"]
+            assert routed.decision.reason_code == case["reason_code"], case["case_id"]
+
+    asyncio.run(scenario())
+
+
+def test_agent_loop_router_preloads_explicit_tool_without_lifecycle_calls() -> None:
+    async def scenario() -> None:
+        capabilities = _Capabilities(kind="tool")
+        controller = RuntimeCapabilityController(capabilities)
+        model = _ScriptedModel(
+            [
+                _response(
+                    "",
+                    ToolCall(
+                        tool_invocation_id="issue-get",
+                        name="github.issue.get",
+                        arguments={"number": 18},
+                    ),
+                ),
+                _response("Issue 18 loaded."),
+            ]
+        )
+        session = _Session("Call github.issue.get for issue 18")
+        control = _Control()
+        harness = AgentHarness(
+            control_store=control,
+            session=session,
+            model=model,
+            tools=capabilities,
+            runtime_events=_RuntimeEvents(),
+            capability_controller=controller,
+            task_router=RuntimeTaskRouter(controller),
+        )
+
+        await harness.execute(_assignment(role="root"))
+
+        assert control.outcome == "completed"
+        assert len(model.requests) == 2
+        first_names = {tool["function"]["name"] for tool in model.requests[0].tools}
+        assert "github.issue.get" in first_names
+        assert not first_names.intersection(
+            {
+                "auraclaw.capabilities.search",
+                "auraclaw.capabilities.load",
+                "auraclaw.skills.activate",
+                SKILL_RESOLVE_AND_ACTIVATE,
+            }
+        )
+        requested = [event for event in session.events if event.type == "tool.call.requested"]
+        assert [event.payload["name"] for event in requested] == ["github.issue.get"]
+        assert capabilities.calls == [
+            "auraclaw.capabilities.search",
+            "auraclaw.capabilities.load",
+            "github.issue.get",
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_agent_loop_router_preloads_validated_read_only_plan() -> None:
+    async def scenario() -> None:
+        capabilities = _Capabilities(kind="tool")
+        controller = RuntimeCapabilityController(capabilities)
+        model = _ScriptedModel(
+            [
+                _response(
+                    "",
+                    ToolCall(
+                        tool_invocation_id="issue-get",
+                        name="github.issue.get",
+                        arguments={"number": 18},
+                    ),
+                    ToolCall(
+                        tool_invocation_id="time-now",
+                        name="system.time.now",
+                        arguments={"timezone": "Asia/Shanghai"},
+                    ),
+                ),
+                _response("Issue and time loaded."),
+            ]
+        )
+        session = _Session("Call github.issue.get and then system.time.now")
+        control = _Control()
+        harness = AgentHarness(
+            control_store=control,
+            session=session,
+            model=model,
+            tools=capabilities,
+            runtime_events=_RuntimeEvents(),
+            capability_controller=controller,
+            task_router=RuntimeTaskRouter(controller),
+        )
+
+        await harness.execute(_assignment(role="root"))
+
+        assert control.outcome == "completed"
+        first_names = {tool["function"]["name"] for tool in model.requests[0].tools}
+        assert {"github.issue.get", "system.time.now"}.issubset(first_names)
+        assert not first_names.intersection(
+            {
+                "auraclaw.capabilities.search",
+                "auraclaw.capabilities.load",
+                "auraclaw.skills.activate",
+                SKILL_RESOLVE_AND_ACTIVATE,
+            }
+        )
+        assert any(
+            message["role"] == "system"
+            and "bounded current-Session plan" in message["content"]
+            and "system.time.now" in message["content"]
+            for message in model.requests[0].messages
+        )
+        assert model.requests[0].runtime_metrics["router.plan.steps"] == 2.0
+        requested = [event for event in session.events if event.type == "tool.call.requested"]
+        assert [event.payload["name"] for event in requested] == [
+            "github.issue.get",
+            "system.time.now",
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_agent_loop_router_preactivates_trusted_skill_before_first_model_turn() -> None:
+    async def scenario() -> None:
+        capabilities = _Capabilities(kind="skill")
+        controller = RuntimeCapabilityController(capabilities)
+        model = _ScriptedModel([_response("Release checklist completed.")])
+        session = _Session("Use release.prepare to prepare a release")
+        session.events[0].payload["skill_names"] = ["release.prepare"]
+        control = _Control()
+        harness = AgentHarness(
+            control_store=control,
+            session=session,
+            model=model,
+            tools=capabilities,
+            runtime_events=_RuntimeEvents(),
+            capability_controller=controller,
+            task_router=RuntimeTaskRouter(controller),
+        )
+
+        await harness.execute(_assignment(role="root"))
+
+        assert control.outcome == "completed"
+        assert len(model.requests) == 1
+        assert all(
+            tool["function"]["name"]
+            not in {
+                "auraclaw.capabilities.search",
+                "auraclaw.capabilities.load",
+                "auraclaw.skills.activate",
+                SKILL_RESOLVE_AND_ACTIVATE,
+            }
+            for tool in model.requests[0].tools
+        )
+        assert any(
+            message["role"] == "system"
+            and "Follow the governed release checklist." in message["content"]
+            for message in model.requests[0].messages
+        )
+        assert model.requests[0].runtime_metrics["router.fast_path.count"] == 1.0
+        assert [event.type for event in session.events].count("skill.activated") == 1
+        assert [event.type for event in session.events].count("model.turn.completed") == 1
+        assert capabilities.calls == ["auraclaw.skills.binding-status"]
+
+    asyncio.run(scenario())
+
+
+def test_task_router_recovers_activation_from_canonical_event_without_duplicate() -> None:
+    async def scenario() -> None:
+        capabilities = _Capabilities(kind="skill")
+        controller = RuntimeCapabilityController(capabilities)
+        assignment = _assignment(role="root")
+        session = _Session("Use release.prepare to prepare a release")
+        session.events[0].payload["skill_names"] = ["release.prepare"]
+        router = RuntimeTaskRouter(controller)
+
+        first = await router.route(assignment, session.events, controller.empty_state())
+        await session.append(
+            assignment,
+            list(first.events),
+            command_id="router-activation",
+            operation="runtime.skill.activated",
+        )
+
+        recovered_state = controller.empty_state()
+        controller.restore_skill_events(recovered_state, session.events)
+        recovered = await router.route(assignment, session.events, recovered_state)
+
+        assert recovered.decision.outcome is RouteOutcome.ADOPTED
+        assert recovered.events == ()
+        assert len(recovered.capability_state["active_skills"]) == 1
+        assert [event.type for event in session.events].count("skill.activated") == 1
+
+    asyncio.run(scenario())
+
+
+def test_agent_loop_activates_skill_with_one_model_visible_lifecycle_call() -> None:
+    async def scenario() -> None:
+        capabilities = _Capabilities(kind="skill")
+        model = _ScriptedModel(
+            [
+                _response(
+                    "",
+                    ToolCall(
+                        tool_invocation_id="resolve-release-skill",
+                        name=SKILL_RESOLVE_AND_ACTIVATE,
+                        arguments={"query": "prepare release", "inputs": {}},
+                    ),
+                ),
+                _response("Release checklist is active."),
+            ]
+        )
+        session = _Session("Prepare a release")
+        control = _Control()
+        harness = AgentHarness(
+            control_store=control,
+            session=session,
+            model=model,
+            tools=capabilities,
+            runtime_events=_RuntimeEvents(),
+            capability_controller=RuntimeCapabilityController(capabilities),
+        )
+
+        await harness.execute(_assignment(role="root"))
+
+        assert control.outcome == "completed"
+        assert len(model.requests) == 2
+        assert any(
+            tool["function"]["name"] == SKILL_RESOLVE_AND_ACTIVATE
+            for tool in model.requests[0].tools
+        )
+        assert any(
+            message["role"] == "system"
+            and "Follow the governed release checklist." in message["content"]
+            for message in model.requests[1].messages
+        )
+        assert capabilities.calls == [
+            "auraclaw.capabilities.search",
+            "auraclaw.capabilities.load",
+            "auraclaw.skills.binding-status",
+        ]
+        assert [event.type for event in session.events].count("skill.activated") == 1
+        assert [event.type for event in session.events].count("model.turn.completed") == 2
+
+    asyncio.run(scenario())
+
+
 def test_required_capabilities_preload_before_model_selection() -> None:
     async def scenario() -> None:
         capabilities = _Capabilities()
@@ -606,13 +1260,13 @@ def test_required_capabilities_preload_before_model_selection() -> None:
     asyncio.run(scenario())
 
 
-def _response(output: str, call: ToolCall | None = None) -> ModelResponse:
+def _response(output: str, *calls: ToolCall) -> ModelResponse:
     return ModelResponse(
         model_call_id="replaced",
         provider="test",
         model="test",
         completed_output=output,
-        tool_calls=(call,) if call is not None else (),
+        tool_calls=calls,
         usage={"output_tokens": 1},
     )
 
@@ -696,6 +1350,50 @@ def test_capability_loop_searches_loads_calls_and_returns_final_output() -> None
         }
 
     asyncio.run(scenario())
+
+
+def test_model_call_id_is_scoped_to_runtime_fencing_epoch() -> None:
+    async def scenario() -> None:
+        model = _ScriptedModel([_response("done")])
+        control = _Control()
+        harness = AgentHarness(
+            control_store=control,
+            session=_Session("Finish after recovery"),
+            model=model,
+            tools=_Capabilities(),
+            runtime_events=_RuntimeEvents(),
+            capability_controller=RuntimeCapabilityController(_Capabilities()),
+        )
+
+        await harness.execute(replace(_assignment(), fencing_token=7))
+
+        assert model.requests[0].model_call_id.startswith(
+            "mdl_run-a_turn_1_fence_7_req_"
+        )
+        assert control.outcome == "completed"
+
+    asyncio.run(scenario())
+
+
+def test_model_call_id_changes_when_recovered_turn_request_changes() -> None:
+    base = ModelRequest(
+        model_call_id="mdl_run-a_turn_2_fence_1",
+        tenant_id="tenant-a",
+        run_id="run-a",
+        session_id="session-a",
+        messages=({"role": "user", "content": "before child"},),
+    )
+    same = RuntimeExecutionEngine._scope_model_call_id_to_request(base)
+    retry = RuntimeExecutionEngine._scope_model_call_id_to_request(base)
+    changed = RuntimeExecutionEngine._scope_model_call_id_to_request(
+        replace(
+            base,
+            messages=({"role": "user", "content": "after child"},),
+        )
+    )
+
+    assert same.model_call_id == retry.model_call_id
+    assert same.model_call_id != changed.model_call_id
 
 
 def test_capability_loop_allows_model_to_correct_invalid_tool_arguments() -> None:
@@ -946,6 +1644,95 @@ def test_capability_loop_activates_signed_skill_and_closes_lifecycle() -> None:
     asyncio.run(scenario())
 
 
+def test_skill_activation_refreshes_binding_after_catalog_generation_changes() -> None:
+    class ChangingCatalog(_Capabilities):
+        def __init__(self) -> None:
+            super().__init__(kind="skill")
+            self.resolutions = 0
+
+        async def execute(self, assignment: RuntimeAssignment, call: ToolCall) -> dict[str, Any]:
+            if call.name != "auraclaw.capabilities.load":
+                return await super().execute(assignment, call)
+            self.calls.append(call.name)
+            ids = list(call.arguments["capability_ids"])
+            if ids == ["cap-one"]:
+                return await super().execute(assignment, call)
+            if ids == ["cap-new"]:
+                return {
+                    "capabilities": [
+                        {
+                            "capability_id": "cap-new",
+                            "server_id": "mcp",
+                            "kind": "tool",
+                            "canonical_name": "price.query",
+                            "version": "1.0.0",
+                            "permission": "read-only",
+                            "model_tool": {
+                                "type": "function",
+                                "function": {
+                                    "name": "price.query",
+                                    "description": "Query price",
+                                    "parameters": {"type": "object"},
+                                },
+                            },
+                        }
+                    ]
+                }
+            return {"capabilities": []}
+
+        async def resolve_skill(self, *args: Any, **kwargs: Any) -> SkillResolutionOutcome:
+            base = await super().resolve_skill(*args, **kwargs)
+            self.resolutions += 1
+            capability_id = "cap-old" if self.resolutions == 1 else "cap-new"
+            assert base.binding is not None
+            return SkillResolutionOutcome(
+                status="success",
+                binding=base.binding.model_copy(
+                    update={
+                        "resolved_tools": (
+                            ResolvedSkillTool(
+                                capability_id=capability_id,
+                                canonical_name="price.query",
+                                version="1.0.0",
+                                schema_digest=f"sha256:{'c' * 64}",
+                                expected_side_effect="read",
+                            ),
+                        )
+                    }
+                ),
+            )
+
+    async def scenario() -> None:
+        capabilities = ChangingCatalog()
+        controller = RuntimeCapabilityController(capabilities, max_loaded=1)
+        assignment = _assignment(role="root")
+        loaded = await controller.execute(
+            assignment,
+            ToolCall(
+                tool_invocation_id="load-changing-skill",
+                name="auraclaw.capabilities.load",
+                arguments={"capability_ids": ["cap-one"]},
+            ),
+            controller.empty_state(),
+        )
+        activated = await controller.execute(
+            assignment,
+            ToolCall(
+                tool_invocation_id="activate-changing-skill",
+                name="auraclaw.skills.activate",
+                arguments={"capability_id": "cap-one", "inputs": {}},
+            ),
+            loaded.state,
+        )
+
+        assert activated.result["status"] == "activated"
+        assert activated.result["loaded_dependency_ids"] == ["cap-new"]
+        assert "cap-new" in activated.state["loaded"]
+        assert capabilities.resolutions == 2
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize("action", ["pause", "cancel"])
 def test_capability_loop_applies_revocation_action_to_active_binding(
     action: str,
@@ -1124,6 +1911,132 @@ def test_real_mcp_search_and_load_hydrates_authoritative_tool_schema() -> None:
         )
         assert "cap-github-issue-get" in followup.state["loaded"]
         assert "cap-github-issue-get" in followup.state["candidates"]
+
+    asyncio.run(scenario())
+
+
+def test_active_skill_can_read_only_declared_non_preloaded_reference() -> None:
+    class ReferenceCapabilities(_Capabilities):
+        def __init__(self) -> None:
+            super().__init__(kind="skill")
+            self.loaded_parts: list[dict[str, Any]] = []
+
+        async def load_skill_part(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+            del args
+            self.loaded_parts.append(dict(kwargs))
+            return [{"text": '{"query":"authoritative"}'}]
+
+    async def scenario() -> None:
+        capabilities = ReferenceCapabilities()
+        controller = RuntimeCapabilityController(capabilities)
+        state = controller.empty_state()
+        state["active_skills"] = [
+            {
+                "activation": {"skill_activation_id": "act-current"},
+                "binding": {
+                    "publisher": "platform",
+                    "skill_name": "tool-probe",
+                    "skill_version": "1.0.0",
+                    "package_digest": f"sha256:{'a' * 64}",
+                },
+                "reference_requirements": [
+                    {
+                        "path": "references/probes.json",
+                        "media_type": "application/json",
+                        "max_bytes": 1024,
+                        "preload": False,
+                    }
+                ],
+            }
+        ]
+        assert SKILL_REFERENCE_READ in {
+            tool["function"]["name"] for tool in controller.model_tools(state)
+        }
+        read = await controller.execute(
+            _assignment(),
+            ToolCall(
+                tool_invocation_id="read-reference",
+                name=SKILL_REFERENCE_READ,
+                arguments={
+                    "skill_activation_id": "act-current",
+                    "path": "references/probes.json",
+                },
+            ),
+            state,
+        )
+        assert read.result["status"] == "success"
+        assert read.result["content"]["text"] == '{"query":"authoritative"}'
+        assert [event.type for event in read.events] == ["context.skill.reference.used"]
+        assert read.events[0].payload["path"] == "references/probes.json"
+        assert capabilities.loaded_parts == [
+            {
+                "publisher": "platform",
+                "name": "tool-probe",
+                "version": "1.0.0",
+                "path": "references/probes.json",
+            }
+        ]
+
+        for activation_id, path, error_code in (
+            ("act-other", "references/probes.json", "skill_activation_not_active"),
+            ("act-current", "references/other.json", "skill_reference_not_declared"),
+        ):
+            denied = await controller.execute(
+                _assignment(),
+                ToolCall(
+                    tool_invocation_id=f"denied-{error_code}",
+                    name=SKILL_REFERENCE_READ,
+                    arguments={"skill_activation_id": activation_id, "path": path},
+                ),
+                state,
+            )
+            assert denied.result["error_code"] == error_code
+        assert len(capabilities.loaded_parts) == 1
+
+    asyncio.run(scenario())
+
+
+def test_active_skill_reference_read_rejects_oversized_content() -> None:
+    async def scenario() -> None:
+        capabilities = _Capabilities(kind="skill")
+        controller = RuntimeCapabilityController(
+            capabilities,
+            skill_reference_read_max_bytes=8,
+        )
+        state = controller.empty_state()
+        state["active_skills"] = [
+            {
+                "activation": {"skill_activation_id": "act-current"},
+                "binding": {
+                    "publisher": "platform",
+                    "skill_name": "tool-probe",
+                    "skill_version": "1.0.0",
+                    "package_digest": f"sha256:{'a' * 64}",
+                },
+                "reference_requirements": [
+                    {
+                        "path": "references/probes.json",
+                        "media_type": "application/json",
+                        "max_bytes": 1024,
+                        "preload": False,
+                    }
+                ],
+            }
+        ]
+        denied = await controller.execute(
+            _assignment(),
+            ToolCall(
+                tool_invocation_id="read-reference-large",
+                name=SKILL_REFERENCE_READ,
+                arguments={
+                    "skill_activation_id": "act-current",
+                    "path": "references/probes.json",
+                },
+            ),
+            state,
+        )
+        assert denied.result["error_code"] == "skill_reference_too_large"
+        assert denied.result["metadata"]["max_bytes"] == 8
 
     asyncio.run(scenario())
 

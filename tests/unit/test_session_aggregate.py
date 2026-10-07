@@ -18,7 +18,7 @@ def test_create_session_emits_fact_and_run_request() -> None:
 
 def test_create_session_freezes_department_snapshot() -> None:
     session = SessionAggregate.empty("ses_1", "tenant_1")
-    session.create(goal="price insight", run_id="run_1", dept_id="9")
+    session.create(goal="inventory analysis", run_id="run_1", dept_id="9")
 
     events = session.release_pending_events()
     assert events[0].payload["dept_id"] == "9"

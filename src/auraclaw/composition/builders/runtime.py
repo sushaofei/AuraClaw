@@ -25,6 +25,8 @@ from auraclaw.runtime.collaboration_controller import RuntimeCollaborationContro
 from auraclaw.runtime.hands_adapter import HandsRuntimeAdapter
 from auraclaw.runtime.hands_client import HttpHandsClient
 from auraclaw.runtime.harness import AgentHarness
+from auraclaw.runtime.semantic_planner import SemanticPlanProposer
+from auraclaw.runtime.task_router import RuntimeTaskRouter
 
 
 def build_agent_runtime_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
@@ -62,29 +64,33 @@ def build_agent_runtime_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
             bearer_tokens={runtime_id: bearer_token},
         )
     )
+    capability_controller = RuntimeCapabilityController(
+        hands,
+        skill_content_cache_max_bytes=settings.runtime_skill_content_cache_max_bytes,
+        skill_content_cache_max_entries=settings.runtime_skill_content_cache_max_entries,
+        skill_content_cache_ttl_seconds=settings.runtime_skill_content_cache_ttl_seconds,
+        skill_prompt_max_bytes=settings.runtime_skill_prompt_max_bytes,
+        skill_prompt_max_estimated_tokens=settings.runtime_skill_prompt_max_estimated_tokens,
+        skill_reference_read_max_bytes=settings.runtime_skill_reference_read_max_bytes,
+    )
     harness = AgentHarness(
         control_store=control,
         session=session,
         model=model,
         tools=hands,
         runtime_events=providers.get_runtime_event_publisher(),
-        capability_controller=RuntimeCapabilityController(
-            hands,
-            skill_content_cache_max_bytes=(
-                settings.runtime_skill_content_cache_max_bytes
-            ),
-            skill_content_cache_max_entries=(
-                settings.runtime_skill_content_cache_max_entries
-            ),
-            skill_content_cache_ttl_seconds=(
-                settings.runtime_skill_content_cache_ttl_seconds
-            ),
-            skill_prompt_max_bytes=settings.runtime_skill_prompt_max_bytes,
-            skill_prompt_max_estimated_tokens=(
-                settings.runtime_skill_prompt_max_estimated_tokens
+        capability_controller=capability_controller,
+        collaboration_controller=RuntimeCollaborationController(collaboration),
+        task_router=RuntimeTaskRouter(
+            capability_controller,
+            mode=settings.runtime_router_mode,
+            semantic_planner_mode=settings.runtime_router_semantic_planner_mode,
+            semantic_planner=(
+                SemanticPlanProposer(model)
+                if settings.runtime_router_semantic_planner_mode != "off"
+                else None
             ),
         ),
-        collaboration_controller=RuntimeCollaborationController(collaboration),
     )
     worker = RemoteRuntimeWorker(control, harness)
     app = _base_service_app(

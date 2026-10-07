@@ -320,7 +320,7 @@ def test_catalog_hides_skills_when_dependency_server_is_quarantined() -> None:
             canonical_name="price.insight.get",
             version="2.1.0",
             content_digest=f"sha256:{'b' * 64}",
-            title="Price insight",
+            title="Inventory insight",
             tenant_id="tenant-a",
             permission="read-only",
             risk_level="low",
@@ -346,10 +346,10 @@ def test_catalog_hides_skills_when_dependency_server_is_quarantined() -> None:
             capability_id="cap-price-skill",
             kind=CapabilityKind.SKILL,
             server_id=skill_server.server_id,
-            canonical_name="price-insight-deviation",
+            canonical_name="inventory-deviation",
             version="1.0.0",
             content_digest=f"sha256:{'c' * 64}",
-            title="Price insight deviation",
+            title="Inventory insight deviation",
             tenant_id="tenant-a",
             permission="read-only",
             risk_level="low",
@@ -380,7 +380,7 @@ def test_catalog_hides_skills_when_dependency_server_is_quarantined() -> None:
                         "required_resources": [],
                         "required_skills": [
                             {
-                                "name": "price-insight-deviation",
+                                "name": "inventory-deviation",
                                 "version": "1.0.0",
                                 "publisher": "platform",
                             }
@@ -525,13 +525,13 @@ def test_resource_gateway_policy_fails_closed() -> None:
 
 def test_resource_gateway_allows_json_schema_media_type() -> None:
     async def scenario() -> None:
-        uri = "repo://business-skills/price-insight/output-contract/1.0.0"
+        uri = "repo://business-skills/inventory-analysis/output-contract/1.0.0"
         registry = HandsResourceRegistry(
             resources=(
                 RegisteredResource(
                     descriptor=HandsResourceDescriptor(
                         uri=uri,
-                        name="价格洞察输出契约",
+                        name="库存洞察输出契约",
                         mime_type="application/schema+json",
                     ),
                     contents=(

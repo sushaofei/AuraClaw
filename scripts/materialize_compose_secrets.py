@@ -27,7 +27,7 @@ SECRET_VARIABLES = {
     "vault_approle_secret_id": "AURACLAW_CREDENTIAL_VAULT_APPROLE_SECRET_ID",
     "obs_ak": "OBS_AK",
     "obs_sk": "OBS_SK",
-    "chaintower_workload_token": "AURACLAW_CHAINTOWER_WORKLOAD_TOKEN",
+    "upstream_workload_token": "AURACLAW_UPSTREAM_WORKLOAD_TOKEN",
     "agent_context_signing_keys_json": "AURACLAW_AGENT_CONTEXT_SIGNING_KEYS_JSON",
 }
 OPTIONAL_VARIABLES = {

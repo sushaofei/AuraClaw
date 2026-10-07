@@ -13,11 +13,11 @@ def build_identity_verifier(settings: Settings) -> IdentityContextVerifier:
     if settings.insecure_identity_headers_enabled:
         return DevelopmentHeaderIdentityVerifier()
     token = (
-        settings.chaintower_workload_token.get_secret_value()
-        if settings.chaintower_workload_token is not None
+        settings.upstream_workload_token.get_secret_value()
+        if settings.upstream_workload_token is not None
         else ""
     )
-    workload_tokens = {token: "chaintower"} if token else {}
+    workload_tokens = {token: "upstream"} if token else {}
     replay_guard = (
         DatabaseAssertionReplayGuard(settings.resolved_database_url)
         if settings.sql_storage_enabled

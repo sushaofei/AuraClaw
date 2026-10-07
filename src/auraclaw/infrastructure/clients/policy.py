@@ -37,6 +37,14 @@ class RemotePolicyClient:
         self._identity = service_identity
         self._client = httpx.AsyncClient(base_url=base_url, transport=transport, timeout=30.0)
         self._contract = HttpContractClient(self._client, bearer_token=bearer_token)
+        # Decision validation is a read-only authorization check. Retry only transient transport
+        # and gateway failures so a healthy allow decision is not surfaced as a permission denial.
+        self._validation_contract = HttpContractClient(
+            self._client,
+            bearer_token=bearer_token,
+            retry_attempts=3,
+            retry_backoff_seconds=0.05,
+        )
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -137,7 +145,7 @@ class RemotePolicyClient:
         resource: str,
     ) -> bool:
         request_id = str(uuid.uuid4())
-        response = await self._contract.call(
+        response = await self._validation_contract.call(
             "/internal/v1/policy/decisions/validate",
             PolicyValidateDecisionRequest(
                 context=InternalRequestContext(

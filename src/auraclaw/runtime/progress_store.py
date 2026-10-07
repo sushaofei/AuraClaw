@@ -93,24 +93,10 @@ class RuntimeProgressStore:
         await self._control.suspend_with_checkpoint(
             self.task_id(assignment), checkpoint, "waiting_children"
         )
-        persisted = await self._control.load_checkpoint(
-            assignment.tenant_id,
-            assignment.session_id,
-            assignment.run_id,
-        )
-        persisted_waiting = (
-            tuple(str(item) for item in persisted.state.get("waiting_child_ids", ()))
-            if persisted is not None
-            else ()
-        )
-        if (
-            persisted is None
-            or persisted.phase != RuntimePhase.AGENT_WAITING_CHILDREN
-            or persisted_waiting != waiting
-        ):
-            raise CollaborationValidationError(
-                "waiting_children checkpoint did not preserve the Child wait set"
-            )
+        # The disposition call atomically persists the checkpoint before releasing
+        # ownership.  Do not read it back after suspension: a Child may have already
+        # completed and a newly fenced Runtime may legitimately advance the same
+        # checkpoint before this worker receives the response.
 
     @staticmethod
     def task_id(assignment: RuntimeAssignment) -> str:

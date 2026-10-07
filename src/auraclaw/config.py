@@ -31,7 +31,7 @@ _SECRET_FILE_VARIABLES = {
     "AURACLAW_POLICY_WORKLOAD_TOKEN",
     "AURACLAW_DELIVERY_WORKLOAD_TOKEN",
     "AURACLAW_STREAMING_GATEWAY_WORKLOAD_TOKEN",
-    "AURACLAW_CHAINTOWER_WORKLOAD_TOKEN",
+    "AURACLAW_UPSTREAM_WORKLOAD_TOKEN",
     "AURACLAW_AGENT_CONTEXT_SIGNING_KEYS_JSON",
     "AURACLAW_LEASE_SIGNING_KEY",
     "AURACLAW_MODEL_API_KEY",
@@ -298,8 +298,8 @@ class Settings(BaseSettings):
     lease_signing_key: SecretStr | None = None
     allow_insecure_identity_headers: bool | None = None
     test_uplink_insecure_identity: bool | None = None
-    chaintower_workload_token: SecretStr | None = None
-    agent_context_issuer: str = "chaintower"
+    upstream_workload_token: SecretStr | None = None
+    agent_context_issuer: str = "upstream"
     agent_context_audience: str = "auraclaw-task-api"
     agent_context_signing_keys_json: str = "{}"
     agent_context_max_ttl_seconds: int = Field(default=300, ge=30, le=600)
@@ -324,6 +324,12 @@ class Settings(BaseSettings):
     hands_url: str = "http://127.0.0.1:8006"
     policy_base_url: str = "http://127.0.0.1:8007"
     credential_proxy_base_url: str = "http://127.0.0.1:8008"
+    # Must exceed the slowest allowed remote tool call. Action Hands waits on
+    # Credential Proxy for the complete MCP round trip, including Java-side
+    # semantic/RAG execution.
+    credential_proxy_request_timeout_seconds: float = Field(
+        default=120.0, gt=0.0, le=3600.0
+    )
     credential_egress_allowlist: str = ""
     java_api_servers_json: str = "[]"
     debug_vault_secrets_json: str = "{}"
@@ -449,6 +455,11 @@ class Settings(BaseSettings):
     runtime_skill_prompt_max_estimated_tokens: int = Field(
         default=65_536, ge=256, le=4_000_000
     )
+    runtime_skill_reference_read_max_bytes: int = Field(
+        default=256 * 1024, ge=1024, le=16 * 1024 * 1024
+    )
+    runtime_router_mode: Literal["off", "shadow", "assist", "enforce"] = "assist"
+    runtime_router_semantic_planner_mode: Literal["off", "shadow", "submit"] = "off"
     skill_transaction_retry_attempts: int = Field(default=3, ge=1, le=10)
     skill_transaction_retry_base_delay_seconds: float = Field(
         default=0.01, ge=0.0, le=1.0
@@ -474,6 +485,7 @@ class Settings(BaseSettings):
     )
     stream_connection_queue_size: int = 128
     stream_delta_min_interval_seconds: float = Field(default=0.02, ge=0.0, le=0.1)
+    stream_heartbeat_interval_seconds: float = Field(default=15.0, gt=0.0, le=300.0)
     cors_allow_origins: str = ""
     runtime_poll_interval: float = 0.05
     # Shared production-topology worker ticks (Outbox → Feed / Projection).
@@ -521,11 +533,43 @@ class Settings(BaseSettings):
     model_name: str | None = None
     model_provider: str = "openai_compatible"
     model_timeout_seconds: float = 120.0
+    model_retry_attempts: int = Field(default=5, ge=1, le=5)
+    model_retry_base_delay_seconds: float = Field(default=1.0, ge=0.0, le=5.0)
     model_tenant_token_limit_per_hour: int = Field(default=1_000_000, ge=1)
     # None omits the field; True/False maps to OpenAI-compatible thinking.type enabled/disabled.
     model_thinking_enabled: bool | None = None
     # Opt-in because some OpenAI-compatible providers reject unknown fields.
     model_prompt_cache_key_enabled: bool = False
+
+    capability_search_semantic_enabled: bool = False
+    capability_search_embedding_url: str | None = None
+    capability_search_embedding_model: str = "BAAI/bge-m3"
+    capability_search_embedding_dimensions: int = Field(default=1024, ge=1, le=8192)
+    capability_search_embedding_timeout_seconds: float = Field(default=12.0, gt=0, le=30)
+    capability_search_index_embedding_timeout_seconds: float = Field(default=300.0, gt=0, le=600)
+    capability_search_embedding_max_concurrent: int = Field(default=8, ge=1, le=64)
+    capability_search_semantic_min_similarity: float = Field(default=0.50, ge=-1, le=1)
+    capability_search_lexical_min_score: float = Field(default=0.1, ge=0)
+    capability_search_cache_max_entries: int = Field(default=2048, ge=0, le=100_000)
+    capability_search_cache_ttl_seconds: float = Field(default=15.0, ge=0, le=300)
+
+    @model_validator(mode="after")
+    def validate_capability_search_settings(self) -> Settings:
+        if self.capability_search_semantic_enabled and not self.capability_search_embedding_url:
+            raise ValueError(
+                "semantic capability search requires "
+                "AURACLAW_CAPABILITY_SEARCH_EMBEDDING_URL"
+            )
+        if (
+            self.capability_search_semantic_enabled
+            and self.mcp_reconcile_server_timeout_seconds
+            <= self.capability_search_index_embedding_timeout_seconds
+        ):
+            raise ValueError(
+                "semantic capability search requires MCP reconcile timeout to exceed "
+                "the index embedding timeout"
+            )
+        return self
 
     @model_validator(mode="after")
     def validate_identity_settings(self) -> Settings:
@@ -809,7 +853,7 @@ class Settings(BaseSettings):
 
     @property
     def signed_identity_configured(self) -> bool:
-        token = self.chaintower_workload_token
+        token = self.upstream_workload_token
         return bool(
             token is not None
             and token.get_secret_value()

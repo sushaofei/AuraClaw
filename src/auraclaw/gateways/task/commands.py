@@ -22,6 +22,7 @@ class TaskCommandGateway:
         interaction_mode: InteractionMode | None = None,
         approval_mode: ApprovalMode | None = None,
         read_refresh: list[dict[str, Any]] | None = None,
+        skill_names: list[str] | None = None,
     ) -> dict[str, Any]:
         return await self._service.create_task(
             goal=goal,
@@ -32,6 +33,7 @@ class TaskCommandGateway:
             interaction_mode=interaction_mode,
             approval_mode=approval_mode,
             read_refresh=read_refresh,
+            skill_names=skill_names,
         )
 
     async def append_message(

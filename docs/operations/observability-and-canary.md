@@ -94,11 +94,11 @@ uv run auraclaw operations redrive --tenant TENANT --queue delivery --item-id DE
 
 重投增加 attempt，不覆盖历史；稳定 `delivery_id` 和接收方 Idempotency-Key 防止重复业务效果。
 
-### chaintower Assertion 验签失败或密钥不可用
+### upstream Assertion 验签失败或密钥不可用
 
 Task API 写与敏感读必须 fail closed（401）。先确认 `kid` 仍在 N/N-1 集合、clock skew
-未超出配置，再检查 chaintower 签发服务。禁止为恢复流量改回裸 `X-Tenant-ID` /
-`X-Actor-ID`。轮换时先加载新 `kid`，chaintower 切签发后再撤旧密钥。
+未超出配置，再检查 upstream 签发服务。禁止为恢复流量改回裸 `X-Tenant-ID` /
+`X-Actor-ID`。轮换时先加载新 `kid`，upstream 切签发后再撤旧密钥。
 
 ## 保留、GC 与安全
 
@@ -134,8 +134,8 @@ Task API 401/403 和 Secret 扫描；任一门禁失败立即停止放量：
 4. 审批后的写工具。
 5. Child DAG 与 Reviewer。
 6. 外部 Webhook Delivery。
-7. chaintower signed Agent Context（保留 development Header adapter，生产不得开启）。
-8. Hands → chaintower MCP `workload_trusted_context`。
+7. upstream signed Agent Context（保留 development Header adapter，生产不得开启）。
+8. Hands → upstream MCP `workload_trusted_context`。
 
 应用回滚不得回滚或删除 Canonical Event。Schema 回滚仅在确认新表没有继续写入且已导出审计记录后，
 执行 `0007_m6_observability_reliability.down.sql`；通常优先回滚应用并保留向前兼容的观测 Schema。

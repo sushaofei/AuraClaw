@@ -68,7 +68,7 @@ _CORS_ALLOW_HEADERS = [
     "Last-Event-ID",
     "X-Actor-ID",
     "X-Correlation-ID",
-    "X-CT-Agent-Context",
+    "X-Aura-Agent-Context",
     "X-Dept-ID",
     "X-Expected-Revision",
     "X-Expected-Version",

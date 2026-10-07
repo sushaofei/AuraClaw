@@ -168,6 +168,7 @@ class CollaborationCommandRequest(ContractModel):
     operation: Literal[
         "get_graph",
         "create_child",
+        "submit_plan",
         "set_dependencies",
         "request_review",
         "cancel_child",
@@ -962,6 +963,8 @@ class McpCapabilityTestResponse(ContractModel):
     status: Literal["passed", "failed"]
     kind: str
     output: Any = None
+    transport_reachable: bool
+    business_success: bool
     schema_valid: bool | None = None
     expectation_matched: bool | None = None
     duration_ms: int = Field(ge=0)

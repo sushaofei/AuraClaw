@@ -210,6 +210,7 @@ def get_streaming_gateway() -> StreamingGateway:
         reader=get_task_projection(),
         bus=get_runtime_replay_bus(),
         delta_min_interval=settings.stream_delta_min_interval_seconds,
+        heartbeat_interval=settings.stream_heartbeat_interval_seconds,
     )
 
 
@@ -226,6 +227,8 @@ def get_model_gateway() -> ModelClient:
         model=settings.model_name,
         name=settings.model_provider,
         timeout_seconds=settings.model_timeout_seconds,
+        retry_attempts=settings.model_retry_attempts,
+        retry_base_delay_seconds=settings.model_retry_base_delay_seconds,
         thinking_enabled=settings.model_thinking_enabled,
         prompt_cache_key_enabled=settings.model_prompt_cache_key_enabled,
     )

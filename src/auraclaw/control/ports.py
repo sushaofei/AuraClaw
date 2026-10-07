@@ -8,14 +8,36 @@ from auraclaw.contracts.internal import LeaseAssertion
 
 DEFAULT_RUNTIME_MAX_STEPS = 48
 AGENT_RUNTIME_POOL = "agent"
+ASSIGNMENT_RESOURCE_PROFILE_KEYS = frozenset(
+    {
+        "tool_permissions",
+        "required_capabilities",
+        "required_skills",
+        "agent_profile_ids",
+        "allowed_models",
+        "allowed_harnesses",
+    }
+)
+
+
+def runtime_requirements_from_profile(profile: dict[str, Any]) -> dict[str, Any]:
+    """Separate node-selection requirements from the Agent assignment profile."""
+    explicit = profile.get("runtime_requirements")
+    if isinstance(explicit, dict):
+        return dict(explicit)
+    return {
+        key: value
+        for key, value in profile.items()
+        if key not in ASSIGNMENT_RESOURCE_PROFILE_KEYS
+        and not key.startswith("_auraclaw_")
+    }
 
 
 @dataclass(frozen=True)
 class RuntimeBudget:
-    # Price Insight's governed flow uses capability discovery, Skill activation,
-    # dependency hydration, and eight atomic metric calls. Follow-up turns in
-    # the same Session also re-search and reload capabilities, so keep the
-    # default above one complete flow plus that rediscovery tax.
+    # Governed flows may use capability discovery, Skill activation, dependency
+    # hydration, and multiple atomic Tool calls. Keep the default large enough
+    # for one complete flow plus bounded rediscovery on follow-up turns.
     max_steps: int = DEFAULT_RUNTIME_MAX_STEPS
     max_output_tokens: int = 8192
     max_cost: float | None = None

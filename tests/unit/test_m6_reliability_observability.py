@@ -17,12 +17,13 @@ from auraclaw.composition.providers import (
 from auraclaw.config import get_settings
 from auraclaw.contracts.commands import CommandContext
 from auraclaw.contracts.events import Actor, CanonicalEvent
-from auraclaw.contracts.observability import TraceContext
+from auraclaw.contracts.observability import MetricPoint, TraceContext
 from auraclaw.contracts.state import Visibility
 from auraclaw.gateways.task.admission import AllowAllAdmissionController
 from auraclaw.infrastructure.artifacts.store import ArtifactStore, InMemoryObjectStorage
 from auraclaw.infrastructure.observability.stores import (
     InMemoryObservabilityStore,
+    PostgresObservabilityStore,
     StructuredLogger,
 )
 from auraclaw.infrastructure.persistence.memory_event_store import InMemoryEventStore
@@ -144,6 +145,133 @@ def test_metric_summary_is_windowed_and_tenant_isolated() -> None:
         assert summary.p50 == 2.5
         assert summary.p95 == pytest.approx(3.85)
         assert summary.p99 == pytest.approx(3.97)
+
+    asyncio.run(scenario())
+
+
+def test_metric_snapshot_is_bounded_and_tenant_isolated() -> None:
+    async def scenario() -> None:
+        store = InMemoryObservabilityStore()
+        service = ObservabilityService(store, InMemoryEventStore())
+        tenant = TraceContext(trace_id="a" * 32, span_id="b" * 16, tenant_id="tenant-a")
+        other = TraceContext(trace_id="c" * 32, span_id="d" * 16, tenant_id="tenant-b")
+
+        await service.metric("global.count", 1.0)
+        await service.metric("tenant.count", 2.0, context=tenant)
+        await service.metric("other.count", 3.0, context=other)
+
+        visible = await service.metrics("tenant-a")
+        assert [(point.name, point.value) for point in visible] == [
+            ("global.count", 1.0),
+            ("tenant.count", 2.0),
+        ]
+        assert await store.metric_snapshot("tenant-a", limit=1) == [visible[-1]]
+
+    asyncio.run(scenario())
+
+
+def test_postgres_metric_snapshot_uses_bounded_tenant_recent_scan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakePool:
+        query = ""
+        arguments: tuple[object, ...] = ()
+
+        async def fetch(self, query: str, *arguments: object) -> list[dict[str, object]]:
+            self.query = query
+            self.arguments = arguments
+            return [
+                {
+                    "metric_name": "model.ttft.seconds",
+                    "value": 1.25,
+                    "observed_at": datetime.now(UTC),
+                    "tenant_id": "tenant-a",
+                    "root_session_id": "root-a",
+                    "session_id": "session-a",
+                    "run_id": "run-a",
+                    # Production asyncpg connections intentionally use the default
+                    # JSON/JSONB text codec, so snapshots must decode this value.
+                    "labels": '{"source":"production-codec"}',
+                    "deduplication_key": None,
+                }
+            ]
+
+    async def scenario() -> None:
+        pool = FakePool()
+        store = PostgresObservabilityStore("postgresql://unused")
+
+        async def fake_pool() -> FakePool:
+            return pool
+
+        monkeypatch.setattr(store, "pool", fake_pool)
+        points = await store.metric_snapshot("tenant-a", limit=17)
+
+        assert pool.arguments == ("tenant-a", 17)
+        assert "WITH recent AS" in pool.query
+        assert "WHERE tenant_id = $1" in pool.query
+        assert "WHERE tenant_id IS NULL" in pool.query
+        assert "LIMIT $2" in pool.query
+        assert [(point.name, point.tenant_id, point.labels) for point in points] == [
+            ("model.ttft.seconds", "tenant-a", {"source": "production-codec"})
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_postgres_runtime_metrics_share_one_bulk_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakePool:
+        query = ""
+        rows: list[tuple[object, ...]] = []
+
+        async def executemany(
+            self, query: str, rows: list[tuple[object, ...]]
+        ) -> None:
+            self.query = query
+            self.rows = rows
+
+    async def scenario() -> None:
+        pool = FakePool()
+        store = PostgresObservabilityStore("postgresql://unused")
+
+        async def fake_pool() -> FakePool:
+            return pool
+
+        monkeypatch.setattr(store, "pool", fake_pool)
+        observed_at = datetime.now(UTC)
+        await store.write_metrics(
+            [
+                MetricPoint(
+                    name="router.requests.count",
+                    value=1,
+                    observed_at=observed_at,
+                    tenant_id="tenant-a",
+                    session_id="session-a",
+                    run_id="run-a",
+                    deduplication_key="router-request",
+                ),
+                MetricPoint(
+                    name="router.fast_path.count",
+                    value=1,
+                    observed_at=observed_at,
+                    tenant_id="tenant-a",
+                    session_id="session-a",
+                    run_id="run-a",
+                    deduplication_key="router-fast-path",
+                ),
+            ]
+        )
+
+        assert "INSERT INTO observability.metric_point" in pool.query
+        assert [row[0] for row in pool.rows] == [
+            "router.requests.count",
+            "router.fast_path.count",
+        ]
+        assert [row[-1] for row in pool.rows] == [
+            "router-request",
+            "router-fast-path",
+        ]
 
     asyncio.run(scenario())
 

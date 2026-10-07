@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import replace
 from pathlib import Path
 from uuid import uuid4
 
@@ -13,7 +14,8 @@ from auraclaw.contracts.collaboration import (
     OutputContract,
 )
 from auraclaw.contracts.commands import CommandContext
-from auraclaw.contracts.events import Actor
+from auraclaw.contracts.errors import VersionConflictError
+from auraclaw.contracts.events import Actor, NewEvent
 from auraclaw.gateways.task.admission import AllowAllAdmissionController
 from auraclaw.infrastructure.persistence.postgres_common import asyncpg_url as _asyncpg_url
 from auraclaw.infrastructure.persistence.postgres_event_store import PostgresEventStore
@@ -24,6 +26,7 @@ from auraclaw.infrastructure.projection.postgres_task_store import PostgresTaskP
 from auraclaw.projection.approval.projector import CompositeProjection
 from auraclaw.projection.relay import OutboxRelay
 from auraclaw.session.collaboration_service import CollaborationService
+from auraclaw.session.ports import StreamAppend
 from auraclaw.session.task_service import TaskService
 
 SETTINGS = get_settings()
@@ -72,6 +75,82 @@ async def _apply_migrations() -> None:
             await connection.execute(MIGRATIONS[-1])
     finally:
         await connection.close()
+
+
+def test_postgres_batch_append_rolls_back_all_streams_on_conflict() -> None:
+    async def scenario() -> None:
+        assert DATABASE_URL is not None
+        await _apply_migrations()
+        suffix = uuid4().hex
+        tenant_id = f"tenant-pg-batch-{suffix}"
+        store = PostgresEventStore(DATABASE_URL)
+        context = CommandContext(
+            command_id=f"seed-{suffix}",
+            tenant_id=tenant_id,
+            actor=Actor(type="coordinator", id="coordinator"),
+            correlation_id=suffix,
+            expected_version=0,
+            operation="seed",
+        )
+        try:
+            await store.append(
+                root_session_id="ses_root",
+                session_id="ses_conflict",
+                run_id=None,
+                context=context,
+                events=(NewEvent(type="test.seeded"),),
+                command_result={},
+            )
+            with pytest.raises(VersionConflictError):
+                await store.append_batch(
+                    root_session_id="ses_root",
+                    context=replace(
+                        context,
+                        command_id=f"batch-{suffix}",
+                        operation="collaboration.submit_plan",
+                    ),
+                    appends=(
+                        StreamAppend(
+                            session_id="ses_new",
+                            run_id=None,
+                            expected_version=0,
+                            events=(NewEvent(type="test.created"),),
+                        ),
+                        StreamAppend(
+                            session_id="ses_conflict",
+                            run_id=None,
+                            expected_version=0,
+                            events=(NewEvent(type="test.created"),),
+                        ),
+                    ),
+                    command_result={"status": "submitted"},
+                )
+            assert await store.load(tenant_id, "ses_new") == []
+            assert [event.type for event in await store.load(tenant_id, "ses_conflict")] == [
+                "test.seeded"
+            ]
+        finally:
+            await store.close()
+            cleanup = await asyncpg.connect(DATABASE_URL)
+            try:
+                await cleanup.execute(
+                    "DELETE FROM session_core.outbox WHERE event_id IN "
+                    "(SELECT event_id FROM session_core.canonical_event WHERE tenant_id=$1)",
+                    tenant_id,
+                )
+                await cleanup.execute(
+                    "DELETE FROM session_core.canonical_event WHERE tenant_id=$1", tenant_id
+                )
+                await cleanup.execute(
+                    "DELETE FROM session_core.session_head WHERE tenant_id=$1", tenant_id
+                )
+                await cleanup.execute(
+                    "DELETE FROM session_core.command_dedup WHERE tenant_id=$1", tenant_id
+                )
+            finally:
+                await cleanup.close()
+
+    asyncio.run(scenario())
 
 
 def test_postgres_collaboration_projection_rebuilds_runnable_and_result() -> None:

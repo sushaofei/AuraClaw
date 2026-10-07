@@ -580,20 +580,32 @@ class ToolGateway:
                 invocation.tool_name, invocation.tool_version, tenant_id=invocation.tenant_id
             )
         except PolicyDeniedError as exc:
+            error_code = (
+                "ambiguous_capability"
+                if "ambiguous_capability" in exc.message
+                else "stale_capability"
+            )
+            if error_code == "stale_capability":
+                await self._emit_security_metric(
+                    "mcp_tool_policy_revision_stale_total",
+                    invocation,
+                    reason="registry_miss",
+                )
             return ToolResult(
                 status=ToolResultStatus.DENIED,
                 summary=exc.message,
-                error_code=(
-                    "ambiguous_capability"
-                    if "ambiguous_capability" in exc.message
-                    else "stale_capability"
-                ),
+                error_code=error_code,
                 side_effect_status="not_started",
             )
         if (
             invocation.capability_ref is not None
             and invocation.capability_ref != capability.invocation_ref
         ):
+            await self._emit_security_metric(
+                "mcp_tool_policy_revision_stale_total",
+                invocation,
+                reason="capability_reference_mismatch",
+            )
             return ToolResult(
                 status=ToolResultStatus.DENIED,
                 error_code="stale_capability",
@@ -675,6 +687,39 @@ class ToolGateway:
             return self._capacity_result("queue_timeout")
         finally:
             await self._capacity.close(ticket)
+
+    async def _emit_security_metric(
+        self,
+        name: str,
+        invocation: ToolInvocation,
+        *,
+        reason: str,
+    ) -> None:
+        if self._metrics is None:
+            return
+        try:
+            await self._metrics.write_metric(
+                MetricPoint(
+                    name=name,
+                    value=1.0,
+                    observed_at=datetime.now(UTC),
+                    tenant_id=invocation.tenant_id,
+                    root_session_id=invocation.root_session_id,
+                    session_id=invocation.session_id,
+                    run_id=invocation.run_id,
+                    labels={
+                        "capability_id": invocation.tool_name,
+                        "reason": reason,
+                    },
+                    deduplication_key=(
+                        f"{name}:{invocation.tenant_id}:"
+                        f"{invocation.tool_invocation_id}:{reason}"
+                    ),
+                )
+            )
+        except Exception:
+            # Observability is best-effort and never weakens fail-closed dispatch.
+            return
 
     async def _execute_claimed(
         self,

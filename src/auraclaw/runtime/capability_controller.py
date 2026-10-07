@@ -36,6 +36,8 @@ from auraclaw.runtime.tool_argument_guidance import (
 CAPABILITY_SEARCH = "auraclaw.capabilities.search"
 CAPABILITY_LOAD = "auraclaw.capabilities.load"
 SKILL_ACTIVATE = "auraclaw.skills.activate"
+SKILL_RESOLVE_AND_ACTIVATE = "auraclaw.skills.resolve_and_activate"
+SKILL_REFERENCE_READ = "auraclaw.skills.reference.read"
 RESOURCE_READ = "auraclaw.resources.read"
 SKILL_BINDING_STATUS = "auraclaw.skills.binding-status"
 _TEMPLATE_FIELD = re.compile(r"\{([A-Za-z0-9_.-]+)\}")
@@ -56,7 +58,7 @@ class CapabilityAdmissionError(RuntimeError):
 
 
 @dataclass(frozen=True)
-class _RunSkillContentEntry:
+class _SkillContentEntry:
     text: str
     size: int
     expires_at: float
@@ -79,6 +81,7 @@ class RuntimeCapabilityController:
         skill_content_cache_ttl_seconds: float = 900.0,
         skill_prompt_max_bytes: int = 256 * 1024,
         skill_prompt_max_estimated_tokens: int = 65_536,
+        skill_reference_read_max_bytes: int = 256 * 1024,
     ) -> None:
         if (
             skill_content_cache_max_bytes < 1
@@ -86,6 +89,7 @@ class RuntimeCapabilityController:
             or skill_content_cache_ttl_seconds <= 0
             or skill_prompt_max_bytes < 1
             or skill_prompt_max_estimated_tokens < 1
+            or skill_reference_read_max_bytes < 1
         ):
             raise ValueError("Runtime Skill content and prompt limits must be positive")
         self._client = client
@@ -100,10 +104,13 @@ class RuntimeCapabilityController:
         self._skill_content_cache_ttl_seconds = skill_content_cache_ttl_seconds
         self._skill_prompt_max_bytes = skill_prompt_max_bytes
         self._skill_prompt_max_estimated_tokens = skill_prompt_max_estimated_tokens
+        self._skill_reference_read_max_bytes = skill_reference_read_max_bytes
         self._skill_content_cache: OrderedDict[
-            tuple[str, str, str, str, str], _RunSkillContentEntry
+            tuple[str, str, str, str, str, str], _SkillContentEntry
         ] = OrderedDict()
-        self._skill_content_loads: dict[tuple[str, str, str, str, str], asyncio.Task[str]] = {}
+        self._skill_content_loads: dict[
+            tuple[str, str, str, str, str, str, str, str, str], asyncio.Task[str]
+        ] = {}
         self._skill_content_cache_bytes = 0
         self._skill_content_lock = asyncio.Lock()
         self._trusted_message_metrics: dict[tuple[str, str, str], dict[str, float]] = {}
@@ -133,11 +140,30 @@ class RuntimeCapabilityController:
     def model_tools(self, state: dict[str, Any]) -> tuple[dict[str, Any], ...]:
         tools = [
             _function_tool(
+                SKILL_RESOLVE_AND_ACTIVATE,
+                "Resolve and activate one unambiguous policy-visible Skill in a single "
+                "governed request. Prefer this tool when the task needs a Skill. It preserves "
+                "package integrity, policy, dependency and activation checks; ambiguous matches "
+                "are returned for another model decision instead of being activated.",
+                {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "maxLength": 1024},
+                        "canonical_name": {"type": "string", "maxLength": 256},
+                        "capability_id": {"type": "string", "maxLength": 256},
+                        "inputs": {"type": "object"},
+                    },
+                    "required": ["inputs"],
+                    "additionalProperties": False,
+                },
+            ),
+            _function_tool(
                 CAPABILITY_SEARCH,
                 "Search the policy-visible capability catalog when the task needs "
                 "external data, an action, or a governed Skill. "
                 "For MCP queries or actions use kinds=[\"tool\"] or omit kinds to search "
-                "all kinds. Do not restrict ordinary data queries to Skills or Resources. "
+                "all kinds. Prefer skills.resolve_and_activate when the task needs a Skill. "
+                "Do not restrict ordinary data queries to Skills or Resources. "
                 "To list Skills use kinds=[\"skill\"] "
                 "and query=\"\"; use canonical_name for a known exact name. An empty result "
                 "does not prove no Skill is installed; "
@@ -219,6 +245,21 @@ class RuntimeCapabilityController:
                     "additionalProperties": False,
                 },
             ),
+            _function_tool(
+                SKILL_REFERENCE_READ,
+                "Read one reference declared by an active signed Skill. Use the exact "
+                "skill_activation_id and path; undeclared paths, other packages, and "
+                "oversized content are denied.",
+                {
+                    "type": "object",
+                    "properties": {
+                        "skill_activation_id": {"type": "string"},
+                        "path": {"type": "string", "pattern": "^references/"},
+                    },
+                    "required": ["skill_activation_id", "path"],
+                    "additionalProperties": False,
+                },
+            ),
         ]
         loaded_items = [item for item in dict(state.get("loaded", {})).values()
                         if isinstance(item, dict)]
@@ -227,6 +268,18 @@ class RuntimeCapabilityController:
             (tool["function"]["name"] == SKILL_ACTIVATE and "skill" not in kinds)
             or (tool["function"]["name"] == RESOURCE_READ
                 and not kinds.intersection({"resource", "resource_template"}))
+            or (
+                tool["function"]["name"] == SKILL_REFERENCE_READ
+                and not any(
+                    isinstance(active, dict)
+                    and any(
+                        isinstance(requirement, dict)
+                        and requirement.get("preload") is not True
+                        for requirement in active.get("reference_requirements", ())
+                    )
+                    for active in state.get("active_skills", ())
+                )
+            )
         )]
         for loaded in loaded_items:
             if not isinstance(loaded, dict):
@@ -305,6 +358,352 @@ class RuntimeCapabilityController:
             )
         current["required_capabilities_preloaded"] = True
         return current
+
+    async def activate_trusted_skill(
+        self,
+        assignment: RuntimeAssignment,
+        state: dict[str, Any],
+        *,
+        publisher: str | None,
+        name: str,
+        inputs: dict[str, Any],
+        activation_key: str,
+        version: str = "*",
+        activation_source: str = "trusted_runtime_context",
+    ) -> CapabilityExecution:
+        """Activate an exact Skill selected by trusted Runtime context."""
+        current = copy.deepcopy(state)
+        active = [
+            item for item in current.get("active_skills", ()) if isinstance(item, dict)
+        ]
+        existing = next(
+            (
+                item
+                for item in active
+                if isinstance(item.get("binding"), dict)
+                and (publisher is None or item["binding"].get("publisher") == publisher)
+                and item["binding"].get("skill_name") == name
+                and (version == "*" or item["binding"].get("skill_version") == version)
+            ),
+            None,
+        )
+        if existing is not None:
+            existing_activation = dict(existing.get("activation", {}))
+            return CapabilityExecution(
+                result={
+                    "status": "activated",
+                    "skill_activation_id": existing_activation.get("skill_activation_id"),
+                    "skill_name": name,
+                    "skill_version": existing["binding"].get("skill_version"),
+                    "already_active": True,
+                },
+                state=current,
+            )
+
+        resolution = await self._client.resolve_skill(
+            assignment,
+            name=name,
+            version=version,
+            publisher=publisher,
+            active_skill_names=tuple(
+                str(item["binding"]["skill_name"])
+                for item in active
+                if isinstance(item.get("binding"), dict)
+            ),
+        )
+        if resolution.status != "success" or resolution.binding is None:
+            return CapabilityExecution(
+                result={
+                    "status": resolution.status,
+                    "error_code": resolution.error_code or "skill_resolver_failed",
+                    "summary": resolution.summary,
+                },
+                state=current,
+            )
+        binding = resolution.binding
+        dependency_ids = [
+            *(item.capability_id for item in binding.resolved_tools),
+            *(item.capability_id for item in binding.resolved_resources),
+            *(item.capability_id for item in binding.resolved_skills),
+        ]
+        missing = await self._load_skill_dependencies(
+            assignment,
+            current,
+            dependency_ids,
+            activation_call_id=activation_key,
+        )
+        if missing:
+            return CapabilityExecution(
+                result={
+                    "status": "denied",
+                    "error_code": "skill_dependency_load_failed",
+                    "missing_capability_ids": missing,
+                },
+                state=current,
+            )
+        activation = SkillActivation(
+            skill_activation_id=_activation_id(assignment, activation_key),
+            activation_key=activation_key,
+            binding=binding,
+            input_digest=f"sha256:{_digest(inputs)}",
+        )
+        active.append(
+            {
+                "activation": activation.model_dump(mode="json"),
+                "binding": binding.model_dump(mode="json"),
+                "reference_requirements": [],
+                "model_reference_paths": [],
+            }
+        )
+        current["active_skills"] = active
+        event = NewEvent(
+            type="skill.activated",
+            payload={
+                "skill_activation_id": activation.skill_activation_id,
+                "activation_key": activation.activation_key,
+                "skill_name": binding.skill_name,
+                "skill_version": binding.skill_version,
+                "package_digest": binding.package_digest,
+                "policy_version": binding.policy_version,
+                "policy_decision_id": binding.policy_decision_id,
+                "workflow_digest": (
+                    binding.resolved_workflow.workflow_digest
+                    if binding.resolved_workflow is not None
+                    else None
+                ),
+                "activation": activation.model_dump(mode="json"),
+                "reference_requirements": [],
+                "model_reference_paths": [],
+                "activation_source": activation_source,
+            },
+        )
+        return CapabilityExecution(
+            result={
+                "status": "activated",
+                "skill_activation_id": activation.skill_activation_id,
+                "skill_name": binding.skill_name,
+                "skill_version": binding.skill_version,
+                "loaded_dependency_ids": dependency_ids,
+            },
+            state=current,
+            events=(event,),
+        )
+
+    async def inspect_explicit_capability(
+        self,
+        assignment: RuntimeAssignment,
+        state: dict[str, Any],
+        *,
+        canonical_name: str,
+    ) -> CapabilityExecution:
+        """Load one exact policy-visible Tool or Skill without activating or executing it."""
+        current = copy.deepcopy(state)
+        search = await self.execute(
+            assignment,
+            ToolCall(
+                tool_invocation_id=authority_request_id(assignment, "router-search"),
+                name=CAPABILITY_SEARCH,
+                version="1",
+                arguments={
+                    "canonical_name": canonical_name,
+                    "kinds": ["tool", "skill"],
+                    "limit": 2,
+                },
+                expected_side_effect="read",
+            ),
+            current,
+        )
+        current = search.state
+        if search.result.get("status", "success") != "success":
+            return CapabilityExecution(
+                result={
+                    "status": "error",
+                    "error_code": search.result.get(
+                        "error_code", "router_candidate_search_failed"
+                    ),
+                    "candidate_count": 0,
+                },
+                state=current,
+            )
+        candidates = [
+            item
+            for item in dict(current.get("candidates", {})).values()
+            if isinstance(item, dict)
+            and item.get("canonical_name") == canonical_name
+            and item.get("kind") in {"tool", "skill"}
+        ]
+        if len(candidates) != 1:
+            return CapabilityExecution(
+                result={
+                    "status": "not_found" if not candidates else "ambiguous",
+                    "error_code": (
+                        "router_candidate_not_found"
+                        if not candidates
+                        else "router_candidate_ambiguous"
+                    ),
+                    "candidate_count": len(candidates),
+                },
+                state=current,
+            )
+        capability_id = str(candidates[0]["capability_id"])
+        loaded = await self.execute(
+            assignment,
+            ToolCall(
+                tool_invocation_id=authority_request_id(assignment, "router-load"),
+                name=CAPABILITY_LOAD,
+                version="1",
+                arguments={"capability_ids": [capability_id]},
+                expected_side_effect="read",
+            ),
+            current,
+        )
+        descriptor = dict(loaded.state.get("loaded", {})).get(capability_id)
+        if (
+            loaded.result.get("status", "success") != "success"
+            or not isinstance(descriptor, dict)
+            or descriptor.get("kind") not in {"tool", "skill"}
+            or (
+                descriptor.get("kind") == "tool"
+                and not isinstance(descriptor.get("model_tool"), dict)
+            )
+            or (
+                descriptor.get("kind") == "skill"
+                and not isinstance(descriptor.get("skill"), dict)
+            )
+        ):
+            return CapabilityExecution(
+                result={
+                    "status": "error",
+                    "error_code": loaded.result.get(
+                        "error_code", "router_candidate_load_failed"
+                    ),
+                    "candidate_count": 1,
+                },
+                state=loaded.state,
+            )
+        return CapabilityExecution(
+            result={
+                "status": "prepared",
+                "candidate": descriptor,
+                "candidate_count": 1,
+            },
+            state=loaded.state,
+        )
+
+    async def inspect_trusted_skill(
+        self,
+        assignment: RuntimeAssignment,
+        state: dict[str, Any],
+        *,
+        publisher: str | None,
+        name: str,
+        version: str = "*",
+    ) -> CapabilityExecution:
+        """Resolve an exact Skill identity from the authoritative Skill resolver.
+
+        Skill packages are not catalog capabilities.  Keeping this read-only
+        inspection on the resolver path prevents stale catalog generations or
+        duplicate catalog rows from changing Router authority decisions.
+        """
+        resolution = await self._client.resolve_skill(
+            assignment,
+            name=name,
+            version=version,
+            publisher=publisher,
+            active_skill_names=(),
+        )
+        if resolution.status != "success" or resolution.binding is None:
+            return CapabilityExecution(
+                result={
+                    "status": resolution.status,
+                    "error_code": resolution.error_code or "router_skill_resolve_failed",
+                    "candidate_count": 0,
+                    "summary": resolution.summary,
+                },
+                state=copy.deepcopy(state),
+            )
+        binding = resolution.binding
+        identity = {
+            "publisher": binding.publisher,
+            "name": binding.skill_name,
+            "version": binding.skill_version,
+            "package_digest": binding.package_digest,
+        }
+        binding_id = "skb_" + hashlib.sha256(
+            json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        return CapabilityExecution(
+            result={
+                "status": "prepared",
+                "candidate_count": 1,
+                "candidate": {
+                    "kind": "skill",
+                    "canonical_name": (
+                        f"{binding.publisher}/{binding.skill_name}"
+                        if publisher is not None
+                        else binding.skill_name
+                    ),
+                    "version": binding.skill_version,
+                    "content_digest": binding.package_digest,
+                    "binding_id": binding_id,
+                    "skill": {
+                        "publisher": binding.publisher,
+                        "name": binding.skill_name,
+                        "version": binding.skill_version,
+                    },
+                },
+            },
+            state=copy.deepcopy(state),
+        )
+
+    async def prepare_explicit_capability(
+        self,
+        assignment: RuntimeAssignment,
+        state: dict[str, Any],
+        *,
+        canonical_name: str,
+    ) -> CapabilityExecution:
+        """Resolve one exact policy-visible Tool or Skill before the first model turn."""
+        inspected = await self.inspect_explicit_capability(
+            assignment,
+            state,
+            canonical_name=canonical_name,
+        )
+        candidate = inspected.result.get("candidate")
+        if inspected.result.get("status") != "prepared" or not isinstance(candidate, dict):
+            return inspected
+        if candidate.get("kind") != "skill":
+            return inspected
+        skill = candidate.get("skill")
+        if not isinstance(skill, dict):
+            return CapabilityExecution(
+                result={
+                    "status": "error",
+                    "error_code": "router_skill_descriptor_invalid",
+                    "candidate_count": 1,
+                },
+                state=inspected.state,
+            )
+        capability_id = str(candidate["capability_id"])
+        activated = await self.activate_trusted_skill(
+            assignment,
+            inspected.state,
+            publisher=(str(skill["publisher"]) if skill.get("publisher") else None),
+            name=str(skill.get("name") or canonical_name),
+            version=str(skill.get("version") or candidate.get("version") or "*"),
+            inputs={},
+            activation_key=f"router:{assignment.run_id}:{capability_id}",
+            activation_source="agent_router",
+        )
+        return CapabilityExecution(
+            result={
+                **activated.result,
+                "candidate": candidate,
+                "candidate_count": 1,
+            },
+            state=activated.state,
+            events=activated.events,
+        )
 
     async def binding_disposition(
         self,
@@ -483,13 +882,10 @@ class RuntimeCapabilityController:
             ]
             for task in tasks:
                 task.cancel()
-            self._remove_run_entries_locked(run_prefix)
             self._trusted_message_metrics.pop(run_prefix, None)
             self._workflow_metrics.pop(run_prefix, None)
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
-            async with self._skill_content_lock:
-                self._remove_run_entries_locked(run_prefix)
 
     async def _load_skill_text(
         self,
@@ -501,21 +897,30 @@ class RuntimeCapabilityController:
         package_digest: str,
         path: str,
     ) -> tuple[str, bool]:
-        key = (*self._run_key(assignment), package_digest, path)
+        cache_key = (
+            assignment.tenant_id,
+            publisher,
+            name,
+            version,
+            package_digest,
+            path,
+        )
+        load_key = (*self._run_key(assignment), *cache_key)
         now = time.monotonic()
         async with self._skill_content_lock:
-            entry = self._skill_content_cache.get(key)
+            entry = self._skill_content_cache.get(cache_key)
             if entry is not None and entry.expires_at > now:
-                self._skill_content_cache.move_to_end(key)
+                self._skill_content_cache.move_to_end(cache_key)
                 return entry.text, True
             if entry is not None:
-                self._skill_content_cache.pop(key)
+                self._skill_content_cache.pop(cache_key)
                 self._skill_content_cache_bytes -= entry.size
-            task = self._skill_content_loads.get(key)
+            task = self._skill_content_loads.get(load_key)
             if task is None:
                 task = asyncio.create_task(
                     self._fetch_skill_text(
-                        key,
+                        cache_key,
+                        load_key,
                         assignment,
                         publisher=publisher,
                         name=name,
@@ -523,12 +928,13 @@ class RuntimeCapabilityController:
                         path=path,
                     )
                 )
-                self._skill_content_loads[key] = task
+                self._skill_content_loads[load_key] = task
         return await asyncio.shield(task), False
 
     async def _fetch_skill_text(
         self,
-        key: tuple[str, str, str, str, str],
+        cache_key: tuple[str, str, str, str, str, str],
+        load_key: tuple[str, str, str, str, str, str, str, str, str],
         assignment: RuntimeAssignment,
         *,
         publisher: str,
@@ -555,12 +961,12 @@ class RuntimeCapabilityController:
             size = len(text.encode())
             async with self._skill_content_lock:
                 if size <= self._skill_content_cache_max_bytes:
-                    self._skill_content_cache[key] = _RunSkillContentEntry(
+                    self._skill_content_cache[cache_key] = _SkillContentEntry(
                         text=text,
                         size=size,
                         expires_at=(time.monotonic() + self._skill_content_cache_ttl_seconds),
                     )
-                    self._skill_content_cache.move_to_end(key)
+                    self._skill_content_cache.move_to_end(cache_key)
                     self._skill_content_cache_bytes += size
                     while self._skill_content_cache and (
                         len(self._skill_content_cache) > self._skill_content_cache_max_entries
@@ -572,18 +978,12 @@ class RuntimeCapabilityController:
         finally:
             async with self._skill_content_lock:
                 current = asyncio.current_task()
-                if self._skill_content_loads.get(key) is current:
-                    self._skill_content_loads.pop(key, None)
+                if self._skill_content_loads.get(load_key) is current:
+                    self._skill_content_loads.pop(load_key, None)
 
     @staticmethod
     def _run_key(assignment: RuntimeAssignment) -> tuple[str, str, str]:
         return assignment.tenant_id, assignment.session_id, assignment.run_id
-
-    def _remove_run_entries_locked(self, run_prefix: tuple[str, str, str]) -> None:
-        keys = [key for key in self._skill_content_cache if key[:3] == run_prefix]
-        for key in keys:
-            entry = self._skill_content_cache.pop(key)
-            self._skill_content_cache_bytes -= entry.size
 
     @staticmethod
     def _active_skill_identities(
@@ -652,6 +1052,14 @@ class RuntimeCapabilityController:
         progress: CapabilityProgressCallback | None = None,
     ) -> CapabilityExecution:
         current = copy.deepcopy(state)
+        if call.name == SKILL_RESOLVE_AND_ACTIVATE:
+            return await self._resolve_and_activate_skill(
+                assignment,
+                call,
+                current,
+                progress=progress,
+            )
+
         if call.name == CAPABILITY_SEARCH:
             search_count = int(current.get("search_count", 0))
             if search_count >= self._max_searches:
@@ -735,6 +1143,9 @@ class RuntimeCapabilityController:
         if call.name == RESOURCE_READ:
             return await self._read_resource(assignment, call, current)
 
+        if call.name == SKILL_REFERENCE_READ:
+            return await self._read_skill_reference(assignment, call, current)
+
         matches = [
             item for item in dict(current.get("loaded", {})).values()
             if isinstance(item, dict) and item.get("kind") == "tool"
@@ -788,7 +1199,18 @@ class RuntimeCapabilityController:
             activation = event.payload.get("activation")
             if (event.type == "skill.activated" and isinstance(activation, dict)
                     and activation.get("skill_activation_id") not in known):
-                active.append({"activation": activation, "binding": activation["binding"]})
+                active.append(
+                    {
+                        "activation": activation,
+                        "binding": activation["binding"],
+                        "reference_requirements": list(
+                            event.payload.get("reference_requirements", ())
+                        ),
+                        "model_reference_paths": list(
+                            event.payload.get("model_reference_paths", ())
+                        ),
+                    }
+                )
                 known.add(activation.get("skill_activation_id"))
         state["active_skills"] = active
         for item in state.get("active_skills", ()):
@@ -844,6 +1266,168 @@ class RuntimeCapabilityController:
                 )
             )
         return tuple(events)
+
+    async def _resolve_and_activate_skill(
+        self,
+        assignment: RuntimeAssignment,
+        call: ToolCall,
+        state: dict[str, Any],
+        *,
+        progress: CapabilityProgressCallback | None,
+    ) -> CapabilityExecution:
+        """Collapse model-driven search, load and activation into one governed call."""
+        started = time.monotonic()
+        metrics = self._workflow_metrics.setdefault(self._run_key(assignment), {})
+        metrics["skill.resolve_and_activate.count"] = (
+            metrics.get("skill.resolve_and_activate.count", 0.0) + 1.0
+        )
+        outcome = "error"
+        try:
+            query = str(call.arguments.get("query", "")).strip()
+            canonical_name = str(call.arguments.get("canonical_name", "")).strip()
+            capability_id = str(call.arguments.get("capability_id", "")).strip()
+            if not any((query, canonical_name, capability_id)):
+                outcome = "invalid"
+                return CapabilityExecution(
+                    result={
+                        "status": "denied",
+                        "error_code": "skill_resolution_query_required",
+                        "summary": (
+                            "Provide query, canonical_name or capability_id to resolve a Skill."
+                        ),
+                    },
+                    state=state,
+                )
+
+            search_arguments: dict[str, Any] = {"kinds": ["skill"], "limit": 3}
+            if query:
+                search_arguments["query"] = query
+            if canonical_name:
+                search_arguments["canonical_name"] = canonical_name
+            if capability_id:
+                search_arguments["capability_id"] = capability_id
+            searched = await self.execute(
+                assignment,
+                ToolCall(
+                    tool_invocation_id=f"{call.tool_invocation_id}:search",
+                    name=CAPABILITY_SEARCH,
+                    version="1",
+                    arguments=search_arguments,
+                    expected_side_effect="read",
+                    idempotency_key=f"{call.tool_invocation_id}:search",
+                ),
+                state,
+                progress=progress,
+            )
+            if searched.result.get("error_code"):
+                outcome = "search_failed"
+                return searched
+
+            candidates = [
+                item
+                for item in dict(searched.state.get("candidates", {})).values()
+                if isinstance(item, dict) and item.get("kind") == "skill"
+            ]
+            if not candidates:
+                outcome = "not_found"
+                return CapabilityExecution(
+                    result={
+                        "status": "not_found",
+                        "error_code": "skill_not_found",
+                        "summary": "No policy-visible Skill matched the request.",
+                    },
+                    state=searched.state,
+                )
+            if len(candidates) != 1:
+                outcome = "ambiguous"
+                return CapabilityExecution(
+                    result={
+                        "status": "ambiguous",
+                        "error_code": "skill_resolution_ambiguous",
+                        "summary": "Multiple Skills matched; select one exact capability_id.",
+                        "candidates": [
+                            {
+                                key: item.get(key)
+                                for key in (
+                                    "capability_id",
+                                    "canonical_name",
+                                    "version",
+                                    "description",
+                                )
+                            }
+                            for item in candidates
+                        ],
+                    },
+                    state=searched.state,
+                )
+
+            selected_id = str(candidates[0]["capability_id"])
+            loaded = await self.execute(
+                assignment,
+                ToolCall(
+                    tool_invocation_id=f"{call.tool_invocation_id}:load",
+                    name=CAPABILITY_LOAD,
+                    version="1",
+                    arguments={"capability_ids": [selected_id]},
+                    expected_side_effect="read",
+                    idempotency_key=f"{call.tool_invocation_id}:load",
+                ),
+                searched.state,
+                progress=progress,
+            )
+            if loaded.result.get("error_code"):
+                outcome = "load_failed"
+                return loaded
+            selected = dict(loaded.state.get("loaded", {})).get(selected_id)
+            if not isinstance(selected, dict) or selected.get("kind") != "skill":
+                outcome = "load_failed"
+                return CapabilityExecution(
+                    result={
+                        "status": "denied",
+                        "error_code": "skill_resolution_load_failed",
+                        "summary": "The selected Skill could not be loaded authoritatively.",
+                    },
+                    state=loaded.state,
+                )
+
+            activated = await self._activate_skill(
+                assignment,
+                ToolCall(
+                    tool_invocation_id=call.tool_invocation_id,
+                    name=SKILL_ACTIVATE,
+                    version="1",
+                    arguments={
+                        "capability_id": selected_id,
+                        "inputs": dict(call.arguments.get("inputs", {})),
+                    },
+                    expected_side_effect="read",
+                    approval_id=call.approval_id,
+                    idempotency_key=call.idempotency_key or call.tool_invocation_id,
+                ),
+                loaded.state,
+                progress=progress,
+            )
+            outcome = str(activated.result.get("status", "error"))
+            return CapabilityExecution(
+                result={
+                    **activated.result,
+                    "resolved_capability_id": selected_id,
+                    "lifecycle_mode": "resolve_and_activate",
+                },
+                state=activated.state,
+                events=activated.events,
+            )
+        finally:
+            metrics[f"skill.resolve_and_activate.result.{outcome}.count"] = (
+                metrics.get(
+                    f"skill.resolve_and_activate.result.{outcome}.count",
+                    0.0,
+                )
+                + 1.0
+            )
+            metrics["skill.resolve_and_activate.latency.seconds"] = (
+                time.monotonic() - started
+            )
 
     async def _activate_skill(
         self,
@@ -965,6 +1549,39 @@ class RuntimeCapabilityController:
                     activation_call_id=call.tool_invocation_id,
                 )
                 if missing:
+                    # Catalog reconciliation replaces one generation atomically.  A
+                    # Skill can therefore resolve against generation N immediately
+                    # before its dependency ids are retired by generation N+1.  Resolve
+                    # once more and hydrate the fresh binding instead of exposing this
+                    # normal race to the model as a permanent dependency failure.
+                    refreshed = await self._client.resolve_skill(
+                        assignment,
+                        name=str(contract["name"]),
+                        version=str(contract["version"]),
+                        publisher=str(contract["publisher"]),
+                        active_skill_names=tuple(
+                            str(item["binding"]["skill_name"])
+                            for item in active
+                            if isinstance(item.get("binding"), dict)
+                        ),
+                    )
+                    resolve_metrics["skill.resolve.retry.count"] = (
+                        resolve_metrics.get("skill.resolve.retry.count", 0.0) + 1.0
+                    )
+                    if refreshed.status == "success" and refreshed.binding is not None:
+                        binding = refreshed.binding
+                        dependency_ids = [
+                            *(item.capability_id for item in binding.resolved_tools),
+                            *(item.capability_id for item in binding.resolved_resources),
+                            *(item.capability_id for item in binding.resolved_skills),
+                        ]
+                        missing = await self._load_skill_dependencies(
+                            assignment,
+                            state,
+                            dependency_ids,
+                            activation_call_id=f"{call.tool_invocation_id}:refresh",
+                        )
+                if missing:
                     return CapabilityExecution(
                         result={
                             "status": "denied",
@@ -982,6 +1599,11 @@ class RuntimeCapabilityController:
             existing = {
                 "activation": activation.model_dump(mode="json"),
                 "binding": binding.model_dump(mode="json"),
+                "reference_requirements": [
+                    dict(item)
+                    for item in contract.get("required_references", ())
+                    if isinstance(item, dict)
+                ],
                 "model_reference_paths": [
                     str(item["path"])
                     for item in contract.get("required_references", ())
@@ -1007,6 +1629,8 @@ class RuntimeCapabilityController:
                             else None
                         ),
                         "activation": activation.model_dump(mode="json"),
+                        "reference_requirements": existing["reference_requirements"],
+                        "model_reference_paths": existing["model_reference_paths"],
                     },
                 )
             )
@@ -1020,6 +1644,8 @@ class RuntimeCapabilityController:
                 "policy_decision_id": binding.policy_decision_id,
                 "workflow_digest": binding.resolved_workflow.workflow_digest,
                 "activation": activation.model_dump(mode="json"),
+                "reference_requirements": existing.get("reference_requirements", ()),
+                "model_reference_paths": existing.get("model_reference_paths", ()),
             }))
         if binding.resolved_workflow is None:
             return CapabilityExecution(
@@ -1265,6 +1891,15 @@ class RuntimeCapabilityController:
         allowed_ids: set[str],
     ) -> dict[str, Any]:
         loaded = dict(state.get("loaded", {}))
+        # Skill descriptors are governed instruction packages, not executable
+        # business capabilities.  Counting the activated Skill itself against the
+        # Tool/Resource load limit made a Skill declaring exactly max_loaded tools
+        # impossible to activate (24 declared tools + 1 Skill descriptor).
+        capacity_used = sum(
+            1
+            for value in loaded.values()
+            if isinstance(value, dict) and value.get("kind") != "skill"
+        )
         schema_bytes = sum(
             _model_tool_size(item) for item in loaded.values() if isinstance(item, dict)
         )
@@ -1275,7 +1910,13 @@ class RuntimeCapabilityController:
             capability_id = str(item.get("capability_id", ""))
             if capability_id not in allowed_ids:
                 continue
-            if capability_id not in loaded and len(loaded) >= self._max_loaded:
+            was_loaded = capability_id in loaded
+            consumes_capacity = item.get("kind") != "skill"
+            if (
+                not was_loaded
+                and consumes_capacity
+                and capacity_used >= self._max_loaded
+            ):
                 continue
             model_tool = item.get("model_tool")
             if isinstance(model_tool, dict):
@@ -1286,7 +1927,120 @@ class RuntimeCapabilityController:
                     continue
                 schema_bytes = schema_bytes - previous_size + size
             loaded[capability_id] = dict(item)
+            if not was_loaded and consumes_capacity:
+                capacity_used += 1
         return loaded
+
+    async def _read_skill_reference(
+        self,
+        assignment: RuntimeAssignment,
+        call: ToolCall,
+        state: dict[str, Any],
+    ) -> CapabilityExecution:
+        activation_id = str(call.arguments.get("skill_activation_id", ""))
+        path = str(call.arguments.get("path", ""))
+        active = next(
+            (
+                item
+                for item in state.get("active_skills", ())
+                if isinstance(item, dict)
+                and isinstance(item.get("activation"), dict)
+                and item["activation"].get("skill_activation_id") == activation_id
+            ),
+            None,
+        )
+        if active is None:
+            return CapabilityExecution(
+                result={
+                    "status": "denied",
+                    "error_code": "skill_activation_not_active",
+                    "summary": "Reference reads are limited to a currently active Skill.",
+                },
+                state=state,
+            )
+        requirement = next(
+            (
+                item
+                for item in active.get("reference_requirements", ())
+                if isinstance(item, dict) and item.get("path") == path
+            ),
+            None,
+        )
+        if requirement is None:
+            return CapabilityExecution(
+                result={
+                    "status": "denied",
+                    "error_code": "skill_reference_not_declared",
+                    "summary": "The active Skill manifest does not declare this reference path.",
+                },
+                state=state,
+            )
+        if requirement.get("preload") is True:
+            return CapabilityExecution(
+                result={
+                    "status": "denied",
+                    "error_code": "skill_reference_already_preloaded",
+                    "summary": "This reference is already present in trusted Skill context.",
+                },
+                state=state,
+            )
+        binding = active.get("binding")
+        if not isinstance(binding, dict):
+            raise ValueError("Active Skill binding is invalid")
+        text, cache_hit = await self._load_skill_text(
+            assignment,
+            publisher=str(binding["publisher"]),
+            name=str(binding["skill_name"]),
+            version=str(binding["skill_version"]),
+            package_digest=str(binding["package_digest"]),
+            path=path,
+        )
+        size = len(text.encode())
+        declared_limit = int(requirement.get("max_bytes", 64 * 1024))
+        effective_limit = min(declared_limit, self._skill_reference_read_max_bytes)
+        if size > effective_limit:
+            return CapabilityExecution(
+                result={
+                    "status": "denied",
+                    "error_code": "skill_reference_too_large",
+                    "summary": "The declared Skill reference exceeds the Runtime read limit.",
+                    "metadata": {
+                        "path": path,
+                        "size_bytes": size,
+                        "max_bytes": effective_limit,
+                    },
+                },
+                state=state,
+            )
+        content_digest = hashlib.sha256(text.encode()).hexdigest()
+        return CapabilityExecution(
+            result={
+                "status": "success",
+                "content": {
+                    "skill_activation_id": activation_id,
+                    "path": path,
+                    "media_type": str(requirement.get("media_type", "text/markdown")),
+                    "text": text,
+                    "size_bytes": size,
+                    "sha256": content_digest,
+                },
+                "metadata": {"cache_hit": cache_hit},
+            },
+            state=state,
+            events=(
+                NewEvent(
+                    type="context.skill.reference.used",
+                    payload={
+                        "skill_activation_id": activation_id,
+                        "package_digest": str(binding["package_digest"]),
+                        "path": path,
+                        "media_type": str(requirement.get("media_type", "text/markdown")),
+                        "size_bytes": size,
+                        "sha256": content_digest,
+                    },
+                ),
+            ),
+        )
 
     async def _read_resource(
         self,

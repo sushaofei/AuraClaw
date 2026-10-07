@@ -31,15 +31,20 @@ class ApprovalConfiguration(BaseModel):
         interaction: InteractionMode,
         mode: ApprovalMode | None = None,
     ) -> ApprovalConfiguration:
+        non_interactive = interaction == InteractionMode.NON_STREAMING
         return cls(
-            effective_approval_mode=mode
-            or (
+            # A caller without an interactive approval channel must never create a
+            # Run that can become permanently stuck in waiting_for_human. Explicit
+            # approval modes are therefore meaningful only for streaming UI calls.
+            effective_approval_mode=(
                 ApprovalMode.FULL_ACCESS
-                if interaction == InteractionMode.NON_STREAMING
-                else ApprovalMode.REQUEST_APPROVAL
+                if non_interactive
+                else mode or ApprovalMode.REQUEST_APPROVAL
             ),
             interaction_mode=interaction,
-            approval_mode_source="explicit" if mode is not None else "default",
+            approval_mode_source=(
+                "default" if non_interactive else "explicit" if mode is not None else "default"
+            ),
             approval_mode_revision=1,
         )
 

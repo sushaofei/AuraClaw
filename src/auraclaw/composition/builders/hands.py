@@ -97,6 +97,9 @@ from auraclaw.infrastructure.kafka.skill_lifecycle_events import (
     KafkaSkillLifecycleSignalConsumer,
     KafkaSkillLifecycleSignalPublisher,
 )
+from auraclaw.infrastructure.model.capability_embeddings import (
+    OpenAICompatibleCapabilityEmbeddingProvider,
+)
 from auraclaw.infrastructure.observability.stores import PostgresObservabilityStore
 from auraclaw.infrastructure.persistence.postgres_capability_catalog import (
     PostgresCapabilityCatalogStore,
@@ -146,7 +149,9 @@ def build_action_hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
     hands_token = _service_bearer_token(settings, ServiceIdentity.ACTION_HANDS)
     policy = RemotePolicyClient(settings.policy_base_url, bearer_token=hands_token)
     credential_proxy = RemoteCredentialProxy(
-        settings.credential_proxy_base_url, bearer_token=hands_token
+        settings.credential_proxy_base_url,
+        bearer_token=hands_token,
+        timeout=settings.credential_proxy_request_timeout_seconds,
     )
     mcp_egress_client = RemoteMcpEgressClient(
         settings.credential_proxy_base_url, bearer_token=hands_token
@@ -192,6 +197,17 @@ def build_action_hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
     else:
         skill_lifecycle = InMemorySkillLifecycleStore()
         skill_publisher_store = InMemorySkillPublisherStore()
+    capability_embedding_provider = (
+        OpenAICompatibleCapabilityEmbeddingProvider(
+            endpoint=str(settings.capability_search_embedding_url),
+            model=settings.capability_search_embedding_model,
+            dimensions=settings.capability_search_embedding_dimensions,
+            timeout_seconds=settings.capability_search_embedding_timeout_seconds,
+            max_concurrent=settings.capability_search_embedding_max_concurrent,
+        )
+        if settings.capability_search_semantic_enabled
+        else None
+    )
     skill_publishers = SkillPublisherService(skill_publisher_store)
     publisher_trust = SkillPublisherTrustService(skill_publisher_store)
     closeables: tuple[Any, ...] = (
@@ -202,6 +218,7 @@ def build_action_hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         artifact_reader,
         skill_artifacts,
         skill_binding_references,
+        *((capability_embedding_provider,) if capability_embedding_provider is not None else ()),
         *((invocation_store,) if invocation_store is not None else ()),
         *((tool_registry_store,) if tool_registry_store is not None else ()),
         *((hands_metric_store,) if hands_metric_store is not None else ()),
@@ -224,7 +241,19 @@ def build_action_hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         *((fencing_ledger,) if isinstance(fencing_ledger, PostgresFencingTokenLedger) else ()),
     )
     app = _base_service_app(spec, settings, closeables=closeables)
-    capability_catalog = CapabilityCatalog(capability_catalog_store)
+    capability_catalog = CapabilityCatalog(
+        capability_catalog_store,
+        embedding_provider=capability_embedding_provider,
+        metric_writer=hands_metric_store,
+        environment=settings.deployment_profile,
+        semantic_min_similarity=settings.capability_search_semantic_min_similarity,
+        lexical_min_score=settings.capability_search_lexical_min_score,
+        index_embedding_timeout_seconds=(
+            settings.capability_search_index_embedding_timeout_seconds
+        ),
+        search_cache_max_entries=settings.capability_search_cache_max_entries,
+        search_cache_ttl_seconds=settings.capability_search_cache_ttl_seconds,
+    )
     skill_registry = _skill_registry_service(settings, artifacts=artifacts)
     skill_publication, _ = _skill_publication_service(
         settings,
@@ -558,6 +587,7 @@ def build_action_hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         max_concurrent_per_tenant=settings.mcp_reconcile_max_concurrent_per_tenant,
         max_concurrent_per_host=settings.mcp_reconcile_max_concurrent_per_host,
         server_timeout_seconds=settings.mcp_reconcile_server_timeout_seconds,
+        metric_writer=hands_metric_store,
     )
     resource_gateway.set_mcp_readiness(reconciler.is_locally_available)
     app.state.catalog_reconciler = reconciler

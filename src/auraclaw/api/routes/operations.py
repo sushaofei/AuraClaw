@@ -36,7 +36,7 @@ async def metric_snapshot(
     identity: Identity,
     service: Service,
 ) -> dict[str, object]:
-    points = await service.metrics()
+    points = await service.metrics(identity.tenant_id)
     return {
         "tenant_id": identity.tenant_id,
         "metrics": [

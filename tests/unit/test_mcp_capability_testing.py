@@ -109,6 +109,8 @@ def test_read_only_capability_test_invokes_input_and_validates_output() -> None:
 
     assert connector.arguments == {"symbol": "AAPL"}
     assert result["status"] == "passed"
+    assert result["transport_reachable"] is True
+    assert result["business_success"] is True
     assert result["schema_valid"] is True
     assert result["expectation_matched"] is True
     assert result["output"] == {"symbol": "AAPL", "price": 123.45}
@@ -151,6 +153,8 @@ def test_remote_error_is_not_overwritten_by_success_output_schema() -> None:
         )
     )
     assert result["status"] == "failed"
+    assert result["transport_reachable"] is True
+    assert result["business_success"] is False
     assert result["error"] == "Identity context unavailable"
     assert result["schema_valid"] is None
     assert result["output"]["error_code"] == "mcp_tool_error"
@@ -192,6 +196,8 @@ def test_resource_probe_accepts_selected_capability_uri(template: bool) -> None:
         input_payload={"uri": "repo://public/readme"} if template else {},
     ))
     assert result["status"] == "passed"
+    assert result["transport_reachable"] is True
+    assert result["business_success"] is True
     assert connector.resource_uri == "repo://public/readme"
 
 

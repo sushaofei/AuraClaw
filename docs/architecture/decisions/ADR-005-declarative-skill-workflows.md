@@ -26,7 +26,11 @@ Hands Invocation Store 与 Runtime checkpoint，因此可以在不扩大代码�
 - 每个逻辑步骤由 activation、workflow digest 和 step id 生成稳定 invocation/idempotency key。恢复、重试和
   审批续跑复用同一标识，结果未知的写操作不得换 id 盲目重试。
 - `required_references` 显式声明路径、媒体类型和大小。Executor reference 首版只使用 JSON；模型 reference
-  仅在 `preload=true` 时进入有界 trusted prompt，其他内容通过 `skill://` 按需加载。
+  仅在 `preload=true` 时进入有界 trusted prompt。`preload=false` 由模型通过
+  `auraclaw.skills.reference.read` 按需读取；Runtime 只接受当前 active Skill activation、manifest
+  已声明的精确路径，并同时执行声明的 `max_bytes` 与
+  `AURACLAW_RUNTIME_SKILL_REFERENCE_READ_MAX_BYTES` 门禁。模型不能拼接任意 `skill://` URI，
+  也不能跨 activation/package 读取。
 - Workflow 中间结果最多 1 MiB；更大或受限结果应由 Tool/Resource Gateway Artifact 化，Runtime 不保存
   credential、Authorization 或无限增长的原始正文。
 

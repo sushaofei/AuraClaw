@@ -135,7 +135,7 @@ registration lease 内仍活跃时，新进程注册会 fail closed。因此显�
    revision；先迁移再滚动 Action Hands。升级窗口不得混跑会绕过 Catalog CAS 的旧 Reconciler。
    `0052` 增加 Approval request digest/generation/decision metadata 与 transition audit；先迁移 Policy
    数据库，再滚动 Policy 和 Task API。升级窗口不得混跑会无条件覆盖 Approval 终态的旧 Policy 副本。
-   `0053` 是 Action Hands 数据一致性迁移：删除已退役的 `auraclaw-price-insight` Provider，并清除
+   `0053` 是 Action Hands 数据一致性迁移：删除已退役的 `legacy-local-provider`，并清除
    非 active generation 的 Capability 残留；迁移后滚动 Action Hands，确认
    `capability.catalog.backing_missing` 不持续增长。该数据清理不可通过 down migration 恢复，若需恢复
    Provider，必须重新注册并发布经过完整校验的新 snapshot。

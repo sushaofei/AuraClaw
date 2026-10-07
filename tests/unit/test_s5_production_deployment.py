@@ -144,14 +144,19 @@ def test_production_compose_mounts_least_privilege_secrets() -> None:
     assert not any(item.endswith("database_url") for item in secret_sources("agent-runtime"))
     assert secrets["runtime_workload_token"]["file"].endswith("/runtime_workload_token")
     assert secrets["lease_signing_key"]["file"].endswith("/lease_signing_key")
+    identity_facing = {"task-api", "streaming-gateway"}
     assert {
-        "chaintower_workload_token",
+        "upstream_workload_token",
         "agent_context_signing_keys_json",
     } <= secret_sources("task-api")
+    assert {
+        "upstream_workload_token",
+        "agent_context_signing_keys_json",
+    } <= secret_sources("streaming-gateway")
     assert all(
-        "chaintower_workload_token" not in secret_sources(service)
+        "upstream_workload_token" not in secret_sources(service)
         and "agent_context_signing_keys_json" not in secret_sources(service)
-        for service in APPLICATION_SERVICES - {"task-api"}
+        for service in APPLICATION_SERVICES - identity_facing
     )
 
 
@@ -335,8 +340,8 @@ def test_production_preflight_accepts_shared_database_url_and_unique_tokens(
         "OBS_AK=test-obs-access",
         "OBS_SK=test-obs-secret",
         "OBS_REGION=example-region",
-        "AURACLAW_CHAINTOWER_WORKLOAD_TOKEN=ct-" + "t" * 40,
-        'AURACLAW_AGENT_CONTEXT_SIGNING_KEYS_JSON={"k1":"chaintower-agent-context-signing-key-01"}',
+        "AURACLAW_UPSTREAM_WORKLOAD_TOKEN=ct-" + "t" * 40,
+        'AURACLAW_AGENT_CONTEXT_SIGNING_KEYS_JSON={"k1":"upstream-agent-context-signing-key-01"}',
     ]
     lines.extend(
         f"AURACLAW_{name}_WORKLOAD_TOKEN={index:02d}-" + "t" * 40
@@ -439,3 +444,8 @@ def test_model_gateway_mounts_policy_caller_identity_for_auto_review(profile: st
     # Reviewer still reaches the model through Model Gateway, not a provider credential.
     policy = compose.split("  policy:", 1)[1].split("  credential-proxy:", 1)[0]
     assert "MODEL_API_KEY" not in policy
+
+
+def test_production_model_gateway_disables_hidden_reasoning_by_default() -> None:
+    gateway = _render_compose()["services"]["model-gateway"]
+    assert gateway["environment"]["AURACLAW_MODEL_THINKING_ENABLED"] == "false"
