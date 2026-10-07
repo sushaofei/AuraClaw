@@ -185,6 +185,16 @@ def _check_supply_chain(failures: list[str]) -> None:
     ):
         if required not in workflow:
             failures.append(f"release workflow is missing supply-chain gate: {required}")
+    for required in (
+        "prod-like-integration:",
+        "postgres:17.6-alpine@sha256:",
+        "apache/kafka:4.0.0@sha256:",
+        "chrislusf/seaweedfs:3.85@sha256:",
+        "scripts/prod_like_gate.py verify-junit",
+        "--minimum-tests 8",
+    ):
+        if required not in workflow:
+            failures.append(f"release workflow is missing prod-like gate: {required}")
     release_image_workflow = ROOT / ".github/workflows/release-image.yml"
     if not release_image_workflow.is_file():
         failures.append("release image publication workflow is missing")

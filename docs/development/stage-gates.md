@@ -3545,3 +3545,12 @@ Ruff、Mypy（248 文件）、10 条架构合同通过。迁移不适用，部�
 - [x] 所有新增 GitHub Actions 固定完整 commit SHA，发布 job 使用显式最小权限并将证据保留 90 天。
 - [x] 发布和生产部署手册固定 digest 传递、attestation 验证与回滚验证步骤，不允许从 tag 在部署时重新解析。
 - [x] Release gate、Ruff、Mypy、针对性测试和完整测试通过；本阶段作为单一 intentional commit 提交并 push，Issue #104 更新验证证据。
+
+## 生产化 P0-D：prod-like 持久化路径 CI（Issue #104）
+
+- [x] CI 以固定 OCI digest 启动 PostgreSQL、Kafka 与 SeaweedFS S3 兼容服务，不复用开发者环境或隐式外部依赖。
+- [x] CI 自动迁移最新 schema，并执行生产必需的数据库角色授权脚本。
+- [x] prod-like 套件覆盖 PostgreSQL Canonical Event/Projection、PostgreSQL→Kafka lifecycle 广播、Kafka Runtime Event、S3 单段/分段对象和数据库角色矩阵。
+- [x] JUnit 证据要求至少 8 项测试且 failures、errors、skipped 均为零；依赖缺失或配置漂移不能静默跳过。
+- [x] 数据库角色测试改用当前 `AURACLAW_*_DATABASE_URL` 名称，并验证 `auraclaw_task_api` 的 Projection 只读、Hands 读写、Observability 只读及跨域拒绝矩阵。
+- [x] 本地等价 prod-like 拓扑、Release gate、Ruff、Mypy、针对性测试和完整 CI profile 通过；本阶段作为单一 intentional commit 提交并 push，Issue #104 更新验证证据。

@@ -107,6 +107,12 @@ Dockerfile 的 Python 与 uv 基础镜像均固定到 OCI digest，应用依赖�
 `.env.prod` 的镜像引用，格式必须为 `ghcr.io/sushaofei/auraclaw@sha256:<64 hex>`。普通版本 tag、
 Git SHA tag 和 `latest` 都不能作为生产部署输入。
 
+`release-gate` 的 `prod-like-integration` job 使用固定 digest 的 PostgreSQL、Kafka 与 SeaweedFS
+S3 服务，自动迁移最新 schema、安装生产角色矩阵并执行持久化边界用例。其 JUnit 门禁要求至少
+8 项且 `failures=errors=skipped=0`；外部依赖未启动、后端误配或用例被 skip 都会阻断发布。
+该 job 验证的是开源 PostgreSQL 兼容路径；正式 KingBase 版本兼容与托管 OBS 联调仍须在发布候选
+环境单独留证。
+
 ### B1. 前置检查
 
 ```bash
