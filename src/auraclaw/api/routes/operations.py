@@ -1,7 +1,7 @@
 from dataclasses import asdict
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
 from pydantic import AwareDatetime
 
 from auraclaw.api.dependencies import (
@@ -10,6 +10,7 @@ from auraclaw.api.dependencies import (
     get_task_projection,
     request_identity,
 )
+from auraclaw.api.projection_contract import apply_projection_contract
 from auraclaw.contracts.errors import NotFoundError
 from auraclaw.observability.service import ObservabilityService
 from auraclaw.projection.ports import TaskReader
@@ -52,13 +53,27 @@ async def audit_search(
 @router.get("/sessions/{session_id}/timeline")
 async def session_timeline(
     session_id: str,
+    response: Response,
     identity: Identity,
     service: Service,
     reader: Reader,
+    min_version: int | None = Query(default=None, ge=0),
+    if_none_match: str | None = Header(default=None, alias="If-None-Match"),
 ) -> dict[str, object]:
-    if await reader.get_task(identity.tenant_id, session_id) is None:
+    task = await reader.get_task(identity.tenant_id, session_id)
+    if task is None:
         raise NotFoundError(f"Session not found: {session_id}")
-    return await service.timeline(identity.tenant_id, session_id)
+    projection_version = int(str(task["projection_version"]))
+    apply_projection_contract(
+        response,
+        projection_version=projection_version,
+        min_version=min_version,
+        if_none_match=if_none_match,
+    )
+    return {
+        **await service.timeline(identity.tenant_id, session_id),
+        "projection_version": projection_version,
+    }
 
 
 @router.get("/metrics")

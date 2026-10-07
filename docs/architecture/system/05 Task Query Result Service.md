@@ -55,9 +55,12 @@ GET /v1/approvals/{approval_id}
 
 ## 轮询治理
 
-- 支持 `ETag / If-None-Match`，无变化返回 `304`。
-- 返回 `Retry-After`，避免客户端固定高频轮询。
-- 支持 `min_version`；投影尚未追上时返回 `202` 或受控等待。
+- 所有绑定单一 Session 的 Task、Result、Children、Transcript、Activity 与运维 Timeline 查询统一返回
+  `ETag: W/"{projection_version}"` 和 `X-Projection-Version`。
+- 上述查询统一接受 `min_version`；投影尚未追上时返回当前有界快照、`202` 与 `Retry-After: 1`，不得回退
+  扫描 Session Log。版本满足且 `If-None-Match` 命中时返回 `304`。
+- 列表、审计检索和指标不绑定单一 Session，不接受无法正确解释的 Session `min_version`；调用方写后读取应查询
+  已知 `session_id` 的资源。
 - 支持 `GET /v1/tasks/{session_id}/result?wait=true` 与 `POST /v1/tasks/sync`：在 Read Model 上受控等待 **当前 Run 终态**（`completed` / `failed` / `cancelled`）。`waiting_for_human` / `paused` 提前结束等待。超时返回当前快照，不取消任务。等待不得订 Runtime Event / SSE，也不得回退扫描 Session Log。
 - 大列表使用 Cursor Pagination，不使用不稳定 Offset Pagination。
 - Root 查询默认返回聚合结果，Child 详情显式查询。
@@ -104,10 +107,11 @@ large_response_total
 - 已实现任务列表/详情、Children、Result、有界等待、Transcript 与 Activity；普通 Task/Result 从 Projection 读取，
   Transcript/Activity 明确从 Canonical Events 构建解释性视图。
 - 同步结果等待支持完成、失败、取消、等待审批、超时与容量耗尽的明确响应语义。
+- 单 Session 查询共享同一 read-your-writes HTTP 契约；Result 未终态使用 `Retry-After: 2`，与投影落后的
+  `Retry-After: 1` 明确区分。
 
 ## 现有缺陷与待完善
 
-- `min_version`/read-your-writes 的统一 HTTP 契约尚未覆盖所有查询；不同 endpoint 的 lag 表达仍需收敛。
 - Artifact 当前主要返回引用；面向外部用户的统一下载、范围读取、预览和授权 URL 契约不完整。
 - Transcript/Activity 按事件读取并即时构建，超长 Session 的分页成本、缓存与预计算策略仍需验证。
-- 待补：ETag/条件请求、跨副本等待容量治理、结果 schema 版本协商和大 Session 性能测试。
+- 待补：跨副本等待容量治理、结果 schema 版本协商和大 Session 性能测试。

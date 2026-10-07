@@ -552,7 +552,13 @@ curl -sS -X POST http://127.0.0.1:8000/v1/tasks \
 权威 **Session 投影**，不是实时流。
 
 查询参数：`min_version`（可选）。投影版本不够时 **202**，并带 `Retry-After: 1`。  
-响应头：`ETag: W/"{projection_version}"`。Run 未终态时还会给 `Retry-After: 2`。`If-None-Match` 命中且版本够则 **304**。
+响应头：`ETag: W/"{projection_version}"`、`X-Projection-Version`。Run 未终态时还会给
+`Retry-After: 2`。`If-None-Match` 命中且版本够则 **304**。
+
+同一契约适用于 `/result`、`/children`、`/transcript`、`/activity` 和
+`/v1/operations/sessions/{session_id}/timeline`。投影落后时 body 仍是当前有界快照；客户端必须按
+`Retry-After` 重试，不能把 202 当作目标版本已经可见。任务列表、审计检索和指标不绑定单一 Session，
+因此不接受 Session `min_version`。
 
 ```json
 {
@@ -594,7 +600,8 @@ Run：`pending` / `runnable` / `running` / `waiting_for_human` / `paused` / `ret
 
 ### `GET /v1/tasks/{session_id}/result`
 
-**结果权威源。** 投影未追上或 Run 未终态 → **202** + `Retry-After: 2`，body 仍返回当前快照。
+**结果权威源。** 投影未追上 → **202** + `Retry-After: 1`；Run 未终态 → **202** +
+`Retry-After: 2`。两种情况 body 均返回当前快照。
 
 ```json
 {
@@ -616,7 +623,9 @@ Run：`pending` / `runnable` / `running` / `waiting_for_human` / `paused` / `ret
 
 这里的 `status` 是 **Run**，`session_status` 才是 Session。流式内容与这里不一致时，以这里为准。
 
-可选 `wait=true`（及 `timeout_seconds`）会在 Query 侧受控等待到 Run 终态、人审/暂停或超时，响应形状与 `POST /v1/tasks/sync` 相同。未传 `wait` 时行为不变：立即返回当前快照，未就绪为 202。`wait=true` 时不使用 `If-None-Match` / `304`。
+可选 `wait=true`（及 `timeout_seconds`）会在 Query 侧受控等待到 Run 终态、人审/暂停或超时，响应形状与
+`POST /v1/tasks/sync` 相同。未传 `wait` 时行为不变：立即返回当前快照，未就绪为 202。等待返回终态且
+`If-None-Match` 命中时可返回 304；若仍未满足 `min_version`，版本保护优先并返回 202。
 
 ### `GET /v1/tasks/{session_id}/transcript`
 

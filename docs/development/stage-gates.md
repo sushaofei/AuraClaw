@@ -3645,3 +3645,13 @@ Ruff、Mypy（248 文件）、10 条架构合同通过。迁移不适用，部�
 - [x] 环境模板明确 TTL、heartbeat、drain timeout 与 retry delay，并校验 TTL 大于两倍 heartbeat。
 - [x] 架构真源、横向恢复与生产部署手册明确摘流、接管、游标重连和 Result API 最终事实边界。
 - [x] Release gate、Ruff、Mypy、97 项通过且 3 项因本机无 PostgreSQL 跳过的针对性测试，以及完整测试（914 passed、69 skipped）通过；本阶段作为单一 intentional commit 提交并 push，Issue #104 更新验证证据。
+
+## 生产化 P1-E：统一 read-your-writes / min_version 契约（Issue #104）
+
+- [x] Task、Result、Children、Transcript、Activity 与 Session Timeline 的单 Session 查询统一接受非负 `min_version`。
+- [x] 单 Session 查询统一返回弱 ETag 与 `X-Projection-Version`；版本不足返回当前有界快照、202 和 `Retry-After: 1`。
+- [x] 版本满足且 `If-None-Match` 命中时返回 304；Result 未终态的 `Retry-After: 2` 与投影 lag 明确区分。
+- [x] `wait=true` Result 返回后仍应用版本保护；未满足 `min_version` 时 202 优先于终态、暂停或审批结果。
+- [x] Children 响应补充 root `projection_version`，Transcript、Activity 和 Timeline 保持 body/header 版本一致。
+- [x] 列表、审计检索和指标不伪造单 Session 版本；写后读调用方使用已知 session id 查询对应资源。
+- [x] Release gate、Ruff、Mypy、40 项针对性测试及完整测试（916 passed、69 skipped）通过；本阶段作为单一 intentional commit 提交并 push，Issue #104 更新验证证据。
