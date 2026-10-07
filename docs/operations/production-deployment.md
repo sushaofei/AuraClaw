@@ -61,7 +61,8 @@ gh attestation verify "oci://${AURACLAW_IMAGE}" --repo sushaofei/AuraClaw
 uv run python scripts/materialize_compose_secrets.py \
   --env-file .env.prod --output-dir .runtime/compose-secrets
 
-uv run python scripts/compose_preflight.py --env-file .env.prod
+uv run python scripts/compose_preflight.py --env-file .env.prod \
+  --readiness-evidence /secure/release-evidence/production-readiness.json
 
 docker compose --env-file .env.prod \
   -f compose.prod.yml --profile migrate config --quiet
@@ -237,6 +238,46 @@ docker compose --env-file .env.prod -f compose.prod.yml up -d agent-runtime
 故障恢复后执行 `auraclaw operations status`，并按需使用 projection rebuild、projection/
 delivery redrive。任何需要清空 DLQ、缩短 retention 或删除 Artifact 的操作都要记录 tenant、
 actor、command id、correlation/causation 和审批依据。
+
+### 7.1 恢复、容量与 SLO 证据门禁
+
+真实演练证据保存在受控发布证据库，不提交生产地址、租户标识、凭据或原始业务 Payload。先复制
+`deploy/production-readiness.evidence.example.json`，完成全部场景后再运行：
+
+```bash
+uv run python scripts/production_readiness_gate.py \
+  --evidence /secure/release-evidence/production-readiness.json
+
+uv run python scripts/compose_preflight.py --env-file .env.prod \
+  --readiness-evidence /secure/release-evidence/production-readiness.json
+```
+
+示例文件故意保持 `pending` 和零 digest，必须校验失败。证据必须绑定本次完整 commit、不可变镜像
+digest、实际环境、操作员和带时区的起止时间；每项 `evidence_refs` 指向脱敏日志/报表及其 SHA-256。
+缺任一场景、状态非 passed、容量余量不足或 SLO 越界都会阻断切流。
+
+演练按以下顺序进行，任一步失败立即恢复流量并保留现场：
+
+1. 在隔离恢复库执行 KingBase/PostgreSQL 一致性备份并恢复，运行 `migrate check --target 0067`，抽样核对
+   Canonical Session、Projection、Approval、Invocation、Audit 与 Artifact metadata；对象存储版本/校验和
+   同步核对。不得用生产库本身充当“恢复目标”。
+2. 在恢复库对最新可逆迁移执行 `0067_bounded_metric_snapshot.down.sql`，验证旧镜像只读/回滚契约，再重新
+   `migrate up --target 0067`。任何 destructive migration 必须采用向前补偿，不能把 down SQL 直接用于生产。
+3. 停止隔离环境消费者，记录 Kafka topic/partition/offset，复制 consumer group 后从记录 offset 重放；Runtime
+   Event 只核对 SSE/replay 行为，不能据此补写业务结果。Skill lifecycle 重放必须得到相同 generation/digest。
+4. 在空 Projection schema 或隔离租户执行 `auraclaw projection rebuild --tenant TENANT`，重建前后对比任务、
+   审批、协作视图的稳定摘要；poison event 必须先隔离、修复再显式 redrive。
+5. 同时运行 blue/green，完成 canary 后切流；blue 摘流至少 75 秒，现有 SSE 用 `Last-Event-ID` 在 green
+   接管，未完成连接不得产生重复 Canonical command、工具副作用或 Delivery。
+6. 在目标峰值负载持续至少 30 分钟，记录吞吐、P50/P95/P99、CPU、内存、数据库池、Kafka lag、队列拒绝与
+   外部配额。门禁保留至少 30% CPU/数据库池余量、20% 内存余量且 queue rejection 为零。
+7. 逐项注入单副本 kill、数据库短断、Kafka 暂停、Vault/对象存储/模型 5xx、告警接收端不可用；记录检测、
+   摘流、恢复时间和 side-effect 对账。不得同时注入多个故障掩盖因果。
+
+SLO 数值由 `production_readiness_gate.py` 固定：Canonical append 可用性至少 99.9%、P95 小于等于
+100 ms，Projection lag P95 小于等于 2 秒、Task start P95 小于等于 5 秒、Runtime recovery P95
+小于等于 30 秒、SSE P95 小于等于 1 秒、Delivery 60 秒成功率至少 99%，unknown/duplicate side
+effect 必须为零。修改门限必须走架构与运维评审，不能在单次证据文件中放宽。
 
 Owner Admin 操作先持久 claim 再执行。重复 `operation_id` 在 active claim 期间返回 `running`，完成后返回
 同一结果；同 ID 不同参数返回 conflict。若 owner 在结果落库前失联，claim 到期后状态变为

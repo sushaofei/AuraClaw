@@ -122,6 +122,11 @@ def main() -> int:
         default=None,
         help="Compose file (default: compose.test.yml for .env.test, else compose.prod.yml)",
     )
+    parser.add_argument(
+        "--readiness-evidence",
+        default=None,
+        help="Validated production drill/SLO evidence required before a production cutover",
+    )
     args = parser.parse_args()
     env_path = Path(args.env_file)
     compose_path = (
@@ -226,6 +231,19 @@ def main() -> int:
     )
     if completed.returncode:
         failures.append("docker compose config validation failed")
+    if args.readiness_evidence:
+        readiness = subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "scripts/production_readiness_gate.py"),
+                "--evidence",
+                str(args.readiness_evidence),
+            ],
+            cwd=ROOT,
+            check=False,
+        )
+        if readiness.returncode:
+            failures.append("production readiness evidence validation failed")
     if failures:
         print("Compose preflight failed")
         for failure in failures:

@@ -3590,3 +3590,13 @@ Ruff、Mypy（248 文件）、10 条架构合同通过。迁移不适用，部�
 - [x] 蓝绿切流先摘流再等待 75 秒，Nginx 优雅退出窗口提升为 90 秒；禁止代理自动重放非幂等写请求。
 - [x] 静态部署回归覆盖默认 bind address、资源/安全边界和完整 ingress 契约；运行时本地 ingress 回归保持通过。
 - [x] Release gate、Ruff、Mypy、38 项针对性测试及完整测试（893 passed、68 skipped）通过；本阶段作为单一 intentional commit 提交并 push，Issue #104 更新验证证据。
+
+## 生产化 P0-H：恢复、容量与 SLO 证据门禁（Issue #104）
+
+- [x] 机器门禁要求双集群切流、连接 drain、数据库备份恢复、迁移回滚、Kafka 重放、Projection 重建、容量基线和故障注入八类真实场景。
+- [x] 证据绑定实际环境、完整 commit、不可变镜像 digest、操作员、时段和外部证据摘要；模板故意不可通过。
+- [x] SLO 固定覆盖 Canonical append、Projection lag、Task start、Runtime recovery、SSE、Delivery 与重复/未知副作用。
+- [x] 容量门禁要求目标吞吐、CPU/数据库池至少 30% 余量、内存至少 20% 余量且队列拒绝为零。
+- [x] Compose preflight 可串联真实 readiness evidence；运维手册明确隔离恢复、可逆迁移、Kafka offset 和 Projection 对账边界。
+- [x] 单元测试覆盖完整证据通过、缺失场景、占位值、SLO 越界和 CLI fail-closed；真实生产演练仍须在获得环境后执行，未执行前不得勾选 #104 对应两项。
+- [x] Release gate、Ruff、Mypy、38 项针对性测试及完整测试（896 passed、68 skipped）通过；本阶段作为单一 intentional commit 提交并 push。
