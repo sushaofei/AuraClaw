@@ -163,7 +163,7 @@ jobs:
           uv run python scripts/prod_like_gate.py wait
           --endpoint 127.0.0.1:5432
           --endpoint 127.0.0.1:9092
-          --endpoint 127.0.0.1:8333
+          --http-url http://127.0.0.1:8333/
       - name: Migrate schema and install production role matrix
         run: |
           uv run auraclaw migrate up --directory migrations

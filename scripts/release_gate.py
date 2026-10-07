@@ -192,6 +192,7 @@ def _check_supply_chain(failures: list[str]) -> None:
         "chrislusf/seaweedfs:3.85@sha256:",
         'NO_PROXY: "localhost,127.0.0.1,::1"',
         "SEAWEEDFS_HOST: 127.0.0.1",
+        "--http-url http://127.0.0.1:8333/",
         "docker logs prod-like-seaweedfs",
         "scripts/prod_like_gate.py verify-junit",
         "--minimum-tests 8",

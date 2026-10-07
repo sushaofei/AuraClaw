@@ -3559,4 +3559,5 @@ Ruff、Mypy（248 文件）、10 条架构合同通过。迁移不适用，部�
 
 - [x] 根据首次 GitHub Actions 实跑结果，将本机 PostgreSQL、Kafka、SeaweedFS 连接固定为 IPv4 loopback，并设置 `NO_PROXY`，避免托管 Runner 代理截获预签名 S3 请求。
 - [x] prod-like 作业失败时输出 SeaweedFS 容器诊断日志，作业结束时无条件清理临时容器。
+- [x] SeaweedFS 就绪探针要求 S3 端口返回完整 HTTP 响应，不能以监听 socket 代替服务就绪。
 - [x] Release gate、Ruff、Mypy、针对性测试与完整 CI profile 通过并推送；GitHub Actions `prod-like-integration` 复跑状态单独留证。

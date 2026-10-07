@@ -4,6 +4,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+import scripts.prod_like_gate as prod_like_gate
+
 ROOT = Path(__file__).resolve().parents[2]
 GATE = ROOT / "scripts/prod_like_gate.py"
 
@@ -75,3 +78,36 @@ def test_prod_like_report_rejects_missing_coverage(tmp_path: Path) -> None:
     )
     assert result.returncode == 1
     assert "expected at least 8" in result.stdout
+
+
+def test_http_readiness_requires_a_complete_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts = 0
+
+    class _Response:
+        def read(self, _: int) -> bytes:
+            return b"x"
+
+    class _Connection:
+        def __init__(self, host: str, port: int, timeout: float) -> None:
+            assert (host, port, timeout) == ("127.0.0.1", 8333, 2)
+
+        def request(self, method: str, target: str) -> None:
+            nonlocal attempts
+            attempts += 1
+            assert (method, target) == ("GET", "/status")
+            if attempts == 1:
+                raise ConnectionResetError
+
+        def getresponse(self) -> _Response:
+            return _Response()
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(prod_like_gate.http.client, "HTTPConnection", _Connection)
+    monkeypatch.setattr(prod_like_gate.time, "sleep", lambda _: None)
+
+    prod_like_gate.wait_for_http_urls(("http://127.0.0.1:8333/status",), timeout=1)
+    assert attempts == 2

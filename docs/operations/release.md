@@ -112,7 +112,8 @@ S3 服务，自动迁移最新 schema、安装生产角色矩阵并执行持久�
 8 项且 `failures=errors=skipped=0`；外部依赖未启动、后端误配或用例被 skip 都会阻断发布。
 Runner 上的环回依赖统一使用 `127.0.0.1`，并显式加入 `NO_PROXY`，防止托管
 Runner 注入的 HTTP 代理截获本机预签名 S3 请求。对象存储测试失败时输出容器日志，随后
-无条件清理临时容器。
+无条件清理临时容器。SeaweedFS 的就绪条件是 S3 端口返回完整 HTTP 响应，而不是仅能建立
+TCP 连接；这可避免 master、volume、filer 仍在串行启动时提前运行对象用例。
 该 job 验证的是开源 PostgreSQL 兼容路径；正式 KingBase 版本兼容与托管 OBS 联调仍须在发布候选
 环境单独留证。
 
