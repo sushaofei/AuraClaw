@@ -2,7 +2,7 @@
 name: auraclaw
 
 x-auraclaw-service: &auraclaw-service
-  image: ${AURACLAW_IMAGE:-ghcr.io/example/auraclaw:replace-with-immutable-sha}
+  image: ${AURACLAW_IMAGE:-ghcr.io/sushaofei/auraclaw@sha256:0000000000000000000000000000000000000000000000000000000000000000}
   user: "10001:10001"
   read_only: true
   init: true

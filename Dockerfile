@@ -16,6 +16,13 @@ RUN uv sync --locked --no-dev --no-editable
 
 FROM python:3.13-slim@sha256:bf44cdfcb76cd3b41e879bc058fc37ec5872002ccfde7fcb765e218cde0cd79c
 
+ARG AURACLAW_VERSION=development
+ARG AURACLAW_REVISION=unknown
+LABEL org.opencontainers.image.title="AuraClaw" \
+    org.opencontainers.image.version="$AURACLAW_VERSION" \
+    org.opencontainers.image.revision="$AURACLAW_REVISION" \
+    org.opencontainers.image.source="https://github.com/sushaofei/AuraClaw"
+
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1

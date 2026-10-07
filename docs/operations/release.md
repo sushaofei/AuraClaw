@@ -101,6 +101,12 @@ Dockerfile 的 Python 与 uv 基础镜像均固定到 OCI digest，应用依赖�
 `uv.lock` 和扫描证据；最终运行镜像删除 pip/ensurepip 等安装工具。禁止临时改回可变 tag 或
 `pip install` 绕过锁文件。未修复项一旦上游发布修复，下一次门禁即会转为阻断项。
 
+正式发布由与 `pyproject.toml` 版本一致的语义版本 tag 触发 `release-image` 工作流。该工作流在
+推送 GHCR 前重新执行完整质量与供应链门禁；推送后以 GitHub OIDC/Sigstore 签署 SLSA provenance
+和 CycloneDX SBOM attestation，并立即验证。workflow 产出的 `image-reference.txt` 是唯一可进入
+`.env.prod` 的镜像引用，格式必须为 `ghcr.io/sushaofei/auraclaw@sha256:<64 hex>`。普通版本 tag、
+Git SHA tag 和 `latest` 都不能作为生产部署输入。
+
 ### B1. 前置检查
 
 ```bash
@@ -110,13 +116,16 @@ docker compose version    # Compose v2
 docker network inspect auraclaw-platform >/dev/null 2>&1 || \
   docker network create auraclaw-platform
 
-# 镜像已就绪（digest 或不可变 tag）
-docker image inspect "${AURACLAW_IMAGE:-auraclaw:s5}" >/dev/null
+# 镜像引用与签名来源均已验证
+uv run python scripts/release_image_contract.py --image "$AURACLAW_IMAGE"
+gh attestation verify "oci://${AURACLAW_IMAGE}" --repo sushaofei/AuraClaw
+docker pull "$AURACLAW_IMAGE"
 ```
 
 确认：
 
-1. 若尚无 `.env.prod`：`cp .env.prod.example .env.prod`，填入不可变镜像与真实密钥（0600，不进 Git）
+1. 若尚无 `.env.prod`：`cp .env.prod.example .env.prod`，用 workflow 的 `image-reference.txt`
+   替换全零 digest，并填入真实密钥（0600，不进 Git）
 2. KingBase DB 角色已按 `deploy/postgres/roles.sql` 的权限意图授权
 3. Kafka / OBS / Vault / 模型出口可从 `auraclaw-platform` 访问
 4. Secret **不**写进 Compose、镜像、命令行
@@ -200,7 +209,7 @@ curl --fail http://127.0.0.1:8080/health/ready
 见 [MCP 升级与回滚](./mcp-annotation-upgrade.md)。启动检查拒绝账本与镜像不一致。
 
 ```bash
-# 1. 把 .env.prod 里 AURACLAW_IMAGE 指回上一 digest/tag
+# 1. 验证上一发布物的 attestation，再把 .env.prod 里的 AURACLAW_IMAGE 指回上一 digest
 # 2. 重新拉起
 docker compose --env-file .env.prod \
   -f compose.prod.yml up -d --force-recreate --wait --remove-orphans

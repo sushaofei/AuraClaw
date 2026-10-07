@@ -3534,3 +3534,14 @@ Ruff、Mypy（248 文件）、10 条架构合同通过。迁移不适用，部�
 - [x] SBOM、依赖审计与两类镜像扫描证据保留 30 天。
 - [x] Release gate、Ruff、Mypy、全量测试、容器构建、依赖审计与可修复漏洞镜像阻断扫描全部通过；完整镜像清单保留 44 个暂无修复版本的 Debian 基础层发现。
 - [x] 本阶段作为单一 intentional commit 提交并 push，Issue #104 更新验证证据。
+
+## 生产化 P0-C：不可变发布身份与签名验证（Issue #104）
+
+- [x] 正式镜像仅由与 `pyproject.toml` 版本一致的语义版本 tag 触发发布，发布前重新执行完整质量与供应链门禁。
+- [x] 发布镜像写入 OCI source、version 与 revision 标签，并推送到小写规范化的 GHCR repository。
+- [x] 发布后从 registry 返回值解析唯一 digest，拒绝空 digest、全零占位 digest、普通 tag 和非规范镜像引用。
+- [x] 使用 GitHub OIDC/Sigstore 为镜像生成 SLSA provenance 和 CycloneDX SBOM attestation，并在发布工作流内回读验证。
+- [x] 生产 Compose 和 preflight 只接受 `image@sha256:<64 hex>`；开发/测试仍允许明确的版本或 SHA tag。
+- [x] 所有新增 GitHub Actions 固定完整 commit SHA，发布 job 使用显式最小权限并将证据保留 90 天。
+- [x] 发布和生产部署手册固定 digest 传递、attestation 验证与回滚验证步骤，不允许从 tag 在部署时重新解析。
+- [x] Release gate、Ruff、Mypy、针对性测试和完整测试通过；本阶段作为单一 intentional commit 提交并 push，Issue #104 更新验证证据。

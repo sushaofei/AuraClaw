@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -60,6 +61,16 @@ OBS_REQUIRED = (
     "OBS_SK",
     "OBS_REGION",
 )
+OCI_DIGEST_REFERENCE = re.compile(
+    r"^[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]+)?/"
+    r"[a-z0-9]+(?:[._/-][a-z0-9]+)*@sha256:[0-9a-f]{64}$"
+)
+
+
+def is_immutable_image_reference(value: str) -> bool:
+    if not OCI_DIGEST_REFERENCE.fullmatch(value):
+        return False
+    return value.rsplit("sha256:", 1)[1] != "0" * 64
 
 
 def _compose_file_for_env(env_path: Path) -> Path:
@@ -153,12 +164,15 @@ def main() -> int:
         failures.append("Vault AppRole requires both role_id and secret_id")
 
     image = values["AURACLAW_IMAGE"]
-    if image and (
-        image.endswith(":latest")
-        or "replace-with-immutable-sha" in image
-        or ":" not in image.split("/")[-1]
+    if image and role_scoped_database and not is_immutable_image_reference(image):
+        failures.append(
+            "production AURACLAW_IMAGE must use a fully qualified, non-placeholder "
+            "image@sha256 digest"
+        )
+    elif image and not role_scoped_database and (
+        image.endswith(":latest") or ":" not in image.split("/")[-1]
     ):
-        failures.append("AURACLAW_IMAGE must use an immutable digest or version/SHA tag")
+        failures.append("AURACLAW_IMAGE must use a version or SHA tag")
 
     token_values = [values[name] for name in WORKLOAD_TOKENS if values[name]]
     if any(len(value) < 32 for value in token_values):

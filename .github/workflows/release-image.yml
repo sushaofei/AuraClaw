@@ -1,0 +1,140 @@
+name: release-image
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-image-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff # v6
+        with:
+          enable-cache: true
+      - name: Validate release identity
+        run: python scripts/release_image_contract.py --tag "$GITHUB_REF_NAME"
+      - name: Install locked development environment
+        run: uv sync --extra dev --locked
+      - name: Re-run release quality gates
+        run: |
+          uv run ruff check .
+          uv run mypy src/auraclaw
+          uv run pytest
+          uv run python scripts/release_gate.py
+        env:
+          AURACLAW_STORAGE_BACKEND: memory
+          AURACLAW_RUNTIME_EVENT_BACKEND: memory
+      - name: Prepare release identity and evidence
+        id: identity
+        shell: bash
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          mkdir -p artifacts
+          uv export --quiet --locked --no-dev --no-emit-project --format cyclonedx1.5 --output-file artifacts/auraclaw.cdx.json
+          uv export --quiet --locked --no-dev --no-emit-project --format requirements-txt --output-file artifacts/runtime-requirements.txt
+      - name: Audit locked Python dependencies
+        id: dependency-audit
+        continue-on-error: true
+        run: uvx --from pip-audit==2.10.1 pip-audit --requirement artifacts/runtime-requirements.txt --disable-pip --format json --output artifacts/pip-audit.json
+      - name: Build release image
+        id: image-build
+        run: |
+          docker build \
+            --build-arg "AURACLAW_VERSION=$GITHUB_REF_NAME" \
+            --build-arg "AURACLAW_REVISION=$GITHUB_SHA" \
+            --tag "${{ steps.identity.outputs.image }}:$GITHUB_REF_NAME" .
+      - name: Inventory all high and critical image vulnerabilities
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        with:
+          image-ref: ${{ steps.identity.outputs.image }}:${{ github.ref_name }}
+          version: v0.75.0
+          scanners: vuln
+          format: json
+          output: artifacts/trivy-all.json
+          severity: HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: "0"
+      - name: Block fixable high and critical image vulnerabilities
+        id: image-scan
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        with:
+          image-ref: ${{ steps.identity.outputs.image }}:${{ github.ref_name }}
+          version: v0.75.0
+          scanners: vuln
+          format: sarif
+          output: artifacts/trivy-gate.sarif
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+      - name: Enforce pre-publish supply-chain gates
+        env:
+          DEPENDENCY_AUDIT_OUTCOME: ${{ steps.dependency-audit.outcome }}
+          IMAGE_BUILD_OUTCOME: ${{ steps.image-build.outcome }}
+          IMAGE_SCAN_OUTCOME: ${{ steps.image-scan.outcome }}
+        run: |
+          test "$DEPENDENCY_AUDIT_OUTCOME" = success
+          test "$IMAGE_BUILD_OUTCOME" = success
+          test "$IMAGE_SCAN_OUTCOME" = success
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Push image and resolve registry digest
+        id: push
+        shell: bash
+        run: |
+          tagged="${{ steps.identity.outputs.image }}:$GITHUB_REF_NAME"
+          docker push "$tagged"
+          reference=$(docker image inspect --format='{{index .RepoDigests 0}}' "$tagged")
+          digest="${reference#*@}"
+          uv run python scripts/release_image_contract.py --image "$reference"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          printf '%s\n' "$reference" > artifacts/image-reference.txt
+          printf '%s\n' "$GITHUB_SHA" > artifacts/source-revision.txt
+      - name: Sign build provenance
+        id: provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ steps.identity.outputs.image }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+      - name: Sign SBOM attestation
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ steps.identity.outputs.image }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          sbom-path: artifacts/auraclaw.cdx.json
+          push-to-registry: true
+      - name: Verify published provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh attestation verify "oci://${{ steps.identity.outputs.image }}@${{ steps.push.outputs.digest }}" --repo "$GITHUB_REPOSITORY"
+      - name: Record attestation identity
+        run: printf '%s\n' '${{ steps.provenance.outputs.attestation-url }}' > artifacts/provenance-url.txt
+      - name: Upload release evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-image-${{ github.sha }}
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 90

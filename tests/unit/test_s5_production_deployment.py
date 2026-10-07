@@ -352,7 +352,7 @@ def test_production_preflight_accepts_role_scoped_database_urls_and_unique_token
         "STREAMING_GATEWAY",
     )
     lines = [
-        "AURACLAW_IMAGE=registry.example/auraclaw:sha-0123456789",
+        "AURACLAW_IMAGE=registry.example/auraclaw@sha256:" + "a" * 64,
         "AURACLAW_MIGRATION_DATABASE_URL=postgresql://migration:secret@db/auraclaw",
         "AURACLAW_LEASE_SIGNING_KEY=" + "l" * 48,
         "AURACLAW_MODEL_API_KEY=test-model-secret",
@@ -416,6 +416,65 @@ def test_production_preflight_accepts_role_scoped_database_urls_and_unique_token
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert result.stdout.strip() == "Compose preflight passed"
+
+
+@pytest.mark.parametrize(
+    ("image", "accepted"),
+    [
+        ("ghcr.io/sushaofei/auraclaw@sha256:" + "a" * 64, True),
+        ("registry.example:5000/platform/auraclaw@sha256:" + "f" * 64, True),
+        ("ghcr.io/sushaofei/auraclaw:v0.1.0", False),
+        ("ghcr.io/sushaofei/auraclaw:sha-0123456789", False),
+        ("ghcr.io/sushaofei/auraclaw@sha256:" + "0" * 64, False),
+        ("ghcr.io/sushaofei/AuraClaw@sha256:" + "a" * 64, False),
+    ],
+)
+def test_release_image_contract_accepts_only_canonical_non_placeholder_digest(
+    image: str, accepted: bool
+) -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts/release_image_contract.py"),
+            "--image",
+            image,
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert (result.returncode == 0) is accepted, result.stdout + result.stderr
+
+
+def test_release_tag_must_match_project_version() -> None:
+    accepted = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts/release_image_contract.py"),
+            "--tag",
+            "v0.1.0",
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    rejected = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts/release_image_contract.py"),
+            "--tag",
+            "v0.1.1",
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert accepted.returncode == 0, accepted.stdout + accepted.stderr
+    assert rejected.returncode == 1
+    assert "must equal project version tag 'v0.1.0'" in rejected.stdout
 
 
 def test_compose_secret_materialization_accepts_approle_without_static_token(

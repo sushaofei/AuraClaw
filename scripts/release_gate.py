@@ -137,6 +137,12 @@ def _check_production_compose(failures: list[str]) -> None:
             failures.append(f"{service_name} is missing auraclaw.database-role")
     if "database_url" in secrets:
         failures.append("production Compose still defines a shared database_url secret")
+    image_template = (ROOT / ".env.prod.example").read_text()
+    placeholder_digest = "sha256:" + "0" * 64
+    if f"AURACLAW_IMAGE=ghcr.io/sushaofei/auraclaw@{placeholder_digest}" not in image_template:
+        failures.append("production env template does not require an OCI digest reference")
+    if f"@{placeholder_digest}" not in (ROOT / "compose.prod.yml").read_text():
+        failures.append("production Compose image default is not a fail-closed digest placeholder")
     runtime_environment = services.get("agent-runtime", {}).get("environment", {})
     if runtime_environment.get("AURACLAW_RUNTIME_EVENT_BACKEND") == "memory":
         failures.append("agent-runtime production runtime events cannot use memory")
@@ -179,9 +185,39 @@ def _check_supply_chain(failures: list[str]) -> None:
     ):
         if required not in workflow:
             failures.append(f"release workflow is missing supply-chain gate: {required}")
-    mutable_action = re.search(r"uses:\s+[^\s]+@(v?\d+(?:\.\d+){0,2})\s*(?:#.*)?$", workflow, re.M)
-    if mutable_action:
-        failures.append(f"release workflow uses mutable action tag: {mutable_action.group(0)}")
+    release_image_workflow = ROOT / ".github/workflows/release-image.yml"
+    if not release_image_workflow.is_file():
+        failures.append("release image publication workflow is missing")
+    else:
+        release_image = release_image_workflow.read_text()
+        for required in (
+            "scripts/release_image_contract.py --tag",
+            "docker/login-action@",
+            "actions/attest@",
+            "subject-digest:",
+            "sbom-path: artifacts/auraclaw.cdx.json",
+            "gh attestation verify",
+            "packages: write",
+            "id-token: write",
+            "attestations: write",
+        ):
+            if required not in release_image:
+                failures.append(f"release image workflow is missing contract: {required}")
+    for workflow_path in (ROOT / ".github/workflows").glob("*.yml"):
+        workflow_content = workflow_path.read_text()
+        try:
+            yaml.load(workflow_content, Loader=_UniqueKeyLoader)
+        except (yaml.YAMLError, ValueError) as exc:
+            failures.append(f"invalid workflow YAML {workflow_path.name}: {exc}")
+        mutable_action = re.search(
+            r"uses:\s+[^\s]+@(v?\d+(?:\.\d+){0,2})\s*(?:#.*)?$",
+            workflow_content,
+            re.M,
+        )
+        if mutable_action:
+            failures.append(
+                f"{workflow_path.name} uses mutable action tag: {mutable_action.group(0)}"
+            )
 
 
 def main() -> int:

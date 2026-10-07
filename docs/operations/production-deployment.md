@@ -14,7 +14,8 @@ Docker Compose 不提供 Kubernetes HPA、PDB 或 NetworkPolicy。本方案以�
 ## 2. 前置条件
 
 - Docker Engine 与 Compose v2；
-- 已推送且使用 digest 或不可变 Git SHA 标记的 AuraClaw 镜像；
+- 已由 `release-image` 工作流发布、签署并验证，且以 `image@sha256:<64 hex>` 引用的
+  AuraClaw 镜像；普通 tag（包括 Git SHA tag）不能进入生产 Compose；
 - 生产主存储固定为 KingBase V9 PostgreSQL 兼容模式；migration owner 与 11 个持久化服务
   分别使用独立的 `postgresql+asyncpg://` DSN；
 - migration owner 完成迁移后必须执行 `deploy/postgres/roles.sql`，并由平台分别设置角色密码；
@@ -40,6 +41,19 @@ Credential Proxy 的 production 入口要求外部 Vault 地址和 token，禁�
 Service 要求明确的 SeaweedFS/OBS backend 与对应 access/secret key；`local` 或 `auto` 回退到 local
 会在启动时失败。服务启动完成前会持久 seed 受管 Connector reference；若已有定义冲突则停止启动，
 若引用已撤销则保持撤销，需显式管理员恢复而不是靠重启。
+
+发布镜像只由语义版本 tag（例如 `v0.1.0`）触发。tag 必须与 `pyproject.toml` 的版本完全一致；
+工作流重新运行 Ruff、Mypy、全量测试、release gate、依赖审计和镜像扫描，通过后才推送 GHCR。
+随后 GitHub OIDC/Sigstore 为镜像生成 SLSA provenance 和 CycloneDX SBOM attestation，并在同一
+workflow 内执行一次验证。部署前再次验证目标 digest，且把命令输出与发布证据一并归档：
+
+```bash
+uv run python scripts/release_image_contract.py --image "$AURACLAW_IMAGE"
+gh attestation verify "oci://${AURACLAW_IMAGE}" --repo sushaofei/AuraClaw
+```
+
+验证的 subject digest 必须与 `.env.prod` 完全一致；不得从 tag 重新解析、复制另一 digest，或使用
+`--repo` 指向非 `sushaofei/AuraClaw` 的构建来源。
 
 ## 3. 预检与迁移
 
