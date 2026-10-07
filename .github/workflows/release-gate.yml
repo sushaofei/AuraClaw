@@ -129,8 +129,7 @@ jobs:
       AURACLAW_KINGBASE_ENV_FILE: /dev/null
       # Hosted runners may inject HTTP(S)_PROXY. Keep loopback integration
       # traffic direct so signed S3 requests cannot escape to that proxy.
-      NO_PROXY: localhost,127.0.0.1,::1
-      no_proxy: localhost,127.0.0.1,::1
+      NO_PROXY: "localhost,127.0.0.1,::1"
       AURACLAW_STORAGE_BACKEND: postgres
       AURACLAW_DATABASE_URL: postgresql+asyncpg://auraclaw_migration:prod-like-migration-password@127.0.0.1:5432/auraclaw
       AURACLAW_MIGRATION_DATABASE_URL: postgresql+asyncpg://auraclaw_migration:prod-like-migration-password@127.0.0.1:5432/auraclaw

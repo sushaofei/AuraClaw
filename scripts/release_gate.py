@@ -190,7 +190,7 @@ def _check_supply_chain(failures: list[str]) -> None:
         "postgres:17.6-alpine@sha256:",
         "apache/kafka:4.0.0@sha256:",
         "chrislusf/seaweedfs:3.85@sha256:",
-        "NO_PROXY: localhost,127.0.0.1,::1",
+        'NO_PROXY: "localhost,127.0.0.1,::1"',
         "SEAWEEDFS_HOST: 127.0.0.1",
         "docker logs prod-like-seaweedfs",
         "scripts/prod_like_gate.py verify-junit",
