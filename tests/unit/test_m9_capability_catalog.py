@@ -180,6 +180,61 @@ def test_catalog_filters_tenant_status_kind_permission_and_query() -> None:
     asyncio.run(scenario())
 
 
+def test_catalog_collapses_only_equivalent_skill_publications() -> None:
+    async def scenario() -> None:
+        store = InMemoryCapabilityCatalogStore()
+        catalog = CapabilityCatalog(store)
+        for server_id in ("skill-mirror-a", "skill-mirror-b", "skill-conflict"):
+            await catalog.register_server(
+                McpServerDefinition(
+                    server_id=server_id,
+                    title=server_id,
+                    endpoint=f"https://{server_id}.example/mcp",
+                    status=CapabilityStatus.ACTIVE,
+                    enabled=True,
+                )
+            )
+
+        def skill(capability_id: str, server_id: str, digest: str) -> CapabilityDescriptor:
+            return CapabilityDescriptor(
+                capability_id=capability_id,
+                kind=CapabilityKind.SKILL,
+                server_id=server_id,
+                canonical_name="rag-knowledge-qa",
+                version="1.0.0",
+                content_digest=digest,
+                title="RAG knowledge QA",
+                status=CapabilityStatus.ACTIVE,
+                updated_at=datetime.now(UTC),
+            )
+
+        same_digest = "sha256:" + "a" * 64
+        await catalog.replace_server_capabilities(
+            "skill-mirror-a", (skill("cap-skill-a", "skill-mirror-a", same_digest),)
+        )
+        await catalog.replace_server_capabilities(
+            "skill-mirror-b", (skill("cap-skill-b", "skill-mirror-b", same_digest),)
+        )
+        await catalog.replace_server_capabilities(
+            "skill-conflict",
+            (skill("cap-skill-conflict", "skill-conflict", "sha256:" + "b" * 64),),
+        )
+
+        matches = await catalog.search(
+            tenant_id="tenant-a",
+            canonical_name="rag-knowledge-qa",
+            kinds=(CapabilityKind.SKILL,),
+            limit=10,
+        )
+
+        assert [item.capability_id for item in matches] == [
+            "cap-skill-a",
+            "cap-skill-conflict",
+        ]
+
+    asyncio.run(scenario())
+
+
 def test_catalog_search_and_load_hide_capabilities_without_backing() -> None:
     async def scenario() -> None:
         store = InMemoryCapabilityCatalogStore()
@@ -283,25 +338,25 @@ def test_catalog_search_matches_chinese_query_without_year_token() -> None:
             "java-mcp",
             (
                 _descriptor(
-                    "cap-price-profile",
-                    "procurement.price.dataset.profile",
+                    "cap-stock-profile",
+                    "inventory.stock.dataset.profile",
                     tenant_id="1",
                 ).model_copy(
                     update={
                         "server_id": "java-mcp",
-                        "tags": ("价格洞察", "price_insight"),
-                        "description": "Profile a governed procurement price dataset.",
+                        "tags": ("inventory insights", "inventory_insight"),
+                        "description": "Profile a governed inventory stock dataset.",
                     }
                 ),
             ),
         )
         matches = await catalog.search(
             tenant_id="1",
-            query="价格洞察 2024",
+            query="inventory insights 2024",
             kinds=(CapabilityKind.TOOL,),
             limit=10,
         )
-        assert [item.capability_id for item in matches] == ["cap-price-profile"]
+        assert [item.capability_id for item in matches] == ["cap-stock-profile"]
 
     asyncio.run(scenario())
 
@@ -311,17 +366,25 @@ def test_catalog_search_resolves_mcp_metadata_exact_refs_and_stable_browse() -> 
         store = InMemoryCapabilityCatalogStore()
         catalog = CapabilityCatalog(store)
         server = McpServerDefinition(
-            server_id="pricing-mcp",
+            server_id="inventory-mcp",
             tenant_id="tenant-a",
-            title="价格洞察服务",
-            endpoint="https://pricing.example/mcp",
+            title="inventory insights服务",
+            endpoint="https://inventory.example/mcp",
             status=CapabilityStatus.ACTIVE,
             enabled=True,
-            metadata={"search_aliases": ["采购行情"]},
+            metadata={
+                "search_aliases": ["库存行情"],
+                "search_alias_governance": {
+                    "tenant_id": "tenant-a",
+                    "actor_id": "catalog-admin",
+                    "source": "tenant-catalog",
+                    "revision": 1,
+                },
+            },
         )
         await catalog.register_server(server)
         descriptor = _descriptor(
-            "cap-price", "procurement.price.profile", tenant_id="tenant-a"
+            "cap-stock", "inventory.stock.profile", tenant_id="tenant-a"
         ).model_copy(
             update={
                 "server_id": server.server_id,
@@ -329,33 +392,39 @@ def test_catalog_search_resolves_mcp_metadata_exact_refs_and_stable_browse() -> 
                     "source_type": "mcp",
                     "server_title": server.title,
                     "endpoint": server.endpoint,
-                    "search_aliases": ["采购行情"],
+                    "search_aliases": ["库存行情"],
+                    "search_alias_governance": {
+                        "tenant_id": "tenant-a",
+                        "actor_id": "catalog-admin",
+                        "source": "tenant-catalog",
+                        "revision": 1,
+                    },
                 },
             }
         )
         await catalog.replace_server_capabilities(server.server_id, (descriptor,))
 
-        for query in ("MCP 工具", "价格洞察服务", "采购行情"):
+        for query in ("MCP 工具", "inventory insights服务", "库存行情"):
             matches = await catalog.search(tenant_id="tenant-a", query=query)
-            assert [item.capability_id for item in matches] == ["cap-price"]
+            assert [item.capability_id for item in matches] == ["cap-stock"]
         assert [
             item.capability_id
             for item in await catalog.search(
-                tenant_id="tenant-a", capability_id="cap-price"
+                tenant_id="tenant-a", capability_id="cap-stock"
             )
-        ] == ["cap-price"]
+        ] == ["cap-stock"]
         assert [
             item.capability_id
             for item in await catalog.search(
-                tenant_id="tenant-a", canonical_name="procurement.price.profile"
+                tenant_id="tenant-a", canonical_name="inventory.stock.profile"
             )
-        ] == ["cap-price"]
+        ] == ["cap-stock"]
         assert [
             item.capability_id
             for item in await catalog.search(
-                tenant_id="tenant-a", server_id="pricing-mcp"
+                tenant_id="tenant-a", server_id="inventory-mcp"
             )
-        ] == ["cap-price"]
+        ] == ["cap-stock"]
         repeated = [
             tuple(
                 item.capability_id
@@ -365,7 +434,7 @@ def test_catalog_search_resolves_mcp_metadata_exact_refs_and_stable_browse() -> 
         ]
         assert len(set(repeated)) == 1
         assert descriptor.metadata.get("catalog_generation") is None
-        stored = await catalog.get(tenant_id="tenant-a", capability_id="cap-price")
+        stored = await catalog.get(tenant_id="tenant-a", capability_id="cap-stock")
         assert stored is not None
         assert stored.metadata["catalog_generation"] == 1
 

@@ -14,7 +14,7 @@
 |------|----------|--------------|--------|------|
 | 本地开发 | `.env.dev` | —（`auraclaw serve`） | 本机 PostgreSQL | 非 Docker；`AURACLAW_STORAGE_BACKEND=postgres` |
 | DEV_SERVICE / 测试 | `.env.test` | `compose.test.yml` | 云 KingBase V9 | 部署在 `10.244.16.131`；数据库凭证源为 `.host.env` |
-| 生产 | `.env.prod` | `compose.prod.yml` | 云 KingBase V9 | 数据库凭证源为 `.host.env`，镜像等单独维护 |
+| 生产 | `.env.prod` | `compose.prod.yml` | 云 KingBase V9 | 分服务最小权限 DSN，migration owner 独立 |
 
 不要混用 env。本地开发用 `.env.dev`；服务器测试用 `.env.test`；生产用 `.env.prod`（均来自对应 `.example`，勿提交）。
 
@@ -41,7 +41,7 @@ docker compose version
 
 在本机执行 `./scripts/dev_service_deploy.sh`。脚本在构建后核对镜像要求的迁移版本，
 再进入维护窗口，执行 stop → migrate up → migrate check → up --force-recreate。
-默认目标为 `0063`，不再要求额外传入 `--migrate`。详情见 DEV_SERVICE 部署手册。
+默认目标为 `0071`，不再要求额外传入 `--migrate`。详情见生产部署手册。
 
 ### A3. 验收
 
@@ -88,6 +88,35 @@ docker compose --env-file .env.test -f compose.test.yml down
 
 ## B. 生产发布（`compose.prod.yml`）
 
+### B0. 供应链门禁
+
+只允许发布 `release-gate` 两个 job 均通过的提交。`supply-chain` job 使用 `uv.lock` 生成
+CycloneDX SBOM 和带哈希的运行时依赖清单，以 `pip-audit` 阻断已知 Python 依赖漏洞。Trivy 保存全部
+HIGH/CRITICAL 镜像漏洞清单，并阻断其中已有上游修复版本的漏洞；尚无修复版本的基础层发现继续进入
+证据，不得从清单中隐藏，后续通过更新固定 digest 消除。SBOM、依赖审计和两份镜像扫描报告作为
+GitHub Actions artifact 保留 30 天。
+
+Dockerfile 的 Python 与 uv 基础镜像均固定到 OCI digest，应用依赖必须通过
+`uv sync --locked --no-dev --no-editable` 安装。更新 Python、uv 或依赖时必须在同一变更中更新 digest、
+`uv.lock` 和扫描证据；最终运行镜像删除 pip/ensurepip 等安装工具。禁止临时改回可变 tag 或
+`pip install` 绕过锁文件。未修复项一旦上游发布修复，下一次门禁即会转为阻断项。
+
+正式发布由与 `pyproject.toml` 版本一致的语义版本 tag 触发 `release-image` 工作流。该工作流在
+推送 GHCR 前重新执行完整质量与供应链门禁；推送后以 GitHub OIDC/Sigstore 签署 SLSA provenance
+和 CycloneDX SBOM attestation，并立即验证。workflow 产出的 `image-reference.txt` 是唯一可进入
+`.env.prod` 的镜像引用，格式必须为 `ghcr.io/sushaofei/auraclaw@sha256:<64 hex>`。普通版本 tag、
+Git SHA tag 和 `latest` 都不能作为生产部署输入。
+
+`release-gate` 的 `prod-like-integration` job 使用固定 digest 的 PostgreSQL、Kafka 与 SeaweedFS
+S3 服务，自动迁移最新 schema、安装生产角色矩阵并执行持久化边界用例。其 JUnit 门禁要求至少
+8 项且 `failures=errors=skipped=0`；外部依赖未启动、后端误配或用例被 skip 都会阻断发布。
+Runner 上的环回依赖统一使用 `127.0.0.1`，并显式加入 `NO_PROXY`，防止托管
+Runner 注入的 HTTP 代理截获本机预签名 S3 请求。对象存储测试失败时输出容器日志，随后
+无条件清理临时容器。SeaweedFS 的就绪条件是 S3 端口返回完整 HTTP 响应，而不是仅能建立
+TCP 连接；这可避免 master、volume、filer 仍在串行启动时提前运行对象用例。
+该 job 验证的是开源 PostgreSQL 兼容路径；正式 KingBase 版本兼容与托管 OBS 联调仍须在发布候选
+环境单独留证。
+
 ### B1. 前置检查
 
 ```bash
@@ -97,13 +126,16 @@ docker compose version    # Compose v2
 docker network inspect auraclaw-platform >/dev/null 2>&1 || \
   docker network create auraclaw-platform
 
-# 镜像已就绪（digest 或不可变 tag）
-docker image inspect "${AURACLAW_IMAGE:-auraclaw:s5}" >/dev/null
+# 镜像引用与签名来源均已验证
+uv run python scripts/release_image_contract.py --image "$AURACLAW_IMAGE"
+gh attestation verify "oci://${AURACLAW_IMAGE}" --repo sushaofei/AuraClaw
+docker pull "$AURACLAW_IMAGE"
 ```
 
 确认：
 
-1. 若尚无 `.env.prod`：`cp .env.prod.example .env.prod`，填入不可变镜像与真实密钥（0600，不进 Git）
+1. 若尚无 `.env.prod`：`cp .env.prod.example .env.prod`，用 workflow 的 `image-reference.txt`
+   替换全零 digest，并填入真实密钥（0600，不进 Git）
 2. KingBase DB 角色已按 `deploy/postgres/roles.sql` 的权限意图授权
 3. Kafka / OBS / Vault / 模型出口可从 `auraclaw-platform` 访问
 4. Secret **不**写进 Compose、镜像、命令行
@@ -121,7 +153,7 @@ Secret 目录权限：目录 `0700`，文件 `0600`。
 
 ### B3. 数据库迁移（先于应用）
 
-先准备本次不可变镜像，核对 `migrate latest` 为 `0063`。已有集群升级时先停止所有旧实例；
+先准备本次不可变镜像，核对 `migrate latest` 为 `0071`。已有集群升级时先停止所有旧实例；
 `0058` 删除字段，不允许与旧实例混跑。升级后须按
 [MCP Tool 前缀移除升级](mcp-tool-prefix-upgrade.md) 完成全量对账与各副本路由验证。
 
@@ -136,11 +168,11 @@ docker compose --env-file .env.prod -f compose.prod.yml stop
 
 docker compose --env-file .env.prod \
   -f compose.prod.yml --profile migrate run --rm migrate \
-  migrate up --target 0063 --directory /app/migrations
+  migrate up --target 0071 --directory /app/migrations
 
 docker compose --env-file .env.prod -f compose.prod.yml \
   --profile migrate run --rm migrate migrate check \
-  --target 0063 --directory /app/migrations
+  --target 0071 --directory /app/migrations
 ```
 
 迁移或校验失败时保持停服并排查，禁止跳过检查启动。进程监听前也会只读校验迁移账本的版本和 checksum；
@@ -187,7 +219,7 @@ curl --fail http://127.0.0.1:8080/health/ready
 见 [MCP 升级与回滚](./mcp-annotation-upgrade.md)。启动检查拒绝账本与镜像不一致。
 
 ```bash
-# 1. 把 .env.prod 里 AURACLAW_IMAGE 指回上一 digest/tag
+# 1. 验证上一发布物的 attestation，再把 .env.prod 里的 AURACLAW_IMAGE 指回上一 digest
 # 2. 重新拉起
 docker compose --env-file .env.prod \
   -f compose.prod.yml up -d --force-recreate --wait --remove-orphans
@@ -228,6 +260,7 @@ curl --fail http://127.0.0.1:8080/health/ready
 - `action-hands` 起不来导致 Runtime 无 MCP
 - Policy / Credential fail-open 或 Secret 出现在日志
 - Canary 任务无 Canonical Result / 重复副作用
+- SBOM、依赖审计、镜像扫描缺失或未通过
 
 ---
 
@@ -236,9 +269,10 @@ curl --fail http://127.0.0.1:8080/health/ready
 测试环境完整发布：`./scripts/dev_service_deploy.sh`。
 生产按 B1–B5 执行，不能省略 B3 的停服、迁移与校验步骤。
 
-## Skill / MCP 联合修复发布（0063）
+## Skill / MCP 联合修复发布（0071 基线）
 
-本次迁移目标为 0063；0058 至 0063 涉及 Tool 前缀、审批模式、本地目录 generation 和 Skill 升级清理。
+当前迁移基线为 0071；0058 至 0063 涉及 Tool 前缀、审批模式、本地目录 generation 和 Skill 升级清理，
+0064 至 0071 增加 Runtime 成本预算、Skill admission 清理、持久 Child wakeup、有界指标快照、运维检索、审批治理、Streaming 所有权与 Activity 缓存字段。
 协调发布全部服务，避免严格 DTO 及旧 Runtime 行为混跑。启用新 Hands 的自动清理之前，必须先确认旧 Runtime
 的在途写调用已结束或人工核对其结果；没有 Canonical invocation 记录的旧调用不能自动推断已完成。
 参见 [Skill 升级](skill-upgrade.md)、[工作流恢复](skill-workflow-recovery.md) 和各阶段门禁。

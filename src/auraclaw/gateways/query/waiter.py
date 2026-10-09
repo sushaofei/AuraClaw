@@ -6,7 +6,7 @@ from collections.abc import Awaitable
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
-from auraclaw.contracts.errors import SyncInvokeBusyError
+from auraclaw.contracts.errors import NotFoundError, SyncInvokeBusyError
 from auraclaw.contracts.state import TERMINAL_RUN_STATUSES
 
 WaitOutcome = Literal[
@@ -104,6 +104,7 @@ class TaskResultWaiter:
         session_id: str,
         *,
         timeout_seconds: float,
+        initial_result: dict[str, Any] | None = None,
     ) -> WaitedResult:
         async with self._lock:
             if self._inflight >= self._limit:
@@ -114,6 +115,7 @@ class TaskResultWaiter:
                 tenant_id,
                 session_id,
                 timeout_seconds=timeout_seconds,
+                initial_result=initial_result,
             )
         finally:
             async with self._lock:
@@ -125,12 +127,19 @@ class TaskResultWaiter:
         session_id: str,
         *,
         timeout_seconds: float,
+        initial_result: dict[str, Any] | None = None,
     ) -> WaitedResult:
         deadline = time.monotonic() + max(timeout_seconds, 0.0)
         interval = self._poll_interval
-        last: dict[str, Any] | None = None
+        last = dict(initial_result) if initial_result is not None else None
         while True:
-            last = await self._query.get_result(tenant_id, session_id)
+            try:
+                last = await self._query.get_result(tenant_id, session_id)
+            except NotFoundError:
+                if initial_result is None:
+                    raise
+            if last is None:
+                raise NotFoundError(f"Session not found: {session_id}")
             outcome = classify_result(last)
             if outcome is not None:
                 return WaitedResult(outcome=outcome, result=last)

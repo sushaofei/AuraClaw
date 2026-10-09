@@ -167,6 +167,10 @@ class ApprovalRecord:
     assigned_approvers: tuple[str, ...]
     policy_version: str
     expires_at: datetime
+    required_approvals: int = 1
+    votes: tuple[dict[str, Any], ...] = ()
+    escalation_at: datetime | None = None
+    escalation_level: int = 0
     status: ApprovalStatus = ApprovalStatus.WAITING
     decision: str | None = None
     feedback: str | None = None
@@ -185,6 +189,12 @@ class ApprovalRecord:
             "assigned_approvers": list(self.assigned_approvers),
             "policy_version": self.policy_version,
             "expires_at": self.expires_at.isoformat(),
+            "required_approvals": self.required_approvals,
+            "votes": list(self.votes),
+            "escalation_at": (
+                self.escalation_at.isoformat() if self.escalation_at is not None else None
+            ),
+            "escalation_level": self.escalation_level,
             "status": self.status.value,
         }
 

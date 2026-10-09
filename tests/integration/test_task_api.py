@@ -230,6 +230,138 @@ def test_human_approval_response_enters_through_task_gateway() -> None:
         assert task.json()["projection_version"] == 5
 
 
+def test_quorum_delegation_escalation_and_idempotent_votes() -> None:
+    with TestClient(create_app(profile="task-api")) as client:
+        tenant_id = "tenant-approval-governance"
+        created = client.post(
+            "/v1/tasks",
+            headers={"Idempotency-Key": "approval-governance-task", "X-Tenant-ID": tenant_id},
+            json={"goal": "perform a jointly approved write"},
+        )
+        session_id = created.json()["session_id"]
+        run_id = created.json()["run_id"]
+
+        async def seed_approval() -> None:
+            store = get_event_store()
+            result = await store.append(
+                root_session_id=session_id,
+                session_id=session_id,
+                run_id=run_id,
+                context=CommandContext(
+                    command_id="runtime-quorum-approval",
+                    tenant_id=tenant_id,
+                    actor=Actor(type="runtime", id="runtime-1"),
+                    correlation_id=run_id,
+                    expected_version=2,
+                    operation="runtime.approval.requested",
+                ),
+                events=[
+                    NewEvent(
+                        type="approval.requested",
+                        payload={
+                            "approval_id": "apr-quorum",
+                            "run_id": run_id,
+                            "action_digest": "digest-quorum",
+                            "tool_name": "controlled-write",
+                            "redacted_arguments": {"target": "release"},
+                            "risk": "critical",
+                            "reason": "two-person control",
+                            "expected_effect": "write",
+                            "allowed_decisions": ["approved", "rejected"],
+                            "assigned_approvers": ["approver-1", "approver-2"],
+                            "policy_version": "policy-v2",
+                            "required_approvals": 2,
+                            "escalation_at": (
+                                datetime.now(UTC) + timedelta(minutes=15)
+                            ).isoformat(),
+                            "expires_at": (
+                                datetime.now(UTC) + timedelta(hours=1)
+                            ).isoformat(),
+                            "status": "waiting",
+                        },
+                    )
+                ],
+                command_result={"approval_id": "apr-quorum"},
+            )
+            await get_task_projection().project(result.events)
+            await get_approval_projection().project(result.events)
+
+        asyncio.run(seed_approval())
+        first_headers = {
+            "Idempotency-Key": "approval-vote-1",
+            "X-Tenant-ID": tenant_id,
+            "X-Actor-ID": "approver-1",
+            "X-Expected-Version": "3",
+        }
+        first = client.post(
+            f"/v1/sessions/{session_id}/approvals/apr-quorum/responses",
+            headers=first_headers,
+            json={"decision": "approved", "feedback": "first review passed"},
+        )
+        retry = client.post(
+            f"/v1/sessions/{session_id}/approvals/apr-quorum/responses",
+            headers=first_headers,
+            json={"decision": "approved", "feedback": "first review passed"},
+        )
+        assert first.status_code == 202
+        assert first.json()["decision"] == "waiting"
+        assert first.json()["status"] == "waiting_for_human"
+        assert retry.json() == first.json()
+
+        delegated = client.post(
+            f"/v1/sessions/{session_id}/approvals/apr-quorum/delegations",
+            headers={
+                "Idempotency-Key": "approval-delegate-1",
+                "X-Tenant-ID": tenant_id,
+                "X-Actor-ID": "approver-2",
+                "X-Expected-Version": "5",
+            },
+            json={"to_approver": "approver-3", "reason": "out of office"},
+        )
+        assert delegated.status_code == 202
+        assert delegated.json()["assigned_approvers"] == ["approver-1", "approver-3"]
+
+        escalated = client.post(
+            f"/v1/sessions/{session_id}/approvals/apr-quorum/escalations",
+            headers={
+                "Idempotency-Key": "approval-escalate-1",
+                "X-Tenant-ID": tenant_id,
+                "X-Actor-ID": "approver-1",
+                "X-Expected-Version": "6",
+            },
+            json={"approvers": ["approver-4"], "reason": "security review"},
+        )
+        assert escalated.status_code == 202
+        assert escalated.json()["escalation_level"] == 1
+
+        final = client.post(
+            f"/v1/sessions/{session_id}/approvals/apr-quorum/responses",
+            headers={
+                "Idempotency-Key": "approval-vote-2",
+                "X-Tenant-ID": tenant_id,
+                "X-Actor-ID": "approver-3",
+                "X-Expected-Version": "7",
+            },
+            json={"decision": "approved", "feedback": "second review passed"},
+        )
+        assert final.status_code == 202
+        assert final.json()["decision"] == "approved"
+        assert final.json()["status"] == "runnable"
+
+        projected = asyncio.run(get_approval_projection().get(tenant_id, "apr-quorum"))
+        assert projected is not None
+        assert projected.status.value == "approved"
+        assert [vote["actor_id"] for vote in projected.votes] == [
+            "approver-1",
+            "approver-3",
+        ]
+        assert projected.assigned_approvers == (
+            "approver-1",
+            "approver-3",
+            "approver-4",
+        )
+
+
 def test_create_records_source_and_lists_root_tasks() -> None:
     with TestClient(create_app(profile="task-api")) as client:
         headers = {"X-Tenant-ID": "tenant-list"}

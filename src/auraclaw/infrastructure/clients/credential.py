@@ -26,9 +26,16 @@ class RemoteCredentialProxy:
         *,
         bearer_token: str,
         service_identity: ServiceIdentity = ServiceIdentity.ACTION_HANDS,
+        timeout: float = 120.0,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
-        self._client = httpx.AsyncClient(base_url=base_url, transport=transport)
+        if timeout <= 0:
+            raise ValueError("credential proxy timeout must be positive")
+        self._client = httpx.AsyncClient(
+            base_url=base_url,
+            transport=transport,
+            timeout=timeout,
+        )
         self._contract = HttpContractClient(self._client, bearer_token=bearer_token)
         self._identity = service_identity
         self._redactor = SecretRedactor()
@@ -51,26 +58,47 @@ class RemoteCredentialProxy:
         del adapter
         if not policy_decision_id:
             raise CredentialAccessError("credential invocation requires policy decision")
-        response = await self._contract.call(
-            "/internal/v1/credentials/invoke",
-            CredentialInvokeRequest(
-                context=InternalRequestContext(
-                    tenant_id=tenant_id,
-                    service_identity=self._identity,
-                    request_id=str(uuid.uuid4()),
-                    correlation_id=session_id,
-                    causation_id=policy_decision_id,
+        try:
+            response = await self._contract.call(
+                "/internal/v1/credentials/invoke",
+                CredentialInvokeRequest(
+                    context=InternalRequestContext(
+                        tenant_id=tenant_id,
+                        service_identity=self._identity,
+                        request_id=str(uuid.uuid4()),
+                        correlation_id=session_id,
+                        causation_id=policy_decision_id,
+                    ),
+                    session_id=session_id,
+                    credential_ref=credential_ref,
+                    operation=operation,
+                    target=tool_name,
+                    method=operation,
+                    policy_decision_id=policy_decision_id,
+                    request=request,
                 ),
-                session_id=session_id,
-                credential_ref=credential_ref,
-                operation=operation,
-                target=tool_name,
-                method=operation,
-                policy_decision_id=policy_decision_id,
-                request=request,
-            ),
-            CredentialInvokeResponse,
-        )
+                CredentialInvokeResponse,
+            )
+        except httpx.TimeoutException as exc:
+            if operation == "mcp.invoke":
+                raise ConnectorExecutionError(
+                    "MCP invocation timed out at credential boundary",
+                    code="mcp_timeout",
+                    status="timeout",
+                    side_effect_status="unknown",
+                    metadata={"stage": "credential_proxy"},
+                ) from exc
+            raise CredentialAccessError("credential proxy request timed out") from exc
+        except httpx.TransportError as exc:
+            if operation == "mcp.invoke":
+                raise ConnectorExecutionError(
+                    "MCP credential boundary is unavailable",
+                    code="mcp_transport_error",
+                    status="error",
+                    side_effect_status="unknown",
+                    metadata={"stage": "credential_proxy"},
+                ) from exc
+            raise CredentialAccessError("credential proxy is unavailable") from exc
         if response.status == "error" and operation == "mcp.invoke":
             body = response.response
             raise ConnectorExecutionError(

@@ -27,6 +27,7 @@ from auraclaw.contracts.capabilities import (
     McpAuthStrategy,
     McpOAuthConfiguration,
     McpServerDefinition,
+    McpTrustLevel,
 )
 from auraclaw.contracts.errors import PolicyDeniedError
 from auraclaw.contracts.hands import CapabilitySnapshot, HandsTrustedContext
@@ -160,7 +161,11 @@ class _RemoteCredentials:
                         "name": "outside.issue.get",
                         "inputSchema": {"type": "object"},
                     },
-                    {"name": "lookup", "inputSchema": {"type": "object"}},
+                    {
+                        "name": "lookup",
+                        "inputSchema": {"type": "object"},
+                        "annotations": {"readOnlyHint": True},
+                    },
                 ],
             )
         if method == "resources/list":
@@ -198,6 +203,13 @@ class _RemoteCredentials:
                     "id": request["id"],
                     "result": {
                         "content": [{"type": "text", "text": "business rejected"}],
+                        "structuredContent": {
+                            "errorCode": "DOWNSTREAM_UNAVAILABLE",
+                            "stage": "downstream_transport",
+                            "message": "business rejected",
+                            "retryable": True,
+                            "requestId": "request-1",
+                        },
                         "isError": True,
                     },
                 }
@@ -385,17 +397,32 @@ def test_catalog_reconciliation_filters_routes_invalidates_and_recovers() -> Non
         )
         assert failed.status == "error"
         assert failed.summary == "business rejected"
-        tool_error_request = next(
-            call["request"]
-            for call in reversed(credentials.calls)
-            if call["request"]["method"] == "tools/call"  # type: ignore[index]
+        assert failed.error_code == "DOWNSTREAM_UNAVAILABLE"
+        assert failed.side_effect_status == "unknown"
+        assert failed.metadata["error_details"] == {
+            "stage": "remote_tool",
+            "origin": "downstream",
+            "remote_stage": "downstream_transport",
+            "retryable": True,
+            "request_id": "request-1",
+            "server_id": server.server_id,
+        }
+        read_failed = await connector.call_tool(
+            _hands_trusted(),
+            name="lookup",
+            arguments={"number": 21},
+            invocation_id="read-tool-error",
         )
-        assert (
-            tool_error_request["params"]["_meta"][  # type: ignore[index]
+        assert read_failed.status == "error"
+        assert read_failed.side_effect_status == "unknown"
+        tool_error_invocation_ids = {
+            call["request"]["params"]["_meta"][  # type: ignore[index]
                 MCP_AURACLAW_INVOCATION_ID_META_KEY
             ]
-            == "tool-error"
-        )
+            for call in credentials.calls
+            if call["request"]["method"] == "tools/call"  # type: ignore[index]
+        }
+        assert {"tool-error", "read-tool-error"} <= tool_error_invocation_ids
         credentials.tool_error = False
         assert not any(
             call["request"]["method"] == "resources/subscribe"  # type: ignore[index]
@@ -540,7 +567,7 @@ def test_catalog_reconcile_is_bounded_and_isolates_server_timeout() -> None:
     asyncio.run(scenario())
 
 
-def test_mcp_connector_marks_tool_resource_and_prompt_reads_as_read_only() -> None:
+def test_mcp_connector_requires_authoritative_policy_before_marking_tool_read_only() -> None:
     async def scenario() -> None:
         connector = ManagedMcpConnector(
             _server(),
@@ -560,12 +587,20 @@ def test_mcp_connector_marks_tool_resource_and_prompt_reads_as_read_only() -> No
             _hands_trusted(),
             name="github.issue.get",
             arguments={"number": 21},
-            invocation_id="read-tool",
+            invocation_id="untrusted-claim",
+        )
+        connector.set_authoritative_read_only_tools({"github.issue.get"})
+        await connector.call_tool(
+            _hands_trusted(),
+            name="github.issue.get",
+            arguments={"number": 21},
+            invocation_id="admitted-read-tool",
         )
         await connector.read_resource(_hands_trusted(), "github://issue/21")
         await connector.get_prompt(_hands_trusted(), "github.review")
 
         assert transport.calls == [
+            ("tools/call", False),
             ("tools/call", True),
             ("resources/read", True),
             ("prompts/get", True),
@@ -703,7 +738,7 @@ def test_connector_applies_java_alias_and_preserves_schema_shaped_input() -> Non
                 "server_id": "java-mcp",
                 "metadata": {
                     "tool_name_aliases": {
-                        "price_insight.dataset.profile": "procurement.price.dataset.profile",
+                        "inventory_insight.dataset.profile": "inventory.stock.dataset.profile",
                     }
                 },
             }
@@ -730,7 +765,7 @@ def test_connector_applies_java_alias_and_preserves_schema_shaped_input() -> Non
                     "result": {
                         "tools": [
                             {
-                                "name": "price_insight.dataset.profile",
+                                "name": "inventory_insight.dataset.profile",
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {"input": {"type": "object"}},
@@ -743,17 +778,17 @@ def test_connector_applies_java_alias_and_preserves_schema_shaped_input() -> Non
             if request["method"] == "tools/call":
                 params = request["params"]
                 assert isinstance(params, dict)
-                assert params["name"] == "price_insight.dataset.profile"
-                assert params["arguments"] == {"input": {"filter": {"anchor": "market"}}}
+                assert params["name"] == "inventory_insight.dataset.profile"
+                assert params["arguments"] == {"input": {"filter": {"anchor": "warehouse"}}}
             return await original_invoke(**arguments)
 
         credentials.invoke = invoke  # type: ignore[method-assign]
         snapshot = await connector.snapshot(_hands_trusted())
-        assert snapshot.tools[0].name == "procurement.price.dataset.profile"
+        assert snapshot.tools[0].name == "inventory.stock.dataset.profile"
         result = await connector.call_tool(
             _hands_trusted(),
-            name="procurement.price.dataset.profile",
-            arguments={"input": {"filter": {"anchor": "market"}}},
+            name="inventory.stock.dataset.profile",
+            arguments={"input": {"filter": {"anchor": "warehouse"}}},
             invocation_id="java-profile-1",
         )
         assert result.status == "success"
@@ -761,7 +796,7 @@ def test_connector_applies_java_alias_and_preserves_schema_shaped_input() -> Non
     asyncio.run(scenario())
 
 
-def test_remote_price_insight_tools_get_search_tags_and_semver() -> None:
+def test_remote_inventory_tools_get_search_tags_and_semver() -> None:
     from auraclaw.action.catalog_reconciler import (
         _capability_semver,
         _normalize_tools,
@@ -775,29 +810,29 @@ def test_remote_price_insight_tools_get_search_tags_and_semver() -> None:
             "server_id": "java-mcp",
             "tenant_id": "1",
             "metadata": {
-                "search_tags": ["价格洞察"],
+                "search_tags": ["库存洞察"],
                 "tool_name_aliases": {
-                    "price_insight.dataset.profile": ("procurement.price.dataset.profile")
+                    "inventory_insight.dataset.profile": ("inventory.stock.dataset.profile")
                 },
             },
         }
     )
-    tags = _tool_search_tags(server, "procurement.price.dataset.profile")
-    assert "价格洞察" in tags
-    assert "price_insight.dataset.profile" in tags
+    tags = _tool_search_tags(server, "inventory.stock.dataset.profile")
+    assert "库存洞察" in tags
+    assert "inventory_insight.dataset.profile" in tags
     descriptors = _normalize_tools(
         server,
         (
             HandsToolDescriptor(
-                name="procurement.price.dataset.profile",
+                name="inventory.stock.dataset.profile",
                 version="1",
-                description="Profile a price dataset",
+                description="Profile an inventory dataset",
                 read_only=True,
             ),
         ),
     )
     assert descriptors[0].version == "1.0.0"
-    assert "价格洞察" in descriptors[0].tags
+    assert "库存洞察" in descriptors[0].tags
 
 
 def test_connector_tool_executor_forwards_trusted_user_id() -> None:
@@ -923,16 +958,39 @@ def test_remote_tool_capability_uses_defaults_when_metadata_missing() -> None:
 
     assert capability.permission.value == "write-with-approval"
     assert capability.risk_level.value == "high"
+    assert capability.timeout_seconds == 60.0
+
+
+@pytest.mark.parametrize("name", ["rag.knowledge.query", "semantic.query.execute"])
+def test_slow_remote_query_capability_has_outer_timeout_budget(name: str) -> None:
+    from datetime import UTC, datetime
+
+    from auraclaw.action.catalog_reconciler import _tool_capability
+    from auraclaw.contracts.capabilities import CapabilityDescriptor
+
+    descriptor = CapabilityDescriptor(
+        capability_id=f"cap-{name}",
+        kind=CapabilityKind.TOOL,
+        server_id="remote-mcp",
+        canonical_name=name,
+        version="1.0.0",
+        content_digest="digest-slow-tool",
+        title=name,
+        updated_at=datetime.now(UTC),
+        metadata={"source": {}},
+    )
+
+    assert _tool_capability(descriptor, "remote-mcp").timeout_seconds == 120.0
 
 
 @pytest.mark.parametrize(
     ("annotations", "declared_risk", "permission", "risk"),
     [
-        ({"readOnlyHint": True}, None, "read-only", "low"),
+        ({"readOnlyHint": True}, None, "write-with-approval", "high"),
         ({"readOnlyHint": False}, None, "write-with-approval", "high"),
         ({"readOnlyHint": "false"}, None, "write-with-approval", "high"),
         ({}, None, "write-with-approval", "high"),
-        ({"readOnlyHint": True}, "medium", "read-only", "medium"),
+        ({"readOnlyHint": True}, "medium", "write-with-approval", "high"),
         ({"readOnlyHint": False}, "critical", "write-with-approval", "critical"),
     ],
 )
@@ -949,7 +1007,7 @@ def test_mcp_annotations_determine_catalog_and_runtime_permissions(
             "_meta": {"auraclaw": {"riskLevel": declared_risk}},
         }
     )
-    # Obsolete exact-name overrides must no longer change remote declarations.
+    # Legacy metadata is untrusted and must not change the authority decision.
     server = _server().model_copy(
         update={
             "metadata": {
@@ -964,10 +1022,147 @@ def test_mcp_annotations_determine_catalog_and_runtime_permissions(
     assert descriptor.permission == capability.permission.value == permission
     assert descriptor.risk_level == capability.risk_level.value == risk
     assert "trust_level" not in descriptor.as_search_result()
+    assert descriptor.metadata["remote_tool_claims"] == {
+        "read_only_hint": annotations.get("readOnlyHint") is True,
+        "risk_level": declared_risk,
+    }
+
+
+@pytest.mark.parametrize(("declared_risk", "policy_risk"), [(None, "low"), ("medium", "medium")])
+def test_exact_name_digest_bound_policy_can_admit_a_verified_read_only_tool(
+    declared_risk: str | None,
+    policy_risk: str,
+) -> None:
+    from auraclaw.action.catalog_reconciler import _normalize_tools
+    from auraclaw.contracts.capabilities import McpToolPolicyOverride, McpTrustLevel
+    from auraclaw.infrastructure.connectors.mcp.connector import _tool_descriptor
+
+    payload: dict[str, Any] = {
+        "name": "github.issue.get",
+        "annotations": {"readOnlyHint": True},
+    }
+    if declared_risk is not None:
+        payload["_meta"] = {"auraclaw": {"riskLevel": declared_risk}}
+    tool = _tool_descriptor(payload)
+    (untrusted,) = _normalize_tools(_server(), (tool,))
+    policy = McpToolPolicyOverride(
+        permission="read-only",
+        risk_level=policy_risk,
+        content_digest=untrusted.content_digest,
+        evidence_ref="security-review://github.issue.get/3",
+        actor_id="security-admin",
+        reason="contract and side-effect review completed",
+        revision=3,
+        correlation_id="corr-admit-3",
+        causation_id="change-3",
+    )
+    server = _server().model_copy(
+        update={
+            "trust_level": McpTrustLevel.TENANT_VERIFIED,
+            "tool_admission_policy_version": "mcp-tool-policy-v1",
+            "tool_policy_overrides": {tool.name: policy},
+        }
+    )
+
+    (admitted,) = _normalize_tools(server, (tool,))
+
+    assert (admitted.permission, admitted.risk_level) == ("read-only", policy_risk)
+    assert admitted.metadata["tool_permission_reason"] == "authoritative_exact_name_policy"
+    assert admitted.metadata["tool_policy_revision"] == 3
+
+
+@pytest.mark.parametrize(
+    ("policy_update", "trust_level"),
+    [
+        ({"revoked": True}, McpTrustLevel.TENANT_VERIFIED),
+        ({"content_digest": f"sha256:{'0' * 64}"}, McpTrustLevel.TENANT_VERIFIED),
+        ({}, McpTrustLevel.EXTERNAL_UNTRUSTED),
+        ({"risk_level": "low"}, McpTrustLevel.TENANT_VERIFIED),
+    ],
+)
+def test_invalid_or_unauthorized_read_only_policy_fails_closed(
+    policy_update: dict[str, Any],
+    trust_level: McpTrustLevel,
+) -> None:
+    from auraclaw.action.catalog_reconciler import _normalize_tools
+    from auraclaw.contracts.capabilities import McpToolPolicyOverride
+    from auraclaw.infrastructure.connectors.mcp.connector import _tool_descriptor
+
+    tool = _tool_descriptor(
+        {
+            "name": "github.issue.get",
+            "annotations": {"readOnlyHint": True},
+            "_meta": {"auraclaw": {"riskLevel": "medium"}},
+        }
+    )
+    (untrusted,) = _normalize_tools(_server(), (tool,))
+    policy = McpToolPolicyOverride(
+        permission="read-only",
+        risk_level="medium",
+        content_digest=untrusted.content_digest,
+        evidence_ref="security-review://github.issue.get/4",
+        actor_id="security-admin",
+        reason="contract and side-effect review completed",
+        revision=4,
+        correlation_id="corr-admit-4",
+        causation_id="change-4",
+    ).model_copy(update=policy_update)
+    server = _server().model_copy(
+        update={
+            "trust_level": trust_level,
+            "tool_admission_policy_version": "mcp-tool-policy-v1",
+            "tool_policy_overrides": {tool.name: policy},
+        }
+    )
+
+    (descriptor,) = _normalize_tools(server, (tool,))
+
+    assert (descriptor.permission, descriptor.risk_level) == ("write-with-approval", "high")
+    assert descriptor.metadata["tool_permission_reason"] == "fail_closed_untrusted_claim"
+
+
+def test_authoritative_policy_cannot_lower_a_remote_critical_risk_claim() -> None:
+    from auraclaw.action.catalog_reconciler import _normalize_tools
+    from auraclaw.contracts.capabilities import McpToolPolicyOverride
+    from auraclaw.infrastructure.connectors.mcp.connector import _tool_descriptor
+
+    tool = _tool_descriptor(
+        {
+            "name": "payments.send",
+            "annotations": {"readOnlyHint": False},
+            "_meta": {"auraclaw": {"riskLevel": "critical"}},
+        }
+    )
+    (baseline,) = _normalize_tools(_server(), (tool,))
+    policy = McpToolPolicyOverride(
+        permission="write-with-approval",
+        risk_level="high",
+        content_digest=baseline.content_digest,
+        evidence_ref="security-review://payments.send/1",
+        actor_id="security-admin",
+        reason="write operation reviewed",
+        revision=1,
+        correlation_id="corr-payment-1",
+        causation_id="change-payment-1",
+    )
+    server = _server().model_copy(
+        update={
+            "tool_admission_policy_version": "mcp-tool-policy-v1",
+            "tool_policy_overrides": {tool.name: policy},
+        }
+    )
+
+    (descriptor,) = _normalize_tools(server, (tool,))
+
+    assert (descriptor.permission, descriptor.risk_level) == (
+        "write-with-approval",
+        "critical",
+    )
 
 
 def test_reconciliation_refreshes_legacy_permissions_without_schema_version_bump() -> None:
     from auraclaw.action.catalog_reconciler import _normalize_snapshot
+    from auraclaw.infrastructure.observability.stores import InMemoryObservabilityStore
 
     class AnnotatedCredentials(_RemoteCredentials):
         read_only = True
@@ -989,30 +1184,43 @@ def test_reconciliation_refreshes_legacy_permissions_without_schema_version_bump
         connector = ManagedMcpConnector(server, credentials=credentials, policy=_AllowPolicy())
         snapshot = await connector.snapshot(_hands_trusted())
         items = _normalize_snapshot(server, snapshot, 100)
-        # Seed the old published policy before a new process builds its registry.
+        # Seed the vulnerable old published policy before a new process reconciles it.
         await catalog.replace_server_capabilities(
             server.server_id,
             tuple(
-                item.model_copy(update={"permission": "write-with-approval", "risk_level": "high"})
+                item.model_copy(update={"permission": "read-only", "risk_level": "low"})
                 if item.kind == CapabilityKind.TOOL
                 else item
                 for item in items
             ),
         )
         tools = ToolRegistry()
+        metrics = InMemoryObservabilityStore()
         reconciler = CapabilityCatalogReconciler(
             catalog=catalog,
             store=store,
             connectors={server.server_id: connector},
             tool_registry=tools,
             hands_router=RoutedHandsExecutor(_UnexpectedHands(), {}),
+            metric_writer=metrics,
         )
         result = await reconciler.reconcile_server(server)
         assert result.status == CapabilityStatus.ACTIVE
-        assert tools.get("github.issue.get", "2.1.0").permission.value == "read-only"
+        assert tools.get("github.issue.get", "2.1.0").permission.value == "write-with-approval"
         current = await store.list_server_capabilities("tenant-a", server.server_id)
         tool = next(item for item in current if item.kind == CapabilityKind.TOOL)
-        assert (tool.permission, tool.risk_level) == ("read-only", "low")
+        assert (tool.permission, tool.risk_level) == ("write-with-approval", "high")
+        active_server = await store.get_server(server.server_id)
+        assert active_server is not None
+        assert active_server.metadata["historical_read_only_reclassified_count"] == 3
+        assert "github.issue.get" in active_server.metadata[
+            "historical_read_only_reclassified_tools"
+        ]
+        metric_names = {item.name for item in await metrics.metric_snapshot()}
+        assert metric_names == {
+            "mcp_tool_claim_mismatch_total",
+            "mcp_tool_permission_fail_closed_total",
+        }
 
     asyncio.run(scenario())
 
@@ -1066,10 +1274,17 @@ def test_same_named_mcp_targets_keep_server_identity_through_gateway(other_versi
     from dataclasses import replace
 
     from auraclaw.action.capability_catalog import _load_result
-    from auraclaw.action.policy import PolicyEngine
     from auraclaw.action.tool_gateway import ToolGateway
     from auraclaw.infrastructure.artifacts.store import ArtifactStore, InMemoryObjectStorage
+    from auraclaw.infrastructure.observability.stores import InMemoryObservabilityStore
     from auraclaw.projection.approval.projector import InMemoryApprovalProjection
+
+    class RoutingPolicy:
+        version = "routing-test-v1"
+
+        def evaluate(self, capability: Any, invocation: Any = None) -> PolicyDecision:
+            del capability, invocation
+            return PolicyDecision.ALLOW
 
     async def scenario() -> None:
         store = InMemoryCapabilityCatalogStore()
@@ -1097,6 +1312,7 @@ def test_same_named_mcp_targets_keep_server_identity_through_gateway(other_versi
         }
         registry = ToolRegistry()
         router = RoutedHandsExecutor(_UnexpectedHands(), {})
+        metrics = InMemoryObservabilityStore()
         reconciler = CapabilityCatalogReconciler(
             catalog=catalog,
             store=store,
@@ -1106,10 +1322,11 @@ def test_same_named_mcp_targets_keep_server_identity_through_gateway(other_versi
         )
         gateway = ToolGateway(
             registry=registry,
-            policy=PolicyEngine(),
+            policy=RoutingPolicy(),
             hands=router,
             approvals=InMemoryApprovalProjection(),
             artifacts=ArtifactStore(InMemoryObjectStorage(), signing_key=b"route-test-key-12345"),
+            metric_writer=metrics,
         )
         loaded = []
         for server in servers:
@@ -1179,6 +1396,12 @@ def test_same_named_mcp_targets_keep_server_identity_through_gateway(other_versi
             )
         )
         assert wrong_tenant.error_code == "stale_capability"
+        stale_metrics = [
+            item
+            for item in await metrics.metric_snapshot()
+            if item.name == "mcp_tool_policy_revision_stale_total"
+        ]
+        assert len(stale_metrics) == 2
 
     asyncio.run(scenario())
 
@@ -1335,6 +1558,55 @@ def test_cold_replica_hydrates_committed_catalog_while_discovery_lease_is_owned(
         }
         assert follower.snapshot_for(server.server_id).extra["_auraclaw_catalog_generation"] == 1
         await store.release_catalog_reconcile(lease)
+
+    asyncio.run(scenario())
+
+
+def test_cold_replica_hydrates_semantic_indexed_catalog() -> None:
+    class Embeddings:
+        model_version = "fixture-multilingual-v1:dim-3:l2"
+        dimensions = 3
+
+        async def embed(self, texts, *, timeout_seconds=None):
+            del timeout_seconds
+            return tuple((1.0, 0.0, 0.0) for _ in texts)
+
+    async def scenario() -> None:
+        store = InMemoryCapabilityCatalogStore()
+        server = _server().model_copy(update={"config_revision": 1})
+        indexed_catalog = CapabilityCatalog(store, embedding_provider=Embeddings())
+        await indexed_catalog.register_server(server)
+        leader = CapabilityCatalogReconciler(
+            catalog=indexed_catalog,
+            store=store,
+            connectors={
+                server.server_id: ManagedMcpConnector(
+                    server, credentials=_RemoteCredentials(), policy=_AllowPolicy()
+                )
+            },
+        )
+        result = await leader.reconcile_server(server)
+        assert result.status is CapabilityStatus.ACTIVE, result.error
+
+        tools = ToolRegistry()
+        router = RoutedHandsExecutor(_UnexpectedHands(), {})
+        follower = CapabilityCatalogReconciler(
+            catalog=CapabilityCatalog(store, embedding_provider=Embeddings()),
+            store=store,
+            connectors={
+                server.server_id: ManagedMcpConnector(
+                    server, credentials=_RemoteCredentials(), policy=_AllowPolicy()
+                )
+            },
+            tool_registry=tools,
+            hands_router=router,
+        )
+        await follower.hydrate_committed(server)
+        capability = tools.get("github.issue.get", "2.1.0")
+        assert await router.execute(_invocation(capability), capability) == {
+            "number": 21,
+            "state": "open",
+        }
 
     asyncio.run(scenario())
 

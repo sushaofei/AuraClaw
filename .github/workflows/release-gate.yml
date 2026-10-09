@@ -4,12 +4,15 @@ on:
   pull_request:
   push:
 
+permissions:
+  contents: read
+
 jobs:
   quality-and-reliability:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff # v6
         with:
           enable-cache: true
       - name: Install
@@ -25,3 +28,172 @@ jobs:
           AURACLAW_RUNTIME_EVENT_BACKEND: memory
       - name: Release artifacts and secret scan
         run: uv run python scripts/release_gate.py
+
+  supply-chain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff # v6
+        with:
+          enable-cache: true
+      - name: Generate locked runtime SBOM and audit input
+        run: |
+          mkdir -p artifacts
+          uv export --quiet --locked --no-dev --no-emit-project --format cyclonedx1.5 --output-file artifacts/auraclaw.cdx.json
+          uv export --quiet --locked --no-dev --no-emit-project --format requirements-txt --output-file artifacts/runtime-requirements.txt
+      - name: Audit locked Python dependencies
+        id: dependency-audit
+        continue-on-error: true
+        run: uvx --from pip-audit==2.10.1 pip-audit --requirement artifacts/runtime-requirements.txt --disable-pip --format json --output artifacts/pip-audit.json
+      - name: Build reproducible runtime image
+        id: image-build
+        run: docker build --tag "auraclaw:${GITHUB_SHA}" .
+      - name: Inventory all high and critical image vulnerabilities
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        with:
+          image-ref: auraclaw:${{ github.sha }}
+          version: v0.75.0
+          scanners: vuln
+          format: json
+          output: artifacts/trivy-all.json
+          severity: HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: "0"
+      - name: Block fixable high and critical image vulnerabilities
+        id: image-scan
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        with:
+          image-ref: auraclaw:${{ github.sha }}
+          version: v0.75.0
+          scanners: vuln
+          format: sarif
+          output: artifacts/trivy-gate.sarif
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+      - name: Upload release evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: supply-chain-${{ github.sha }}
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 30
+      - name: Enforce dependency and image scan results
+        if: always()
+        env:
+          DEPENDENCY_AUDIT_OUTCOME: ${{ steps.dependency-audit.outcome }}
+          IMAGE_BUILD_OUTCOME: ${{ steps.image-build.outcome }}
+          IMAGE_SCAN_OUTCOME: ${{ steps.image-scan.outcome }}
+        run: |
+          test "$DEPENDENCY_AUDIT_OUTCOME" = success
+          test "$IMAGE_BUILD_OUTCOME" = success
+          test "$IMAGE_SCAN_OUTCOME" = success
+
+  prod-like-integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17.6-alpine@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94
+        env:
+          POSTGRES_USER: auraclaw_migration
+          POSTGRES_PASSWORD: prod-like-migration-password
+          POSTGRES_DB: auraclaw
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U auraclaw_migration -d auraclaw"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      kafka:
+        image: apache/kafka:4.0.0@sha256:3f7b939115cd4872e9cee9369d80bd69712fde55f9902f46d793f64848dedc75
+        env:
+          KAFKA_NODE_ID: 1
+          KAFKA_PROCESS_ROLES: broker,controller
+          KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+          KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+          KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+          KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+          KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+          KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+          KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+          KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+          KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+        ports:
+          - 9092:9092
+    env:
+      AURACLAW_DISABLE_ENV_FILE: "1"
+      AURACLAW_POSTGRESQL_ENV_FILE: /dev/null
+      AURACLAW_KINGBASE_ENV_FILE: /dev/null
+      # Hosted runners may inject HTTP(S)_PROXY. Keep loopback integration
+      # traffic direct so signed S3 requests cannot escape to that proxy.
+      NO_PROXY: "localhost,127.0.0.1,::1"
+      AURACLAW_STORAGE_BACKEND: postgres
+      AURACLAW_DATABASE_URL: postgresql+asyncpg://auraclaw_migration:prod-like-migration-password@127.0.0.1:5432/auraclaw
+      AURACLAW_MIGRATION_DATABASE_URL: postgresql+asyncpg://auraclaw_migration:prod-like-migration-password@127.0.0.1:5432/auraclaw
+      AURACLAW_RUNTIME_EVENT_BACKEND: kafka
+      KAFKA_HOST: 127.0.0.1
+      KAFKA_PORT: "9092"
+      AURACLAW_ARTIFACT_BACKEND: seaweedfs
+      SEAWEEDFS_HOST: 127.0.0.1
+      SEAWEEDFS_S3_PORT: "8333"
+      SEAWEEDFS_ACCESS_KEY: prod-like-access-key
+      SEAWEEDFS_SECRET_KEY: prod-like-secret-key
+      SEAWEEDFS_BUCKET: auraclaw-artifacts
+      SEAWEEDFS_REGION: us-east-1
+      SEAWEEDFS_USE_SSL: "false"
+      SEAWEEDFS_PATH_STYLE: "true"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff # v6
+        with:
+          enable-cache: true
+      - name: Install locked test environment
+        run: uv sync --extra dev --locked
+      - name: Start pinned S3-compatible storage
+        run: >-
+          docker run --detach --name prod-like-seaweedfs
+          --publish 8333:8333 --publish 9333:9333
+          chrislusf/seaweedfs:3.85@sha256:49312939c00c01e5ee6afbd7d728b18027821d3764c35a797a72acd4fdf3296a
+          server -s3 -s3.port=8333
+      - name: Require every external dependency
+        run: >-
+          uv run python scripts/prod_like_gate.py wait
+          --endpoint 127.0.0.1:5432
+          --endpoint 127.0.0.1:9092
+          --http-url http://127.0.0.1:8333/
+      - name: Migrate schema and install production role matrix
+        run: |
+          uv run auraclaw migrate up --directory migrations
+          uv run auraclaw migrate check --directory migrations
+          uv run python scripts/prod_like_gate.py apply-roles --database-url "$AURACLAW_MIGRATION_DATABASE_URL"
+      - name: Exercise PostgreSQL, Kafka and S3 production paths
+        run: |
+          mkdir -p artifacts
+          uv run pytest \
+            tests/integration/test_postgres_m1.py \
+            tests/integration/test_issue74_skill_multireplica.py \
+            tests/integration/test_kafka_m5.py \
+            tests/integration/test_postgres_s4_streaming.py \
+            tests/integration/test_postgres_activity_projection.py \
+            tests/integration/test_seaweedfs_s3.py \
+            tests/integration/test_postgres_role_grants.py \
+            --junitxml artifacts/prod-like-junit.xml
+          uv run python scripts/prod_like_gate.py verify-junit \
+            --report artifacts/prod-like-junit.xml --minimum-tests 12
+      - name: Upload prod-like evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: prod-like-${{ github.sha }}
+          path: artifacts/prod-like-junit.xml
+          if-no-files-found: error
+          retention-days: 30
+      - name: Capture object-storage diagnostics
+        if: failure()
+        run: docker logs prod-like-seaweedfs
+      - name: Remove object-storage container
+        if: always()
+        run: docker rm --force prod-like-seaweedfs

@@ -112,7 +112,12 @@ class RemoteRuntimeSessionClient:
         self._client = httpx.AsyncClient(
             base_url=base_url, timeout=timeout, transport=transport
         )
-        self._contract = HttpContractClient(self._client, bearer_token=bearer_token)
+        self._contract = HttpContractClient(
+            self._client,
+            bearer_token=bearer_token,
+            retry_attempts=3,
+            retry_backoff_seconds=0.05,
+        )
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -220,7 +225,12 @@ class RemoteCollaborationClient:
         self._client = httpx.AsyncClient(
             base_url=base_url, timeout=timeout, transport=transport
         )
-        self._contract = HttpContractClient(self._client, bearer_token=bearer_token)
+        self._contract = HttpContractClient(
+            self._client,
+            bearer_token=bearer_token,
+            retry_attempts=3,
+            retry_backoff_seconds=0.05,
+        )
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -267,7 +277,12 @@ class RemoteOrchestratorSessionClient:
         self._client = httpx.AsyncClient(
             base_url=base_url, timeout=timeout, transport=transport
         )
-        self._contract = HttpContractClient(self._client, bearer_token=bearer_token)
+        self._contract = HttpContractClient(
+            self._client,
+            bearer_token=bearer_token,
+            retry_attempts=3,
+            retry_backoff_seconds=0.05,
+        )
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -393,7 +408,12 @@ class RemoteRuntimeControlClient:
         self._client = httpx.AsyncClient(
             base_url=base_url, timeout=timeout, transport=transport
         )
-        self._contract = HttpContractClient(self._client, bearer_token=bearer_token)
+        self._contract = HttpContractClient(
+            self._client,
+            bearer_token=bearer_token,
+            retry_attempts=3,
+            retry_backoff_seconds=0.05,
+        )
         self._assignments: dict[tuple[str, str, str], tuple[str, RuntimeAssignment]] = {}
 
     async def aclose(self) -> None:

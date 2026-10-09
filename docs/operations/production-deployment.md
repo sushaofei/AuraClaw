@@ -14,12 +14,12 @@ Docker Compose 不提供 Kubernetes HPA、PDB 或 NetworkPolicy。本方案以�
 ## 2. 前置条件
 
 - Docker Engine 与 Compose v2；
-- 已推送且使用 digest 或不可变 Git SHA 标记的 AuraClaw 镜像；
-- 测试与生产主存储固定为 KingBase V9 PostgreSQL 兼容模式，使用统一
-  `postgresql+asyncpg://` DSN；`deploy/postgres/roles.sql` 为可选硬化参考；
-- `.host.env` 保存 `KINGBASE_HOST/PORT/USER/PWD`，运行
-  `scripts/sync_kingbase_env.py` 后再物化 Compose Secret；
-- Compose `migrate` 使用 `/app/migrations`，当前目标 `0063`；
+- 已由 `release-image` 工作流发布、签署并验证，且以 `image@sha256:<64 hex>` 引用的
+  AuraClaw 镜像；普通 tag（包括 Git SHA tag）不能进入生产 Compose；
+- 生产主存储固定为 KingBase V9 PostgreSQL 兼容模式；migration owner 与 11 个持久化服务
+  分别使用独立的 `postgresql+asyncpg://` DSN；
+- migration owner 完成迁移后必须执行 `deploy/postgres/roles.sql`，并由平台分别设置角色密码；
+- Compose `migrate` 使用 `/app/migrations`，当前目标 `0071`；
 - Kafka/Replay Router、华为 OBS、Vault 和模型出口可从 `auraclaw-platform` 网络访问；
 - 部署机存在被 `.gitignore` 排除的 `.env.prod`，从 `.env.prod.example` 复制后填真实密钥；
 - Secret 不写入 Compose、镜像、命令参数或日志。
@@ -32,9 +32,9 @@ docker network inspect auraclaw-platform >/dev/null 2>&1 ||
   docker network create auraclaw-platform
 ```
 
-最低必填配置包括不可变 `AURACLAW_IMAGE`、统一应用 DSN、migration admin DSN、工作负载
-令牌、lease key、chaintower workload token、Agent Context 验签密钥、模型凭据、Vault 配置
-及 OBS 配置。Agent Runtime 没有数据库、模型、Vault 或 OBS Secret；chaintower
+最低必填配置包括不可变 `AURACLAW_IMAGE`、11 个分服务应用 DSN、migration admin DSN、工作负载
+令牌、lease key、upstream workload token、Agent Context 验签密钥、模型凭据、Vault 配置
+及 OBS 配置。Agent Runtime 没有数据库、模型、Vault 或 OBS Secret；upstream
 身份密钥只挂到 Task API。只有对应 owner service 获得这些凭据。
 
 Credential Proxy 的 production 入口要求外部 Vault 地址和 token，禁止 debug secret JSON。Artifact
@@ -42,15 +42,27 @@ Service 要求明确的 SeaweedFS/OBS backend 与对应 access/secret key；`loc
 会在启动时失败。服务启动完成前会持久 seed 受管 Connector reference；若已有定义冲突则停止启动，
 若引用已撤销则保持撤销，需显式管理员恢复而不是靠重启。
 
+发布镜像只由语义版本 tag（例如 `v0.1.0`）触发。tag 必须与 `pyproject.toml` 的版本完全一致；
+工作流重新运行 Ruff、Mypy、全量测试、release gate、依赖审计和镜像扫描，通过后才推送 GHCR。
+随后 GitHub OIDC/Sigstore 为镜像生成 SLSA provenance 和 CycloneDX SBOM attestation，并在同一
+workflow 内执行一次验证。部署前再次验证目标 digest，且把命令输出与发布证据一并归档：
+
+```bash
+uv run python scripts/release_image_contract.py --image "$AURACLAW_IMAGE"
+gh attestation verify "oci://${AURACLAW_IMAGE}" --repo sushaofei/AuraClaw
+```
+
+验证的 subject digest 必须与 `.env.prod` 完全一致；不得从 tag 重新解析、复制另一 digest，或使用
+`--repo` 指向非 `sushaofei/AuraClaw` 的构建来源。
+
 ## 3. 预检与迁移
 
 ```bash
-uv run python scripts/sync_kingbase_env.py
-
 uv run python scripts/materialize_compose_secrets.py \
   --env-file .env.prod --output-dir .runtime/compose-secrets
 
-uv run python scripts/compose_preflight.py --env-file .env.prod
+uv run python scripts/compose_preflight.py --env-file .env.prod \
+  --readiness-evidence /secure/release-evidence/production-readiness.json
 
 docker compose --env-file .env.prod \
   -f compose.prod.yml --profile migrate config --quiet
@@ -63,16 +75,19 @@ docker compose --env-file .env.prod -f compose.prod.yml stop
 
 docker compose --env-file .env.prod \
   -f compose.prod.yml run --rm migrate migrate up \
-  --target 0063 --directory /app/migrations
+  --target 0071 --directory /app/migrations
+
+# 由 migration owner 执行，确保现有对象和 default privileges 同时收敛
+psql "$AURACLAW_MIGRATION_DATABASE_URL" -f deploy/postgres/roles.sql
 
 docker compose --env-file .env.prod -f compose.prod.yml \
-  run --rm migrate migrate check --target 0063 --directory /app/migrations
+  run --rm migrate migrate check --target 0071 --directory /app/migrations
 ```
 
 迁移进程只挂载 migration admin DSN。KingBase 使用 PostgreSQL advisory lock 防止并发迁移，
 checksum ledger 阻止已执行文件漂移；重复运行是幂等的。`0058` 删除 MCP Tool 前缀字段，必须
 先停止所有旧实例，在维护窗口内迁移，再强制重建全部服务，不能滚动混跑。
-运行迁移前应已准备好同一不可变镜像，并核对其 `migrate latest` 为 `0063`。
+运行迁移前应已准备好同一不可变镜像，并核对其 `migrate latest` 为 `0071`。
 迁移或 `migrate check` 失败时禁止继续启动。
 
 数据库服务在开始监听前会只读校验完整迁移账本，缺失、checksum 漂移、版本不匹配均拒绝启动。
@@ -86,7 +101,7 @@ Secret 生成目录必须与 `.env.prod` 的 `AURACLAW_SECRET_DIR` 一致；目�
 ```bash
 docker compose --env-file .env.prod -f compose.prod.yml \
   --profile migrate run --rm migrate migrate baseline \
-  --target 0063 --confirm-existing-schema --directory /app/migrations
+  --target 0071 --confirm-existing-schema --directory /app/migrations
 ```
 
 全新库、未知来源库、部分迁移库或 checksum 不一致时禁止 baseline。
@@ -112,6 +127,38 @@ Compose 的 `deploy.replicas`、resources、restart policy 会由 Compose v2 应
 Ingress 使用 Docker DNS 动态重解析 Task API 与 Streaming Gateway；副本扩缩容或替换后
 不需要重启 Nginx。
 
+### 4.1 外部 TLS、健康检查与连接契约
+
+仓库内 Nginx 是集群内 L7 路由，不保存公网证书，也不应直接暴露到公网。生产默认把 ingress
+绑定到 `127.0.0.1:8080`；外部负载均衡不在同一主机时，才将
+`AURACLAW_INGRESS_BIND_ADDRESS` 改为专用私网地址，并用主机防火墙只允许负载均衡器源网段。
+公网入口必须在受管负载均衡器终止 TLS 1.2/1.3、自动轮换证书、HTTP 跳转 HTTPS，并覆盖写入
+`X-Forwarded-Proto=https`、`X-Forwarded-For` 与 `X-Forwarded-Host`。不得信任来自任意公网源的
+Forwarded Header，也不得把 AuraClaw workload token 放到 L7 配置或访问日志。
+
+负载均衡器使用 `/health/live` 判断进程存活、`/health/ready` 判断 Task API 是否接收新流量；发布
+门禁还必须主动建立一条带有效身份的 SSE canary，不能只凭 Task API readiness 推断 Streaming
+Gateway 可用。健康请求周期 10 秒、超时不高于 5 秒，连续 3 次失败摘流，连续 2 次成功才恢复。
+
+仓库内 ingress 契约如下：
+
+| 项目 | 契约 |
+|---|---|
+| 请求体 | 最大 25 MiB；Header 最多 4 × 16 KiB；Header 10 秒、Body 30 秒内完成 |
+| 普通 HTTP | 上游连接 3 秒、发送 30 秒、读取 120 秒；只在响应发送前对连接/502/503/504 最多换副本 1 次 |
+| SSE | 关闭 proxy buffering/cache；15 秒应用 heartbeat，代理 read timeout 75 秒；客户端必须支持 `Last-Event-ID` 重连 |
+| 优雅退出 | 外部 LB 先摘流，等待至少 75 秒；Nginx `stop_grace_period` 90 秒；断开的 SSE 依游标重连，最终结果仍查询 Result API |
+
+Streaming Gateway readiness 同时检查数据库中的 owner generation。摘流后进程进入 draining，新订阅返回
+503 与 Retry-After，现有 SSE 被关闭并由客户端通过 Last-Event-ID 接到其他副本。活跃 generation 不可被
+同 owner 覆盖；只有 TTL 到期才允许接管。部署验收须查询 `streaming.gateway_instance` 与
+`streaming.connection_registry`，确认旧 generation 和孤儿连接已清理，不能只看容器退出状态。
+
+外部负载均衡器的 idle timeout 必须大于 75 秒，请求总超时不得小于 120 秒；同步 Task 调用的客户端
+超时还必须大于其 `timeout_seconds`。413、408、502/503/504、SSE 断连和慢请求分别纳入指标与告警。
+任何代理重试不得启用 `proxy_next_upstream non_idempotent`；写请求重试只能由客户端复用原
+`Idempotency-Key` 发起。
+
 ## 5. 蓝绿发布与回滚
 
 当前启动检查要求镜像与数据库 schema 完全一致。本节仅用于相同 schema 的代码更新；
@@ -136,8 +183,9 @@ curl --fail http://127.0.0.1:18080/health/ready
 ```
 
 随后执行一条真实的只读查询和一条隔离租户的 canary 任务，确认 Runnable、Assignment、
-Model/MCP、Canonical Result、SSE 和 Delivery 均完成。上游负载均衡切到 green 后，先等待
-最长请求时限和 60 秒优雅退出窗口，再停止 blue：
+Model/MCP、Canonical Result、SSE 和 Delivery 均完成。上游负载均衡切到 green 后，先将 blue
+摘流并等待至少 75 秒（以及仍在处理的最长普通请求时限）；Nginx 90 秒优雅退出窗口内不再接收
+新连接，然后再停止 blue：
 
 ```bash
 docker compose -p auraclaw-blue --env-file .env.prod \
@@ -196,6 +244,46 @@ docker compose --env-file .env.prod -f compose.prod.yml up -d agent-runtime
 delivery redrive。任何需要清空 DLQ、缩短 retention 或删除 Artifact 的操作都要记录 tenant、
 actor、command id、correlation/causation 和审批依据。
 
+### 7.1 恢复、容量与 SLO 证据门禁
+
+真实演练证据保存在受控发布证据库，不提交生产地址、租户标识、凭据或原始业务 Payload。先复制
+`deploy/production-readiness.evidence.example.json`，完成全部场景后再运行：
+
+```bash
+uv run python scripts/production_readiness_gate.py \
+  --evidence /secure/release-evidence/production-readiness.json
+
+uv run python scripts/compose_preflight.py --env-file .env.prod \
+  --readiness-evidence /secure/release-evidence/production-readiness.json
+```
+
+示例文件故意保持 `pending` 和零 digest，必须校验失败。证据必须绑定本次完整 commit、不可变镜像
+digest、实际环境、操作员和带时区的起止时间；每项 `evidence_refs` 指向脱敏日志/报表及其 SHA-256。
+缺任一场景、状态非 passed、容量余量不足或 SLO 越界都会阻断切流。
+
+演练按以下顺序进行，任一步失败立即恢复流量并保留现场：
+
+1. 在隔离恢复库执行 KingBase/PostgreSQL 一致性备份并恢复，运行 `migrate check --target 0071`，抽样核对
+   Canonical Session、Projection、Approval、Invocation、Audit 与 Artifact metadata；对象存储版本/校验和
+   同步核对。不得用生产库本身充当“恢复目标”。
+2. 在恢复库依次执行 `0071_activity_projection_cache.down.sql`、`0070_streaming_connection_ownership.down.sql`、`0069_approval_workflow_governance.down.sql` 与 `0068_operations_search_indexes.down.sql`，验证旧镜像只读/回滚契约，再重新
+   `migrate up --target 0071`。任何 destructive migration 必须采用向前补偿，不能把 down SQL 直接用于生产。
+3. 停止隔离环境消费者，记录 Kafka topic/partition/offset，复制 consumer group 后从记录 offset 重放；Runtime
+   Event 只核对 SSE/replay 行为，不能据此补写业务结果。Skill lifecycle 重放必须得到相同 generation/digest。
+4. 在空 Projection schema 或隔离租户执行 `auraclaw projection rebuild --tenant TENANT`，重建前后对比任务、
+   审批、协作视图的稳定摘要；poison event 必须先隔离、修复再显式 redrive。
+5. 同时运行 blue/green，完成 canary 后切流；blue 摘流至少 75 秒，现有 SSE 用 `Last-Event-ID` 在 green
+   接管，未完成连接不得产生重复 Canonical command、工具副作用或 Delivery。
+6. 在目标峰值负载持续至少 30 分钟，记录吞吐、P50/P95/P99、CPU、内存、数据库池、Kafka lag、队列拒绝与
+   外部配额。门禁保留至少 30% CPU/数据库池余量、20% 内存余量且 queue rejection 为零。
+7. 逐项注入单副本 kill、数据库短断、Kafka 暂停、Vault/对象存储/模型 5xx、告警接收端不可用；记录检测、
+   摘流、恢复时间和 side-effect 对账。不得同时注入多个故障掩盖因果。
+
+SLO 数值由 `production_readiness_gate.py` 固定：Canonical append 可用性至少 99.9%、P95 小于等于
+100 ms，Projection lag P95 小于等于 2 秒、Task start P95 小于等于 5 秒、Runtime recovery P95
+小于等于 30 秒、SSE P95 小于等于 1 秒、Delivery 60 秒成功率至少 99%，unknown/duplicate side
+effect 必须为零。修改门限必须走架构与运维评审，不能在单次证据文件中放宽。
+
 Owner Admin 操作先持久 claim 再执行。重复 `operation_id` 在 active claim 期间返回 `running`，完成后返回
 同一结果；同 ID 不同参数返回 conflict。若 owner 在结果落库前失联，claim 到期后状态变为
 `unknown_side_effect`，禁止自动重放 rebuild/redrive/retention 等可能已产生副作用的操作。操作员应先核对
@@ -208,9 +296,34 @@ Owner Admin 操作先持久 claim 再执行。重复 `operation_id` 在 active c
 跨角色数据库写入成功、Canonical Result 丢失、
 Delivery 重复副作用、OBS 对象与 metadata 无法收敛，或 Secret 出现在日志/config。
 
-## Skill / MCP 联合修复发布（0063）
+## 审批治理上线检查
 
-本次迁移目标为 0063；0058 至 0063 涉及 Tool 前缀、审批模式、本地目录 generation 和 Skill 升级清理。
+1. 在 Policy 配置中填入来自受信组织目录的稳定审批主体 ID，确认 quorum 不超过主体数，且升级时间严格
+   小于审批 TTL；生产不得保留示例中的 `replace-with-*` 值。
+2. 执行 `0069` 后核对 `projection.approval_view` 的 quorum、votes、escalation 字段和两个 due index；按租户
+   重建 Approval Projection，确认旧事件以 quorum=1 兼容读取。
+3. 为生产租户注册受监控的 Delivery sink，验证 approval.requested、delegated、escalated、expired 与
+   cancelled 的投递、重试和 DLQ 告警。通知成功不是 Tool 授权条件，通知失败也不能删除审批事实。
+4. 用两名不同主体完成一次会签，并验证重复投票、越权委托、重复 Idempotency-Key 换参数均被拒绝；再用
+   缩短的升级/过期窗口验证 SLA worker 只升级一次且过期后 Session 恢复 runnable。
+5. 监控 Task API maintenance 日志、Delivery dead letter、审批等待时间和过期数；Projection 不可用时扫描
+   fail closed，不允许从 Canonical Event 之外推断批准。
+
+## Activity Projection 上线检查
+
+1. 执行 `0071` 后确认 `projection.activity_state`、`projection.activity_node` 和
+   `activity_node_incremental_page_idx` 存在，Task API 仅有 SELECT，Projection Worker 有读写权限。
+2. 对每个生产租户执行现有 Projection rebuild 管理操作；返回的 `projection_counts.activity` 必须等于该租户
+   输入事件数。`activity_state.complete=false` 表示升级后只收到增量事件，不能视为完整缓存。
+3. 抽样比较 Activity API 与隔离环境 Canonical 重建结果的 node id、sequence、updated_version；缓存落后时允许
+   受控回退，但必须告警，不能删除或改写 Canonical Events。
+4. 执行 10,000 节点 prod-like 基线并保存 EXPLAIN；发布环境 p95 目标 100ms、p99 目标 250ms，单页保持不超过
+   200 节点。超标时停止切流并检查索引/统计信息，不通过放宽 API 页大小规避。
+
+## Skill / MCP 联合修复发布（0071 基线）
+
+当前迁移基线为 0071；0058 至 0063 涉及 Tool 前缀、审批模式、本地目录 generation 和 Skill 升级清理，
+0064 至 0071 增加 Runtime 成本预算、Skill admission 清理、持久 Child wakeup、有界指标快照、运维检索、审批治理、Streaming 所有权与 Activity 缓存字段。
 协调发布全部服务，避免严格 DTO 及旧 Runtime 行为混跑。启用新 Hands 的自动清理之前，必须先确认旧 Runtime
 的在途写调用已结束或人工核对其结果；没有 Canonical invocation 记录的旧调用不能自动推断已完成。
 参见 [Skill 升级](skill-upgrade.md)、[工作流恢复](skill-workflow-recovery.md) 和各阶段门禁。

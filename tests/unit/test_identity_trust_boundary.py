@@ -37,8 +37,8 @@ from auraclaw.infrastructure.identity import (
 )
 from auraclaw.main import create_app
 
-SIGNING_KEY = b"chaintower-agent-context-signing-key-01"
-WORKLOAD = "chaintower-workload-token-value"
+SIGNING_KEY = b"upstream-agent-context-signing-key-01"
+WORKLOAD = "upstream-workload-token-value"
 
 
 class _SharedReplayPool:
@@ -72,7 +72,7 @@ class _TestDatabaseReplayGuard(DatabaseAssertionReplayGuard):
 def _claims(**overrides: object) -> dict[str, object]:
     now = int(datetime.now(UTC).timestamp())
     payload: dict[str, object] = {
-        "iss": "chaintower",
+        "iss": "upstream",
         "aud": "auraclaw-task-api",
         "tenant_id": "1",
         "user_id": "101",
@@ -92,8 +92,8 @@ def _signer() -> AgentContextSigner:
 
 def _verifier() -> SignedAgentContextVerifier:
     return SignedAgentContextVerifier(
-        workload_tokens={WORKLOAD: "chaintower"},
-        keys={"k1": SIGNING_KEY, "k0": b"chaintower-agent-context-signing-key-00"},
+        workload_tokens={WORKLOAD: "upstream"},
+        keys={"k1": SIGNING_KEY, "k0": b"upstream-agent-context-signing-key-00"},
     )
 
 
@@ -105,7 +105,7 @@ def test_identity_contracts_forbid_extra_fields() -> None:
 def test_verified_envelope_repr_and_dump_omit_raw_assertion() -> None:
     envelope = VerifiedIdentityEnvelope.model_validate(
         {
-            "caller": {"kind": "chaintower_workload", "subject": "chaintower"},
+            "caller": {"kind": "upstream_workload", "subject": "upstream"},
             "user": {"tenant_id": "1", "user_id": "101"},
         }
     )
@@ -328,7 +328,7 @@ def test_signed_verifier_covers_failure_matrix() -> None:
 
         rotated = AgentContextSigner(
             key_id="k0",
-            signing_key=b"chaintower-agent-context-signing-key-00",
+            signing_key=b"upstream-agent-context-signing-key-00",
         ).sign(_claims(jti="jti-rotated", kid="k0"))
         previous = await verifier.verify(
             IdentityVerificationRequest(
@@ -381,8 +381,8 @@ def test_development_header_adapter_is_explicit() -> None:
         production = Settings(
             _env_file=None,
             deployment_profile="production",
-            chaintower_workload_token=WORKLOAD,
-            agent_context_signing_keys_json='{"k1":"chaintower-agent-context-signing-key-01"}',
+            upstream_workload_token=WORKLOAD,
+            agent_context_signing_keys_json='{"k1":"upstream-agent-context-signing-key-01"}',
         )
         assert isinstance(
             build_identity_verifier(production), SignedAgentContextVerifier
@@ -391,8 +391,8 @@ def test_development_header_adapter_is_explicit() -> None:
             _env_file=None,
             deployment_profile="production",
             test_uplink_insecure_identity=True,
-            chaintower_workload_token=WORKLOAD,
-            agent_context_signing_keys_json='{"k1":"chaintower-agent-context-signing-key-01"}',
+            upstream_workload_token=WORKLOAD,
+            agent_context_signing_keys_json='{"k1":"upstream-agent-context-signing-key-01"}',
         )
         assert uplink.insecure_identity_headers_enabled is True
         assert isinstance(
@@ -412,8 +412,8 @@ def test_production_task_api_requires_signed_context() -> None:
             _env_file=None,
             deployment_profile="production",
             storage_backend="memory",
-            chaintower_workload_token=SecretStr(WORKLOAD),
-            agent_context_signing_keys_json='{"k1":"chaintower-agent-context-signing-key-01"}',
+            upstream_workload_token=SecretStr(WORKLOAD),
+            agent_context_signing_keys_json='{"k1":"upstream-agent-context-signing-key-01"}',
         )
     )
     token = _signer().sign(_claims(tenant_id="tenant-1", user_id="user-1", jti="api-1"))
@@ -429,7 +429,7 @@ def test_production_task_api_requires_signed_context() -> None:
             headers={
                 "Idempotency-Key": "prod-signed-1",
                 "Authorization": f"Bearer {WORKLOAD}",
-                "X-CT-Agent-Context": token,
+                "X-Aura-Agent-Context": token,
             },
             json={"goal": "trusted"},
         )
@@ -439,7 +439,7 @@ def test_production_task_api_requires_signed_context() -> None:
             f"/v1/tasks/{session_id}",
             headers={
                 "Authorization": f"Bearer {WORKLOAD}",
-                "X-CT-Agent-Context": _signer().sign(
+                "X-Aura-Agent-Context": _signer().sign(
                     _claims(
                         tenant_id="tenant-2",
                         user_id="user-1",
@@ -454,7 +454,7 @@ def test_production_task_api_requires_signed_context() -> None:
             f"/v1/tasks/{session_id}",
             headers={
                 "Authorization": f"Bearer {WORKLOAD}",
-                "X-CT-Agent-Context": token,
+                "X-Aura-Agent-Context": token,
                 "X-Tenant-ID": "tenant-2",
             },
         )
@@ -464,7 +464,7 @@ def test_production_task_api_requires_signed_context() -> None:
             headers={
                 "Idempotency-Key": "prod-signed-dept",
                 "Authorization": f"Bearer {WORKLOAD}",
-                "X-CT-Agent-Context": _signer().sign(
+                "X-Aura-Agent-Context": _signer().sign(
                     _claims(
                         tenant_id="tenant-1",
                         user_id="user-1",
@@ -481,11 +481,11 @@ def test_production_task_api_requires_signed_context() -> None:
 
 def test_mcp_workload_trusted_context_does_not_require_oauth() -> None:
     server = McpServerDefinition(
-        server_id="chaintower-mcp",
+        server_id="upstream-mcp",
         tenant_id="1",
-        title="chaintower",
-        endpoint="https://mcp.chaintower.example/mcp",
-        credential_ref="vault/chaintower-mcp#workload",
+        title="upstream",
+        endpoint="https://mcp.upstream.example/mcp",
+        credential_ref="vault/upstream-mcp#workload",
         auth_strategy=McpAuthStrategy.WORKLOAD_TRUSTED_CONTEXT,
         allowed_resource_schemes=("order",),
         allowed_prompt_prefixes=("order.",),
@@ -494,7 +494,7 @@ def test_mcp_workload_trusted_context_does_not_require_oauth() -> None:
     )
     assert server.resolved_auth_strategy is McpAuthStrategy.WORKLOAD_TRUSTED_CONTEXT
     adapter = ManagedMcpEgressAdapter(server)
-    assert adapter.credential_scope == "https://mcp.chaintower.example"
+    assert adapter.credential_scope == "https://mcp.upstream.example"
 
 
 class _AllowPolicy:
@@ -523,11 +523,11 @@ def test_mcp_transport_rejects_argument_identity_override_and_missing_user() -> 
                 return value
 
         server = McpServerDefinition(
-            server_id="chaintower-mcp",
+            server_id="upstream-mcp",
             tenant_id="1",
-            title="chaintower",
-            endpoint="https://mcp.chaintower.example/mcp",
-            credential_ref="vault/chaintower-mcp#workload",
+            title="upstream",
+            endpoint="https://mcp.upstream.example/mcp",
+            credential_ref="vault/upstream-mcp#workload",
             auth_strategy=McpAuthStrategy.WORKLOAD_TRUSTED_CONTEXT,
             allowed_resource_schemes=("order",),
             allowed_prompt_prefixes=("order.",),

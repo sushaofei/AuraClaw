@@ -16,6 +16,7 @@ from auraclaw.infrastructure.persistence.postgres_policy_store import PostgresPo
 from auraclaw.internal.http import create_contract_app
 from auraclaw.internal.routes import policy_routes
 from auraclaw.policy.approval_modes import ApprovalModeResolver
+from auraclaw.policy.governance import ProductionPolicy
 from auraclaw.policy.internal_service import PolicyInternalService
 
 
@@ -38,7 +39,28 @@ def build_policy_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
     )
     contract_app = create_contract_app(
         "policy",
-        policy_routes(PolicyInternalService(version="s3-v1", store=store, mode_resolver=resolver)),
+        policy_routes(
+            PolicyInternalService(
+                version="s3-v1",
+                store=store,
+                mode_resolver=resolver,
+                governance=ProductionPolicy(
+                    runtime_budget=settings.runtime_budget_snapshot(),
+                    model_provider=settings.model_provider,
+                    model_name=settings.model_name,
+                    model_data_region=settings.model_data_region,
+                    allowed_data_regions=settings.allowed_model_data_regions,
+                    artifact_share_max_ttl_seconds=settings.artifact_share_max_ttl_seconds,
+                    artifact_share_classifications=(settings.shareable_artifact_classifications),
+                    approval_approvers=settings.approval_approvers,
+                    approval_required_approvals=settings.policy_approval_required_approvals,
+                    approval_ttl_seconds=settings.policy_approval_ttl_seconds,
+                    approval_escalation_after_seconds=(
+                        settings.policy_approval_escalation_after_seconds
+                    ),
+                ),
+            )
+        ),
         workload_identities=_configured_identities(
             settings,
             (

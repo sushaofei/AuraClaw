@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from auraclaw.contracts.errors import RuntimeCancelledError
+from auraclaw.contracts.errors import CollaborationValidationError, RuntimeCancelledError
 from auraclaw.control.ports import RuntimeAssignment
 from auraclaw.runtime.execution_guard import RuntimeExecutionGuard
 from auraclaw.runtime.execution_state import (
@@ -56,6 +56,39 @@ async def test_progress_store_rejects_unknown_checkpoint_phase() -> None:
         await store.save_checkpoint(
             _assignment(), RuntimePhase("legacy.unknown"), {}
         )
+
+
+@pytest.mark.asyncio
+async def test_child_suspension_does_not_read_checkpoint_after_releasing_lease() -> None:
+    suspended: list[object] = []
+
+    class Control:
+        async def suspend_with_checkpoint(
+            self, task_id: str, checkpoint: object, reason: str
+        ) -> None:
+            assert task_id == "tenant-runtime-state:ses_runtime:run_runtime"
+            assert reason == "waiting_children"
+            suspended.append(checkpoint)
+
+        async def load_checkpoint(self, *_: object) -> object:
+            raise AssertionError("released checkpoint must not be read back")
+
+    store = RuntimeProgressStore(Control())  # type: ignore[arg-type]
+    await store.suspend_for_children(
+        _assignment(), {"turn_index": 2}, ("ses_child", "ses_child")
+    )
+
+    assert len(suspended) == 1
+    checkpoint = suspended[0]
+    assert checkpoint.phase == RuntimePhase.AGENT_WAITING_CHILDREN
+    assert checkpoint.state["waiting_child_ids"] == ["ses_child"]
+
+
+@pytest.mark.asyncio
+async def test_child_suspension_rejects_empty_wait_set() -> None:
+    store = RuntimeProgressStore(object())  # type: ignore[arg-type]
+    with pytest.raises(CollaborationValidationError, match="non-empty"):
+        await store.suspend_for_children(_assignment(), {}, ())
 
 
 @pytest.mark.asyncio

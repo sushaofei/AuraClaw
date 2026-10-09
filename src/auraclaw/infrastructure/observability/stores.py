@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import sys
 from dataclasses import asdict
 from datetime import UTC, datetime
 from typing import Any
@@ -20,7 +21,52 @@ from auraclaw.infrastructure.persistence.postgres_common import (
 from auraclaw.infrastructure.persistence.postgres_common import (
     json_dumps as _json,
 )
+from auraclaw.infrastructure.persistence.postgres_common import (
+    json_loads as _decode_json,
+)
 from auraclaw.observability.redaction import redact_sensitive
+
+
+class JsonLogFormatter(logging.Formatter):
+    """Format process logs as one redacted JSON object per line."""
+
+    def __init__(self, *, service: str) -> None:
+        super().__init__()
+        self._service = service
+
+    def format(self, record: logging.LogRecord) -> str:
+        fields = getattr(record, "structured_fields", {})
+        safe_fields = redact_sensitive(fields) if isinstance(fields, dict) else {}
+        payload: dict[str, Any] = {
+            "timestamp": datetime.fromtimestamp(record.created, UTC).isoformat(),
+            "level": record.levelname.lower(),
+            "service": self._service,
+            "logger": record.name,
+            "message": record.getMessage(),
+            **safe_fields,
+        }
+        if record.exc_info is not None:
+            exception = record.exc_info[1]
+            payload["exception"] = {
+                "type": type(exception).__name__ if exception is not None else "Exception",
+                "message": str(exception) if exception is not None else "",
+            }
+        return json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def configure_json_logging(*, level: str, service: str) -> None:
+    """Install the process-wide production log contract."""
+
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(JsonLogFormatter(service=service))
+    root = logging.getLogger()
+    root.handlers.clear()
+    root.addHandler(handler)
+    root.setLevel(getattr(logging, level.upper(), logging.INFO))
+    for logger_name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+        uvicorn_logger = logging.getLogger(logger_name)
+        uvicorn_logger.handlers.clear()
+        uvicorn_logger.propagate = True
 
 
 class StructuredLogger:
@@ -34,7 +80,11 @@ class StructuredLogger:
             "message": message,
             **redact_sensitive(fields),
         }
-        self._logger.log(level, json.dumps(record, sort_keys=True, separators=(",", ":")))
+        self._logger.log(
+            level,
+            message,
+            extra={"structured_fields": redact_sensitive(fields)},
+        )
         return record
 
 
@@ -61,6 +111,18 @@ class InMemoryObservabilityStore:
             self._metrics.append(metric)
             if metric.deduplication_key is not None:
                 self._metric_keys.add(metric.deduplication_key)
+
+    async def write_metrics(self, metrics: list[MetricPoint]) -> None:
+        async with self._lock:
+            for metric in metrics:
+                if (
+                    metric.deduplication_key is not None
+                    and metric.deduplication_key in self._metric_keys
+                ):
+                    continue
+                self._metrics.append(metric)
+                if metric.deduplication_key is not None:
+                    self._metric_keys.add(metric.deduplication_key)
 
     async def write_audit(self, event: AuditEvent) -> None:
         async with self._lock:
@@ -95,8 +157,17 @@ class InMemoryObservabilityStore:
             ],
         }
 
-    async def metric_snapshot(self) -> list[MetricPoint]:
-        return list(self._metrics)
+    async def metric_snapshot(
+        self, tenant_id: str | None = None, *, limit: int = 2000
+    ) -> list[MetricPoint]:
+        if limit < 1:
+            return []
+        visible = (
+            self._metrics
+            if tenant_id is None
+            else [point for point in self._metrics if point.tenant_id in {None, tenant_id}]
+        )
+        return list(visible[-limit:])
 
     async def metric_summary(
         self, tenant_id: str, *, window_hours: int
@@ -113,6 +184,38 @@ class InMemoryObservabilityStore:
             _metric_summary(name, values)
             for name, values in sorted(grouped.items())
         ]
+
+    async def search_audits(
+        self,
+        tenant_id: str,
+        *,
+        action: str | None = None,
+        outcome: str | None = None,
+        actor_id: str | None = None,
+        session_id: str | None = None,
+        before: datetime | None = None,
+        before_id: str | None = None,
+        limit: int = 50,
+    ) -> list[AuditEvent]:
+        records = [
+            event
+            for event in self._audits.values()
+            if event.tenant_id == tenant_id
+            and (action is None or event.action == action)
+            and (outcome is None or event.outcome == outcome)
+            and (actor_id is None or event.actor_id == actor_id)
+            and (
+                session_id is None
+                or event.session_id == session_id
+                or event.root_session_id == session_id
+            )
+            and (
+                before is None
+                or (event.occurred_at, event.audit_id) < (before, before_id or "")
+            )
+        ]
+        records.sort(key=lambda event: (event.occurred_at, event.audit_id), reverse=True)
+        return records[:limit]
 
 
 class PostgresObservabilityStore(_LazyPool):
@@ -145,6 +248,32 @@ class PostgresObservabilityStore(_LazyPool):
             metric.name, metric.value, metric.observed_at, metric.tenant_id,
             metric.root_session_id, metric.session_id, metric.run_id, _json(metric.labels),
             metric.deduplication_key,
+        )
+
+    async def write_metrics(self, metrics: list[MetricPoint]) -> None:
+        if not metrics:
+            return
+        pool = await self.pool()
+        await pool.executemany(
+            """INSERT INTO observability.metric_point
+            (metric_name,value,observed_at,tenant_id,root_session_id,session_id,run_id,labels,
+             deduplication_key)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9)
+            ON CONFLICT (deduplication_key) DO NOTHING""",
+            [
+                (
+                    metric.name,
+                    metric.value,
+                    metric.observed_at,
+                    metric.tenant_id,
+                    metric.root_session_id,
+                    metric.session_id,
+                    metric.run_id,
+                    _json(metric.labels),
+                    metric.deduplication_key,
+                )
+                for metric in metrics
+            ],
         )
 
     async def write_audit(self, event: AuditEvent) -> None:
@@ -200,22 +329,61 @@ class PostgresObservabilityStore(_LazyPool):
             "alerts": [dict(row) for row in alerts],
         }
 
-    async def metric_snapshot(self) -> list[MetricPoint]:
+    async def metric_snapshot(
+        self, tenant_id: str | None = None, *, limit: int = 2000
+    ) -> list[MetricPoint]:
         pool = await self.pool()
-        rows = await pool.fetch(
-            """SELECT DISTINCT ON (
-                 metric_name, coalesce(tenant_id,''), coalesce(session_id,'')
-               )
-            * FROM observability.metric_point
-            ORDER BY metric_name, coalesce(tenant_id,''), coalesce(session_id,''),
-                     observed_at DESC"""
-        )
+        if limit < 1:
+            return []
+        if tenant_id is None:
+            rows = await pool.fetch(
+                """SELECT DISTINCT ON (
+                     metric_name, coalesce(tenant_id,''), coalesce(session_id,'')
+                   )
+                * FROM observability.metric_point
+                ORDER BY metric_name, coalesce(tenant_id,''), coalesce(session_id,''),
+                         observed_at DESC
+                LIMIT $1""",
+                limit,
+            )
+        else:
+            rows = await pool.fetch(
+                """WITH recent AS (
+                    SELECT * FROM (
+                        SELECT * FROM observability.metric_point
+                         WHERE tenant_id = $1
+                         ORDER BY observed_at DESC
+                         LIMIT $2
+                    ) tenant_points
+                    UNION ALL
+                    SELECT * FROM (
+                        SELECT * FROM observability.metric_point
+                         WHERE tenant_id IS NULL
+                         ORDER BY observed_at DESC
+                         LIMIT $2
+                    ) global_points
+                ), ranked AS (
+                    SELECT recent.*,
+                           row_number() OVER (
+                               PARTITION BY metric_name, coalesce(tenant_id,''),
+                                            coalesce(session_id,'')
+                               ORDER BY observed_at DESC
+                           ) AS snapshot_rank
+                      FROM recent
+                )
+                SELECT * FROM ranked
+                 WHERE snapshot_rank = 1
+                 ORDER BY observed_at DESC
+                 LIMIT $2""",
+                tenant_id,
+                limit,
+            )
         return [
             MetricPoint(
                 name=str(row["metric_name"]), value=float(row["value"]),
                 observed_at=row["observed_at"], tenant_id=row["tenant_id"],
                 root_session_id=row["root_session_id"], session_id=row["session_id"],
-                run_id=row["run_id"], labels=dict(row["labels"]),
+                run_id=row["run_id"], labels=dict(_decode_json(row["labels"])),
                 deduplication_key=row["deduplication_key"],
             )
             for row in rows
@@ -250,6 +418,62 @@ class PostgresObservabilityStore(_LazyPool):
                 p50=float(row["p50"]),
                 p95=float(row["p95"]),
                 p99=float(row["p99"]),
+            )
+            for row in rows
+        ]
+
+    async def search_audits(
+        self,
+        tenant_id: str,
+        *,
+        action: str | None = None,
+        outcome: str | None = None,
+        actor_id: str | None = None,
+        session_id: str | None = None,
+        before: datetime | None = None,
+        before_id: str | None = None,
+        limit: int = 50,
+    ) -> list[AuditEvent]:
+        pool = await self.pool()
+        rows = await pool.fetch(
+            """SELECT * FROM observability.audit_event
+            WHERE tenant_id=$1
+              AND ($2::text IS NULL OR action=$2)
+              AND ($3::text IS NULL OR outcome=$3)
+              AND ($4::text IS NULL OR actor_id=$4)
+              AND ($5::text IS NULL OR session_id=$5 OR root_session_id=$5)
+              AND ($6::timestamptz IS NULL OR (occurred_at,audit_id) < ($6,$7::text))
+            ORDER BY occurred_at DESC,audit_id DESC LIMIT $8""",
+            tenant_id,
+            action,
+            outcome,
+            actor_id,
+            session_id,
+            before,
+            before_id,
+            limit,
+        )
+        return [
+            AuditEvent(
+                audit_id=str(row["audit_id"]),
+                occurred_at=row["occurred_at"],
+                action=str(row["action"]),
+                outcome=str(row["outcome"]),
+                actor_type=str(row["actor_type"]),
+                actor_id=str(row["actor_id"]),
+                tenant_id=str(row["tenant_id"]),
+                trace_id=str(row["trace_id"]),
+                root_session_id=row["root_session_id"],
+                session_id=row["session_id"],
+                run_id=row["run_id"],
+                event_id=row["event_id"],
+                command_id=row["command_id"],
+                tool_invocation_id=row["tool_invocation_id"],
+                delivery_id=row["delivery_id"],
+                approval_id=row["approval_id"],
+                resource_ref=row["resource_ref"],
+                payload_ref=row["payload_ref"],
+                metadata=dict(_decode_json(row["metadata"])),
             )
             for row in rows
         ]

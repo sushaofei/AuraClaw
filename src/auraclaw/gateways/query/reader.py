@@ -1,14 +1,16 @@
+import logging
 from typing import Any, Protocol
 
 from auraclaw.contracts.approval_mode import ApprovalConfiguration
 from auraclaw.contracts.errors import NotFoundError
 from auraclaw.contracts.events import CanonicalEvent
-from auraclaw.gateways.query.activity import (
+from auraclaw.gateways.query.transcript import TRANSCRIPT_EVENT_TYPES, build_transcript
+from auraclaw.projection.activity import ActivityReader
+from auraclaw.projection.activity_view import (
     ACTIVITY_EVENT_TYPES,
     build_activity,
     page_activity,
 )
-from auraclaw.gateways.query.transcript import TRANSCRIPT_EVENT_TYPES, build_transcript
 from auraclaw.projection.ports import CollaborationReader, TaskReader
 
 
@@ -36,10 +38,12 @@ class TaskQueryService:
         reader: TaskReader,
         collaboration: CollaborationReader,
         events: EventReader,
+        activity: ActivityReader,
     ) -> None:
         self._reader = reader
         self._collaboration = collaboration
         self._events = events
+        self._activity = activity
 
     async def get_task(self, tenant_id: str, session_id: str) -> dict[str, Any]:
         task = await self._reader.get_task(tenant_id, session_id)
@@ -120,23 +124,45 @@ class TaskQueryService:
         limit: int = 200,
     ) -> dict[str, Any]:
         task = await self.get_task(tenant_id, session_id)
-        events = await self._events.load(
+        projection_version = int(task["projection_version"])
+        page = await self._activity.get_activity_page(
             tenant_id,
             session_id,
-            event_types=tuple(sorted(ACTIVITY_EVENT_TYPES)),
+            after_version=after_version,
+            limit=limit,
+            min_source_version=projection_version,
         )
-        source_version = max(
-            (event.aggregate_version for event in events),
-            default=int(task["projection_version"]),
-        )
-        page = page_activity(build_activity(events), after_version=after_version, limit=limit)
+        if page is None:
+            logging.getLogger(__name__).warning(
+                "activity projection fallback tenant_id=%s session_id=%s projection_version=%s",
+                tenant_id,
+                session_id,
+                projection_version,
+            )
+            events = await self._events.load(
+                tenant_id,
+                session_id,
+                event_types=tuple(sorted(ACTIVITY_EVENT_TYPES)),
+            )
+            source_version = max(
+                (event.aggregate_version for event in events),
+                default=projection_version,
+            )
+            page = {
+                "source_version": source_version,
+                "cache_status": "fallback",
+                **page_activity(
+                    build_activity(events), after_version=after_version, limit=limit
+                ),
+            }
+        else:
+            page["cache_status"] = "hit"
         return {
             **{
                 key: task.get(key, value)
                 for key, value in ApprovalConfiguration().public_dict().items()
             },
             "session_id": session_id,
-            "projection_version": int(task["projection_version"]),
-            "source_version": source_version,
+            "projection_version": projection_version,
             **page,
         }

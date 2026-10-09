@@ -39,5 +39,20 @@ class SyncInvocationGateway:
             context.tenant_id,
             session_id,
             timeout_seconds=self._waiter.clamp_timeout(timeout_seconds),
+            initial_result={
+                "session_id": session_id,
+                "run_id": accepted.get("run_id"),
+                "status": "pending",
+                "session_status": "pending",
+                "result_summary": None,
+                "result_ref": None,
+                "artifact_refs": [],
+                "error": None,
+                "delivery_status": None,
+                "delivery_id": None,
+                "delivery_attempt_count": 0,
+                "delivery_response_summary": None,
+                "projection_version": 0,
+            },
         )
         return accepted, waited

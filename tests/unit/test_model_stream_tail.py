@@ -4,9 +4,15 @@ import asyncio
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
 
-from auraclaw.contracts.errors import RuntimeCancelledError
+from auraclaw.contracts.errors import (
+    BudgetExceededError,
+    ModelProviderError,
+    ModelReadError,
+    RuntimeCancelledError,
+)
 from auraclaw.contracts.internal import (
     InternalRequestContext,
     ModelCancelRequest,
@@ -17,6 +23,8 @@ from auraclaw.contracts.internal import (
     ServiceIdentity,
 )
 from auraclaw.infrastructure.clients.model import RemoteModelClient
+from auraclaw.internal.http import create_contract_app
+from auraclaw.internal.routes import model_routes, model_stream_routes
 from auraclaw.model_gateway.internal_service import ModelGatewayInternalService
 from auraclaw.model_gateway.ports import (
     ModelCallExecution,
@@ -209,7 +217,7 @@ def _gateway_request() -> ModelGenerateRequest:
 
 
 @pytest.mark.asyncio
-async def test_gateway_persists_before_yielding_completed() -> None:
+async def test_gateway_forwards_delta_before_persisting_completed() -> None:
     state = _OrderedState()
     service = ModelGatewayInternalService(_StreamingModel(), state=state)
     events: list[str] = []
@@ -224,6 +232,155 @@ async def test_gateway_persists_before_yielding_completed() -> None:
     await task
     assert events == ["delta", "completed"]
     assert state.events == ["complete_started", "complete_finished"]
+
+
+@pytest.mark.asyncio
+async def test_gateway_emits_structured_error_instead_of_aborting_sse_stream() -> None:
+    class FailingModel:
+        async def generate_stream(self, request: Any):
+            del request
+            raise ModelReadError("model provider stream read failed")
+            yield  # pragma: no cover
+
+    state = _LifecycleState()
+    service = ModelGatewayInternalService(FailingModel(), state=state)
+    events = [event async for event in service.generate_stream(_gateway_request())]
+
+    assert state.status == "failed"
+    assert len(events) == 1
+    assert events[0].type == "error"
+    assert events[0].payload == {
+        "code": "model_read_error",
+        "message": "model provider stream read failed",
+        "retryable": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_gateway_raises_when_tenant_quota_is_exhausted() -> None:
+    class QuotaState:
+        async def reserve(self, **kwargs: Any) -> ModelCallReservation:
+            del kwargs
+            return ModelCallReservation(status="quota_exceeded")
+
+    service = ModelGatewayInternalService(_StreamingModel(), state=QuotaState())
+    with pytest.raises(BudgetExceededError, match="token quota is exhausted"):
+        async for _event in service.generate_stream(_gateway_request()):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_remote_model_client_maps_structured_tenant_quota_error() -> None:
+    async def fake_stream(path: str, request: Any, event_model: type[ModelStreamEvent]):
+        del path, request, event_model
+        yield ModelStreamEvent(
+            model_call_id="mdl_1",
+            sequence=1,
+            type="error",
+            payload={
+                "code": "runtime_budget_exceeded",
+                "message": "tenant model token quota is exhausted",
+                "retryable": False,
+            },
+        )
+
+    client = RemoteModelClient("http://model.test", bearer_token="token")
+    client._contract.stream = fake_stream  # type: ignore[method-assign]
+    with pytest.raises(BudgetExceededError, match="token quota is exhausted"):
+        async for _chunk in client.generate_stream(
+            ModelRequest(
+                model_call_id="mdl_1",
+                tenant_id="t1",
+                run_id="run_1",
+                messages=(),
+            )
+        ):
+            pass
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_http_stream_converts_preflight_quota_error_to_structured_event() -> None:
+    class QuotaState:
+        async def reserve(self, **kwargs: Any) -> ModelCallReservation:
+            del kwargs
+            return ModelCallReservation(status="quota_exceeded")
+
+    service = ModelGatewayInternalService(_StreamingModel(), state=QuotaState())
+    app = create_contract_app(
+        "model-gateway",
+        model_routes(service),
+        stream_routes=model_stream_routes(service),
+        workload_identities={"runtime-token": ServiceIdentity.AGENT_RUNTIME},
+    )
+    client = RemoteModelClient(
+        "http://model.test",
+        bearer_token="runtime-token",
+        transport=httpx.ASGITransport(app=app),
+    )
+    with pytest.raises(BudgetExceededError, match="token quota is exhausted"):
+        async for _chunk in client.generate_stream(
+            ModelRequest(
+                model_call_id="mdl_1",
+                tenant_id="t1",
+                run_id="run_1",
+                messages=(),
+            )
+        ):
+            pass
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_remote_model_client_maps_structured_gateway_error() -> None:
+    async def fake_stream(path: str, request: Any, event_model: type[ModelStreamEvent]):
+        del path, request, event_model
+        yield ModelStreamEvent(
+            model_call_id="mdl_1",
+            sequence=1,
+            type="error",
+            payload={
+                "code": "model_read_error",
+                "message": "model provider stream read failed",
+                "retryable": True,
+            },
+        )
+
+    client = RemoteModelClient("http://model.test", bearer_token="token")
+    client._contract.stream = fake_stream  # type: ignore[method-assign]
+    with pytest.raises(ModelReadError, match="stream read failed"):
+        async for _chunk in client.generate_stream(
+            ModelRequest(
+                model_call_id="mdl_1",
+                tenant_id="t1",
+                run_id="run_1",
+                messages=(),
+            )
+        ):
+            pass
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_remote_model_client_never_leaks_raw_transport_error() -> None:
+    async def failing_stream(path: str, request: Any, event_model: type[ModelStreamEvent]):
+        del path, request, event_model
+        raise httpx.ReadError("socket reset")
+        yield  # pragma: no cover
+
+    client = RemoteModelClient("http://model.test", bearer_token="token")
+    client._contract.stream = failing_stream  # type: ignore[method-assign]
+    with pytest.raises(ModelReadError, match="gateway stream read failed"):
+        async for _chunk in client.generate_stream(
+            ModelRequest(
+                model_call_id="mdl_1",
+                tenant_id="t1",
+                run_id="run_1",
+                messages=(),
+            )
+        ):
+            pass
+    await client.aclose()
 
 
 @pytest.mark.asyncio
@@ -246,6 +403,106 @@ async def test_gateway_does_not_claim_completed_when_persist_fails() -> None:
         async for event in service.generate_stream(_gateway_request()):
             events.append(event)
     assert [event.type for event in events] == ["delta"]
+
+
+@pytest.mark.asyncio
+async def test_remote_model_client_does_not_retry_after_partial_output() -> None:
+    attempts = 0
+
+    async def flaky_stream(path: str, request: Any, event_model: type[ModelStreamEvent]):
+        nonlocal attempts
+        del path, request, event_model
+        attempts += 1
+        yield ModelStreamEvent(
+            model_call_id="mdl_1",
+            sequence=1,
+            type="delta",
+            payload={"delta": "partial" if attempts == 1 else "complete"},
+        )
+        if attempts == 1:
+            raise httpx.ReadError("socket reset")
+        yield ModelStreamEvent(
+            model_call_id="mdl_1",
+            sequence=2,
+            type="completed",
+            payload={
+                "model_call_id": "mdl_1",
+                "provider": "test",
+                "model": "test",
+                "completed_output": "complete",
+                "deltas": ["complete"],
+                "tool_calls": [],
+                "finish_reason": "stop",
+                "usage": {"output_tokens": 1},
+            },
+        )
+
+    client = RemoteModelClient("http://model.test", bearer_token="token")
+    client._contract.stream = flaky_stream  # type: ignore[method-assign]
+    chunks: list[ModelStreamChunk] = []
+    with pytest.raises(ModelReadError, match="gateway stream read failed"):
+        async for chunk in client.generate_stream(
+            ModelRequest(
+                model_call_id="mdl_1",
+                tenant_id="t1",
+                run_id="run_1",
+                messages=(),
+            )
+        ):
+            chunks.append(chunk)
+    assert attempts == 1
+    assert [chunk.delta for chunk in chunks if chunk.kind == "delta"] == ["partial"]
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_remote_model_client_retries_transport_failure_before_first_delta() -> None:
+    attempts = 0
+
+    async def flaky_stream(path: str, request: Any, event_model: type[ModelStreamEvent]):
+        nonlocal attempts
+        del path, request, event_model
+        attempts += 1
+        if attempts == 1:
+            raise httpx.ReadError("socket reset")
+        yield ModelStreamEvent(
+            model_call_id="mdl_1",
+            sequence=1,
+            type="delta",
+            payload={"delta": "complete"},
+        )
+        yield ModelStreamEvent(
+            model_call_id="mdl_1",
+            sequence=2,
+            type="completed",
+            payload={
+                "model_call_id": "mdl_1",
+                "provider": "test",
+                "model": "test",
+                "completed_output": "complete",
+                "deltas": ["complete"],
+                "tool_calls": [],
+                "finish_reason": "stop",
+                "usage": {"output_tokens": 1},
+            },
+        )
+
+    client = RemoteModelClient("http://model.test", bearer_token="token")
+    client._contract.stream = flaky_stream  # type: ignore[method-assign]
+    chunks = [
+        chunk
+        async for chunk in client.generate_stream(
+            ModelRequest(
+                model_call_id="mdl_1",
+                tenant_id="t1",
+                run_id="run_1",
+                messages=(),
+            )
+        )
+    ]
+    assert attempts == 2
+    assert [chunk.delta for chunk in chunks if chunk.kind == "delta"] == ["complete"]
+    await client.aclose()
 
 
 @pytest.mark.asyncio
@@ -462,7 +719,7 @@ async def test_remote_model_client_sends_authenticated_cancel_contract() -> None
 
 
 @pytest.mark.asyncio
-async def test_remote_client_reconnects_once_for_missing_completed() -> None:
+async def test_remote_client_does_not_reconnect_after_partial_stream_ends() -> None:
     completed = ModelGenerateResponse(
         model_call_id="mdl_1",
         provider="test",
@@ -505,8 +762,8 @@ async def test_remote_client_reconnects_once_for_missing_completed() -> None:
 
     client = RemoteModelClient("http://model.test", bearer_token="token")
     client._contract.stream = fake_stream  # type: ignore[method-assign]
-    chunks = [
-        chunk
+    chunks: list[ModelStreamChunk] = []
+    with pytest.raises(ModelProviderError, match="after partial output"):
         async for chunk in client.generate_stream(
             ModelRequest(
                 model_call_id="mdl_1",
@@ -515,11 +772,9 @@ async def test_remote_client_reconnects_once_for_missing_completed() -> None:
                 messages=({"role": "user", "content": "hi"},),
                 policy=ModelPolicy(),
             )
-        )
-    ]
+        ):
+            chunks.append(chunk)
     await client.aclose()
-    assert calls["n"] == 2
-    assert [chunk.kind for chunk in chunks] == ["delta", "completed"]
+    assert calls["n"] == 1
+    assert [chunk.kind for chunk in chunks] == ["delta"]
     assert chunks[0].delta == "hel"
-    assert chunks[1].response is not None
-    assert chunks[1].response.completed_output == "hello"

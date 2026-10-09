@@ -11,7 +11,7 @@ Runtime ──Hands HTTP──► Action Hands ──ManagedMcpConnector──�
 
 - Runtime / AuraX **不得**直连 AuraMCP。
 - AuraClaw **不得**把内核 Tool（如价格洞察）迁入 AuraMCP。
-- chaintower 业务 MCP **不得**指到 AuraMCP。
+- upstream 业务 MCP **不得**指到 AuraMCP。
 - 身份仍是 Hands workload + trusted context；不要为 AuraMCP 配固定租户的 OAuth client。
 
 登记走 **MCP Server 热配置 Admin API**（`/v1/admin/mcp-servers`）。配置写入 Hands Registry，Action Hands 与 Credential Proxy 无需重启即可加载；重启后从 Registry 恢复。
@@ -49,7 +49,7 @@ AuraMCP 侧：
 - `AURAMCP_HANDS_WORKLOAD_TOKEN` 与 Vault workload 相同
 - 生产必须 `AURAMCP_DEPLOYMENT_PROFILE=production` 且 `AURAMCP_ALLOW_INSECURE_IDENTITY=false`
 
-Hands 用标准 MCP 方法访问，并发送 `Authorization: Bearer <workload>`、`X-CT-*` 与 `_meta.io.auraclaw/*`。
+Hands 用标准 MCP 方法访问，并发送 `Authorization: Bearer <workload>`、`X-Aura-*` 与 `_meta.io.auraclaw/*`。
 
 ## 本地联调
 

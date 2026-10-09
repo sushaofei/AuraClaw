@@ -12,6 +12,8 @@ from auraclaw.contracts.internal import (
     OutboxDispositionRequest,
     OutboxDispositionResponse,
     OutboxRecord,
+    OutboxRedriveRequest,
+    OutboxRedriveResponse,
     ServiceIdentity,
     SessionAppendRequest,
     SessionAppendResponse,
@@ -19,6 +21,8 @@ from auraclaw.contracts.internal import (
     SessionFeedResponse,
     SessionRootFeedRequest,
     SessionRootFeedResponse,
+    SessionTenantFeedRequest,
+    SessionTenantFeedResponse,
     SkillActiveBindingReferenceRequest,
     SkillActiveBindingReferenceResponse,
     SkillBindingReferenceRequest,
@@ -225,6 +229,28 @@ class SessionInternalService:
         )
         return SessionRootFeedResponse(events=tuple(event.as_dict() for event in events))
 
+    async def tenant_feed(
+        self, request: SessionTenantFeedRequest
+    ) -> SessionTenantFeedResponse:
+        if request.context.service_identity is not ServiceIdentity.PROJECTION_WORKER:
+            raise AuthorizationError("tenant feed is restricted to projection")
+        if (request.after_session_id is None) != (request.after_version is None):
+            raise ValueError("tenant feed cursor requires session id and version")
+        events = await self._event_store.load_tenant_page(
+            request.context.tenant_id,
+            after_session_id=request.after_session_id,
+            after_version=request.after_version,
+            limit=request.limit + 1,
+        )
+        page = events[: request.limit]
+        has_more = len(events) > len(page)
+        last = page[-1] if has_more and page else None
+        return SessionTenantFeedResponse(
+            events=tuple(event.as_dict() for event in page),
+            next_session_id=last.session_id if last else None,
+            next_version=last.aggregate_version if last else None,
+        )
+
     @staticmethod
     def _require_outbox_identity(identity: ServiceIdentity, destination: str) -> None:
         expected = {
@@ -270,3 +296,13 @@ class SessionInternalService:
             request.reason,
         )
         return OutboxDispositionResponse(accepted=accepted)
+
+    async def redrive_outbox(
+        self, request: OutboxRedriveRequest
+    ) -> OutboxRedriveResponse:
+        self._require_outbox_identity(request.context.service_identity, request.destination)
+        accepted = await self._event_store.redrive_outbox(
+            request.destination,
+            request.event_id,
+        )
+        return OutboxRedriveResponse(accepted=accepted)

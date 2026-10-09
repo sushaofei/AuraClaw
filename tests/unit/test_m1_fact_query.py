@@ -181,3 +181,48 @@ def test_projector_rejects_gap_and_unknown_critical_event() -> None:
             )
 
     asyncio.run(scenario())
+
+
+def test_projector_accepts_skill_reference_audit_event() -> None:
+    async def scenario() -> None:
+        projection = InMemoryTaskProjection()
+        base = dict(
+            tenant_id="tenant-1",
+            root_session_id="ses-1",
+            session_id="ses-1",
+            run_id="run-1",
+            occurred_at=utc_now(),
+            actor=Actor(type="service", id="runtime-1"),
+            correlation_id="corr-1",
+            causation_id="cmd-1",
+            visibility=Visibility.INTERNAL,
+            schema_version=1,
+        )
+        await projection.project(
+            [
+                CanonicalEvent(
+                    event_id="evt-1",
+                    aggregate_version=1,
+                    type="session.created",
+                    payload={"goal": "read a governed skill reference"},
+                    **base,
+                ),
+                CanonicalEvent(
+                    event_id="evt-2",
+                    aggregate_version=2,
+                    type="context.skill.reference.used",
+                    payload={
+                        "skill_activation_id": "ska-1",
+                        "path": "references/probes.json",
+                        "sha256": "abc",
+                    },
+                    **base,
+                ),
+            ]
+        )
+
+        task = await projection.get_task("tenant-1", "ses-1")
+        assert task is not None
+        assert task["projection_version"] == 2
+
+    asyncio.run(scenario())

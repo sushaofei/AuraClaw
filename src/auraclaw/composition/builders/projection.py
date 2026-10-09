@@ -7,6 +7,7 @@ from fastapi import FastAPI
 
 from auraclaw.admin.internal_service import OwnerAdminService
 from auraclaw.composition import providers
+from auraclaw.composition.observability import exporting_observability_store
 from auraclaw.composition.services import (
     ServiceSpec,
     _base_service_app,
@@ -40,6 +41,7 @@ def build_projection_app(
     task_projection = providers.get_task_projection()
     approval_projection = providers.get_approval_projection()
     collaboration_projection = providers.get_collaboration_projection()
+    activity_projection = providers.get_activity_projection()
     admin_store = PostgresAdminOperationStore(
         settings.resolved_database_url, schema="projection"
     )
@@ -56,7 +58,11 @@ def build_projection_app(
         worker_id="projection-worker",
         wait_seconds=claim_wait,
     )
-    observability_store = providers.get_observability_store()
+    observability_store = exporting_observability_store(
+        settings,
+        service_name="projection-worker",
+        store=providers.get_observability_store(),
+    )
     projector = CompositeProjection(
         *providers.session_outbox_projectors(),
         ObservabilityProjector(ObservabilityService(observability_store, remote_session)),
@@ -67,6 +73,7 @@ def build_projection_app(
         task_projection,
         approval_projection,
         collaboration_projection,
+        activity_projection,
         admin_store,
         observability_store,
     )
@@ -85,26 +92,45 @@ def build_projection_app(
             if isinstance(task_projection, PostgresTaskProjection)
             else 0
         )
-        return {"poison_count": count}
+        items = (
+            await task_projection.poison_items(
+                str(tenant_id) if tenant_id else None,
+                limit=min(100, max(1, int(parameters.get("limit", 20)))),
+            )
+            if isinstance(task_projection, PostgresTaskProjection)
+            else []
+        )
+        return {"poison_count": count, "poison_events": items}
 
     async def redrive(parameters: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(task_projection, PostgresTaskProjection):
-            return {"changed": False}
-        changed = await task_projection.redrive_poison(
-            str(parameters["tenant_id"]), str(parameters["event_id"])
-        )
-        return {"changed": changed}
+            return {"accepted": False}
+        tenant_id = str(parameters["tenant_id"])
+        event_id = str(parameters["event_id"])
+        if not await task_projection.has_poison(tenant_id, event_id):
+            return {"accepted": False, "reason": "poison_event_not_found"}
+        accepted = await remote_session.redrive_outbox("projection", event_id)
+        return {"accepted": accepted}
 
     async def rebuild(parameters: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(task_projection, PostgresTaskProjection) or remote_session is None:
             return {"processed": 0}
         tenant = parameters.get("tenant_id")
-        tenant_id = str(tenant) if tenant else None
-        events = []
-        for event_tenant, session_id in await task_projection.session_keys(tenant_id):
-            events.extend(await remote_session.load(event_tenant, session_id))
-        processed = await task_projection.rebuild(events, tenant_id)
-        return {"processed": processed}
+        if not tenant:
+            return {"processed": 0, "accepted": False, "reason": "tenant_id_required"}
+        tenant_id = str(tenant)
+        events = await remote_session.load_all(tenant_id)
+        counts = {
+            "task": await task_projection.rebuild(events, tenant_id),
+            "approval": await approval_projection.rebuild(events, tenant_id),
+            "collaboration": await collaboration_projection.rebuild(events, tenant_id),
+            "activity": await activity_projection.rebuild(events, tenant_id),
+        }
+        return {
+            "accepted": True,
+            "processed": len(events),
+            "projection_counts": counts,
+        }
 
     admin_app = create_contract_app(
         "projection-worker",

@@ -13,7 +13,12 @@ import pytest
 from approval_mode_checks import check_approval_modes
 
 from auraclaw.action.capability_catalog import CapabilityCatalog
-from auraclaw.contracts.capabilities import CapabilityDescriptor, CapabilityKind
+from auraclaw.contracts.capabilities import (
+    CapabilityDescriptor,
+    CapabilityKind,
+    McpToolPolicyOverride,
+    McpTrustLevel,
+)
 from auraclaw.infrastructure.persistence.migration_runner import (
     MigrationError,
     PostgresMigrationRunner,
@@ -87,10 +92,37 @@ async def _check_mcp_trust_migration(
         assert revision.config_digest == "original-digest"
         assert revision.config.metadata == {"deployment": "internal"}
         server = await store.get_server("trust-migration")
-        assert server is not None and "trust_level" not in server.model_dump()
+        assert server is not None
+        assert server.trust_level is McpTrustLevel.EXTERNAL_UNTRUSTED
+        assert server.tool_admission_policy_version is None
+        assert server.tool_policy_overrides == {}
         assert server.metadata["deployment"] == "internal"
         assert "tool_policy_overrides" not in server.metadata
-        await store.upsert_server(server)
+        policy = McpToolPolicyOverride(
+            permission="read-only",
+            risk_level="low",
+            content_digest=f"sha256:{'1' * 64}",
+            evidence_ref="security-review://managed.query/1",
+            actor_id="security-admin",
+            reason="verified read-only contract",
+            revision=1,
+            correlation_id="corr-policy-1",
+            causation_id="change-policy-1",
+        )
+        secured = server.model_copy(
+            update={
+                "trust_level": McpTrustLevel.PLATFORM,
+                "tool_admission_policy_version": "mcp-tool-policy-v1",
+                "tool_policy_overrides": {"managed.query": policy},
+                "config_revision": 2,
+            }
+        )
+        await store.upsert_server(secured)
+        restored_secured = await store.get_server("trust-migration")
+        assert restored_secured is not None
+        assert restored_secured.trust_level is McpTrustLevel.PLATFORM
+        assert restored_secured.tool_admission_policy_version == "mcp-tool-policy-v1"
+        assert restored_secured.tool_policy_overrides == {"managed.query": policy}
         catalog = CapabilityCatalog(store)
         await catalog.replace_server_capabilities(
             "trust-migration",
@@ -111,6 +143,15 @@ async def _check_mcp_trust_migration(
         )
         items = await store.list_server_capabilities("platform", "trust-migration")
         assert len(items) == 1 and items[0].permission == "read-only"
+        await store.upsert_server(server)
+        assert (await store.get_server("trust-migration")) == restored_secured
+        await store.upsert_server(server, allow_rollback=True)
+        rolled_back = await store.get_server("trust-migration")
+        assert rolled_back is not None
+        assert rolled_back.config_revision == 1
+        assert rolled_back.trust_level is McpTrustLevel.EXTERNAL_UNTRUSTED
+        assert rolled_back.tool_policy_overrides == {}
+        await store.upsert_server(secured)
         await connection.execute(down)
         assert (
             await connection.fetchval(
@@ -132,6 +173,10 @@ async def _check_mcp_trust_migration(
         )
         assert json.loads(row["config_json"]) == legacy
         assert row["config_digest"] == "original-digest"
+        restored_after_migration = await store.get_server("trust-migration")
+        assert restored_after_migration is not None
+        assert restored_after_migration.trust_level is McpTrustLevel.PLATFORM
+        assert restored_after_migration.tool_policy_overrides == {"managed.query": policy}
     finally:
         await store.close()
         await registry.close()
@@ -254,7 +299,7 @@ def test_migration_runner_is_locked_idempotent_and_detects_drift(tmp_path: Path)
         connection = await asyncpg.connect(database_url)
         try:
             await connection.execute((ROOT / "deploy/postgres/roles.sql").read_text())
-            readonly_url = database_url.replace("postgres@", "auraclaw_task_query_ro@")
+            readonly_url = database_url.replace("postgres@", "auraclaw_task_api@")
             await PostgresMigrationRunner(readonly_url, migration_dir).check()
             readonly = await asyncpg.connect(readonly_url)
             try:
@@ -268,7 +313,7 @@ def test_migration_runner_is_locked_idempotent_and_detects_drift(tmp_path: Path)
             await connection.execute(
                 """INSERT INTO hands.downstream_mcp_server
                    (server_id,title,endpoint,enabled,status,active_catalog_generation)
-                   VALUES ('auraclaw-price-insight','retired provider',
+                   VALUES ('legacy-local-provider','retired provider',
                            'https://retired.invalid/mcp',true,'active',1),
                           ('stale-generation-test','stale generation',
                            'https://stale.invalid/mcp',true,'active',2)"""
@@ -286,7 +331,7 @@ def test_migration_runner_is_locked_idempotent_and_detects_drift(tmp_path: Path)
             )
             assert not await connection.fetchval(
                 """SELECT EXISTS(SELECT 1 FROM hands.downstream_mcp_server
-                   WHERE server_id='auraclaw-price-insight')"""
+                   WHERE server_id='legacy-local-provider')"""
             )
             assert not await connection.fetchval(
                 """SELECT EXISTS(SELECT 1 FROM hands.capability_catalog

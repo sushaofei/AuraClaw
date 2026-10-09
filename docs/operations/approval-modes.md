@@ -32,6 +32,22 @@ write 只是一个例子，所有要求审批的操作都经过同一个 `Approv
   不自动改成 full_access 重试。202 timeout 继续使用原结果等待协议。
 - 同一 command id 不可换参数/模式；Run 命令重试在当前状态变化后仍返回原 Run。
 
+## 会签、委托、升级与通知
+
+- Policy 通过 `AURACLAW_POLICY_APPROVAL_APPROVERS` 配置稳定主体 ID，以
+  `AURACLAW_POLICY_APPROVAL_REQUIRED_APPROVALS` 配置 quorum；quorum 不得超过配置主体数。
+- `POST /v1/sessions/{session_id}/approvals/{approval_id}/responses` 记录批准或拒绝票。每位当前审批人
+  只能投票一次；任何拒绝立即终止，批准票达到 quorum 后才恢复 Run。
+- `POST /v1/sessions/{session_id}/approvals/{approval_id}/delegations` 允许未投票的当前审批人把自己的
+  席位委托给新主体。
+- `POST /v1/sessions/{session_id}/approvals/{approval_id}/escalations` 允许当前审批人加入新的审批主体。
+  所有写操作都要求 Idempotency-Key 和 X-Expected-Version，相同 key 换参数返回冲突。
+- `AURACLAW_POLICY_APPROVAL_ESCALATION_AFTER_SECONDS` 到点产生一次升级事实；
+  `AURACLAW_POLICY_APPROVAL_TTL_SECONDS` 到点产生过期事实；Task API 以
+  `AURACLAW_APPROVAL_SLA_SCAN_INTERVAL_SECONDS` 扫描可重建 Approval Projection。
+- 审批请求、委托、升级、过期和取消使用 Delivery sink 的 retry/DLQ 机制通知。通知不可用不改变审批事实；
+  运维应为生产租户注册至少一个受监控 sink，并对 dead letter 告警。
+
 ## 权威状态与审核
 
 `session.created`、`run.requested`、`session.approval_mode_changed` 中的 approval 对象保存模式与修订。

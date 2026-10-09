@@ -115,9 +115,16 @@ Producer 的有序范围是 `(tenant_id, session_id)`：同一 Session 的 seque
 - Producer SDK 已实现安全 payload、按 Session 有序 sequence、并发/排队/超时边界和指标；开发环境可用内存实现。
 - Bus 只承载可见增量与运行状态，最终模型输出、工具结果和生命周期仍提交 Canonical Event。
 
-## 现有缺陷与待完善
+## 统一运维契约
+
+Runtime Event、Projection、Delivery 与 Skill lifecycle 使用
+[`GET /v1/operations/contract`](../../operations/failure-governance.md) 暴露统一状态词汇、owner、
+事实源与恢复动作。Runtime Event 明确没有 DLQ：消费者断线后只在保留窗口内按游标 replay，窗口外回到
+Canonical Result/Task API；Skill lifecycle 失败映射为 `retry_wait`，并以持久 snapshot reconcile 收敛。
+这统一了告警与处置语义，但不会把四类数据强行合并到一个跨服务数据库队列。
+
+## 仍需环境验证的边界
 
 - Kafka topic 分区数、保留、复制因子和跨 AZ 故障域由部署环境提供，仓库尚无完整容量规划与自动校验。
 - Replay Store 有事件数量边界，但租户级 retention、磁盘水位、批量清理和 Kafka/DB offset 对账仍需完善。
-- Skill lifecycle 使用独立 Kafka topic，尚未与 Runtime Event 的运维模型、DLQ 和可观测规范完全统一。
 - 待补：broker 故障注入、乱序/重复/大消息压测、schema 兼容验证和明确的丢弃/降采样策略。

@@ -60,6 +60,7 @@ from auraclaw.infrastructure.clients.runtime import (
     RemoteRuntimeControlClient,
 )
 from auraclaw.infrastructure.credentials.proxy import CredentialProxy
+from auraclaw.infrastructure.observability import configure_json_logging
 from auraclaw.infrastructure.persistence.postgres_capability_catalog import (
     PostgresCapabilityCatalogStore,
 )
@@ -238,6 +239,7 @@ WORKER_SERVICES = {
 }
 
 DATABASE_SERVICES = {
+    "task-api",
     "session",
     "projection-worker",
     "orchestrator",
@@ -248,6 +250,12 @@ DATABASE_SERVICES = {
     "model-gateway",
     "streaming-gateway",
     "delivery-worker",
+}
+
+KAFKA_SERVICES = {
+    "agent-runtime",
+    "action-hands",
+    "streaming-gateway",
 }
 
 
@@ -571,7 +579,7 @@ def _readiness(name: str, settings: Settings) -> tuple[bool, dict[str, str]]:
         identity_ready = (
             settings.insecure_identity_headers_enabled or settings.signed_identity_configured
         )
-        dependencies["chaintower_identity"] = (
+        dependencies["upstream_identity"] = (
             "insecure-headers"
             if settings.insecure_identity_headers_enabled
             else "ready"
@@ -719,11 +727,7 @@ async def _service_lifespan(app: FastAPI) -> AsyncIterator[None]:
     stop = asyncio.Event()
     worker_task: asyncio.Task[None] | None = None
     log_level = str(getattr(app.state, "log_level", "INFO") or "INFO").upper()
-    logging.basicConfig(
-        level=getattr(logging, log_level, logging.INFO),
-        format="%(levelname)s:%(name)s:%(message)s",
-        force=True,
-    )
+    configure_json_logging(level=log_level, service=app.state.service_name)
     if getattr(app.state, "worker_wake", None) is None and bool(app.state.worker):
         app.state.worker_wake = WorkerWakeGate()
     initialize = getattr(app.state, "initialize", None)
@@ -979,5 +983,10 @@ def create_service_app(
 ) -> FastAPI:
     selected = settings or get_settings()
     spec = service_spec(command, selected)
+    if selected.deployment_profile == "production":
+        if spec.name in DATABASE_SERVICES and not selected.sql_storage_enabled:
+            raise ValueError(f"{spec.name} production composition requires SQL storage")
+        if spec.name in KAFKA_SERVICES and not selected.kafka_enabled:
+            raise ValueError(f"{spec.name} production composition requires Kafka")
     builder = SERVICE_BUILDERS.get(spec.name, SERVICE_BUILDERS["default"])
     return builder(spec, selected, worker_interval)

@@ -1,11 +1,29 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Literal, Protocol
 
 if TYPE_CHECKING:
     from auraclaw.artifact.internal_service import PendingUpload
+
+
+@dataclass(frozen=True)
+class ArtifactScanResult:
+    verdict: Literal["clean", "quarantined"]
+    policy_version: str
+    finding_code: str | None = None
+
+
+class ArtifactContentScanner(Protocol):
+    async def scan(
+        self, pending: PendingUpload, *, download_url: str
+    ) -> ArtifactScanResult: ...
+
+    async def readiness(self) -> tuple[bool, str]: ...
+
+    async def aclose(self) -> None: ...
 
 
 class ObjectPresigner(Protocol):

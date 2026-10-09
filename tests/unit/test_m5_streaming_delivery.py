@@ -669,6 +669,69 @@ def test_streaming_gateway_paces_consecutive_model_deltas() -> None:
     asyncio.run(scenario())
 
 
+def test_streaming_gateway_sends_heartbeat_without_cancelling_event_subscription() -> None:
+    class Reader:
+        async def get_task(self, tenant_id: str, session_id: str) -> dict[str, str]:
+            return {"tenant_id": tenant_id, "session_id": session_id}
+
+    class Subscription:
+        initial: list[RuntimeEvent] = []
+        replay_missed = False
+
+        def __init__(self) -> None:
+            self.queue: asyncio.Queue[RuntimeEvent] = asyncio.Queue()
+
+        async def events(self):  # type: ignore[no-untyped-def]
+            while True:
+                yield await self.queue.get()
+
+    subscription = Subscription()
+
+    class Bus:
+        async def subscribe(
+            self,
+            tenant_id: str,
+            session_id: str,
+            *,
+            after_sequence: int | None = None,
+        ) -> Subscription:
+            del tenant_id, session_id, after_sequence
+            return subscription
+
+    async def scenario() -> None:
+        gateway = StreamingGateway(
+            reader=Reader(),  # type: ignore[arg-type]
+            bus=Bus(),  # type: ignore[arg-type]
+            heartbeat_interval=0.01,
+        )
+        stream = gateway.sse(
+            tenant_id="tenant-m5",
+            session_id="session-m5",
+            last_event_id=None,
+        )
+        assert await asyncio.wait_for(anext(stream), timeout=0.1) == ": keepalive\n\n"
+        await subscription.queue.put(
+            RuntimeEvent(
+                event_id="event-after-heartbeat",
+                tenant_id="tenant-m5",
+                root_session_id="session-m5",
+                session_id="session-m5",
+                run_id="run-m5",
+                sequence=1,
+                type="runtime.progress",
+                timestamp=datetime.now(UTC),
+                payload={"step": "after-heartbeat"},
+                visibility="user",
+            )
+        )
+        event = await asyncio.wait_for(anext(stream), timeout=0.1)
+        assert "event: runtime.progress" in event
+        assert '"step":"after-heartbeat"' in event
+        await stream.aclose()
+
+    asyncio.run(scenario())
+
+
 def test_parent_session_sink_dlq_and_circuit_breaker_are_observable() -> None:
     async def scenario() -> None:
         event_store = InMemoryEventStore()

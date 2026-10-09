@@ -119,15 +119,70 @@ class ApprovalAggregate:
                     assigned_approvers=tuple(payload.get("assigned_approvers", ())),
                     policy_version=str(payload["policy_version"]),
                     expires_at=_aware_expires_at(payload["expires_at"]),
+                    required_approvals=max(1, int(payload.get("required_approvals", 1))),
+                    votes=tuple(payload.get("votes", ())),
+                    escalation_at=(
+                        _aware_expires_at(payload["escalation_at"])
+                        if payload.get("escalation_at")
+                        else None
+                    ),
+                    escalation_level=int(payload.get("escalation_level", 0)),
                     status=ApprovalStatus(str(payload.get("status", "waiting"))),
                 )
                 continue
             if record is None or not event.type.startswith("approval."):
                 continue
+            if event.type == "approval.vote.recorded":
+                vote = {
+                    "actor_id": str(event.payload["actor_id"]),
+                    "decision": str(event.payload["decision"]),
+                    "feedback": event.payload.get("feedback"),
+                    "recorded_at": str(event.occurred_at.isoformat()),
+                }
+                record = replace(record, votes=(*record.votes, vote))
+                continue
+            if event.type == "approval.delegated":
+                previous = str(event.payload["from_approver"])
+                replacement = str(event.payload["to_approver"])
+                approvers = tuple(
+                    replacement if value == previous else value
+                    for value in record.assigned_approvers
+                )
+                record = replace(record, assigned_approvers=tuple(dict.fromkeys(approvers)))
+                continue
+            if event.type == "approval.escalated":
+                additions = tuple(str(value) for value in event.payload["approvers"])
+                record = replace(
+                    record,
+                    assigned_approvers=tuple(
+                        dict.fromkeys((*record.assigned_approvers, *additions))
+                    ),
+                    escalation_level=int(event.payload["escalation_level"]),
+                    escalation_at=(
+                        _aware_expires_at(event.payload["next_escalation_at"])
+                        if event.payload.get("next_escalation_at")
+                        else None
+                    ),
+                )
+                continue
             status = ApprovalStatus(event.type.split(".", 1)[1])
+            votes = record.votes
+            if event.payload.get("actor_id") is not None:
+                actor_id = str(event.payload["actor_id"])
+                if not any(str(vote.get("actor_id")) == actor_id for vote in votes):
+                    votes = (
+                        *votes,
+                        {
+                            "actor_id": actor_id,
+                            "decision": str(event.payload.get("decision", status.value)),
+                            "feedback": event.payload.get("feedback"),
+                            "recorded_at": event.occurred_at.isoformat(),
+                        },
+                    )
             record = replace(
                 record,
                 status=status,
+                votes=votes,
                 decision=event.payload.get("decision"),
                 feedback=event.payload.get("feedback"),
             )
@@ -147,10 +202,22 @@ class ApprovalAggregate:
         expected_effect: str,
         policy_version: str,
         assigned_approvers: tuple[str, ...] = (),
+        required_approvals: int = 1,
+        escalation_after: timedelta | None = None,
         ttl: timedelta = timedelta(hours=1),
         now: datetime | None = None,
     ) -> ApprovalRecord:
         requested_at = now or datetime.now(UTC)
+        if required_approvals < 1:
+            raise ApprovalValidationError("approval quorum must be positive")
+        if assigned_approvers and required_approvals > len(set(assigned_approvers)):
+            raise ApprovalValidationError("approval quorum exceeds assigned approvers")
+        if ttl <= timedelta(0):
+            raise ApprovalValidationError("approval TTL must be positive")
+        if escalation_after is not None and (
+            escalation_after <= timedelta(0) or escalation_after >= ttl
+        ):
+            raise ApprovalValidationError("approval escalation must occur within its TTL")
         return ApprovalRecord(
             approval_id=f"apr_{uuid4().hex}",
             tenant_id=tenant_id,
@@ -166,6 +233,60 @@ class ApprovalAggregate:
             assigned_approvers=assigned_approvers,
             policy_version=policy_version,
             expires_at=requested_at + ttl,
+            required_approvals=required_approvals,
+            escalation_at=(
+                requested_at + escalation_after if escalation_after is not None else None
+            ),
+        )
+
+    @staticmethod
+    def vote(
+        record: ApprovalRecord,
+        *,
+        actor_id: str,
+        decision: str,
+        feedback: str | None,
+        now: datetime | None = None,
+    ) -> tuple[ApprovalRecord, bool]:
+        current_time = now or datetime.now(UTC)
+        if record.status not in {ApprovalStatus.REQUESTED, ApprovalStatus.WAITING}:
+            raise ApprovalValidationError(f"approval is already {record.status.value}")
+        if current_time >= record.expires_at:
+            raise ApprovalValidationError("approval has expired")
+        if record.assigned_approvers and actor_id not in record.assigned_approvers:
+            raise ApprovalValidationError("actor is not an assigned approver")
+        if decision not in record.allowed_decisions:
+            raise ApprovalValidationError(f"unsupported approval decision: {decision}")
+        if any(str(vote.get("actor_id")) == actor_id for vote in record.votes):
+            raise ApprovalValidationError("actor has already voted on this approval")
+        vote = {
+            "actor_id": actor_id,
+            "decision": decision,
+            "feedback": feedback,
+            "recorded_at": current_time.isoformat(),
+        }
+        votes = (*record.votes, vote)
+        rejected = decision == ApprovalStatus.REJECTED.value
+        approved_count = sum(
+            1 for item in votes if item.get("decision") == ApprovalStatus.APPROVED.value
+        )
+        terminal = rejected or approved_count >= record.required_approvals
+        status = (
+            ApprovalStatus.REJECTED
+            if rejected
+            else ApprovalStatus.APPROVED
+            if terminal
+            else ApprovalStatus.WAITING
+        )
+        return (
+            replace(
+                record,
+                votes=votes,
+                status=status,
+                decision=status.value if terminal else None,
+                feedback=feedback if terminal else None,
+            ),
+            terminal,
         )
 
     @staticmethod
@@ -177,21 +298,16 @@ class ApprovalAggregate:
         feedback: str | None,
         now: datetime | None = None,
     ) -> ApprovalRecord:
-        current_time = now or datetime.now(UTC)
-        if record.status not in {ApprovalStatus.REQUESTED, ApprovalStatus.WAITING}:
-            raise ApprovalValidationError(f"approval is already {record.status.value}")
-        if current_time >= record.expires_at:
-            raise ApprovalValidationError("approval has expired")
-        if record.assigned_approvers and actor_id not in record.assigned_approvers:
-            raise ApprovalValidationError("actor is not an assigned approver")
-        if decision not in record.allowed_decisions:
-            raise ApprovalValidationError(f"unsupported approval decision: {decision}")
-        return replace(
+        decided, terminal = ApprovalAggregate.vote(
             record,
-            status=ApprovalStatus(decision),
+            actor_id=actor_id,
             decision=decision,
             feedback=feedback,
+            now=now,
         )
+        if not terminal:
+            raise ApprovalValidationError("approval quorum has not been reached")
+        return decided
 
     @staticmethod
     def validate(

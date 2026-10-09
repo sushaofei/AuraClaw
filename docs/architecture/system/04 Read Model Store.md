@@ -33,7 +33,9 @@ started_at, completed_at, source_version
 
 ```text
 approval_id, session_id, action_digest, risk
-status, requested_by, expires_at, decision, source_version
+assigned_approvers, required_approvals, votes
+escalation_at, escalation_level
+status, expires_at, decision, source_version
 ```
 
 ## 核心功能模块
@@ -66,7 +68,7 @@ searchTimeline(filters, cursor)
 
 ## 数据库实现建议
 
-MVP 可使用 PostgreSQL：
+当前实现使用 PostgreSQL 兼容存储：
 
 - 不同 Projection 使用独立表或 Schema。
 - 不建立指向 Canonical Event 表的跨边界外键。

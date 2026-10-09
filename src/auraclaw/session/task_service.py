@@ -4,17 +4,21 @@ import hashlib
 import json
 import logging
 import time
+from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
 from auraclaw.contracts.approval_mode import ApprovalConfiguration, ApprovalMode, InteractionMode
 from auraclaw.contracts.commands import CommandContext
 from auraclaw.contracts.errors import (
+    ApprovalValidationError,
     CollaborationValidationError,
     NotFoundError,
     VersionConflictError,
 )
+from auraclaw.contracts.events import Actor
 from auraclaw.contracts.runtime_options import ReadRefreshGrant
+from auraclaw.contracts.tools import ApprovalRecord, ApprovalStatus
 from auraclaw.domain.approval import ApprovalAggregate
 from auraclaw.domain.session import SessionAggregate
 from auraclaw.projection.ports import ApprovalViewReader, TaskReader
@@ -50,6 +54,20 @@ class TaskService:
         self._approval_notifier = approval_notifier
         self._runtime_budget = dict(runtime_budget) if runtime_budget else None
 
+    async def _govern_runtime_budget(
+        self, *, goal: str, context: CommandContext
+    ) -> dict[str, Any] | None:
+        govern = getattr(self._admission, "govern_budget", None)
+        if not callable(govern):
+            await self._admission.admit(goal=goal, context=context)
+            return self._runtime_budget
+        governed = await govern(
+            goal=goal,
+            context=context,
+            runtime_budget=dict(self._runtime_budget or {}),
+        )
+        return dict(governed)
+
     def _refresh_snapshots(self, grants: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
         if grants and (self._runtime_budget or {}).get("policy_version") != "2":
             raise CollaborationValidationError("read refresh requires runtime budget policy v2")
@@ -72,13 +90,18 @@ class TaskService:
         interaction_mode: InteractionMode | None = None,
         approval_mode: ApprovalMode | None = None,
         read_refresh: list[dict[str, Any]] | None = None,
+        skill_names: list[str] | None = None,
     ) -> dict[str, Any]:
-        interaction = interaction_mode or (
-            InteractionMode.NON_STREAMING if source == "schedule" else InteractionMode.STREAMING
+        # Schedulers do not have a user interaction channel. Ignore contradictory
+        # caller input instead of creating an unresolvable human-approval wait.
+        interaction = (
+            InteractionMode.NON_STREAMING
+            if source == "schedule"
+            else interaction_mode or InteractionMode.STREAMING
         )
         approval = ApprovalConfiguration.resolve(interaction, approval_mode)
         started = time.perf_counter()
-        await self._admission.admit(goal=goal, context=context)
+        runtime_budget = await self._govern_runtime_budget(goal=goal, context=context)
         session_id = f"ses_{uuid4().hex}"
         run_id = f"run_{uuid4().hex}"
         session = SessionAggregate.empty(session_id, context.tenant_id)
@@ -90,8 +113,9 @@ class TaskService:
             schedule_id=schedule_id,
             occurrence_id=occurrence_id,
             approval=approval,
-            runtime_budget=self._runtime_budget,
+            runtime_budget=runtime_budget,
             read_refresh=self._refresh_snapshots(read_refresh),
+            skill_names=skill_names,
         )
         response = {
             "session_id": session_id,
@@ -106,6 +130,7 @@ class TaskService:
                         "occurrence_id": occurrence_id,
                         **approval.public_dict(),
                         **({"read_refresh": read_refresh} if read_refresh else {}),
+                        **({"skill_names": skill_names} if skill_names else {}),
                     },
                     sort_keys=True,
                 ).encode()
@@ -189,13 +214,17 @@ class TaskService:
                     **event.payload.get("approval", {}),
                 }
         session = await self._load(context.tenant_id, session_id)
+        runtime_budget = await self._govern_runtime_budget(
+            goal=session.goal or "continue task",
+            context=context,
+        )
         run_id = f"run_{uuid4().hex}"
         session.request_run(
             run_id,
             approval_mode,
             command_id=context.command_id,
             request_fingerprint=fingerprint,
-            runtime_budget=self._runtime_budget,
+            runtime_budget=runtime_budget,
             read_refresh=self._refresh_snapshots(read_refresh),
         )
         response = {
@@ -308,6 +337,54 @@ class TaskService:
         context: CommandContext,
     ) -> dict[str, Any]:
         events = await self._event_store.load(context.tenant_id, session_id)
+        previous_response = next(
+            (
+                event
+                for event in events
+                if event.type == "human.response.recorded"
+                and event.causation_id == context.command_id
+            ),
+            None,
+        )
+        if previous_response is not None:
+            if (
+                previous_response.payload.get("approval_id") != approval_id
+                or previous_response.payload.get("actor_id") != context.actor.id
+                or previous_response.payload.get("decision") != decision
+                or previous_response.payload.get("feedback") != feedback
+            ):
+                raise VersionConflictError("command was reused with a different request")
+            previous_terminal = next(
+                (
+                    event
+                    for event in events
+                    if event.causation_id == context.command_id
+                    and event.type
+                    in {
+                        "approval.approved",
+                        "approval.rejected",
+                        "approval.expired",
+                        "approval.cancelled",
+                    }
+                ),
+                None,
+            )
+            session = await self._load(context.tenant_id, session_id)
+            return {
+                **session.approval.public_dict(),
+                "session_id": session_id,
+                "run_id": previous_response.run_id,
+                "status": "runnable" if previous_terminal is not None else "waiting_for_human",
+                "run_status": (
+                    "runnable" if previous_terminal is not None else "waiting_for_human"
+                ),
+                "approval_id": approval_id,
+                "decision": (
+                    previous_terminal.type.split(".", 1)[1]
+                    if previous_terminal is not None
+                    else ApprovalStatus.WAITING.value
+                ),
+            }
         record = ApprovalAggregate.from_events(
             events,
             tenant_id=context.tenant_id,
@@ -324,8 +401,9 @@ class TaskService:
         if record.status.value == decision:
             decided = record
             append_required = False
+            terminal = True
         else:
-            decided = ApprovalAggregate.respond(
+            decided, terminal = ApprovalAggregate.vote(
                 record,
                 actor_id=context.actor.id,
                 decision=decision,
@@ -334,8 +412,9 @@ class TaskService:
             session.record_human_response(
                 approval_id=approval_id,
                 actor_id=context.actor.id,
-                decision=decided.status.value,
+                decision=decision,
                 feedback=feedback,
+                terminal=terminal,
             )
             append_required = True
         response = {
@@ -358,7 +437,7 @@ class TaskService:
             )
             response = result.command_result
             await self._after_append(session, result)
-        if self._approval_notifier is not None:
+        if terminal and self._approval_notifier is not None:
             await self._approval_notifier.record_human_response(
                 record,
                 decision=decided.status.value,
@@ -366,6 +445,197 @@ class TaskService:
                 actor_id=context.actor.id,
             )
         return response
+
+    async def delegate_approval(
+        self,
+        *,
+        session_id: str,
+        approval_id: str,
+        to_approver: str,
+        reason: str,
+        context: CommandContext,
+    ) -> dict[str, Any]:
+        for event in await self._event_store.load(context.tenant_id, session_id):
+            if event.type != "approval.delegated" or event.causation_id != context.command_id:
+                continue
+            if (
+                event.payload.get("approval_id") != approval_id
+                or event.payload.get("from_approver") != context.actor.id
+                or event.payload.get("to_approver") != to_approver
+                or event.payload.get("reason") != reason
+            ):
+                raise VersionConflictError("command was reused with a different request")
+            record = await self._approval_record(context.tenant_id, session_id, approval_id)
+            return {
+                "session_id": session_id,
+                "approval_id": approval_id,
+                "status": "waiting",
+                "assigned_approvers": list(record.assigned_approvers),
+            }
+        record = await self._approval_record(context.tenant_id, session_id, approval_id)
+        if record.status not in {ApprovalStatus.REQUESTED, ApprovalStatus.WAITING}:
+            raise ApprovalValidationError("only a waiting approval can be delegated")
+        if context.actor.id not in record.assigned_approvers:
+            raise ApprovalValidationError("only an assigned approver may delegate")
+        if any(str(vote.get("actor_id")) == context.actor.id for vote in record.votes):
+            raise ApprovalValidationError("an approver who already voted cannot delegate")
+        if to_approver in record.assigned_approvers:
+            raise ApprovalValidationError("delegate is already assigned")
+        session = await self._load(context.tenant_id, session_id)
+        session.delegate_approval(
+            approval_id=approval_id,
+            from_approver=context.actor.id,
+            to_approver=to_approver,
+            delegated_by=context.actor.id,
+            reason=reason,
+        )
+        response = {
+            "session_id": session_id,
+            "approval_id": approval_id,
+            "status": "waiting",
+            "assigned_approvers": [
+                to_approver if item == context.actor.id else item
+                for item in record.assigned_approvers
+            ],
+        }
+        result = await self._event_store.append(
+            root_session_id=session.root_session_id,
+            session_id=session.session_id,
+            run_id=session.run_id,
+            context=context,
+            events=session.release_pending_events(),
+            command_result=response,
+        )
+        await self._after_append(session, result)
+        return result.command_result
+
+    async def escalate_approval(
+        self,
+        *,
+        session_id: str,
+        approval_id: str,
+        approvers: tuple[str, ...],
+        reason: str,
+        context: CommandContext,
+    ) -> dict[str, Any]:
+        for event in await self._event_store.load(context.tenant_id, session_id):
+            if event.type != "approval.escalated" or event.causation_id != context.command_id:
+                continue
+            requested = tuple(dict.fromkeys(approvers))
+            if (
+                event.payload.get("approval_id") != approval_id
+                or tuple(event.payload.get("approvers", ())) != requested
+                or event.payload.get("reason") != reason
+            ):
+                raise VersionConflictError("command was reused with a different request")
+            record = await self._approval_record(context.tenant_id, session_id, approval_id)
+            return {
+                "session_id": session_id,
+                "approval_id": approval_id,
+                "status": "waiting",
+                "escalation_level": record.escalation_level,
+                "assigned_approvers": list(record.assigned_approvers),
+            }
+        record = await self._approval_record(context.tenant_id, session_id, approval_id)
+        if record.status not in {ApprovalStatus.REQUESTED, ApprovalStatus.WAITING}:
+            raise ApprovalValidationError("only a waiting approval can be escalated")
+        if record.assigned_approvers and context.actor.id not in record.assigned_approvers:
+            raise ApprovalValidationError("only an assigned approver may escalate")
+        additions = tuple(dict.fromkeys(approvers))
+        if any(value in record.assigned_approvers for value in additions):
+            raise ApprovalValidationError("escalation approvers must be newly assigned")
+        session = await self._load(context.tenant_id, session_id)
+        level = record.escalation_level + 1
+        session.escalate_approval(
+            approval_id=approval_id,
+            approvers=additions,
+            escalation_level=level,
+            escalated_by=context.actor.id,
+            reason=reason,
+        )
+        response = {
+            "session_id": session_id,
+            "approval_id": approval_id,
+            "status": "waiting",
+            "escalation_level": level,
+            "assigned_approvers": list((*record.assigned_approvers, *additions)),
+        }
+        result = await self._event_store.append(
+            root_session_id=session.root_session_id,
+            session_id=session.session_id,
+            run_id=session.run_id,
+            context=context,
+            events=session.release_pending_events(),
+            command_result=response,
+        )
+        await self._after_append(session, result)
+        return result.command_result
+
+    async def _approval_record(
+        self, tenant_id: str, session_id: str, approval_id: str
+    ) -> ApprovalRecord:
+        record = ApprovalAggregate.from_events(
+            await self._event_store.load(tenant_id, session_id),
+            tenant_id=tenant_id,
+            session_id=session_id,
+            approval_id=approval_id,
+        )
+        if record is None:
+            raise NotFoundError(f"Approval not found: {approval_id}")
+        return record
+
+    async def process_due_approval_slas(
+        self, *, now: datetime | None = None, limit: int = 100
+    ) -> int:
+        if self._approvals is None:
+            return 0
+        current = now or datetime.now(UTC)
+        processed = 0
+        for record in await self._approvals.list_due(current, limit=limit):
+            session = await self._load(record.tenant_id, record.session_id)
+            if session.status is None or session.status.value != "waiting_for_human":
+                continue
+            if record.expires_at <= current:
+                action = "expired"
+                due_at = record.expires_at
+                session.expire_approval(approval_id=record.approval_id, expired_at=current)
+            elif record.escalation_at is not None and record.escalation_at <= current:
+                action = "escalated"
+                due_at = record.escalation_at
+                session.escalate_approval(
+                    approval_id=record.approval_id,
+                    approvers=(),
+                    escalation_level=record.escalation_level + 1,
+                    escalated_by="approval-sla-worker",
+                    reason="approval_sla_escalation",
+                )
+            else:
+                continue
+            context = CommandContext(
+                command_id=f"approval-sla:{action}:{record.approval_id}:{due_at.isoformat()}",
+                tenant_id=record.tenant_id,
+                actor=Actor(type="system", id="approval-sla-worker"),
+                correlation_id=record.run_id,
+                causation_id=record.approval_id,
+                expected_version=session.version,
+                operation=f"approval_sla_{action}",
+            )
+            result = await self._event_store.append(
+                root_session_id=session.root_session_id,
+                session_id=session.session_id,
+                run_id=session.run_id,
+                context=context,
+                events=session.release_pending_events(),
+                command_result={
+                    "session_id": record.session_id,
+                    "approval_id": record.approval_id,
+                    "status": action,
+                },
+            )
+            await self._after_append(session, result)
+            if not result.deduplicated:
+                processed += 1
+        return processed
 
     async def get_task(self, *, tenant_id: str, session_id: str) -> dict[str, Any]:
         task = await self._reader.get_task(tenant_id, session_id)

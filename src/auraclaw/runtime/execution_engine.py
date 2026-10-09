@@ -52,6 +52,7 @@ from auraclaw.runtime.rounds import (
     ModelRoundExecutor,
     ToolRoundDisposition,
 )
+from auraclaw.runtime.task_router import RuntimeTaskRouter
 from auraclaw.runtime.tool_round import ToolRoundExecutor
 
 logger = logging.getLogger(__name__)
@@ -102,6 +103,14 @@ class RuntimeExecutionEngine:
             "human.response.recorded",
         }
     )
+    _MODEL_DISCOVERY_TOOLS = frozenset(
+        {
+            "auraclaw.capabilities.search",
+            "auraclaw.capabilities.load",
+            "auraclaw.skills.activate",
+            "auraclaw.skills.resolve_and_activate",
+        }
+    )
 
     def __init__(
         self,
@@ -114,6 +123,7 @@ class RuntimeExecutionEngine:
         model_policy: ModelPolicy | None = None,
         capability_controller: RuntimeCapabilityController | None = None,
         collaboration_controller: RuntimeCollaborationController | None = None,
+        task_router: RuntimeTaskRouter | None = None,
         failure_injector: FailureInjector | None = None,
         per_turn_output_tokens: int = 4096,
         terminal_output_reserve: int = 512,
@@ -148,6 +158,7 @@ class RuntimeExecutionEngine:
         self._policy = model_policy or ModelPolicy()
         self._capability_controller = capability_controller
         self._collaboration_controller = collaboration_controller
+        self._task_router = task_router
         self._failure_injector = failure_injector
         self._per_turn_output_tokens = per_turn_output_tokens
         self._terminal_output_reserve = terminal_output_reserve
@@ -381,6 +392,11 @@ class RuntimeExecutionEngine:
             raise CollaborationValidationError("Run budget policy changed during recovery")
         state["budget_policy_version"] = assignment.budget.policy_version
         capability_state = dict(state.get("capability_state", {}))
+        if self._capability_controller is not None:
+            self._capability_controller.restore_skill_events(
+                capability_state,
+                [event for event in (events or ()) if event.run_id == assignment.run_id],
+            )
         if (
             self._capability_controller is not None
             and not capability_state.get("required_capabilities_preloaded")
@@ -389,6 +405,67 @@ class RuntimeExecutionEngine:
                 assignment,
                 capability_state,
             )
+        if self._task_router is not None and "routing_decision" not in state:
+            route = await self._task_router.route(
+                assignment,
+                events or await self._session.load(assignment),
+                dict(state.get("capability_state", {})),
+                reserve_model=(
+                    lambda model_call_id, tokens: self._reserve_budget(
+                        assignment, model_call_id, "model", tokens
+                    )
+                )
+                if assignment.budget.policy_version == "2"
+                else None,
+            )
+            for event in route.events:
+                await self._events.append_capability_event(assignment, event)
+            state["capability_state"] = route.capability_state
+            state["routing_decision"] = route.decision.model_dump(mode="json")
+            state["router_metrics"] = dict(route.metrics or {})
+            if route.planner_usage:
+                state["usage"] = self._accumulate_usage(
+                    dict(state.get("usage", {})), route.planner_usage
+                )
+                state["steps_used"] = int(state.get("steps_used", 0)) + 1
+                self._validate_cumulative_usage(assignment, dict(state["usage"]))
+            state["router_capability_prepared"] = bool(
+                route.decision.route_kind.value in {"single_capability", "sequential_plan"}
+                and route.decision.outcome.value == "adopted"
+            )
+            if (
+                route.decision.outcome.value == "adopted"
+                and route.decision.route_kind.value == "coordinator_dag"
+                and route.decision.plan is not None
+            ):
+                if self._collaboration_controller is None:
+                    raise CollaborationValidationError(
+                        "adopted coordinator DAG requires Collaboration Service"
+                    )
+                submission = await self._collaboration_controller.submit_routing_plan(
+                    assignment,
+                    route.decision.plan,
+                )
+                children = submission.get("children", ())
+                child_ids = tuple(
+                    str(child["session_id"])
+                    for child in children
+                    if isinstance(child, dict) and child.get("session_id")
+                )
+                if not child_ids or len(child_ids) != len(route.decision.plan.steps):
+                    raise CollaborationValidationError(
+                        "Collaboration Service returned an incomplete routing plan submission"
+                    )
+                state["router_plan_submission"] = {
+                    "plan_digest": route.decision.plan.plan_digest,
+                    "child_session_ids": list(child_ids),
+                }
+                state["router_metrics"] = {
+                    **dict(state.get("router_metrics", {})),
+                    "router.semantic_planner.submitted.count": 1.0,
+                }
+                await self._progress.suspend_for_children(assignment, state, child_ids)
+                return
         if checkpoint is not None and checkpoint.phase == "capability.approval_waiting":
             approval_id = str(state.get("approval_id", ""))
             session_events = await self._session.load(assignment)
@@ -428,11 +505,39 @@ class RuntimeExecutionEngine:
                     still_waiting,
                 )
                 return
+            router_submission = state.get("router_plan_submission")
+            if isinstance(router_submission, dict):
+                routed_children = tuple(
+                    str(item)
+                    for item in router_submission.get("child_session_ids", ())
+                    if item
+                )
+                if routed_children and set(routed_children) == set(waiting):
+                    join_result = await self._collaboration_controller.join_routing_plan(
+                        assignment,
+                        routed_children,
+                    )
+                    state["router_plan_join"] = dict(join_result)
+                    state["collaboration_terminal"] = True
+                    state["waiting_child_ids"] = []
+                    await self._progress.save_checkpoint(
+                        assignment, RuntimePhase.AGENT_COMPLETED, state
+                    )
+                    await self._control.finish_assignment(
+                        self._task_id(assignment), "completed"
+                    )
+                    return
         turn_events = events
         while True:
             await self._guard_service.check(assignment)
             turn_index = int(state.get("turn_index", 0))
-            model_call_id = f"mdl_{assignment.run_id}_turn_{turn_index + 1}"
+            # Start with the logical turn/fencing identity.  Once the prompt is built
+            # below, bind it to a request digest as well so recovery after changing
+            # child/capability state cannot reuse an id for different content.
+            logical_model_call_id = (
+                f"mdl_{assignment.run_id}_turn_{turn_index + 1}"
+                f"_fence_{assignment.fencing_token}"
+            )
             resume_phase = checkpoint.phase if checkpoint is not None else ""
             if resume_phase == "capability.approval_waiting":
                 resume_phase = "capability.model_completed"
@@ -491,6 +596,46 @@ class RuntimeExecutionEngine:
                     trusted += await self._capability_controller.trusted_messages(
                         assignment, capability_state
                     )
+                routing_decision = state.get("routing_decision")
+                if (
+                    turn_index == 0
+                    and isinstance(routing_decision, dict)
+                    and routing_decision.get("outcome") == "adopted"
+                    and routing_decision.get("route_kind") == "sequential_plan"
+                    and isinstance(routing_decision.get("plan"), dict)
+                ):
+                    plan = dict(routing_decision["plan"])
+                    trusted += (
+                        {
+                            "role": "system",
+                            "content": (
+                                "The pre-model Router validated this bounded current-Session "
+                                "plan. Its capability bindings are fixed, but every invocation "
+                                "still requires live Policy, Approval, budget and revocation "
+                                "checks. Execute the steps in dependency order; do not create "
+                                "Child Sessions for this sequential plan:\n"
+                                + json.dumps(
+                                    {
+                                        "plan_digest": plan.get("plan_digest"),
+                                        "route_kind": plan.get("route_kind"),
+                                        "steps": [
+                                            {
+                                                "task_key": step.get("task_key"),
+                                                "dependencies": step.get("dependencies", []),
+                                                "capability": dict(
+                                                    step.get("capability") or {}
+                                                ).get("name"),
+                                            }
+                                            for step in plan.get("steps", [])
+                                            if isinstance(step, dict)
+                                        ],
+                                    },
+                                    ensure_ascii=False,
+                                    sort_keys=True,
+                                )
+                            ),
+                        },
+                    )
                 if self._collaboration_controller is not None:
                     trusted += await self._collaboration_controller.trusted_messages(assignment)
                 model_tools: tuple[dict[str, Any], ...] = ()
@@ -498,6 +643,14 @@ class RuntimeExecutionEngine:
                     model_tools += self._capability_controller.model_tools(capability_state)
                 if self._collaboration_controller is not None:
                     model_tools += self._collaboration_controller.model_tools(assignment)
+                if state.get("router_capability_prepared") or state.get(
+                    "router_skill_activated"
+                ):
+                    model_tools = tuple(
+                        tool
+                        for tool in model_tools
+                        if tool.get("function", {}).get("name") not in self._MODEL_DISCOVERY_TOOLS
+                    )
                 if state.get("concluding_reason"):
                     # Existing collaboration terminals publish success-shaped results.
                     # Stop via run.failed until a failure-capable terminal contract exists.
@@ -560,21 +713,8 @@ class RuntimeExecutionEngine:
                             ),
                         },
                     )
-                checkpoint_ready = asyncio.create_task(
-                    self._progress.save_checkpoint(
-                        assignment,
-                        RuntimePhase.CAPABILITY_MODEL_PENDING,
-                        {
-                            **state,
-                            "model_call_id": model_call_id,
-                            "call_index": 0,
-                        },
-                    )
-                )
-                await self._inject(InjectionPoint.BEFORE_MODEL)
-                await self._guard_service.check(assignment)
                 request = ModelRequest(
-                    model_call_id=model_call_id,
+                    model_call_id=logical_model_call_id,
                     tenant_id=assignment.tenant_id,
                     run_id=assignment.run_id,
                     session_id=assignment.session_id,
@@ -590,11 +730,16 @@ class RuntimeExecutionEngine:
                         self._per_turn_output_tokens, available_for_turn
                     ),
                     runtime_metrics=(
-                        self._capability_controller.trusted_message_metrics(
-                            assignment
-                        )
+                        {
+                            **self._capability_controller.trusted_message_metrics(assignment),
+                            **(
+                                dict(state.get("router_metrics", {}))
+                                if turn_index == 0
+                                else {}
+                            ),
+                        }
                         if self._capability_controller is not None
-                        else {}
+                        else dict(state.get("router_metrics", {}))
                     ),
                     prompt_cache_key=(
                         self._capability_controller.prompt_cache_key(
@@ -604,6 +749,21 @@ class RuntimeExecutionEngine:
                         else None
                     ),
                 )
+                request = self._scope_model_call_id_to_request(request)
+                model_call_id = request.model_call_id
+                checkpoint_ready = asyncio.create_task(
+                    self._progress.save_checkpoint(
+                        assignment,
+                        RuntimePhase.CAPABILITY_MODEL_PENDING,
+                        {
+                            **state,
+                            "model_call_id": model_call_id,
+                            "call_index": 0,
+                        },
+                    )
+                )
+                await self._inject(InjectionPoint.BEFORE_MODEL)
+                await self._guard_service.check(assignment)
                 await self._record_model_input(
                     assignment,
                     turn_events,
@@ -1626,7 +1786,10 @@ class RuntimeExecutionEngine:
     @staticmethod
     def _build_capability_messages(
         events: list[Any],
+        *,
+        current_run_id: str | None = None,
     ) -> tuple[dict[str, Any], ...]:
+        del current_run_id
         messages: list[dict[str, Any]] = []
         for event in events:
             if event.type == "session.created":
@@ -1660,6 +1823,10 @@ class RuntimeExecutionEngine:
                     }
                 )
             elif event.type == "model.turn.completed":
+                if str(event.payload.get("purpose", "")).startswith(
+                    "router_semantic_plan_"
+                ):
+                    continue
                 calls = []
                 for raw_call in event.payload.get("tool_calls", ()):
                     if not isinstance(raw_call, dict):
@@ -1706,6 +1873,36 @@ class RuntimeExecutionEngine:
                     }
                 )
         return tuple(messages)
+
+    @staticmethod
+    def _scope_model_call_id_to_request(request: ModelRequest) -> ModelRequest:
+        """Keep retries idempotent without colliding after the logical turn changes.
+
+        A coordinator can resume the same turn and fencing epoch after a child or
+        capability changes the canonical prompt.  The Model Gateway correctly
+        rejects reusing an idempotency key for that different request, so bind the
+        durable call id to the request content as well as the logical turn.
+        """
+        digest = hashlib.sha256(
+            json.dumps(
+                {
+                    "run_id": request.run_id,
+                    "session_id": request.session_id,
+                    "messages": request.messages,
+                    "tools": request.tools,
+                    "capability": request.policy.capability,
+                    "preferred_model": request.policy.preferred_model,
+                    "allowed_providers": request.policy.allowed_providers,
+                    "data_classification": request.policy.data_classification,
+                    "max_output_tokens": request.max_output_tokens,
+                    "run_max_cost": request.run_max_cost,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            ).encode()
+        ).hexdigest()[:16]
+        return replace(request, model_call_id=f"{request.model_call_id}_req_{digest}")
 
     @staticmethod
     def _tool_call_to_dict(call: ToolCall) -> dict[str, Any]:

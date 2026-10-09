@@ -1,0 +1,52 @@
+[
+  {
+    "case_id": "exact-tool",
+    "goal": "Call github.issue.get for issue 18",
+    "kind": "tool",
+    "route_kind": "single_capability",
+    "outcome": "adopted",
+    "reason_code": "unique_exact_capability_reference"
+  },
+  {
+    "case_id": "selected-from-allowlist",
+    "goal": "Use release.verify to verify the release",
+    "kind": "skill",
+    "skill_names": ["release.prepare", "release.verify"],
+    "route_kind": "single_capability",
+    "outcome": "adopted",
+    "reason_code": "unique_trusted_skill_intent_match"
+  },
+  {
+    "case_id": "allowlist-is-not-selection",
+    "goal": "Prepare a release",
+    "kind": "skill",
+    "skill_names": ["release.prepare"],
+    "route_kind": "fallback",
+    "outcome": "fallback",
+    "reason_code": "trusted_skill_not_selected_by_intent"
+  },
+  {
+    "case_id": "multiple-explicit-capabilities",
+    "goal": "Call github.issue.get and then system.time.now",
+    "kind": "tool",
+    "route_kind": "sequential_plan",
+    "outcome": "adopted",
+    "reason_code": "validated_exact_read_only_plan"
+  },
+  {
+    "case_id": "plain-answer-fallback",
+    "goal": "Explain why the sky appears blue",
+    "kind": "tool",
+    "route_kind": "fallback",
+    "outcome": "fallback",
+    "reason_code": "no_explicit_capability_reference"
+  },
+  {
+    "case_id": "url-is-not-capability",
+    "goal": "Summarize https://github.com/example/project",
+    "kind": "tool",
+    "route_kind": "fallback",
+    "outcome": "fallback",
+    "reason_code": "no_explicit_capability_reference"
+  }
+]

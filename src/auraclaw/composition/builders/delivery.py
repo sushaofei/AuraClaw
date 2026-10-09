@@ -6,6 +6,7 @@ from typing import Any
 from fastapi import FastAPI
 
 from auraclaw.admin.internal_service import OwnerAdminService
+from auraclaw.composition.observability import exporting_observability_store
 from auraclaw.composition.services import (
     ServiceSpec,
     _base_service_app,
@@ -61,7 +62,11 @@ def build_delivery_worker_app(
         else None
     )
     delivery_metric_store = (
-        PostgresObservabilityStore(settings.resolved_database_url)
+        exporting_observability_store(
+            settings,
+            service_name="delivery-worker",
+            store=PostgresObservabilityStore(settings.resolved_database_url),
+        )
         if settings.sql_storage_enabled
         else None
     )
@@ -74,6 +79,7 @@ def build_delivery_worker_app(
         settings.credential_proxy_base_url,
         bearer_token=bearer_token,
         service_identity=ServiceIdentity.DELIVERY_WORKER,
+        timeout=settings.credential_proxy_request_timeout_seconds,
     )
     worker = ResultDeliveryWorker(
         outbox=outbox,

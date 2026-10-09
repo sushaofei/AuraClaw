@@ -11,8 +11,11 @@ from auraclaw.composition.services import RemoteRuntimeWorker
 from auraclaw.config import Settings
 from auraclaw.contracts.errors import (
     ModelAuthenticationError,
+    ModelConnectError,
+    ModelProtocolError,
     ModelProviderError,
     ModelRateLimitError,
+    ModelReadError,
     ModelTimeoutError,
 )
 from auraclaw.control.ports import RunnableItem, RuntimeAssignment, RuntimeInstance
@@ -527,6 +530,41 @@ def test_openai_compatible_provider_sends_thinking_disabled() -> None:
     asyncio.run(scenario())
 
 
+def test_openai_compatible_provider_rejects_reasoning_only_completion() -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        chunks = [
+            {"choices": [{"delta": {"reasoning_content": "hidden reasoning"}}]},
+            {
+                "choices": [{"delta": {}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 4, "completion_tokens": 9, "total_tokens": 13},
+            },
+        ]
+        body = "".join(f"data: {json.dumps(chunk)}\n\n" for chunk in chunks)
+        return httpx.Response(200, text=f"{body}data: [DONE]\n\n")
+
+    async def scenario() -> None:
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        provider = OpenAICompatibleProvider(
+            base_url="https://models.example/v1",
+            model="reasoning-model",
+            retry_attempts=1,
+            client=client,
+        )
+        with pytest.raises(ModelProtocolError, match="without visible content or tool calls"):
+            await provider.generate(
+                ModelRequest(
+                    model_call_id="model-reasoning-only",
+                    tenant_id="tenant-m8",
+                    run_id="run-m8",
+                    messages=({"role": "user", "content": "answer visibly"},),
+                ),
+                credential="secret",
+            )
+        await client.aclose()
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize(
     ("status", "error", "body"),
     [
@@ -594,6 +632,184 @@ def test_openai_compatible_provider_maps_timeout() -> None:
         await client.aclose()
 
     asyncio.run(scenario())
+
+
+def test_openai_compatible_provider_retries_read_error_before_first_output() -> None:
+    attempts = 0
+
+    class FailingStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            raise httpx.ReadError("connection reset before first byte")
+            yield b""  # pragma: no cover
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return httpx.Response(200, stream=FailingStream())
+        chunk = {"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]}
+        return httpx.Response(200, text=f"data: {json.dumps(chunk)}\n\ndata: [DONE]\n\n")
+
+    async def scenario() -> None:
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        provider = OpenAICompatibleProvider(
+            base_url="https://models.example/v1",
+            model="model",
+            retry_base_delay_seconds=0,
+            client=client,
+        )
+        response = await provider.generate(
+            ModelRequest(
+                model_call_id="model-read-retry",
+                tenant_id="tenant-m8",
+                run_id="run-m8",
+                messages=(),
+            ),
+            credential="secret",
+        )
+        assert response.completed_output == "ok"
+        assert attempts == 2
+        await client.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_openai_compatible_provider_completes_100_calls_with_transient_read_failures() -> None:
+    attempts: dict[str, int] = {}
+
+    class FailingStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            raise httpx.ReadError("transient read failure")
+            yield b""  # pragma: no cover
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content.decode())
+        call_id = str(payload["messages"][0]["content"])
+        attempts[call_id] = attempts.get(call_id, 0) + 1
+        if int(call_id) % 10 == 0 and attempts[call_id] == 1:
+            return httpx.Response(200, stream=FailingStream())
+        chunk = {"choices": [{"delta": {"content": call_id}, "finish_reason": "stop"}]}
+        return httpx.Response(200, text=f"data: {json.dumps(chunk)}\n\ndata: [DONE]\n\n")
+
+    async def scenario() -> None:
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        provider = OpenAICompatibleProvider(
+            base_url="https://models.example/v1",
+            model="model",
+            retry_base_delay_seconds=0,
+            client=client,
+        )
+        for index in range(100):
+            response = await provider.generate(
+                ModelRequest(
+                    model_call_id=f"model-reliability-{index}",
+                    tenant_id="tenant-m8",
+                    run_id=f"run-{index}",
+                    messages=({"role": "user", "content": str(index)},),
+                ),
+                credential="secret",
+            )
+            assert response.completed_output == str(index)
+        assert sum(attempts.values()) == 110
+        await client.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_openai_compatible_provider_does_not_retry_after_visible_partial_output() -> None:
+    attempts = 0
+
+    class PartialStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            chunk = {"choices": [{"delta": {"content": "visible"}}]}
+            yield f"data: {json.dumps(chunk)}\n\n".encode()
+            raise httpx.ReadError("connection reset after output")
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return httpx.Response(200, stream=PartialStream())
+        chunk = {"choices": [{"delta": {"content": "complete"}, "finish_reason": "stop"}]}
+        return httpx.Response(200, text=f"data: {json.dumps(chunk)}\n\ndata: [DONE]\n\n")
+
+    async def scenario() -> None:
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        provider = OpenAICompatibleProvider(
+            base_url="https://models.example/v1",
+            model="model",
+            retry_base_delay_seconds=0,
+            client=client,
+        )
+        chunks = []
+        with pytest.raises(ModelReadError, match="stream read failed"):
+            async for chunk in provider.generate_stream(
+                ModelRequest(
+                    model_call_id="model-read-visible",
+                    tenant_id="tenant-m8",
+                    run_id="run-m8",
+                    messages=(),
+                ),
+                credential="secret",
+            ):
+                chunks.append(chunk)
+        assert [chunk.delta for chunk in chunks if chunk.kind == "delta"] == ["visible"]
+        assert attempts == 1
+        await client.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_openai_compatible_provider_retries_rate_limit() -> None:
+    attempts = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return httpx.Response(429, headers={"Retry-After": "0"})
+        chunk = {"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]}
+        return httpx.Response(200, text=f"data: {json.dumps(chunk)}\n\ndata: [DONE]\n\n")
+
+    async def scenario() -> None:
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        provider = OpenAICompatibleProvider(
+            base_url="https://models.example/v1",
+            model="model",
+            retry_base_delay_seconds=0,
+            client=client,
+        )
+        response = await provider.generate(
+            ModelRequest(
+                model_call_id="model-rate-limit-retry",
+                tenant_id="tenant-m8",
+                run_id="run-m8",
+                messages=(),
+            ),
+            credential="secret",
+        )
+        assert response.completed_output == "ok"
+        assert attempts == 2
+        await client.aclose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("transport_error", "mapped_error"),
+    [
+        (httpx.ConnectError("connect"), ModelConnectError),
+        (httpx.ReadError("read"), ModelReadError),
+        (httpx.RemoteProtocolError("protocol"), ModelProtocolError),
+        (httpx.ReadTimeout("timeout"), ModelTimeoutError),
+    ],
+)
+def test_openai_compatible_provider_maps_transport_failure_reason(
+    transport_error: httpx.HTTPError,
+    mapped_error: type[ModelProviderError],
+) -> None:
+    mapped = OpenAICompatibleProvider._map_transport_error(transport_error)
+    assert isinstance(mapped, mapped_error)
 
 
 def test_openai_compatible_provider_cancels_active_stream_by_model_call() -> None:

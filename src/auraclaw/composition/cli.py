@@ -43,6 +43,7 @@ from auraclaw.contracts.errors import SkillContentRejectedError
 from auraclaw.contracts.internal import ServiceIdentity
 from auraclaw.contracts.skills import SkillManifest
 from auraclaw.infrastructure.clients.admin import RemoteAdminClient
+from auraclaw.infrastructure.observability import configure_json_logging
 from auraclaw.infrastructure.persistence.migration_runner import (
     create_migration_runner,
     default_migrations_directory,
@@ -585,13 +586,15 @@ def _run_service_process(
     worker_interval: float | None,
 ) -> None:
     settings = get_settings()
+    service_name = SERVICE_BY_COMMAND[command]
+    configure_json_logging(level=log_level, service=service_name)
     _check_service_schema(command, settings)
     app = (
         create_service_app(command, settings, worker_interval=worker_interval)
         if command == "projection" and worker_interval is not None
         else create_service_app(command, settings)
     )
-    uvicorn.run(app, host=host, port=port, log_level=log_level)
+    uvicorn.run(app, host=host, port=port, log_level=log_level, log_config=None)
 
 
 def _run_ingress_process(
@@ -601,11 +604,12 @@ def _run_ingress_process(
     streaming_base_url: str,
     log_level: str,
 ) -> None:
+    configure_json_logging(level=log_level, service="local-ingress")
     app = create_local_ingress_app(
         task_api_base_url=task_api_base_url,
         streaming_base_url=streaming_base_url,
     )
-    uvicorn.run(app, host=host, port=port, log_level=log_level)
+    uvicorn.run(app, host=host, port=port, log_level=log_level, log_config=None)
 
 
 def _serve_topology(settings: Settings, *, host: str) -> None:
@@ -712,6 +716,7 @@ def main(
                 host=args.host or settings.host,
                 port=args.port or spec.port,
                 log_level=settings.log_level.lower(),
+                log_config=None,
             )
             return
         settings = get_settings()
@@ -762,11 +767,13 @@ def main(
             )
         spec = service_spec(args.command, settings)
         _check_service_schema(args.command, settings)
+        configure_json_logging(level=settings.log_level, service=spec.name)
         uvicorn_runner(
             create_service_app(args.command, settings),
             host=args.host or settings.host,
             port=args.port or spec.port,
             log_level=settings.log_level.lower(),
+            log_config=None,
         )
         return
     parser.error(f"unknown command: {args.command}")

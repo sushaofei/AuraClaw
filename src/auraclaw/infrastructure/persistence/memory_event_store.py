@@ -12,13 +12,22 @@ from auraclaw.contracts.errors import VersionConflictError
 from auraclaw.contracts.events import CanonicalEvent, NewEvent, utc_now
 from auraclaw.domain.runtime_budget import govern
 from auraclaw.domain.skill_execution import has_active_skill_reference
-from auraclaw.session.ports import AppendResult, ClaimedOutboxRecord, SessionSnapshot
+from auraclaw.session.ports import (
+    AppendResult,
+    ClaimedOutboxRecord,
+    SessionSnapshot,
+    StreamAppend,
+)
 
 DELIVERY_TRIGGER_EVENTS = {
+    "approval.requested",
+    "approval.delegated",
+    "approval.escalated",
+    "approval.expired",
+    "approval.cancelled",
     "run.completed",
     "run.failed",
     "run.cancelled",
-    "approval.requested",
     "child.result_published",
 }
 CONTROL_TRIGGER_EVENTS = {
@@ -27,6 +36,8 @@ CONTROL_TRIGGER_EVENTS = {
     "session.resumed",
     "approval.approved",
     "approval.rejected",
+    "approval.expired",
+    "approval.cancelled",
     "dependency.changed",
     "child.result_published",
     "review.completed",
@@ -90,6 +101,24 @@ class InMemoryEventStore:
             events,
             key=lambda event: (event.tenant_id, event.session_id, event.aggregate_version),
         )
+
+    async def load_tenant_page(
+        self,
+        tenant_id: str,
+        *,
+        after_session_id: str | None = None,
+        after_version: int | None = None,
+        limit: int = 1000,
+    ) -> list[CanonicalEvent]:
+        events = await self.load_all(tenant_id)
+        if after_session_id is not None and after_version is not None:
+            events = [
+                event
+                for event in events
+                if (event.session_id, event.aggregate_version)
+                > (after_session_id, after_version)
+            ]
+        return events[:limit]
 
     async def has_skill_package_reference(self, tenant_id: str, package_digest: str) -> bool:
         for event in await self.load_all(tenant_id):
@@ -233,18 +262,134 @@ class InMemoryEventStore:
                     )
             return AppendResult(events=canonical, command_result=dict(command_result))
 
+    async def append_batch(
+        self,
+        *,
+        root_session_id: str,
+        context: CommandContext,
+        appends: Sequence[StreamAppend],
+        command_result: dict[str, Any],
+    ) -> AppendResult:
+        if not appends:
+            raise ValueError("batch append requires at least one stream")
+        session_ids = [item.session_id for item in appends]
+        if len(set(session_ids)) != len(session_ids):
+            raise ValueError("batch append session ids must be unique")
+        command_key = (context.tenant_id, context.operation, context.command_id)
+        async with self._lock:
+            previous = self._commands.get(command_key)
+            if previous is not None:
+                if command_result.get("_request_fingerprint") != previous.get(
+                    "_request_fingerprint"
+                ):
+                    raise VersionConflictError("command was reused with a different request")
+                return AppendResult(events=[], command_result=dict(previous), deduplicated=True)
+
+            for item in appends:
+                actual_version = len(
+                    self._streams.get((context.tenant_id, item.session_id), ())
+                )
+                if actual_version != item.expected_version:
+                    raise VersionConflictError(
+                        f"expected Session version {item.expected_version}, "
+                        f"got {actual_version}"
+                    )
+
+            root_events: list[Any] = [
+                event
+                for (tenant, _), rows in self._streams.items()
+                if tenant == context.tenant_id
+                for event in rows
+                if event.root_session_id == root_session_id
+            ]
+            canonical: list[CanonicalEvent] = []
+            by_stream: dict[str, list[CanonicalEvent]] = {}
+            for item in appends:
+                governed = govern(
+                    root_events,
+                    item.events,
+                    session_id=item.session_id,
+                    root_session_id=root_session_id,
+                    run_id=item.run_id,
+                )
+                stored_events: list[CanonicalEvent] = []
+                for offset, event in enumerate(governed, start=1):
+                    stored = CanonicalEvent(
+                        event_id=f"evt_{uuid4().hex}",
+                        tenant_id=context.tenant_id,
+                        root_session_id=root_session_id,
+                        session_id=item.session_id,
+                        run_id=item.run_id,
+                        aggregate_version=item.expected_version + offset,
+                        type=event.type,
+                        occurred_at=utc_now(),
+                        actor=context.actor,
+                        correlation_id=context.correlation_id,
+                        causation_id=context.causation_id or context.command_id,
+                        visibility=event.visibility,
+                        schema_version=1,
+                        payload=dict(event.payload),
+                    )
+                    stored_events.append(stored)
+                    canonical.append(stored)
+                    root_events.append(stored)
+                by_stream[item.session_id] = stored_events
+
+            # Nothing above mutates storage: validation and budget governance either
+            # succeed for the complete DAG or the entire batch remains absent.
+            for session_id, stored_events in by_stream.items():
+                self._streams.setdefault((context.tenant_id, session_id), []).extend(
+                    stored_events
+                )
+            self._commands[command_key] = dict(command_result)
+            for stored_event in canonical:
+                self._append_outbox_records(stored_event)
+            return AppendResult(events=canonical, command_result=dict(command_result))
+
+    def _append_outbox_records(self, stored_event: CanonicalEvent) -> None:
+        self._outbox.append(
+            OutboxRecord(
+                outbox_id=len(self._outbox) + 1,
+                event_id=stored_event.event_id,
+                destination="projection",
+                event=stored_event,
+            )
+        )
+        if stored_event.type in DELIVERY_TRIGGER_EVENTS:
+            self._outbox.append(
+                OutboxRecord(
+                    outbox_id=len(self._outbox) + 1,
+                    event_id=stored_event.event_id,
+                    destination="delivery",
+                    event=stored_event,
+                )
+            )
+        if stored_event.type in CONTROL_TRIGGER_EVENTS:
+            self._outbox.append(
+                OutboxRecord(
+                    outbox_id=len(self._outbox) + 1,
+                    event_id=stored_event.event_id,
+                    destination="control",
+                    event=stored_event,
+                )
+            )
+
     async def pending_outbox(self) -> list[OutboxRecord]:
         return [
             record
             for record in self._outbox
-            if not record.published and record.destination == "projection"
+            if not record.published
+            and not record.poisoned
+            and record.destination == "projection"
         ]
 
     async def pending_delivery_outbox(self) -> list[OutboxRecord]:
         return [
             record
             for record in self._outbox
-            if not record.published and record.destination == "delivery"
+            if not record.published
+            and not record.poisoned
+            and record.destination == "delivery"
         ]
 
     async def mark_outbox_published(self, outbox_id: int) -> None:
@@ -259,6 +404,8 @@ class InMemoryEventStore:
             for record in self._outbox:
                 if record.outbox_id == outbox_id:
                     record.publish_attempt += 1
+                    if record.destination == "projection" and record.publish_attempt >= 5:
+                        record.poisoned = True
                     return
 
     async def claim_outbox(
@@ -357,8 +504,33 @@ class InMemoryEventStore:
                 record.published = True
             elif disposition == "poison":
                 record.poisoned = True
-            elif disposition != "nack":
+            elif disposition == "nack":
+                if destination == "projection" and record.publish_attempt >= 5:
+                    record.poisoned = True
+            else:
                 return False
+            record.claimed_by = None
+            record.claim_token = None
+            record.claim_expires_at = None
+            return True
+
+    async def redrive_outbox(self, destination: str, event_id: str) -> bool:
+        async with self._lock:
+            record = next(
+                (
+                    item
+                    for item in self._outbox
+                    if item.destination == destination
+                    and item.event_id == event_id
+                    and item.poisoned
+                    and not item.published
+                ),
+                None,
+            )
+            if record is None:
+                return False
+            record.poisoned = False
+            record.publish_attempt = 0
             record.claimed_by = None
             record.claim_token = None
             record.claim_expires_at = None

@@ -96,7 +96,7 @@ class SignedAgentContextVerifier:
         workload_tokens: Mapping[str, str],
         keys: Mapping[str, bytes],
         replay_guard: AssertionReplayStore | None = None,
-        issuer: str = "chaintower",
+        issuer: str = "upstream",
         audience: str = "auraclaw-task-api",
         required_scope: str = "agent.task.invoke",
         max_ttl_seconds: int = 300,
@@ -125,13 +125,13 @@ class SignedAgentContextVerifier:
         token = (request.workload_credential or "").removeprefix("Bearer ").strip()
         if not token:
             raise identity_error(
-                "missing chaintower workload credential",
+                "missing upstream workload credential",
                 reason=IdentityErrorReason.MISSING_CREDENTIAL,
             )
         subject = self._workload_tokens.get(token)
         if subject is None:
             raise identity_error(
-                "chaintower workload credential is not trusted",
+                "upstream workload credential is not trusted",
                 reason=IdentityErrorReason.WORKLOAD_MISMATCH,
             )
         if not request.assertion:
@@ -161,7 +161,7 @@ class SignedAgentContextVerifier:
                 expires_at=int(claims["exp"]) + self._clock_skew_seconds,
             )
         return VerifiedIdentityEnvelope(
-            caller=AuthenticatedCaller(kind="chaintower_workload", subject=subject),
+            caller=AuthenticatedCaller(kind="upstream_workload", subject=subject),
             user=user,
             assertion=AssertionMetadata(
                 issuer=str(claims["iss"]),

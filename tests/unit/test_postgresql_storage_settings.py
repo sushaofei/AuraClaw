@@ -19,16 +19,16 @@ def test_postgres_backend_resolves_local_dialect(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setenv("AURACLAW_STORAGE_BACKEND", "postgres")
     monkeypatch.setenv("DB_HOST", "localhost")
     monkeypatch.setenv("DB_PORT", "5432")
-    monkeypatch.setenv("DB_USER", "chaintower_admin")
+    monkeypatch.setenv("DB_USER", "auraclaw_admin")
     monkeypatch.setenv("DB_PWD", "Chain@2026")
-    monkeypatch.setenv("DB_NAME", "chaintower_agent")
+    monkeypatch.setenv("DB_NAME", "auraclaw")
     settings = Settings(_env_file=None)
     assert settings.postgres_enabled is True
     assert settings.kingbase_enabled is False
     assert settings.resolved_db_dialect == "postgres"
     assert settings.storage_label == "postgres"
     assert settings.resolved_database_url.startswith("postgresql+asyncpg://")
-    assert "@localhost:5432/chaintower_agent" in settings.resolved_database_url
+    assert "@localhost:5432/auraclaw" in settings.resolved_database_url
     assert "Chain%402026" in settings.resolved_database_url
 
 
@@ -48,7 +48,7 @@ def test_postgresql_env_aliases_overwrite_db_when_backend_postgres(
                 "POSTGRESQL_PORT=5432",
                 "POSTGRESQL_DB_USER=pg_user",
                 "POSTGRESQL_DB_PWD=Chain@2026",
-                "POSTGRESQL_AURACLAW_DB=chaintower_agent",
+                "POSTGRESQL_AURACLAW_DB=auraclaw",
             ]
         )
         + "\n",
@@ -70,5 +70,5 @@ def test_postgresql_env_aliases_overwrite_db_when_backend_postgres(
     assert settings.db_port == 5432
     assert settings.db_user == "pg_user"
     assert settings.db_password == "Chain@2026"
-    assert settings.db_name == "chaintower_agent"
+    assert settings.db_name == "auraclaw"
     assert "Chain%402026" in settings.resolved_database_url

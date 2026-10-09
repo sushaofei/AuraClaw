@@ -43,6 +43,9 @@ KNOWN_TASK_EVENTS = {
     "session.paused",
     "approval.requested",
     "human.response.recorded",
+    "approval.vote.recorded",
+    "approval.delegated",
+    "approval.escalated",
     "approval.approved",
     "approval.rejected",
     "approval.expired",
@@ -66,6 +69,7 @@ KNOWN_TASK_EVENTS = {
     "skill.failed",
     "skill.cancelled",
     "context.resource.used",
+    "context.skill.reference.used",
     "delivery.attempting",
     "delivery.retrying",
     "delivery.succeeded",
@@ -76,7 +80,7 @@ KNOWN_TASK_EVENTS = {
 
 
 class InMemoryTaskProjection:
-    """Disposable Control/Result read model used by the first vertical slice."""
+    """Disposable Control/Result read model for development and isolated tests."""
 
     def __init__(self) -> None:
         self._tasks: dict[tuple[str, str], dict[str, Any]] = {}
@@ -331,7 +335,7 @@ class InMemoryTaskProjection:
                 run_status=RunStatus.RUNNABLE.value,
                 current_stage="scheduling",
             )
-        elif event.type == "approval.rejected":
+        elif event.type in {"approval.rejected", "approval.expired", "approval.cancelled"}:
             view.update(
                 status=SessionStatus.RUNNABLE.value,
                 run_status=RunStatus.RUNNABLE.value,

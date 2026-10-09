@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime
 from typing import Literal
@@ -38,6 +38,7 @@ from auraclaw.api.dependencies import (
 from auraclaw.api.dependencies import (
     get_task_result_waiter as task_result_waiter_dependency,
 )
+from auraclaw.api.routes.artifacts import router as artifact_router
 from auraclaw.api.routes.health import router as health_router
 from auraclaw.api.routes.operations import router as operations_router
 from auraclaw.api.routes.streams import router as stream_router
@@ -47,6 +48,7 @@ from auraclaw.composition.identity import build_identity_verifier
 from auraclaw.config import Settings, get_settings
 from auraclaw.contracts.errors import AuraClawError
 from auraclaw.contracts.observability import TraceContext
+from auraclaw.contracts.operations import error_disposition
 from auraclaw.infrastructure.observability.stores import StructuredLogger
 
 ApiProfile = Literal["task-api", "streaming-gateway"]
@@ -68,7 +70,7 @@ _CORS_ALLOW_HEADERS = [
     "Last-Event-ID",
     "X-Actor-ID",
     "X-Correlation-ID",
-    "X-CT-Agent-Context",
+    "X-Aura-Agent-Context",
     "X-Dept-ID",
     "X-Expected-Revision",
     "X-Expected-Version",
@@ -99,10 +101,31 @@ def install_public_cors(app: FastAPI, settings: Settings) -> None:
 async def task_api_lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.service_name = "task-api"
     app.state.service_ready = bool(getattr(app.state, "config_ready", True))
+    maintenance_tasks: list[asyncio.Task[None]] = []
+    for tick in getattr(app.state, "maintenance_ticks", ()):
+
+        async def run_maintenance(
+            worker: Callable[[], Awaitable[object]] = tick,
+        ) -> None:
+            while True:
+                try:
+                    await worker()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logging.getLogger(__name__).exception("task-api maintenance tick failed")
+                await asyncio.sleep(getattr(app.state, "maintenance_interval", 30.0))
+
+        maintenance_tasks.append(asyncio.create_task(run_maintenance()))
     try:
         yield
     finally:
         app.state.service_ready = False
+        for task in maintenance_tasks:
+            task.cancel()
+        for task in maintenance_tasks:
+            with suppress(asyncio.CancelledError):
+                await task
         for closeable in getattr(app.state, "closeables", ()):
             close = getattr(closeable, "aclose", None)
             if close is None:
@@ -114,19 +137,35 @@ async def task_api_lifespan(app: FastAPI) -> AsyncIterator[None]:
 async def streaming_lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.service_name = "streaming-gateway"
     app.state.service_ready = False
-    ingestor = providers.get_streaming_ingestor()
-    if ingestor is not None:
-        await asyncio.wait_for(ingestor.start(), timeout=10)
-    app.state.runtime_event_bus_ready = True
-    app.state.service_ready = True
+    replay = providers.get_runtime_replay_bus()
+    ingestor = None
     try:
+        start_replay = getattr(replay, "start", None)
+        if start_replay is not None:
+            await asyncio.wait_for(start_replay(), timeout=10)
+        app.state.readiness_probe = getattr(replay, "readiness", None)
+        ingestor = providers.get_streaming_ingestor()
+        if ingestor is not None:
+            await asyncio.wait_for(ingestor.start(), timeout=10)
+        app.state.runtime_event_bus_ready = True
+        app.state.service_ready = True
         yield
     finally:
         app.state.service_ready = False
+        begin_drain = getattr(replay, "begin_drain", None)
+        if begin_drain is not None:
+            with suppress(Exception):
+                await asyncio.wait_for(
+                    begin_drain(
+                        retry_after_seconds=get_settings().streaming_drain_retry_after_seconds
+                    ),
+                    timeout=10,
+                )
         if ingestor is not None:
             with suppress(Exception):
                 await asyncio.wait_for(ingestor.close(), timeout=10)
-        await providers.get_runtime_replay_bus().close()
+        with suppress(Exception):
+            await replay.close()
         close_identity = getattr(app.state.identity_verifier, "close", None)
         if close_identity is not None:
             await close_identity()
@@ -160,6 +199,7 @@ def create_app(*, profile: ApiProfile) -> FastAPI:
     install_public_cors(app, settings)
     app.include_router(health_router)
     if profile == "task-api":
+        app.include_router(artifact_router)
         app.include_router(task_router)
         app.include_router(operations_router)
     else:
@@ -167,12 +207,11 @@ def create_app(*, profile: ApiProfile) -> FastAPI:
     structured_logger = StructuredLogger()
 
     @app.middleware("http")
-    async def observe_request(
-        request: Request, call_next: RequestResponseEndpoint
-    ) -> Response:
+    async def observe_request(request: Request, call_next: RequestResponseEndpoint) -> Response:
         trace_id = request.headers.get("traceparent", "").split("-")[1:2]
         trace = trace_id[0] if trace_id and len(trace_id[0]) == 32 else uuid4().hex
         span_id = uuid4().hex[:16]
+        request.state.trace_id = trace
         tenant_id = "unauthenticated"
         started_at = datetime.now(UTC)
         started = time.perf_counter()
@@ -189,11 +228,14 @@ def create_app(*, profile: ApiProfile) -> FastAPI:
             duration_ms = (time.perf_counter() - started) * 1_000
             context = TraceContext(trace_id=trace, span_id=span_id, tenant_id=tenant_id)
             try:
-                observability = getattr(
-                    request.app.state,
-                    "observability_service",
-                    None,
-                ) or providers.get_observability_service()
+                observability = (
+                    getattr(
+                        request.app.state,
+                        "observability_service",
+                        None,
+                    )
+                    or providers.get_observability_service()
+                )
                 await observability.record_span(
                     context=context,
                     component="task_gateway",
@@ -223,13 +265,22 @@ def create_app(*, profile: ApiProfile) -> FastAPI:
                 )
 
     @app.exception_handler(AuraClawError)
-    async def handle_auraclaw_error(_: Request, exc: AuraClawError) -> JSONResponse:
+    async def handle_auraclaw_error(request: Request, exc: AuraClawError) -> JSONResponse:
         headers = {}
         if exc.retry_after is not None:
             headers["Retry-After"] = str(exc.retry_after)
+        disposition = error_disposition(exc.code, exc.status_code)
         return JSONResponse(
             status_code=exc.status_code,
-            content={"code": exc.code, "message": exc.message, "detail": exc.detail},
+            content={
+                "code": exc.code,
+                "message": exc.message,
+                "detail": exc.detail,
+                "category": disposition.category.value,
+                "retryable": disposition.retryable,
+                "operator_action": disposition.operator_action.value,
+                "trace_id": getattr(request.state, "trace_id", "unavailable"),
+            },
             headers=headers,
         )
 

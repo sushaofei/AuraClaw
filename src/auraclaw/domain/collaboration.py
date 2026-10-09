@@ -27,6 +27,9 @@ class CollaborationNode:
     task_key: str
     output_contract: OutputContract = field(default_factory=OutputContract)
     dependency_ids: tuple[str, ...] = ()
+    input_refs: tuple[str, ...] = ()
+    tool_permissions: tuple[str, ...] = ()
+    metadata: dict[str, Any] = field(default_factory=dict)
     owner: str | None = None
     budget: float = 0.0
     runtime_budget: dict[str, int | float | None] = field(default_factory=dict)
@@ -87,6 +90,11 @@ class CollaborationAggregate:
                 task_key=str(payload["task_key"]),
                 output_contract=OutputContract.from_dict(dict(payload["output_contract"])),
                 dependency_ids=tuple(str(item) for item in payload.get("dependency_ids", ())),
+                input_refs=tuple(str(item) for item in payload.get("input_refs", ())),
+                tool_permissions=tuple(
+                    str(item) for item in payload.get("tool_permissions", ())
+                ),
+                metadata=dict(payload.get("metadata", {})),
                 budget=float(payload.get("budget", 1.0)),
                 runtime_budget=dict(payload.get("runtime_budget", {})),
                 target_session_id=payload.get("target_session_id"),
@@ -156,6 +164,42 @@ class CollaborationAggregate:
         if sum(node.budget for node in children) + spec.budget > limits.max_budget:
             raise CollaborationValidationError("root collaboration budget exceeded")
         self.validate_dependencies(child_session_id, spec.dependency_ids)
+
+    def stage_new_child(
+        self,
+        *,
+        parent_session_id: str,
+        child_session_id: str,
+        spec: ChildSpec,
+        limits: CollaborationLimits,
+    ) -> CollaborationNode:
+        """Validate and stage a Child in-memory while checking an atomic plan."""
+        self.validate_new_child(
+            parent_session_id=parent_session_id,
+            child_session_id=child_session_id,
+            spec=spec,
+            limits=limits,
+        )
+        node = CollaborationNode(
+            tenant_id=self.tenant_id,
+            session_id=child_session_id,
+            root_session_id=self.root_session_id,
+            parent_session_id=parent_session_id,
+            role=spec.role,
+            goal=spec.goal,
+            task_key=spec.task_key,
+            output_contract=spec.output_contract,
+            dependency_ids=spec.dependency_ids,
+            input_refs=spec.input_refs,
+            tool_permissions=spec.tool_permissions,
+            metadata=dict(spec.metadata),
+            budget=spec.budget,
+            runtime_budget=dict(spec.runtime_budget),
+            target_session_id=spec.metadata.get("target_session_id"),
+        )
+        self.nodes[child_session_id] = node
+        self._refresh_runnable()
+        return node
 
     def validate_dependencies(
         self, child_session_id: str, dependency_ids: tuple[str, ...]

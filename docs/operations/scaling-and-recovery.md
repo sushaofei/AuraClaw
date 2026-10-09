@@ -1,5 +1,27 @@
 # S4 横向扩展与恢复运行说明
 
+## 长会话 Activity 容量基线
+
+- `0071` 将 Activity 节点预计算到可重建 Projection；Task API 每次最多读取 200 个节点，正常热路径不得调用
+  Session 全量事件接口。缓存缺失、不完整或落后于 Task Projection 时允许受控回退，必须记录为容量风险并尽快
+  执行租户 Projection rebuild。
+- prod-like CI 用 10,000 节点验证 `activity_node_incremental_page_idx` 和单页数据库读取小于 1 秒；生产发布目标
+  p95 小于 100ms、p99 小于 250ms。基线至少记录节点数、响应分位、数据库 CPU/读块、索引命中和回退次数；
+  `X-Activity-Cache=fallback` 与对应结构化日志必须进入告警。
+- 扩容前用目标租户分布复测 100,000+ 节点会话；若索引查询超过目标，禁止通过增加 Task API 副本掩盖数据库
+  扫描，应先检查统计信息、索引膨胀、连接池与慢查询计划。
+
+## Streaming Gateway 所有权与摘流
+
+- Gateway 实例使用进程 generation 注册；同一 owner 的活跃 generation 不允许第二个进程覆盖。实例
+  heartbeat 失败或所有权被接管时 readiness 返回 503，新订阅返回 `service_draining` 与 Retry-After。
+- 发布时先从 LB 摘除旧实例并观察 readiness，再发送终止信号。终止钩子把实例标为 draining、关闭本地
+  SSE；客户端携带最后一个 `Last-Event-ID` 重连其他副本。不要把断开解释为任务取消或结果丢失。
+- active owner 缺失、generation 不匹配或 TTL 到期的连接由活跃 Gateway 周期清理。正常关闭的删除条件
+  同时包含 owner 和 generation，避免旧进程删除新进程接管后的记录。
+- 验收至少覆盖：活跃 owner 冲突拒绝、TTL 后接管、孤儿清除、drain 拒绝新连接、现有 SSE 结束、游标
+  重连无重复/倒序，以及最终结果继续从 Task Result API 读取。
+
 ## 生产拓扑建议
 
 S4 的进程均为无本地业务状态实例；Canonical Event、Control、Projection、Delivery、Hands、
@@ -34,7 +56,8 @@ registration lease 内仍活跃时，新进程注册会 fail closed。因此显�
 - 无可用 Runtime 槽位是背压而非故障。Orchestrator 将原队列项延迟 100–500ms（带 jitter）后按原
   priority/partition 重排，避免多副本热循环且不改变公平顺序。
 - Projection Outbox 每个 destination/tenant/session 只释放最早未完成记录。claim、retry delay 或
-  poison 会阻断后续版本，避免多个 Worker 产生 version gap。
+  poison 会阻断后续版本，避免多个 Worker 产生 version gap。连续 5 次失败后 Session owner 将记录
+  隔离为 poison，停止自动领取；修复后只能由 Projection Worker 的 owner 管理操作显式 redrive。
 - Delivery 在 Outbox ingestion 后按 tenant/session/sink 串行领取 Job；attempting、retry_wait 和过期
   claim 均可恢复，DLQ 与人工 redelivery 使用稳定 delivery ID。Sink 熔断状态按 tenant/sink 共享，
   半开探针通过持久 claim 保证全局至多一个，不随 Worker 重启丢失。每轮只领取副本空闲容量，
@@ -109,8 +132,8 @@ registration lease 内仍活跃时，新进程注册会 fail closed。因此显�
 
 1. 依次应用 PostgreSQL/KingBase `0010`～`0053` migration。`0040`
    `0022` 增加 registration 与 execution claim 字段和索引；先迁移 Control 数据库，再滚动升级
-   Orchestrator，最后升级 Agent Runtime。可选执行 `deploy/postgres/roles.sql` 做硬化，
-   当前部署不按服务注入分角色 DSN。
+   Orchestrator，最后升级 Agent Runtime。生产迁移后必须由 migration owner 执行
+   `deploy/postgres/roles.sql`，再以分服务 DSN 启动应用；migration owner 凭据不得挂载到应用服务。
    `0041` 将 MCP observed health 扩为实例级主键，并加入 Catalog generation；必须在滚动 Action Hands
    前应用。升级后观察每个 Server 至少一个 active instance、active generation 单调增长和 stale 告警。
    `0042` 增加 Session、Control、Hands fencing 高水位表；必须先迁移数据库，再滚动三个服务，
@@ -135,12 +158,12 @@ registration lease 内仍活跃时，新进程注册会 fail closed。因此显�
    revision；先迁移再滚动 Action Hands。升级窗口不得混跑会绕过 Catalog CAS 的旧 Reconciler。
    `0052` 增加 Approval request digest/generation/decision metadata 与 transition audit；先迁移 Policy
    数据库，再滚动 Policy 和 Task API。升级窗口不得混跑会无条件覆盖 Approval 终态的旧 Policy 副本。
-   `0053` 是 Action Hands 数据一致性迁移：删除已退役的 `auraclaw-price-insight` Provider，并清除
+   `0053` 是 Action Hands 数据一致性迁移：删除已退役的 `legacy-local-provider`，并清除
    非 active generation 的 Capability 残留；迁移后滚动 Action Hands，确认
    `capability.catalog.backing_missing` 不持续增长。该数据清理不可通过 down migration 恢复，若需恢复
    Provider，必须重新注册并发布经过完整校验的新 snapshot。
-2. 各服务共享统一 `AURACLAW_DATABASE_URL`（Compose `database_url` secret）；migration 使用
-   独立的 `AURACLAW_MIGRATION_DATABASE_URL`。
+2. 生产中的每个持久化服务使用独立 `AURACLAW_<SERVICE>_DATABASE_URL` Secret；migration 使用
+   独立的 `AURACLAW_MIGRATION_DATABASE_URL`，且 migration owner 凭据不得挂载到应用服务。
 3. 所有 Control、Session 与 Hands 副本必须使用相同的 `AURACLAW_LEASE_SIGNING_KEY`，并通过平台
    Secret mount 注入。
 4. OBS bucket 权限只授予 Artifact Service；Vault token 只授予 Credential Proxy。Vault KV

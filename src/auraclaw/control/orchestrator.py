@@ -19,6 +19,7 @@ from auraclaw.control.ports import (
     RuntimeInstance,
     RuntimeLease,
     RuntimeProvisioner,
+    runtime_requirements_from_profile,
 )
 from auraclaw.runtime.ports import SessionClient
 
@@ -270,7 +271,7 @@ class LocalRuntimeProvisioner:
             runtime_type="agent",
             role=AGENT_RUNTIME_POOL,
             node_id=self._node_id,
-            capabilities=dict(item.required_capability),
+            capabilities=runtime_requirements_from_profile(item.required_capability),
             capacity=1,
         )
 

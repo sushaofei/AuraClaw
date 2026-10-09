@@ -94,7 +94,7 @@ class HttpxPinnedMcpSender:
         self,
         client: httpx.AsyncClient | None = None,
         *,
-        timeout_seconds: float = 30.0,
+        timeout_seconds: float = 120.0,
         max_response_bytes: int = 8 * 1024 * 1024,
     ) -> None:
         self._max_response_bytes = max_response_bytes
@@ -330,13 +330,13 @@ class ManagedMcpEgressAdapter:
             dept_id = identity.get("dept_id")
             session_id = identity.get("session_id")
             if tenant_id:
-                headers["X-CT-Tenant-ID"] = str(tenant_id)
+                headers["X-Aura-Tenant-ID"] = str(tenant_id)
             if user_id:
-                headers["X-CT-User-ID"] = str(user_id)
+                headers["X-Aura-User-ID"] = str(user_id)
             if dept_id:
-                headers["X-CT-Dept-ID"] = str(dept_id)
+                headers["X-Aura-Dept-ID"] = str(dept_id)
             if session_id:
-                headers["X-CT-Session-ID"] = str(session_id)
+                headers["X-Aura-Session-ID"] = str(session_id)
         body: dict[str, Any] = {"jsonrpc": "2.0", "method": method, "params": params}
         if not method.startswith("notifications/"):
             body["id"] = payload.get("id")

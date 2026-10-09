@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Protocol
+from typing import Any, Protocol
 
+from auraclaw.action.ports import PolicyEvaluation
 from auraclaw.artifact.ports import (
+    ArtifactContentScanner,
     ObjectMultipartClient,
     ObjectPresigner,
     ObjectVerifier,
@@ -22,6 +26,8 @@ from auraclaw.contracts.internal import (
     ArtifactDownloadResponse,
     ArtifactFinalizeRequest,
     ArtifactFinalizeResponse,
+    ArtifactShareRequest,
+    ArtifactShareResponse,
     ArtifactSkillOrphanClaimRequest,
     ArtifactSkillOrphanClaimResponse,
     ArtifactSkillOrphanResolveRequest,
@@ -33,6 +39,7 @@ from auraclaw.contracts.internal import (
     ArtifactUploadResponse,
     ServiceIdentity,
 )
+from auraclaw.contracts.tools import PolicyDecision
 
 
 @dataclass(frozen=True)
@@ -182,6 +189,18 @@ class ArtifactPolicyValidator(Protocol):
         resource: str,
     ) -> bool: ...
 
+    async def evaluate_action(
+        self,
+        *,
+        tenant_id: str,
+        subject: str,
+        action: str,
+        resource: str,
+        input_digest: str,
+        correlation_id: str,
+        attributes: dict[str, object],
+    ) -> PolicyEvaluation: ...
+
 
 def _is_task_api_skill_upload(pending: PendingUpload) -> bool:
     return (
@@ -202,6 +221,7 @@ class ArtifactInternalService:
         object_verifier: ObjectVerifier | None = None,
         policy: ArtifactPolicyValidator | None = None,
         multipart: ObjectMultipartClient | None = None,
+        content_scanner: ArtifactContentScanner | None = None,
         multipart_threshold: int = 16 * 1024 * 1024,
         multipart_part_size: int = 8 * 1024 * 1024,
         claim_ttl: timedelta = timedelta(seconds=30),
@@ -212,6 +232,7 @@ class ArtifactInternalService:
         self._object_verifier = object_verifier
         self._policy = policy
         self._multipart = multipart
+        self._content_scanner = content_scanner
         self._multipart_threshold = multipart_threshold
         self._multipart_part_size = multipart_part_size
         self._claim_ttl = claim_ttl
@@ -523,6 +544,29 @@ class ArtifactInternalService:
                     raise ArtifactAccessError(f"artifact object scan failed: {scan}")
                 if scan != "clean":
                     raise ArtifactAccessError(f"artifact object is not ready: {scan}")
+            if self._content_scanner is not None:
+                await self._assert_claim(pending, "finalize", claim_lost)
+                download_url, _ = self._presigner.presign(
+                    "GET", pending.object_key, ttl=timedelta(minutes=5)
+                )
+                try:
+                    content_scan = await self._content_scanner.scan(
+                        pending, download_url=download_url
+                    )
+                except Exception as exc:
+                    if self._repository is not None and not await self._repository.mark_quarantined(
+                        pending, "content_scanner_unavailable"
+                    ):
+                        raise ArtifactAccessError("artifact finalization lease was lost") from exc
+                    raise ArtifactAccessError("artifact content scanner is unavailable") from exc
+                await self._assert_claim(pending, "finalize", claim_lost)
+                if content_scan.verdict != "clean":
+                    reason = f"content_{content_scan.finding_code or 'policy_denied'}"
+                    if self._repository is not None and not await self._repository.mark_quarantined(
+                        pending, reason
+                    ):
+                        raise ArtifactAccessError("artifact finalization lease was lost")
+                    raise ArtifactAccessError("artifact content scan quarantined the object")
             await self._assert_claim(pending, "finalize", claim_lost)
             if self._repository is not None:
                 if not await self._repository.mark_ready(pending, request.version):
@@ -675,6 +719,63 @@ class ArtifactInternalService:
             "GET", record.object_key, ttl=timedelta(minutes=5)
         )
         return ArtifactDownloadResponse(download_url=url, expires_at=expires_at)
+
+    async def share(self, request: ArtifactShareRequest) -> ArtifactShareResponse:
+        if request.context.service_identity is not ServiceIdentity.TASK_API:
+            raise ArtifactAccessError("only task-api may create Artifact shares")
+        if self._policy is None:
+            raise ArtifactAccessError("Artifact sharing policy is unavailable")
+        if self._repository is not None:
+            record = await self._repository.get_ready(
+                request.context.tenant_id, request.artifact_id, request.version
+            )
+        else:
+            record = self._ready.get(
+                (request.context.tenant_id, request.artifact_id, request.version)
+            )
+        if record is None:
+            raise NotFoundError("artifact was not found")
+        attributes: dict[str, object] = {
+            "artifact_version": request.version,
+            "classification": record.classification,
+            "media_type": record.media_type,
+            "audience": request.audience,
+            "ttl_seconds": request.ttl_seconds,
+            "permission": "read-only",
+            "risk_level": "medium",
+        }
+        digest = hashlib.sha256(json.dumps(attributes, sort_keys=True).encode()).hexdigest()
+        evaluation = await self._policy.evaluate_action(
+            tenant_id=request.context.tenant_id,
+            subject=request.actor_id,
+            action="artifact.share",
+            resource=request.artifact_id,
+            input_digest=digest,
+            correlation_id=request.context.correlation_id,
+            attributes=attributes,
+        )
+        if evaluation.decision not in {
+            PolicyDecision.ALLOW,
+            PolicyDecision.ALLOW_WITH_CONSTRAINTS,
+        }:
+            raise ArtifactAccessError("Artifact sharing policy denied access")
+        constraints: dict[str, Any] = evaluation.constraints
+        if constraints.get("audience", request.audience) != request.audience:
+            raise ArtifactAccessError("Artifact sharing audience was not authorized")
+        ttl_seconds = int(constraints.get("ttl_seconds", request.ttl_seconds))
+        if ttl_seconds < 30 or ttl_seconds > request.ttl_seconds:
+            raise ArtifactAccessError("Artifact sharing policy returned an invalid TTL")
+        url, expires_at = self._presigner.presign(
+            "GET", record.object_key, ttl=timedelta(seconds=ttl_seconds)
+        )
+        return ArtifactShareResponse(
+            artifact_id=request.artifact_id,
+            version=request.version,
+            audience=request.audience,
+            share_url=url,
+            expires_at=expires_at,
+            policy_decision_id=evaluation.decision_id,
+        )
 
     async def delete(self, request: ArtifactDeleteRequest) -> ArtifactDeleteResponse:
         if request.context.service_identity is not ServiceIdentity.ACTION_HANDS:

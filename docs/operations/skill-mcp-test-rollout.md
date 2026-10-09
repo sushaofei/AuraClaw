@@ -3,7 +3,7 @@
 ## 2026-09-07 Vault token 到期故障与修复方案（Issue #102）
 
 AuraX 的 MCP TEST 返回 `credential_access_denied`，目录保留旧 generation。错误发生在
-Credential Proxy 读取 `vault/chaintower-mcp-test#workload` 时；下游 MCP 尚未收到请求。
+Credential Proxy 读取 `vault/upstream-mcp-test#workload` 时；下游 MCP 尚未收到请求。
 直接原因是下述 24 小时静态 token 到期，而旧 readiness 只检查 `/v1/sys/health`，没有检查
 挂载身份是否仍然有效。
 
@@ -47,11 +47,11 @@ Vault 访问已恢复，workload 配置 revision 4 已测试并启用；Java 仍
 
 ## 当前认证配置和待办
 
-AuraClaw 保存的 `chaintowermcp` 平台配置 revision 3 是 `auth_strategy=none`。
+AuraClaw 保存的 `upstream-mcp` 平台配置 revision 3 是 `auth_strategy=none`。
 该策略不会发送 workload 凭据或可信 tenant/user/dept 头；Java 工具需要已恢复的身份上下文。
 因此必须修正显式认证配置，不能让 none 模式隐式发送可信身份，也不能向业务 arguments 注入身份。
 
-用户已授权使用测试 Vault：已创建专用引用 `vault/chaintower-mcp-test#workload`，
+用户已授权使用测试 Vault：已创建专用引用 `vault/upstream-mcp-test#workload`，
 使用 KV v2 CAS=0 防止覆盖；未复用其他开发端点的凭据，未输出密钥值。
 Vault 只负责保管和提供凭据，下游是否校验对应 workload token 仍须独立核实和配置。
 
@@ -113,7 +113,7 @@ Vault 只负责保管和提供凭据，下游是否校验对应 workload token �
 总览生成合法 input={}，location 生成 input.type=warehouse/input.limit=10；
 两项执行仍返回相同 Java 身份错误，没有库存查询成功证据。
 
-Java 本地源码的 McpTrustedContextFilter 读取 X-CT-Tenant-ID/X-CT-User-ID，
+Java 本地源码的 McpTrustedContextFilter 读取 X-Aura-Tenant-ID/X-Aura-User-ID，
 再向 AdminUserApi 查询启用用户及部门。AuraClaw 出站代码头名与之匹配；
 尚未取得部署端收到的头、Filter 生效和 Java 用户事实源查询结果，不能猜定其中某一步的原因。
 管理探测错误保真回归及目录/Agent/管理联合 45 项通过，Ruff/Mypy 通过，无 DDL。

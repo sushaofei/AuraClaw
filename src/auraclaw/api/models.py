@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -53,9 +54,45 @@ class AppendMessageRequest(BaseModel):
     message: str = Field(min_length=1, max_length=100_000)
 
 
+class ArtifactSharePublicRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    version: int = Field(default=1, ge=1)
+    audience: str = Field(min_length=1, max_length=256)
+    ttl_seconds: int = Field(default=300, ge=30, le=3600)
+
+
+class ArtifactSharePublicResponse(BaseModel):
+    artifact_id: str
+    version: int
+    audience: str
+    share_url: str
+    expires_at: datetime
+    policy_decision_id: str
+
+
 class ApprovalResponseRequest(BaseModel):
     decision: str = Field(pattern="^(approved|rejected)$")
     feedback: str | None = Field(default=None, max_length=10_000)
+
+
+class ApprovalDelegationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    to_approver: str = Field(min_length=1, max_length=256)
+    reason: str = Field(min_length=1, max_length=2_000)
+
+
+class ApprovalEscalationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    approvers: tuple[str, ...] = Field(min_length=1, max_length=20)
+    reason: str = Field(min_length=1, max_length=2_000)
+
+    @field_validator("approvers")
+    @classmethod
+    def unique_approvers(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        normalized = tuple(item.strip() for item in value)
+        if any(not item for item in normalized) or len(set(normalized)) != len(normalized):
+            raise ValueError("approvers must be non-empty and unique")
+        return normalized
 
 
 class TaskAcceptedResponse(ApprovalConfiguration):
@@ -79,6 +116,14 @@ class CommandResponse(ApprovalConfiguration):
 class ApprovalCommandResponse(CommandResponse):
     approval_id: str
     decision: str
+
+
+class ApprovalWorkflowResponse(BaseModel):
+    session_id: str
+    approval_id: str
+    status: Literal["waiting"]
+    assigned_approvers: list[str]
+    escalation_level: int | None = None
 
 
 class TaskView(ApprovalConfiguration):
@@ -105,6 +150,7 @@ class TaskView(ApprovalConfiguration):
     @classmethod
     def public_budget(cls, value: Any) -> dict[str, Any]:
         return {k: v for k, v in (value or {}).items() if not k.startswith("_")}
+
     delivery_status: str | None = None
     delivery_id: str | None = None
     delivery_attempt_count: int = 0
@@ -154,3 +200,7 @@ class ErrorResponse(BaseModel):
     code: str
     message: str
     detail: str | None = None
+    category: str
+    retryable: bool
+    operator_action: str
+    trace_id: str

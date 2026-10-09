@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import UTC, datetime, timedelta
 
 import asyncpg  # type: ignore[import-untyped]
@@ -16,6 +18,8 @@ from auraclaw.contracts.capabilities import (
     CapabilityStatus,
     McpOAuthConfiguration,
     McpServerDefinition,
+    McpToolPolicyOverride,
+    McpTrustLevel,
 )
 from auraclaw.contracts.errors import StaleCapabilitySnapshotError
 from auraclaw.infrastructure.persistence.postgres_common import (
@@ -26,7 +30,9 @@ from auraclaw.infrastructure.persistence.postgres_common import (
 
 
 class PostgresCapabilityCatalogStore(LazyPool):
-    async def upsert_server(self, server: McpServerDefinition) -> None:
+    async def upsert_server(
+        self, server: McpServerDefinition, *, allow_rollback: bool = False
+    ) -> None:
         pool = await self.pool()
         await pool.execute(
             """INSERT INTO hands.downstream_mcp_server
@@ -45,7 +51,7 @@ class PostgresCapabilityCatalogStore(LazyPool):
               status=EXCLUDED.status,enabled=EXCLUDED.enabled,
               metadata=EXCLUDED.metadata,updated_at=now(),
               config_revision=EXCLUDED.config_revision
-            WHERE EXCLUDED.config_revision >=
+            WHERE $13 OR EXCLUDED.config_revision >=
                   hands.downstream_mcp_server.config_revision""",
             server.server_id,
             server.tenant_id,
@@ -70,9 +76,18 @@ class PostgresCapabilityCatalogStore(LazyPool):
                         if server.allowed_private_hosts
                         else {}
                     ),
+                    "_auraclaw_trust_level": server.trust_level.value,
+                    "_auraclaw_tool_admission_policy_version": (
+                        server.tool_admission_policy_version
+                    ),
+                    "_auraclaw_tool_policy_overrides": {
+                        name: policy.model_dump(mode="json")
+                        for name, policy in server.tool_policy_overrides.items()
+                    },
                 }
             ),
             int(server.config_revision or 0),
+            allow_rollback,
         )
 
     async def get_server(self, server_id: str) -> McpServerDefinition | None:
@@ -357,6 +372,48 @@ class PostgresCapabilityCatalogStore(LazyPool):
         )
         return tuple(_capability(row) for row in rows)
 
+    async def catalog_revision(self, tenant_id: str) -> str:
+        pool = await self.pool()
+        rows = await pool.fetch(
+            """SELECT server_id,config_revision,active_catalog_generation,enabled,status
+            FROM hands.downstream_mcp_server
+            WHERE tenant_id IS NULL OR tenant_id=$1
+            ORDER BY server_id""",
+            tenant_id,
+        )
+        encoded = json.dumps(
+            [
+                {
+                    "server_id": str(row["server_id"]),
+                    "config_revision": int(row["config_revision"] or 0),
+                    "generation": int(row["active_catalog_generation"] or 0),
+                    "enabled": bool(row["enabled"]),
+                    "status": str(row["status"]),
+                }
+                for row in rows
+            ],
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+
+    async def find_capabilities_by_canonical_name(
+        self, tenant_id: str, canonical_name: str
+    ) -> tuple[CapabilityDescriptor, ...]:
+        pool = await self.pool()
+        rows = await pool.fetch(
+            """SELECT c.* FROM hands.capability_catalog AS c
+            JOIN hands.downstream_mcp_server AS s ON s.server_id=c.server_id
+            WHERE c.canonical_name=$1
+              AND (c.tenant_id IS NULL OR c.tenant_id=$2)
+              AND s.enabled AND s.status IN ('active','degraded')
+              AND c.catalog_generation=s.active_catalog_generation
+            ORDER BY c.version,c.capability_id""",
+            canonical_name,
+            tenant_id,
+        )
+        return tuple(_capability(row) for row in rows)
+
     async def list_server_capabilities(
         self, tenant_id: str, server_id: str
     ) -> tuple[CapabilityDescriptor, ...]:
@@ -410,6 +467,13 @@ def _server(row: object) -> McpServerDefinition:
         )
     oauth_payload = metadata.pop("_auraclaw_oauth", None)
     allowed_private_hosts = metadata.pop("_auraclaw_allowed_private_hosts", ())
+    trust_level = metadata.pop(
+        "_auraclaw_trust_level", McpTrustLevel.EXTERNAL_UNTRUSTED.value
+    )
+    tool_admission_policy_version = metadata.pop(
+        "_auraclaw_tool_admission_policy_version", None
+    )
+    tool_policy_overrides = metadata.pop("_auraclaw_tool_policy_overrides", {})
     return McpServerDefinition(
         server_id=str(row["server_id"]),  # type: ignore[index]
         tenant_id=row["tenant_id"],  # type: ignore[index]
@@ -429,6 +493,12 @@ def _server(row: object) -> McpServerDefinition:
             json_loads(row["allowed_prompt_prefixes"])  # type: ignore[index]
         ),
         allowed_private_hosts=tuple(allowed_private_hosts or ()),
+        trust_level=McpTrustLevel(str(trust_level)),
+        tool_admission_policy_version=tool_admission_policy_version,
+        tool_policy_overrides={
+            str(name): McpToolPolicyOverride.model_validate(policy)
+            for name, policy in dict(tool_policy_overrides or {}).items()
+        },
         config_revision=(
             int(row["config_revision"])  # type: ignore[index]
             if int(row["config_revision"]) > 0  # type: ignore[index]

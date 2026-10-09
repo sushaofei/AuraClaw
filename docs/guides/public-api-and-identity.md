@@ -1,14 +1,14 @@
 # AuraClaw 公开 API 与身份接入手册
 
-> 面向：chaintower 后端、工作台 / BFF、定时调度接入方。  
+> 面向：upstream 后端、工作台 / BFF、定时调度接入方。
 > 代码基线：当前仓库公开路由 `src/auraclaw/api/routes/`，身份契约 [ADR-003](../architecture/decisions/ADR-003-trusted-identity-context.md)。  
-> 配套文档：[chaintower 身份联调任务](./chaintower-identity-integration.md)、[Task Gateway](../architecture/system/01%20Task%20Gateway%20Admission.md)、[Policy Approval](../architecture/system/18%20Policy%20Approval%20Service.md)、[External Integration Contracts](../architecture/system/21%20External%20Integration%20Contracts.md)。
+> 配套文档：[upstream 身份联调任务](./upstream-identity-integration.md)、[Task Gateway](../architecture/system/01%20Task%20Gateway%20Admission.md)、[Policy Approval](../architecture/system/18%20Policy%20Approval%20Service.md)、[External Integration Contracts](../architecture/system/21%20External%20Integration%20Contracts.md)。
 
 本文回答四件事：
 
 1. 租户、用户、触发方分别是什么，谁负责签发身份。
 2. AuraClaw 对外到底开放哪些 HTTP/SSE 接口。
-3. chaintower 或定时任务应如何调用，以及不要调用什么。
+3. upstream 或定时任务应如何调用，以及不要调用什么。
 4. 工具需要人工审批（Human-in-the-Loop）时，接入方如何检测、展示与响应。
 
 ---
@@ -16,19 +16,19 @@
 ## 1. 先给结论
 
 - **租户不是用户。** `tenant_id` 是企业/组织数据隔离边界；`user_id`（命令里的 `actor`）是这次动作的操作者。
-- **AuraClaw 不会自己跑起来。** 合法触发只有两类：已登录用户，或 chaintower 侧的定时/调度任务。两者都走同一套 `POST /v1/tasks`。
-- **chaintower 是用户身份与业务权限的唯一权威。** AuraClaw 不实现 SSO，不管理用户 access token，不查询菜单/部门 RBAC。
-- **AuraClaw 必须自己验签。** 它验证 chaintower workload 与短期 Agent Context，再按租户隔离 Session。不能因为“请求来自内网”就信任裸 `X-Tenant-ID`。
+- **AuraClaw 不会自己跑起来。** 合法触发只有两类：已登录用户，或 upstream 侧的定时/调度任务。两者都走同一套 `POST /v1/tasks`。
+- **upstream 是用户身份与业务权限的唯一权威。** AuraClaw 不实现 SSO，不管理用户 access token，不查询菜单/部门 RBAC。
+- **AuraClaw 必须自己验签。** 它验证 upstream workload 与短期 Agent Context，再按租户隔离 Session。不能因为“请求来自内网”就信任裸 `X-Tenant-ID`。
 - **对外是 Task API + Streaming Gateway + 工作台 Admin + 健康检查。** `/internal/v1/*`、Hands、AuraMCP 都不是给业务调用方或 AuraX 用的。
 - **人审是公开写命令，不是 SSE 上行。** 高风险工具进入 `waiting_for_human` 后，必须走 `POST .../approvals/{approval_id}/responses`；Streaming 只通知，不接收批准/拒绝。
 
 ```text
 用户或定时任务
-  -> chaintower：登录 / 调度授权 + 签发短期 Agent Context
+  -> upstream：登录 / 调度授权 + 签发短期 Agent Context
   -> AuraClaw Task API：验签 workload + Assertion
   -> 编排 / 策略 / 租约 / 幂等
   ->（需要人审时）waiting_for_human → 审批响应 → 恢复同一工具调用
-  -> Hands -> chaintower MCP：最终业务鉴权
+  -> Hands -> upstream MCP：最终业务鉴权
 ```
 
 ---
@@ -37,7 +37,7 @@
 
 ### 2.1 租户 ≠ 用户
 
-| 概念 | AuraClaw 字段 | chaintower | 含义 |
+| 概念 | AuraClaw 字段 | upstream | 含义 |
 |---|---|---|---|
 | 租户 | `tenant_id` | `LoginUser.tenantId` | 哪家企业的数据，查哪套表、哪套数据权限 |
 | 用户 | `user_id` / `actor.id` | `LoginUser.id` | 谁点的按钮，谁为这次任务负责 |
@@ -54,12 +54,12 @@ AuraClaw 公开入口只有 Task Gateway。外面只有两类合法触发：
 
 ```text
 用户（页面 / API）
-  -> chaintower 登录 + 业务授权
+  -> upstream 登录 + 业务授权
   -> 签发 Agent Context（同时包含 tenant_id + user_id）
   -> POST /v1/tasks
 
 定时任务 / Timer
-  -> chaintower 调度器按计划触发
+  -> upstream 调度器按计划触发
   -> 同样走 Task Gateway（同一套 POST /v1/tasks）
   -> 必须带租户；actor 可以是系统账号，但不能没有租户
 ```
@@ -69,16 +69,16 @@ Timer 创建完即结束，**不轮询结果**。结果靠 Query API 或 Result 
 定时任务也不是“没有用户”。它至少要有：
 
 - **租户**：跑哪家企业的数据。
-- **actor**：系统主体，例如 `type=system, id=price-insight-daily`，便于审计。
+- **actor**：系统主体，例如 `type=system, id=inventory-audit-daily`，便于审计。
 
 不能用“定时任务”省略租户，否则会串数据。
 
 ### 2.3 身份字段怎么填
 
 - 人触发：`tenant_id` = 当前登录租户，`user_id` = 当前登录用户，`dept_id` = 当前登录部门（写入 Assertion，AuraClaw 固化到 Root Session）。
-- 定时触发：`tenant_id` = 任务所属租户，`user_id` / `actor` 与 `dept_id` = 调度主体（仍由 chaintower 签发）。
+- 定时触发：`tenant_id` = 任务所属租户，`user_id` / `actor` 与 `dept_id` = 调度主体（仍由 upstream 签发）。
 
-AuraClaw 不判断“该不该这个人点、这个定时任务属不属于这家企业”——那是 chaintower 的事。它把验过的租户、用户、部门写入 `session.created`，并透传到 Hands → MCP 的 `X-CT-Tenant-ID` / `X-CT-User-ID` / `X-CT-Dept-ID` 与 `_meta.io.auraclaw/*`。
+AuraClaw 不判断“该不该这个人点、这个定时任务属不属于这家企业”——那是 upstream 的事。它把验过的租户、用户、部门写入 `session.created`，并透传到 Hands → MCP 的 `X-Aura-Tenant-ID` / `X-Aura-User-ID` / `X-Aura-Dept-ID` 与 `_meta.io.auraclaw/*`。
 
 不要把 `dept_id` 写进 `POST /v1/tasks` body。body / query 若声明部门且与 Assertion 冲突 → 403。
 
@@ -90,7 +90,7 @@ AuraClaw 不判断“该不该这个人点、这个定时任务属不属于这�
 
 | 类别 | 典型位置 | 做什么 | 是否留在 AuraClaw |
 |---|---|---|---|
-| 用户身份消费 | `api/dependencies.py`、`infrastructure/identity/` | 校验 chaintower workload + `X-CT-Agent-Context` | **必须留**：消费身份，不是颁发身份 |
+| 用户身份消费 | `api/dependencies.py`、`infrastructure/identity/` | 校验 upstream workload + `X-Aura-Agent-Context` | **必须留**：消费身份，不是颁发身份 |
 | 内部服务互认 | `ServiceIdentity`、workload token、Hands lease | 12 个内部入口互证“我是哪个服务、持有哪次租约” | **必须留** |
 | Agent 策略 / 审批 | Policy、Tool permission、配额 | 这次工具能不能做、要不要人审 | **必须留**：Agent 控制面，不是用户 RBAC |
 | 下游凭证代持 | Credential Proxy / Vault | Agent 碰不到真实 Secret | **必须留** |
@@ -98,8 +98,8 @@ AuraClaw 不判断“该不该这个人点、这个定时任务属不属于这�
 
 判断标准：
 
-- 问“这个人是谁、能不能看这张表” → chaintower。
-- 问“这个调用是不是可信的 chaintower、这次 run 有没有租约、Secret 能不能进模型” → AuraClaw。
+- 问“这个人是谁、能不能看这张表” → upstream。
+- 问“这个调用是不是可信的 upstream、这次 run 有没有租约、Secret 能不能进模型” → AuraClaw。
 
 否决过的方案：AuraClaw 自建 OAuth/SSO；转发并持久化浏览器 access token；只靠内网或 IP allowlist；生产继续信任裸租户 Header。
 
@@ -111,7 +111,7 @@ AuraClaw 不判断“该不该这个人点、这个定时任务属不属于这�
 
 | 入口 | 调用方 | 用途 |
 |---|---|---|
-| `/v1/tasks*`、`/v1/sessions*`、`/v1/operations*` | chaintower / 前端 BFF | 创建任务、续聊、取消、审批、查状态和结果 |
+| `/v1/tasks*`、`/v1/sessions*`、`/v1/operations*` | upstream / 前端 BFF | 创建任务、续聊、取消、审批、查状态和结果 |
 | `/v1/streams/{session_id}` | 同上 | SSE 实时增量，**不保证结果** |
 | `/health/live`、`/health/ready` | 探活、ingress | 无业务身份 |
 | `/internal/v1/*` | AuraClaw 内部 12 服务 | **不要调** |
@@ -123,15 +123,15 @@ AuraClaw 不判断“该不该这个人点、这个定时任务属不属于这�
 
 ## 5. 认证与公共 Header
 
-### 5.1 生产（chaintower → AuraClaw）
+### 5.1 生产（upstream → AuraClaw）
 
 ```http
-Authorization: Bearer <chaintower-workload-credential>
-X-CT-Agent-Context: <base64url(canonical-json)>.<base64url(hmac-sha256)>
+Authorization: Bearer <upstream-workload-credential>
+X-Aura-Agent-Context: <base64url(canonical-json)>.<base64url(hmac-sha256)>
 X-Correlation-ID: <可选>
 ```
 
-Assertion 至少包含：`iss=chaintower`、`aud=auraclaw-task-api`、`tenant_id`、`user_id`、`scopes`（含 `agent.task.invoke`）、`iat` / `exp`（默认不超过 5 分钟）、`jti`、`kid`。可选 `dept_id`、`session_id`、`permission_version`。
+Assertion 至少包含：`iss=upstream`、`aud=auraclaw-task-api`、`tenant_id`、`user_id`、`scopes`（含 `agent.task.invoke`）、`iat` / `exp`（默认不超过 5 分钟）、`jti`、`kid`。可选 `dept_id`、`session_id`、`permission_version`。
 
 约束：
 
@@ -141,7 +141,7 @@ Assertion 至少包含：`iss=chaintower`、`aud=auraclaw-task-api`、`tenant_id
 - Assertion 原文不得进入 Event、Projection、日志或 `model_dump`。
 - 创建 Root Session 时把 Assertion 的 `dept_id` 写入 `session.created` 并冻结；后续 Run / MCP 使用这份快照，不再现查用户部门。
 
-chaintower 签发入口：`POST /rpc-api/agent-runtime/auth/agent-context`（管理端适配路径见 agent-runtime README）。请求体只能带可选 `sessionId`，tenant / user / dept 一律从当前 `LoginUser` 恢复。
+upstream 签发入口：`POST /rpc-api/agent-runtime/auth/agent-context`（管理端适配路径见 agent-runtime README）。请求体只能带可选 `sessionId`，tenant / user / dept 一律从当前 `LoginUser` 恢复。
 
 ### 5.2 开发例外
 
@@ -208,6 +208,7 @@ X-Actor-ID: local-user
 | `GET` | `/v1/tasks/{session_id}/children` | 子 Session 图 |
 | `GET` | `/v1/operations/sessions/{session_id}/timeline` | 运维时间线 |
 | `GET` | `/v1/operations/metrics` | 当前租户可见指标 |
+| `GET` | `/v1/operations/audits` | 当前租户结构化审计检索 |
 
 ### 实时流
 
@@ -268,7 +269,7 @@ Secret 只允许引用 `credential_ref`，响应里不会出现明文。写命�
 定时任务：
 
 ```text
-1. chaintower 调度器按租户签发 Agent Context（actor 为系统主体）
+1. upstream 调度器按租户签发 Agent Context（actor 为系统主体）
 2. POST /v1/tasks，Idempotency-Key 用计划实例稳定键（例如 jobId + 业务日）
 3. 不要保持 SSE；配置 Result Delivery，或事后用 Query 核对
 4. Timer 在 202 Accepted 后结束本次触发
@@ -435,11 +436,11 @@ approval_id + tenant_id + session_id + action_digest(tool + version + args) + po
 - **不要**在 `waiting_for_human` 时当普通追问继续 `POST .../messages` / `.../runs`（工作台应拦截并提示先审）。`runs` 在该状态下会 409；消息追加虽未在领域层硬拦，业务上应先结束待审。
 - **不要**在等待人审时把 Result 的 202 当成最终失败。
 - **不要**调用 `/internal/v1/policy/approvals/*`；那是内部 Policy 服务口。
-- 定时任务若触发了需人审的工具：Timer 本身结束后，由业务侧通知有权审批人，或走 Result Delivery；**不要**让调度器代人点击批准，除非 chaintower 明确把系统 actor 配进 `assigned_approvers`。
+- 定时任务若触发了需人审的工具：Timer 本身结束后，由业务侧通知有权审批人，或走 Result Delivery；**不要**让调度器代人点击批准，除非 upstream 明确把系统 actor 配进 `assigned_approvers`。
 
 ### 8.7 与身份、审计的关系
 
-- 人审属于 **Agent 控制面**（§3），不是 chaintower 菜单 RBAC。chaintower 仍负责“谁能打开工作台”；AuraClaw 负责“这次工具副作用能不能做”。
+- 人审属于 **Agent 控制面**（§3），不是 upstream 菜单 RBAC。upstream 仍负责“谁能打开工作台”；AuraClaw 负责“这次工具副作用能不能做”。
 - 审批 actor 写入 Canonical Event（`human.response.recorded`），可审计。
 - 参数以 `redacted_arguments` 展示，真实 Secret 不进审批卡、不进模型。
 
@@ -551,7 +552,13 @@ curl -sS -X POST http://127.0.0.1:8000/v1/tasks \
 权威 **Session 投影**，不是实时流。
 
 查询参数：`min_version`（可选）。投影版本不够时 **202**，并带 `Retry-After: 1`。  
-响应头：`ETag: W/"{projection_version}"`。Run 未终态时还会给 `Retry-After: 2`。`If-None-Match` 命中且版本够则 **304**。
+响应头：`ETag: W/"{projection_version}"`、`X-Projection-Version`。Run 未终态时还会给
+`Retry-After: 2`。`If-None-Match` 命中且版本够则 **304**。
+
+同一契约适用于 `/result`、`/children`、`/transcript`、`/activity` 和
+`/v1/operations/sessions/{session_id}/timeline`。投影落后时 body 仍是当前有界快照；客户端必须按
+`Retry-After` 重试，不能把 202 当作目标版本已经可见。任务列表、审计检索和指标不绑定单一 Session，
+因此不接受 Session `min_version`。
 
 ```json
 {
@@ -593,7 +600,8 @@ Run：`pending` / `runnable` / `running` / `waiting_for_human` / `paused` / `ret
 
 ### `GET /v1/tasks/{session_id}/result`
 
-**结果权威源。** 投影未追上或 Run 未终态 → **202** + `Retry-After: 2`，body 仍返回当前快照。
+**结果权威源。** 投影未追上 → **202** + `Retry-After: 1`；Run 未终态 → **202** +
+`Retry-After: 2`。两种情况 body 均返回当前快照。
 
 ```json
 {
@@ -615,7 +623,9 @@ Run：`pending` / `runnable` / `running` / `waiting_for_human` / `paused` / `ret
 
 这里的 `status` 是 **Run**，`session_status` 才是 Session。流式内容与这里不一致时，以这里为准。
 
-可选 `wait=true`（及 `timeout_seconds`）会在 Query 侧受控等待到 Run 终态、人审/暂停或超时，响应形状与 `POST /v1/tasks/sync` 相同。未传 `wait` 时行为不变：立即返回当前快照，未就绪为 202。`wait=true` 时不使用 `If-None-Match` / `304`。
+可选 `wait=true`（及 `timeout_seconds`）会在 Query 侧受控等待到 Run 终态、人审/暂停或超时，响应形状与
+`POST /v1/tasks/sync` 相同。未传 `wait` 时行为不变：立即返回当前快照，未就绪为 202。等待返回终态且
+`If-None-Match` 命中时可返回 304；若仍未满足 `min_version`，版本保护优先并返回 202。
 
 ### `GET /v1/tasks/{session_id}/transcript`
 
@@ -666,7 +676,7 @@ Run：`pending` / `runnable` / `running` / `waiting_for_human` / `paused` / `ret
       "id": "tool:run_...:tci_...",
       "type": "tool",
       "status": "completed",
-      "title": "procurement.price.profile",
+      "title": "inventory.stock.profile",
       "summary": "success",
       "sequence": 18,
       "updated_version": 20,
@@ -969,24 +979,24 @@ data: {"event_id":"rte_...","session_id":"ses_abc","run_id":"run_...","sequence"
 
 ---
 
-## 11. chaintower 接入约定
+## 11. upstream 接入约定
 
-1. 只由已登录用户或已授权的调度器在 chaintower 签发 Assertion，再调 AuraClaw。生产前端不要直连 Task API（仓库内测试台除外）。
+1. 只由已登录用户或已授权的调度器在 upstream 签发 Assertion，再调 AuraClaw。生产前端不要直连 Task API（仓库内测试台除外）。
 2. 创建后把 `session_id` 写进后续 Assertion。
 3. 轮询尊重 `Retry-After` 和 `ETag`。
 4. UI 可以订 SSE，但完成态、最终答案、是否可追问，只信 Task / Result。
 5. 取消停当前生成，关闭结束整段对话。
 6. 人审：发现 `waiting_for_human` 后展示 transcript/`pending_approval`，经 Task Gateway 提交 `approved`/`rejected`；不要用 SSE 上行，也不要把 resume 当主路径。详见 [§8](#8-human-in-the-loop人审)。
 7. 不要调用 `/internal/v1/*`，不要把用户 access token 转给 AuraClaw。
-8. 不要再往 AuraClaw 加用户 / 部门 / 菜单查询。用户禁用、权限版本变化，由 chaintower 在签发时和 MCP 执行时 fail closed。
-9. chaintower MCP 走 `workload_trusted_context`，不要给平台 MCP 配“固定租户的 OAuth client_credentials”。
+8. 不要再往 AuraClaw 加用户 / 部门 / 菜单查询。用户禁用、权限版本变化，由 upstream 在签发时和 MCP 执行时 fail closed。
+9. upstream MCP 走 `workload_trusted_context`，不要给平台 MCP 配“固定租户的 OAuth client_credentials”。
 
 ---
 
 ## 12. 相关真源
 
 - 身份决策：[ADR-003 用户身份归属与可信上下文](../architecture/decisions/ADR-003-trusted-identity-context.md)
-- 跨仓签发任务：[chaintower 身份联调任务](./chaintower-identity-integration.md)
+- 跨仓签发任务：[upstream 身份联调任务](./upstream-identity-integration.md)
 - 人审 / Policy：[Policy Approval Service](../architecture/system/18%20Policy%20Approval%20Service.md)
 - 部署边界：[ADR-001](../architecture/decisions/ADR-001-production-service-boundaries.md)
 - 代码：`src/auraclaw/api/routes/tasks.py`、`streams.py`、`operations.py`、`health.py`；`src/auraclaw/api/models.py`；`src/auraclaw/domain/approval.py`；`src/auraclaw/infrastructure/identity/verifier.py`

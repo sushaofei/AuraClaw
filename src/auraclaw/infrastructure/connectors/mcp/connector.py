@@ -230,12 +230,15 @@ class ManagedMcpConnector:
             trusted_context=_mcp_trusted(trusted),
             read_only=name in self._read_only_tools,
         )
+        failure_side_effect_status = (
+            "not_started" if name in self._read_only_tools else "unknown"
+        )
         if response.error is not None:
             return HandsToolResult(
                 status="error",
                 summary=safe_error_text(response.error.message),
                 error_code="mcp_jsonrpc_error",
-                side_effect_status="unknown",
+                side_effect_status=failure_side_effect_status,
                 metadata={
                     "error_details": {
                         "stage": "protocol",
@@ -248,16 +251,35 @@ class ManagedMcpConnector:
             )
         result = dict(response.result or {})
         if result.get("isError") is True:
+            remote_error = _structured_tool_error(result)
             return HandsToolResult(
                 status="error",
                 summary=_tool_error_summary(result),
-                error_code="mcp_tool_error",
-                side_effect_status="unknown",
+                error_code=(
+                    str(remote_error["errorCode"])
+                    if remote_error is not None
+                    else "mcp_tool_error"
+                ),
+                side_effect_status=failure_side_effect_status,
                 metadata={
                     "error_details": {
                         "stage": "remote_tool",
                         "origin": "downstream",
-                        "retryable": False,
+                        "remote_stage": (
+                            str(remote_error["stage"])
+                            if remote_error is not None
+                            else "unknown"
+                        ),
+                        "retryable": (
+                            bool(remote_error["retryable"])
+                            if remote_error is not None
+                            else False
+                        ),
+                        "request_id": (
+                            remote_error.get("requestId")
+                            if remote_error is not None
+                            else None
+                        ),
                         "server_id": self._server.server_id,
                     }
                 },
@@ -301,11 +323,10 @@ class ManagedMcpConnector:
         if canonical_name != remote_name:
             self._remote_tool_names[canonical_name] = remote_name
         descriptor = _tool_descriptor(item, name=canonical_name)
-        if descriptor.read_only:
-            self._read_only_tools.add(canonical_name)
-        else:
-            self._read_only_tools.discard(canonical_name)
         return descriptor
+
+    def set_authoritative_read_only_tools(self, names: set[str]) -> None:
+        self._read_only_tools = set(names)
 
     async def _discover(
         self, trusted: McpTrustedContext, *, refresh: bool = False
@@ -458,6 +479,27 @@ def _tool_error_summary(result: dict[str, Any]) -> str:
         if isinstance(item, dict) and item.get("type") == "text" and item.get("text"):
             return safe_error_text(item["text"])
     return "remote MCP Tool returned an execution error"
+
+
+def _structured_tool_error(result: dict[str, Any]) -> dict[str, Any] | None:
+    structured = result.get("structuredContent")
+    if not isinstance(structured, dict):
+        return None
+    error = structured.get("error", structured)
+    if not isinstance(error, dict):
+        return None
+    if not isinstance(error.get("errorCode"), str):
+        return None
+    if not isinstance(error.get("stage"), str):
+        return None
+    if not isinstance(error.get("message"), str):
+        return None
+    if not isinstance(error.get("retryable"), bool):
+        return None
+    request_id = error.get("requestId")
+    if request_id is not None and not isinstance(request_id, str):
+        return None
+    return error
 
 
 def _mcp_trusted(trusted: HandsTrustedContext) -> McpTrustedContext:

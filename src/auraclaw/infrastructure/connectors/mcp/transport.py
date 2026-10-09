@@ -103,7 +103,7 @@ class ManagedRemoteMcpTransport:
             and not identity["user_id"]
             and request.method in {"tools/call", "resources/read", "prompts/get"}
         ):
-            raise PolicyDeniedError("chaintower MCP call is missing trusted user context")
+            raise PolicyDeniedError("upstream MCP call is missing trusted user context")
         input_digest = hashlib.sha256(
             json.dumps(
                 request_payload,

@@ -56,7 +56,7 @@ def test_standard_http_session_lifecycle_and_identity_isolation(stateful: bool) 
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             method = body["method"]
             session = self.headers.get("Mcp-Session-Id")
-            dept = self.headers.get("X-CT-Dept-ID")
+            dept = self.headers.get("X-Aura-Dept-ID")
             events.append((method, session, dept))
             assert self.headers["Authorization"] == "Bearer fixture-workload"
             assert self.headers["MCP-Protocol-Version"] == "2025-11-25"
@@ -95,7 +95,7 @@ def test_standard_http_session_lifecycle_and_identity_isolation(stateful: bool) 
 
         def do_DELETE(self) -> None:
             events.append(
-                ("DELETE", self.headers.get("Mcp-Session-Id"), self.headers.get("X-CT-Dept-ID"))
+                ("DELETE", self.headers.get("Mcp-Session-Id"), self.headers.get("X-Aura-Dept-ID"))
             )
             self.reply(503 if delete_fail else 405)
 

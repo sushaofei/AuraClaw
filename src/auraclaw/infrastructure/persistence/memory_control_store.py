@@ -15,6 +15,7 @@ from auraclaw.control.ports import (
     RuntimeCheckpoint,
     RuntimeInstance,
     RuntimeLease,
+    runtime_requirements_from_profile,
 )
 
 
@@ -37,6 +38,7 @@ class InMemoryControlStateStore:
         self._lease_counters: dict[str, int] = {}
         self._assignments: dict[str, tuple[RuntimeAssignment, str]] = {}
         self._assignment_started_at: dict[str, datetime] = {}
+        self._pending_wakes: set[str] = set()
         self._runtimes: dict[str, tuple[RuntimeInstance, datetime]] = {}
         self._capacity: dict[str, int] = {}
         self._checkpoints: dict[tuple[str, str, str], RuntimeCheckpoint] = {}
@@ -207,6 +209,7 @@ class InMemoryControlStateStore:
             }:
                 return False
             self._assignments[task_id] = (assignment, "assigned")
+            self._pending_wakes.discard(task_id)
             if task_id in self._queue:
                 item, _, owner = self._queue[task_id]
                 self._queue[task_id] = (item, "assigned", owner)
@@ -232,7 +235,9 @@ class InMemoryControlStateStore:
                     continue
                 if any(
                     runtime.capabilities.get(key) != value
-                    for key, value in item.required_capability.items()
+                    for key, value in runtime_requirements_from_profile(
+                        item.required_capability
+                    ).items()
                 ):
                     continue
                 active = sum(
@@ -387,6 +392,11 @@ class InMemoryControlStateStore:
 
     async def finish_assignment(self, task_id: str, outcome: str) -> None:
         async with self._lock:
+            should_wake = outcome in {
+                "waiting_children",
+                "waiting_for_human",
+                "waiting_for_tool",
+            } and task_id in self._pending_wakes
             entry = self._assignments.get(task_id)
             if entry is not None:
                 assignment = entry[0]
@@ -406,7 +416,14 @@ class InMemoryControlStateStore:
                         del self._leases[resource_id]
             queued = self._queue.get(task_id)
             if queued is not None:
-                self._queue[task_id] = (queued[0], "acked", queued[2])
+                self._queue[task_id] = (
+                    queued[0],
+                    "queued" if should_wake else "acked",
+                    None if should_wake else queued[2],
+                )
+                if should_wake:
+                    self._queue_claims.pop(task_id, None)
+            self._pending_wakes.discard(task_id)
 
     async def suspend_assignment(self, task_id: str, reason: str) -> None:
         if reason not in {"waiting_children", "waiting_for_human", "waiting_for_tool"}:
@@ -444,20 +461,32 @@ class InMemoryControlStateStore:
             del self._leases[resource_id]
             queued = self._queue.get(task_id)
             if queued is not None:
-                self._queue[task_id] = (queued[0], "acked", queued[2])
+                should_wake = task_id in self._pending_wakes
+                self._queue[task_id] = (
+                    queued[0],
+                    "queued" if should_wake else "acked",
+                    None if should_wake else queued[2],
+                )
+                if should_wake:
+                    self._queue_claims.pop(task_id, None)
+            self._pending_wakes.discard(task_id)
 
     async def wake_assignment(self, task_id: str) -> bool:
         async with self._lock:
             entry = self._assignments.get(task_id)
             queued = self._queue.get(task_id)
-            if (
-                entry is None
-                or entry[1] not in {"waiting_children", "waiting_for_human", "waiting_for_tool"}
-                or queued is None or queued[1] != "acked"
-            ):
+            if entry is None or queued is None:
+                return False
+            if entry[1] in {"assigned", "running"}:
+                self._pending_wakes.add(task_id)
+                return False
+            if entry[1] not in {"waiting_children", "waiting_for_human", "waiting_for_tool"}:
+                return False
+            if queued[1] != "acked":
                 return False
             self._queue[task_id] = (queued[0], "queued", None)
             self._queue_claims.pop(task_id, None)
+            self._pending_wakes.discard(task_id)
             return True
 
     async def list_waiting_assignments(

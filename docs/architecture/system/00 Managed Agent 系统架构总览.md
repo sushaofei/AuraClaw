@@ -108,7 +108,6 @@ flowchart TD
 - [[16 Hands Service]]
 - [[23 MCP Runtime 能力平面]]
 - [[25 Skill 生命周期与发布控制平面]]
-- [[24 Model Skill 转换服务]]
 
 ### 安全与治理
 
@@ -135,7 +134,7 @@ flowchart TD
 
 ## 部署边界
 
-MVP 合并进程仍作为显式 development profile 保留。生产拓扑固定为 12 个独立入口，允许使用同一
+本地开发 profile 仅用于开发与隔离测试。生产拓扑固定为 12 个独立入口，允许使用同一
 monorepo 和应用镜像，但必须使用不同 service identity、配置、数据库角色、健康检查和扩缩容策略：
 
 ```text

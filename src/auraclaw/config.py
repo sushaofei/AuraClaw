@@ -31,11 +31,13 @@ _SECRET_FILE_VARIABLES = {
     "AURACLAW_POLICY_WORKLOAD_TOKEN",
     "AURACLAW_DELIVERY_WORKLOAD_TOKEN",
     "AURACLAW_STREAMING_GATEWAY_WORKLOAD_TOKEN",
-    "AURACLAW_CHAINTOWER_WORKLOAD_TOKEN",
+    "AURACLAW_UPSTREAM_WORKLOAD_TOKEN",
     "AURACLAW_AGENT_CONTEXT_SIGNING_KEYS_JSON",
     "AURACLAW_LEASE_SIGNING_KEY",
     "AURACLAW_MODEL_API_KEY",
     "AURACLAW_SKILL_SIGNING_KEY",
+    "AURACLAW_OBSERVABILITY_EXPORTER_TOKEN",
+    "AURACLAW_ALERT_RECEIVER_TOKEN",
     "AURACLAW_CREDENTIAL_VAULT_TOKEN",
     "AURACLAW_CREDENTIAL_VAULT_APPROLE_SECRET_ID",
     "SEAWEEDFS_ACCESS_KEY",
@@ -166,9 +168,7 @@ def _settings_backend(
     *extra_file_values: dict[str, str],
 ) -> str:
     settings_file_values = (
-        _parse_dotenv_values(Path(settings_env_file))
-        if settings_env_file is not None
-        else {}
+        _parse_dotenv_values(Path(settings_env_file)) if settings_env_file is not None else {}
     )
     for source in (selected, settings_file_values, *extra_file_values):
         value = (source.get("AURACLAW_STORAGE_BACKEND") or "").strip().lower()
@@ -236,21 +236,13 @@ def apply_kingbase_env_aliases(
     """
     selected = os.environ if environ is None else environ
     settings_file_values = (
-        _parse_dotenv_values(Path(settings_env_file))
-        if settings_env_file is not None
-        else {}
+        _parse_dotenv_values(Path(settings_env_file)) if settings_env_file is not None else {}
     )
     optional_path = selected.get("AURACLAW_KINGBASE_ENV_FILE")
-    legacy_file_values = (
-        _parse_dotenv_values(Path(optional_path)) if optional_path else {}
-    )
+    legacy_file_values = _parse_dotenv_values(Path(optional_path)) if optional_path else {}
 
     def kingbase_value(key: str) -> str | None:
-        return (
-            selected.get(key)
-            or settings_file_values.get(key)
-            or legacy_file_values.get(key)
-        )
+        return selected.get(key) or settings_file_values.get(key) or legacy_file_values.get(key)
 
     backend = _settings_backend(
         selected, settings_env_file, settings_file_values, legacy_file_values
@@ -274,9 +266,7 @@ def apply_kingbase_env_aliases(
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(
-        env_file=".env.dev", env_prefix="AURACLAW_", extra="ignore"
-    )
+    model_config = SettingsConfigDict(env_file=".env.dev", env_prefix="AURACLAW_", extra="ignore")
 
     host: str = "127.0.0.1"
     port: int = 8000
@@ -298,8 +288,8 @@ class Settings(BaseSettings):
     lease_signing_key: SecretStr | None = None
     allow_insecure_identity_headers: bool | None = None
     test_uplink_insecure_identity: bool | None = None
-    chaintower_workload_token: SecretStr | None = None
-    agent_context_issuer: str = "chaintower"
+    upstream_workload_token: SecretStr | None = None
+    agent_context_issuer: str = "upstream"
     agent_context_audience: str = "auraclaw-task-api"
     agent_context_signing_keys_json: str = "{}"
     agent_context_max_ttl_seconds: int = Field(default=300, ge=30, le=600)
@@ -324,31 +314,27 @@ class Settings(BaseSettings):
     hands_url: str = "http://127.0.0.1:8006"
     policy_base_url: str = "http://127.0.0.1:8007"
     credential_proxy_base_url: str = "http://127.0.0.1:8008"
+    # Must exceed the slowest allowed remote tool call. Action Hands waits on
+    # Credential Proxy for the complete MCP round trip, including Java-side
+    # semantic/RAG execution.
+    credential_proxy_request_timeout_seconds: float = Field(default=120.0, gt=0.0, le=3600.0)
     credential_egress_allowlist: str = ""
     java_api_servers_json: str = "[]"
     debug_vault_secrets_json: str = "{}"
     mcp_reconcile_interval_seconds: float = Field(default=60.0, ge=5.0, le=3600.0)
-    mcp_revision_reconcile_interval_seconds: float = Field(
-        default=30.0, ge=5.0, le=3600.0
-    )
+    mcp_revision_reconcile_interval_seconds: float = Field(default=30.0, ge=5.0, le=3600.0)
     mcp_reconcile_max_concurrent: int = Field(default=8, ge=1, le=1000)
     mcp_reconcile_max_concurrent_per_tenant: int = Field(default=4, ge=1, le=1000)
     mcp_reconcile_max_concurrent_per_host: int = Field(default=2, ge=1, le=1000)
-    mcp_reconcile_server_timeout_seconds: float = Field(
-        default=60.0, gt=0.0, le=3600.0
-    )
+    mcp_reconcile_server_timeout_seconds: float = Field(default=60.0, gt=0.0, le=3600.0)
     mcp_allow_private_auth_none: bool | None = None
     skill_signing_key: SecretStr | None = None
     skill_admission_retention_days: int = Field(default=365, ge=30, le=3650)
-    skill_admission_cleanup_interval_seconds: float = Field(
-        default=3600.0, ge=60.0, le=86400.0
-    )
+    skill_admission_cleanup_interval_seconds: float = Field(default=3600.0, ge=60.0, le=86400.0)
     skill_admission_cleanup_batch_size: int = Field(default=1000, ge=1, le=10_000)
     skill_admission_metrics_window_hours: int = Field(default=24, ge=1, le=2160)
     skill_admission_quarantine_alert_ratio: float = Field(default=0.25, ge=0, le=1)
-    skill_admission_quarantine_alert_min_samples: int = Field(
-        default=20, ge=1, le=1_000_000
-    )
+    skill_admission_quarantine_alert_min_samples: int = Field(default=20, ge=1, le=1_000_000)
     credential_vault_addr: str | None = None
     credential_vault_token: SecretStr | None = None
     credential_vault_approle_role_id: str | None = None
@@ -361,6 +347,13 @@ class Settings(BaseSettings):
     delivery_circuit_reset_seconds: float = Field(default=30.0, ge=0.1, le=3600.0)
     delivery_circuit_probe_ttl_seconds: float = Field(default=10.0, ge=0.1, le=300.0)
     log_level: str = "INFO"
+    observability_otlp_http_endpoint: str | None = None
+    observability_exporter_token: SecretStr | None = None
+    alert_receiver_url: str | None = None
+    alert_receiver_token: SecretStr | None = None
+    observability_export_timeout_seconds: float = Field(default=2.0, gt=0, le=30)
+    observability_export_retry_attempts: int = Field(default=2, ge=1, le=5)
+    observability_export_queue_capacity: int = Field(default=2048, ge=1, le=100_000)
     storage_backend: Literal["auto", "memory", "postgres", "kingbase"] = "auto"
     db_dialect: Literal["postgres"] = "postgres"
     database_url: str = "postgresql+asyncpg://auraclaw:auraclaw@localhost:5432/auraclaw"
@@ -388,16 +381,10 @@ class Settings(BaseSettings):
     seaweedfs_secret_key: SecretStr | None = Field(
         default=None, validation_alias="SEAWEEDFS_SECRET_KEY"
     )
-    seaweedfs_bucket: str = Field(
-        default="auraclaw-artifacts", validation_alias="SEAWEEDFS_BUCKET"
-    )
-    seaweedfs_region: str = Field(
-        default="us-east-1", validation_alias="SEAWEEDFS_REGION"
-    )
+    seaweedfs_bucket: str = Field(default="auraclaw-artifacts", validation_alias="SEAWEEDFS_BUCKET")
+    seaweedfs_region: str = Field(default="us-east-1", validation_alias="SEAWEEDFS_REGION")
     seaweedfs_use_ssl: bool = Field(default=False, validation_alias="SEAWEEDFS_USE_SSL")
-    seaweedfs_path_style: bool = Field(
-        default=True, validation_alias="SEAWEEDFS_PATH_STYLE"
-    )
+    seaweedfs_path_style: bool = Field(default=True, validation_alias="SEAWEEDFS_PATH_STYLE")
     obs_endpoint: str | None = Field(default=None, validation_alias="OBS_ENDPOINT")
     obs_bucket: str = Field(default="auraclaw-artifacts", validation_alias="OBS_BUCKET")
     obs_ak: SecretStr | None = Field(default=None, validation_alias="OBS_AK")
@@ -407,14 +394,17 @@ class Settings(BaseSettings):
     obs_path_style: bool = Field(default=False, validation_alias="OBS_PATH_STYLE")
     obs_domain: str | None = Field(default=None, validation_alias="OBS_DOMAIN")
     obs_tenant_id: str | None = Field(default=None, validation_alias="OBS_TENANT_ID")
-    artifact_multipart_threshold: int = Field(
-        default=16 * 1024 * 1024, ge=5 * 1024 * 1024
-    )
-    artifact_multipart_part_size: int = Field(
-        default=8 * 1024 * 1024, ge=5 * 1024 * 1024
-    )
+    artifact_multipart_threshold: int = Field(default=16 * 1024 * 1024, ge=5 * 1024 * 1024)
+    artifact_multipart_part_size: int = Field(default=8 * 1024 * 1024, ge=5 * 1024 * 1024)
     artifact_claim_ttl_seconds: float = Field(default=30.0, ge=3.0, le=3600.0)
     artifact_orphan_claim_limit: int = Field(default=1, ge=1, le=100)
+    artifact_share_max_ttl_seconds: int = Field(default=300, ge=30, le=3600)
+    artifact_share_classifications: str = "public,internal"
+    artifact_scanner_base_url: str | None = None
+    artifact_scanner_policy_version: str = Field(
+        default="artifact-content-v1", pattern=r"^[a-z0-9][a-z0-9._-]{0,127}$"
+    )
+    artifact_scanner_timeout_seconds: float = Field(default=30.0, gt=0, le=300)
     hands_max_concurrent: int = Field(default=32, ge=1, le=10_000)
     hands_max_concurrent_per_tenant: int = Field(default=8, ge=1, le=10_000)
     hands_max_queued: int = Field(default=256, ge=1, le=100_000)
@@ -424,35 +414,26 @@ class Settings(BaseSettings):
     delivery_max_concurrent_per_tenant: int = Field(default=2, ge=1, le=10_000)
     delivery_claim_ttl_seconds: float = Field(default=30.0, gt=0.0, le=3600.0)
     skill_reliability_max_concurrent: int = Field(default=8, ge=1, le=10_000)
-    skill_reliability_claim_ttl_seconds: float = Field(
-        default=30.0, gt=0.0, le=3600.0
-    )
+    skill_reliability_claim_ttl_seconds: float = Field(default=30.0, gt=0.0, le=3600.0)
     skill_content_cache_max_bytes: int = Field(
         default=64 * 1024 * 1024, ge=1024, le=4 * 1024 * 1024 * 1024
     )
     skill_content_cache_max_entries: int = Field(default=1024, ge=1, le=100_000)
-    skill_content_cache_ttl_seconds: float = Field(
-        default=3600.0, ge=60.0, le=86_400.0
-    )
+    skill_content_cache_ttl_seconds: float = Field(default=3600.0, ge=60.0, le=86_400.0)
     runtime_skill_content_cache_max_bytes: int = Field(
         default=16 * 1024 * 1024, ge=1024, le=1024 * 1024 * 1024
     )
-    runtime_skill_content_cache_max_entries: int = Field(
-        default=1024, ge=1, le=100_000
+    runtime_skill_content_cache_max_entries: int = Field(default=1024, ge=1, le=100_000)
+    runtime_skill_content_cache_ttl_seconds: float = Field(default=900.0, ge=60.0, le=86_400.0)
+    runtime_skill_prompt_max_bytes: int = Field(default=256 * 1024, ge=1024, le=64 * 1024 * 1024)
+    runtime_skill_prompt_max_estimated_tokens: int = Field(default=65_536, ge=256, le=4_000_000)
+    runtime_skill_reference_read_max_bytes: int = Field(
+        default=256 * 1024, ge=1024, le=16 * 1024 * 1024
     )
-    runtime_skill_content_cache_ttl_seconds: float = Field(
-        default=900.0, ge=60.0, le=86_400.0
-    )
-    runtime_skill_prompt_max_bytes: int = Field(
-        default=256 * 1024, ge=1024, le=64 * 1024 * 1024
-    )
-    runtime_skill_prompt_max_estimated_tokens: int = Field(
-        default=65_536, ge=256, le=4_000_000
-    )
+    runtime_router_mode: Literal["off", "shadow", "assist", "enforce"] = "assist"
+    runtime_router_semantic_planner_mode: Literal["off", "shadow", "submit"] = "off"
     skill_transaction_retry_attempts: int = Field(default=3, ge=1, le=10)
-    skill_transaction_retry_base_delay_seconds: float = Field(
-        default=0.01, ge=0.0, le=1.0
-    )
+    skill_transaction_retry_base_delay_seconds: float = Field(default=0.01, ge=0.0, le=1.0)
     resource_gateway_max_concurrent: int = Field(default=32, ge=1, le=10_000)
     resource_gateway_max_queued: int = Field(default=128, ge=1, le=100_000)
     resource_gateway_queue_timeout_seconds: float = Field(default=5.0, gt=0.0, le=3600.0)
@@ -466,16 +447,21 @@ class Settings(BaseSettings):
     runtime_event_retention_events: int = 1_000
     runtime_event_publish_max_concurrent: int = Field(default=64, ge=1, le=10_000)
     runtime_event_publish_max_queued: int = Field(default=1_024, ge=1, le=100_000)
-    runtime_event_publish_queue_timeout_seconds: float = Field(
-        default=5.0, gt=0.0, le=3600.0
-    )
-    runtime_event_publish_timeout_seconds: float = Field(
-        default=10.0, gt=0.0, le=3600.0
-    )
+    runtime_event_publish_queue_timeout_seconds: float = Field(default=5.0, gt=0.0, le=3600.0)
+    runtime_event_publish_timeout_seconds: float = Field(default=10.0, gt=0.0, le=3600.0)
     stream_connection_queue_size: int = 128
     stream_delta_min_interval_seconds: float = Field(default=0.02, ge=0.0, le=0.1)
+    stream_heartbeat_interval_seconds: float = Field(default=15.0, gt=0.0, le=300.0)
+    streaming_gateway_instance_id: str | None = None
+    streaming_connection_ttl_seconds: int = Field(default=30, ge=10, le=300)
+    streaming_gateway_heartbeat_interval_seconds: float = Field(
+        default=5.0, ge=1.0, le=60.0
+    )
+    streaming_drain_timeout_seconds: int = Field(default=30, ge=5, le=300)
+    streaming_drain_retry_after_seconds: int = Field(default=5, ge=1, le=60)
     cors_allow_origins: str = ""
     runtime_poll_interval: float = 0.05
+    approval_sla_scan_interval_seconds: float = Field(default=30.0, ge=1.0, le=3600.0)
     # Shared production-topology worker ticks (Outbox → Feed / Projection).
     # Keep identical semantics across compose.test and compose.prod.
     # With worker_wake_enabled, idle uses worker_idle_interval; busy ticks drain
@@ -503,37 +489,99 @@ class Settings(BaseSettings):
     runtime_tree_max_cost: float | None = Field(default=None, gt=0, allow_inf_nan=False)
 
     def runtime_budget_snapshot(self) -> dict[str, Any]:
-        if (self.runtime_tree_max_steps < self.runtime_max_steps
-                or self.runtime_tree_max_output_tokens < self.runtime_max_output_tokens):
+        if (
+            self.runtime_tree_max_steps < self.runtime_max_steps
+            or self.runtime_tree_max_output_tokens < self.runtime_max_output_tokens
+        ):
             raise ValueError("tree quotas must cover the root Run")
-        if self.runtime_tree_max_cost is not None and (self.runtime_max_cost is None
-                or self.runtime_tree_max_cost < self.runtime_max_cost):
+        if self.runtime_tree_max_cost is not None and (
+            self.runtime_max_cost is None or self.runtime_tree_max_cost < self.runtime_max_cost
+        ):
             raise ValueError("cost-limited tree must cover a priced root Run")
-        return {"max_steps": self.runtime_max_steps,
-                "max_output_tokens": self.runtime_max_output_tokens,
-                "max_cost": self.runtime_max_cost, "tree_max_cost": self.runtime_tree_max_cost,
-                "tree_max_steps": self.runtime_tree_max_steps,
-                "tree_max_output_tokens": self.runtime_tree_max_output_tokens,
-                "policy_version": self.runtime_budget_policy_version}
+        return {
+            "max_steps": self.runtime_max_steps,
+            "max_output_tokens": self.runtime_max_output_tokens,
+            "max_cost": self.runtime_max_cost,
+            "tree_max_cost": self.runtime_tree_max_cost,
+            "tree_max_steps": self.runtime_tree_max_steps,
+            "tree_max_output_tokens": self.runtime_tree_max_output_tokens,
+            "policy_version": self.runtime_budget_policy_version,
+        }
 
     model_api_key: str | None = None
     model_base_url: str | None = None
     model_name: str | None = None
     model_provider: str = "openai_compatible"
+    model_data_region: str = "local"
+    policy_allowed_data_regions: str = "local"
+    policy_approval_approvers: str = ""
+    policy_approval_required_approvals: int = Field(default=1, ge=1, le=20)
+    policy_approval_ttl_seconds: int = Field(default=3600, ge=60, le=604800)
+    policy_approval_escalation_after_seconds: int = Field(default=900, ge=60, le=86400)
     model_timeout_seconds: float = 120.0
+    model_retry_attempts: int = Field(default=5, ge=1, le=5)
+    model_retry_base_delay_seconds: float = Field(default=1.0, ge=0.0, le=5.0)
     model_tenant_token_limit_per_hour: int = Field(default=1_000_000, ge=1)
     # None omits the field; True/False maps to OpenAI-compatible thinking.type enabled/disabled.
     model_thinking_enabled: bool | None = None
     # Opt-in because some OpenAI-compatible providers reject unknown fields.
     model_prompt_cache_key_enabled: bool = False
 
+    capability_search_semantic_enabled: bool = False
+    capability_search_embedding_url: str | None = None
+    capability_search_embedding_model: str = "BAAI/bge-m3"
+    capability_search_embedding_dimensions: int = Field(default=1024, ge=1, le=8192)
+    capability_search_embedding_timeout_seconds: float = Field(default=12.0, gt=0, le=30)
+    capability_search_index_embedding_timeout_seconds: float = Field(default=300.0, gt=0, le=600)
+    capability_search_embedding_max_concurrent: int = Field(default=8, ge=1, le=64)
+    capability_search_semantic_min_similarity: float = Field(default=0.50, ge=-1, le=1)
+    capability_search_lexical_min_score: float = Field(default=0.1, ge=0)
+    capability_search_cache_max_entries: int = Field(default=2048, ge=0, le=100_000)
+    capability_search_cache_ttl_seconds: float = Field(default=15.0, ge=0, le=300)
+
+    @model_validator(mode="after")
+    def validate_capability_search_settings(self) -> Settings:
+        if self.capability_search_semantic_enabled and not self.capability_search_embedding_url:
+            raise ValueError(
+                "semantic capability search requires AURACLAW_CAPABILITY_SEARCH_EMBEDDING_URL"
+            )
+        if (
+            self.capability_search_semantic_enabled
+            and self.mcp_reconcile_server_timeout_seconds
+            <= self.capability_search_index_embedding_timeout_seconds
+        ):
+            raise ValueError(
+                "semantic capability search requires MCP reconcile timeout to exceed "
+                "the index embedding timeout"
+            )
+        return self
+
     @model_validator(mode="after")
     def validate_identity_settings(self) -> Settings:
-        if (
-            self.deployment_profile == "production"
-            and self.allow_insecure_identity_headers is True
-        ):
+        if self.deployment_profile == "production" and self.allow_insecure_identity_headers is True:
             raise ValueError("insecure identity headers cannot be enabled in production")
+        return self
+
+    @model_validator(mode="after")
+    def validate_observability_export(self) -> Settings:
+        configured = (
+            self.observability_otlp_http_endpoint,
+            self.alert_receiver_url,
+        )
+        if self.deployment_profile == "production":
+            insecure = [url for url in configured if url and not url.startswith("https://")]
+            if insecure:
+                raise ValueError("production observability endpoints must use HTTPS")
+        return self
+
+    @model_validator(mode="after")
+    def validate_policy_governance(self) -> Settings:
+        if not self.allowed_model_data_regions:
+            raise ValueError("Policy must allow at least one model data region")
+        if self.model_data_region not in self.allowed_model_data_regions:
+            raise ValueError("configured model data region is not allowed by Policy")
+        if not self.shareable_artifact_classifications:
+            raise ValueError("Policy must allow at least one Artifact share classification")
         return self
 
     @model_validator(mode="after")
@@ -550,20 +598,14 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def validate_hands_capacity(self) -> Settings:
         if self.hands_max_concurrent_per_tenant > self.hands_max_concurrent:
-            raise ValueError(
-                "hands per-tenant concurrency cannot exceed global concurrency"
-            )
+            raise ValueError("hands per-tenant concurrency cannot exceed global concurrency")
         if self.hands_max_queued_per_tenant > self.hands_max_queued:
             raise ValueError("hands per-tenant queue cannot exceed global queue")
         if self.delivery_max_concurrent_per_tenant > self.delivery_max_concurrent:
-            raise ValueError(
-                "delivery per-tenant concurrency cannot exceed global concurrency"
-            )
+            raise ValueError("delivery per-tenant concurrency cannot exceed global concurrency")
         if (
-            self.mcp_reconcile_max_concurrent_per_tenant
-            > self.mcp_reconcile_max_concurrent
-            or self.mcp_reconcile_max_concurrent_per_host
-            > self.mcp_reconcile_max_concurrent
+            self.mcp_reconcile_max_concurrent_per_tenant > self.mcp_reconcile_max_concurrent
+            or self.mcp_reconcile_max_concurrent_per_host > self.mcp_reconcile_max_concurrent
         ):
             raise ValueError("MCP partition concurrency cannot exceed global concurrency")
         return self
@@ -584,9 +626,7 @@ class Settings(BaseSettings):
                     "kingbase+",
                 )
             ):
-                raise ValueError(
-                    "database URLs must use PostgreSQL or Kingbase compatibility mode"
-                )
+                raise ValueError("database URLs must use PostgreSQL or Kingbase compatibility mode")
         return self
 
     @model_validator(mode="after")
@@ -627,22 +667,43 @@ class Settings(BaseSettings):
             raise ValueError(f"OBS backend requires: {', '.join(missing)}")
         return self
 
+    @model_validator(mode="after")
+    def validate_approval_policy(self) -> Settings:
+        if self.approval_approvers and self.policy_approval_required_approvals > len(
+            self.approval_approvers
+        ):
+            raise ValueError("approval quorum exceeds configured approvers")
+        if (
+            self.policy_approval_escalation_after_seconds
+            >= self.policy_approval_ttl_seconds
+        ):
+            raise ValueError("approval escalation must occur before approval expiry")
+        return self
+
+    @model_validator(mode="after")
+    def validate_streaming_ownership(self) -> Settings:
+        if (
+            self.streaming_gateway_heartbeat_interval_seconds * 2
+            >= self.streaming_connection_ttl_seconds
+        ):
+            raise ValueError("streaming gateway TTL must exceed two heartbeat intervals")
+        if self.streaming_drain_retry_after_seconds > self.streaming_drain_timeout_seconds:
+            raise ValueError("streaming retry delay cannot exceed drain timeout")
+        return self
+
     @property
     def resolved_db_dialect(self) -> Literal["postgres"]:
         return "postgres"
 
     @property
     def resolved_database_url(self) -> str:
-        if (
-            self.db_host
-            and self.db_user
-            and self.db_password is not None
-            and self.db_name
-        ):
+        if self.db_host and self.db_user and self.db_password is not None and self.db_name:
             user = quote(self.db_user, safe="")
             password = quote(self.db_password, safe="")
             database = quote(self.db_name, safe="")
-            return f"postgresql+asyncpg://{user}:{password}@{self.db_host}:{self.db_port}/{database}"
+            return (
+                f"postgresql+asyncpg://{user}:{password}@{self.db_host}:{self.db_port}/{database}"
+            )
         url = self.database_url
         lowered = url.lower()
         if lowered.startswith("kingbase+asyncpg://"):
@@ -732,9 +793,7 @@ class Settings(BaseSettings):
     @property
     def seaweedfs_s3_endpoint(self) -> str:
         scheme = "https" if self.seaweedfs_use_ssl else "http"
-        return (
-            f"{scheme}://{self.seaweedfs_host or '127.0.0.1'}:{self.seaweedfs_s3_port}"
-        )
+        return f"{scheme}://{self.seaweedfs_host or '127.0.0.1'}:{self.seaweedfs_s3_port}"
 
     @property
     def obs_s3_endpoint(self) -> str:
@@ -747,9 +806,7 @@ class Settings(BaseSettings):
     @property
     def allowed_cors_origins(self) -> list[str]:
         configured = [
-            origin.strip()
-            for origin in self.cors_allow_origins.split(",")
-            if origin.strip()
+            origin.strip() for origin in self.cors_allow_origins.split(",") if origin.strip()
         ]
         return configured
 
@@ -784,6 +841,32 @@ class Settings(BaseSettings):
         return bool(self.model_api_key and self.model_base_url and self.model_name)
 
     @property
+    def allowed_model_data_regions(self) -> tuple[str, ...]:
+        return tuple(
+            region.strip()
+            for region in self.policy_allowed_data_regions.split(",")
+            if region.strip()
+        )
+
+    @property
+    def shareable_artifact_classifications(self) -> tuple[str, ...]:
+        return tuple(
+            value.strip()
+            for value in self.artifact_share_classifications.split(",")
+            if value.strip()
+        )
+
+    @property
+    def approval_approvers(self) -> tuple[str, ...]:
+        return tuple(
+            dict.fromkeys(
+                value.strip()
+                for value in self.policy_approval_approvers.split(",")
+                if value.strip()
+            )
+        )
+
+    @property
     def insecure_identity_headers_enabled(self) -> bool:
         if self.test_uplink_insecure_identity is True:
             return True
@@ -809,11 +892,9 @@ class Settings(BaseSettings):
 
     @property
     def signed_identity_configured(self) -> bool:
-        token = self.chaintower_workload_token
+        token = self.upstream_workload_token
         return bool(
-            token is not None
-            and token.get_secret_value()
-            and self.agent_context_signing_keys
+            token is not None and token.get_secret_value() and self.agent_context_signing_keys
         )
 
     def workload_token_value(self, service_name: str) -> str | None:

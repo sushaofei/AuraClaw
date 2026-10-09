@@ -15,7 +15,10 @@ from auraclaw.api.models import (
     ActivityPageResponse,
     AppendMessageRequest,
     ApprovalCommandResponse,
+    ApprovalDelegationRequest,
+    ApprovalEscalationRequest,
     ApprovalResponseRequest,
+    ApprovalWorkflowResponse,
     CancelTaskRequest,
     CloseSessionRequest,
     CommandResponse,
@@ -26,6 +29,7 @@ from auraclaw.api.models import (
     TaskListResponse,
     TaskView,
 )
+from auraclaw.api.projection_contract import apply_projection_contract
 from auraclaw.gateways.query.reader import TaskQueryService
 from auraclaw.gateways.query.waiter import TaskResultWaiter, WaitedResult, decorate_result
 from auraclaw.gateways.task.commands import TaskCommandGateway
@@ -135,31 +139,44 @@ async def get_task(
     response: Response,
     identity: Identity,
     query: TaskQueryDependency,
-    min_version: int | None = None,
+    min_version: int | None = Query(default=None, ge=0),
     if_none_match: str | None = Header(default=None, alias="If-None-Match"),
 ) -> dict[str, Any]:
     task = await query.get_task(tenant_id=identity.tenant_id, session_id=session_id)
-    if min_version is not None and int(task["projection_version"]) < min_version:
-        response.status_code = status.HTTP_202_ACCEPTED
-        response.headers["Retry-After"] = "1"
-    etag = f'W/"{task["projection_version"]}"'
-    response.headers["ETag"] = etag
-    projection_is_fresh = min_version is None or int(task["projection_version"]) >= min_version
+    projection_is_fresh = apply_projection_contract(
+        response,
+        projection_version=int(task["projection_version"]),
+        min_version=min_version,
+        if_none_match=if_none_match,
+    )
     if projection_is_fresh and task["run_status"] not in {"completed", "failed", "cancelled"}:
         response.headers["Retry-After"] = "2"
-    if if_none_match == etag and projection_is_fresh:
-        response.status_code = status.HTTP_304_NOT_MODIFIED
     return task
 
 
 @router.get("/tasks/{session_id}/children")
 async def list_children(
     session_id: str,
+    response: Response,
     identity: Identity,
     query: TaskQueryDependency,
+    min_version: int | None = Query(default=None, ge=0),
+    if_none_match: str | None = Header(default=None, alias="If-None-Match"),
 ) -> dict[str, Any]:
+    task = await query.get_task(identity.tenant_id, session_id)
     children = await query.list_children(identity.tenant_id, session_id)
-    return {"root_session_id": session_id, "children": children}
+    projection_version = int(task["projection_version"])
+    apply_projection_contract(
+        response,
+        projection_version=projection_version,
+        min_version=min_version,
+        if_none_match=if_none_match,
+    )
+    return {
+        "root_session_id": session_id,
+        "projection_version": projection_version,
+        "children": children,
+    }
 
 
 @router.get("/tasks/{session_id}/result")
@@ -169,7 +186,7 @@ async def get_result(
     identity: Identity,
     query: TaskQueryDependency,
     waiter: TaskWaiterDependency,
-    min_version: int | None = None,
+    min_version: int | None = Query(default=None, ge=0),
     wait: bool = False,
     timeout_seconds: int | None = Query(default=None, ge=1, le=3600),
     if_none_match: str | None = Header(default=None, alias="If-None-Match"),
@@ -180,28 +197,50 @@ async def get_result(
             session_id,
             timeout_seconds=waiter.clamp_timeout(timeout_seconds),
         )
-        return _apply_wait_outcome(response, waited, session_id)
+        body = _apply_wait_outcome(response, waited, session_id)
+        apply_projection_contract(
+            response,
+            projection_version=int(body["projection_version"]),
+            min_version=min_version,
+            if_none_match=if_none_match,
+            allow_not_modified=waited.outcome in {"completed", "failed", "cancelled"},
+        )
+        return body
 
     result = await query.get_result(tenant_id=identity.tenant_id, session_id=session_id)
-    projection_is_fresh = min_version is None or int(result["projection_version"]) >= min_version
     result_is_ready = result["status"] in {"completed", "failed", "cancelled"}
-    if not projection_is_fresh or not result_is_ready:
+    projection_is_fresh = apply_projection_contract(
+        response,
+        projection_version=int(result["projection_version"]),
+        min_version=min_version,
+        if_none_match=if_none_match,
+        allow_not_modified=result_is_ready,
+    )
+    if projection_is_fresh and not result_is_ready:
         response.status_code = status.HTTP_202_ACCEPTED
         response.headers["Retry-After"] = "2"
-    etag = f'W/"{result["projection_version"]}"'
-    response.headers["ETag"] = etag
-    if if_none_match == etag and projection_is_fresh and result_is_ready:
-        response.status_code = status.HTTP_304_NOT_MODIFIED
     return result
 
 
 @router.get("/tasks/{session_id}/transcript")
 async def get_transcript(
     session_id: str,
+    response: Response,
     identity: Identity,
     query: TaskQueryDependency,
+    min_version: int | None = Query(default=None, ge=0),
+    if_none_match: str | None = Header(default=None, alias="If-None-Match"),
 ) -> dict[str, Any]:
-    return await query.get_transcript(tenant_id=identity.tenant_id, session_id=session_id)
+    transcript = await query.get_transcript(
+        tenant_id=identity.tenant_id, session_id=session_id
+    )
+    apply_projection_contract(
+        response,
+        projection_version=int(transcript["projection_version"]),
+        min_version=min_version,
+        if_none_match=if_none_match,
+    )
+    return transcript
 
 
 @router.get("/tasks/{session_id}/activity", response_model=ActivityPageResponse)
@@ -212,6 +251,8 @@ async def get_activity(
     query: TaskQueryDependency,
     after_version: int = Query(default=0, ge=0),
     limit: int = Query(default=200, ge=1, le=200),
+    min_version: int | None = Query(default=None, ge=0),
+    if_none_match: str | None = Header(default=None, alias="If-None-Match"),
 ) -> dict[str, Any]:
     activity = await query.get_activity(
         tenant_id=identity.tenant_id,
@@ -221,6 +262,13 @@ async def get_activity(
     )
     response.headers["Cache-Control"] = "private, no-store"
     response.headers["X-Activity-Version"] = str(activity["source_version"])
+    response.headers["X-Activity-Cache"] = str(activity.pop("cache_status", "fallback"))
+    apply_projection_contract(
+        response,
+        projection_version=int(activity["projection_version"]),
+        min_version=min_version,
+        if_none_match=if_none_match,
+    )
     return activity
 
 
@@ -374,4 +422,60 @@ async def record_approval_response(
         decision=request.decision,
         feedback=request.feedback,
         context=context,
+    )
+
+
+@router.post(
+    "/sessions/{session_id}/approvals/{approval_id}/delegations",
+    response_model=ApprovalWorkflowResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def delegate_approval(
+    session_id: str,
+    approval_id: str,
+    request: ApprovalDelegationRequest,
+    identity: Identity,
+    service: TaskCommandDependency,
+    idempotency_key: str = Header(alias="Idempotency-Key", min_length=1),
+    expected_version: int = Header(alias="X-Expected-Version"),
+) -> dict[str, Any]:
+    return await service.delegate_approval(
+        session_id=session_id,
+        approval_id=approval_id,
+        to_approver=request.to_approver,
+        reason=request.reason,
+        context=command_context(
+            identity=identity,
+            command_id=idempotency_key,
+            expected_version=expected_version,
+            operation="delegate_approval",
+        ),
+    )
+
+
+@router.post(
+    "/sessions/{session_id}/approvals/{approval_id}/escalations",
+    response_model=ApprovalWorkflowResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def escalate_approval(
+    session_id: str,
+    approval_id: str,
+    request: ApprovalEscalationRequest,
+    identity: Identity,
+    service: TaskCommandDependency,
+    idempotency_key: str = Header(alias="Idempotency-Key", min_length=1),
+    expected_version: int = Header(alias="X-Expected-Version"),
+) -> dict[str, Any]:
+    return await service.escalate_approval(
+        session_id=session_id,
+        approval_id=approval_id,
+        approvers=request.approvers,
+        reason=request.reason,
+        context=command_context(
+            identity=identity,
+            command_id=idempotency_key,
+            expected_version=expected_version,
+            operation="escalate_approval",
+        ),
     )

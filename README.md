@@ -69,7 +69,7 @@ AuraClaw 的回应是：让 LLM 专注语义推理与判断，把记忆、协议
 
 ### 工程原则
 
-MVP 采用「模块化单体 + 独立 Worker + PostgreSQL」，**逻辑边界不能因合并部署而消失**：
+本地开发采用「模块化服务 + 独立 Worker + PostgreSQL」，**逻辑边界不能因本地部署而消失**：
 
 ```text
 api → application → domain → contracts
@@ -148,6 +148,23 @@ Compose 容器入口保留；在 `deployment_profile=development` 下 CLI 会拒
 
 ## 配置文件
 
+Agent Router 使用 `AURACLAW_RUNTIME_ROUTER_MODE=off|shadow|assist|enforce` 控制灰度，默认
+`assist`。当前 assist 对可信任务上下文中被目标精确选择的唯一 Skill 做首轮前预激活，也会对目标中
+唯一、完整、策略可见的 dotted canonical Tool/Skill 做受管 Search/Load。2–8 个精确且全部只读的
+Tool 可编译为当前 Session 内的有界结构化顺序计划；写能力、Skill、多候选歧义或低置信度任务继续
+使用原 Capability-Aware Agent Loop。
+
+语义 Planner 另由 `AURACLAW_RUNTIME_ROUTER_SEMANTIC_PLANNER_MODE=off|shadow|submit`
+控制，默认 `off`。`shadow` 只对确定性 Router 无法采用、且具有可信候选 allowlist 的复杂任务请求
+一次受 Schema 约束的虚拟 `submit_plan` 调用；本地重新绑定当前受管 Capability 并校验 DAG、预算、
+Role/Profile/Model/Harness 注册表和写操作 Reviewer 门禁。通过的提案只随 Router checkpoint 记录，
+Planner 模型用量写入内部 canonical model event 并计入本 Run；不会创建 Child、激活 Skill 或改变既有
+Agent Loop。budget policy v2 会在 Planner 模型调用前写入 canonical reservation；预留失败时不调用模型。
+`submit` 仅自动采用 root/coordinator 生成的低/中风险、只读、精确绑定且纯 worker 的
+`coordinator_dag`，通过受 Root lease 保护的内部原子命令一次创建全部 Child，随后 Root 挂起等待结果；
+不满足灰度门禁的合法计划仍保持 shadow。Reviewer、写操作和动态重规划尚不自动采用，内部提交命令也未
+加入模型可见协作工具。
+
 仓库提交三份环境模板，真实密钥文件被 gitignore：
 
 | 模板 | 复制为 | 用途 |
@@ -176,7 +193,7 @@ AURACLAW_ARTIFACT_SERVICE_WORKLOAD_TOKEN
 AURACLAW_DELIVERY_WORKLOAD_TOKEN
 AURACLAW_STREAMING_GATEWAY_WORKLOAD_TOKEN
 AURACLAW_LEASE_SIGNING_KEY             # ≥32 字节；Session/Orchestrator/Hands 租约签名
-AURACLAW_CHAINTOWER_WORKLOAD_TOKEN     # Task API 对外身份（智问等客户端）
+AURACLAW_UPSTREAM_WORKLOAD_TOKEN     # Task API 对外身份（受信上游客户端）
 ```
 
 生产 Compose 可通过 `scripts/materialize_compose_secrets.py` 从 `.env.prod` 生成
@@ -187,7 +204,7 @@ AURACLAW_CHAINTOWER_WORKLOAD_TOKEN     # Task API 对外身份（智问等客户
 
 本地开发只走与生产同构的 12 进程拓扑：`auraclaw serve` 拉起全部独立入口（端口 8000–8011），
 并在 `:8080` 提供 Ingress（`/v1/streams/*` → Streaming Gateway `:8010`，其余 → Task API `:8000`）。
-Java 智问代理应指向 `http://127.0.0.1:8080`。
+外部客户端应指向 `http://127.0.0.1:8080`。
 
 不要使用单进程 Combined 应用或单独 `auraclaw <service> run` 做本地调试。后者仅作为 Compose
 容器的进程入口。VS Code 使用 **AuraClaw serve** 调试配置（读取 `.env.dev`）。
@@ -222,13 +239,12 @@ PostgreSQL 或 Kafka 运行在 Docker Host，请把相应 host 配置为 `host.d
 
 ```bash
 docker network create auraclaw-platform # 已存在时跳过
-uv run python scripts/sync_kingbase_env.py
 uv run python scripts/materialize_compose_secrets.py \
   --env-file .env.prod --output-dir .runtime/compose-secrets
 uv run python scripts/compose_preflight.py --env-file .env.prod
 docker compose --env-file .env.prod -f compose.prod.yml \
   --profile migrate run --rm migrate migrate up \
-  --target 0054 --directory /app/migrations
+  --target 0071 --directory /app/migrations
 docker compose --env-file .env.prod -f compose.prod.yml up -d --wait
 ```
 
@@ -258,7 +274,7 @@ Streaming Ingestor 写入 Replay Bus 供 SSE 消费；Kafka 不可用只会令 S
 ./scripts/remote_compose.sh logs -f task-api
 ```
 
-AuraClaw 是纯 Python 后端。外部客户端（如智问 UI）只调用公开 HTTP/SSE API；跨域部署通过
+AuraClaw 是纯 Python 后端。外部客户端只调用公开 HTTP/SSE API；跨域部署通过
 `AURACLAW_CORS_ALLOW_ORIGINS` 或反向代理允许所需 Origin、Methods 和 Headers。
 
 服务启动后可访问：
@@ -279,6 +295,7 @@ AuraClaw 是纯 Python 后端。外部客户端（如智问 UI）只调用公开
 - `POST /v1/sessions/{session_id}/approvals/{approval_id}/responses`
 - `GET /v1/operations/sessions/{session_id}/timeline`
 - `GET /v1/operations/metrics`
+- `GET /v1/operations/contract`（错误分类、失败队列 owner、状态与恢复动作）
 
 写接口要求 `Idempotency-Key`；修改既有 Session 时还要求 `X-Expected-Version`。
 查询支持 `ETag`、`If-None-Match` 和 `min_version`，投影未追上时返回 `202` 与
@@ -311,7 +328,7 @@ Event 回写，并通过 Task/Result Query 的 `delivery_status`、`delivery_id`
 
 ## 主存储（PostgreSQL / KingBase）
 
-存储配置支持两种形式：
+开发与测试存储配置支持两种形式：
 
 - `AURACLAW_DATABASE_URL=postgresql+asyncpg://...`
   （KingBase 也可用 `kingbase://` / `kingbase+asyncpg://`，运行时规范为 `postgresql+asyncpg://`）
@@ -328,16 +345,17 @@ Event 回写，并通过 Task/Result Query 的 `delivery_status`、`delivery_id`
 `Settings.resolved_database_url` 自动 URL 编码。
 
 **KingBase（PostgreSQL 兼容模式）**：测试与生产环境固定设置
-`AURACLAW_STORAGE_BACKEND=kingbase`。数据库主机凭证只维护在 gitignored `.host.env`
-的 `KINGBASE_HOST/PORT/USER/PWD`；运行 `scripts/sync_kingbase_env.py` 会原子更新
-`.env.test` / `.env.prod` 的 `DB_*` 与 URL 编码后的统一 asyncpg DSN。方言与连接池复用
+`AURACLAW_STORAGE_BACKEND=kingbase`。服务器测试可以用 `scripts/sync_kingbase_env.py`
+从 gitignored `.host.env` 生成共享测试 DSN；生产必须为 11 个持久化服务分别配置
+`AURACLAW_<SERVICE>_DATABASE_URL`，并单独配置 migration owner DSN。方言与连接池复用
 PostgreSQL / `asyncpg`，Domain ports 与 Store 代码无需改动。
 
 **本地 PostgreSQL**：开发默认可用 `AURACLAW_STORAGE_BACKEND=postgres`。启动时从
 `.postgresql.local.env`（或 `.postgresql.env` / `AURACLAW_POSTGRESQL_ENV_FILE`）读取
 `POSTGRESQL_*` 并覆盖写入 `DB_*`。示例见 `.postgresql.env.example`；Kafka 开发默认指向
-`localhost:9092`。开发 / 测试 / 生产均使用统一 `AURACLAW_DATABASE_URL`（Compose 共享
-`database_url` secret）；不再按服务注入分角色 DSN。`deploy/*/roles.sql` 仅作可选硬化参考。
+`localhost:9092`。开发和服务器测试可以使用统一 `AURACLAW_DATABASE_URL`；生产 Compose
+强制挂载分服务 DSN，且必须先由 migration owner 执行 `deploy/postgres/roles.sql`。Agent Runtime
+不拥有数据库凭据。
 
 迁移：
 
@@ -349,8 +367,9 @@ AURACLAW_STORAGE_BACKEND=kingbase uv run auraclaw migrate up --directory migrati
 
 首次启动前按版本顺序应用 migrations。开发和生产使用各自配置文件中的 `DB_NAME`。
 
-PostgreSQL / KingBase 共用 `migrations/`。可选角色授权脚本（当前部署不注入分角色 DSN）为
-`deploy/postgres/roles.sql`，应用到 KingBase 前需在目标实例验证兼容语法。
+PostgreSQL / KingBase 共用 `migrations/`。生产角色授权脚本为
+`deploy/postgres/roles.sql`；应用到 KingBase 前需在目标实例验证兼容语法，并由 migration owner
+在每次新增 schema/table 的迁移后重新执行以收敛授权。
 
 ```text
 migrations/0001_initial.sql
@@ -520,5 +539,5 @@ Metrics Pipeline 和 Alert Receiver 通过同一观测端口接入。
 AuraClaw 不再直接读取业务数据库或内置业务 Tool。Tool 与 Resource 通过
 `action-hands` 的 MCP / Java API egress 对账发现；业务数据由远端 MCP Server 提供。
 Skill 包通过受治理的管理 API 上传和发布。开发与联调见
-[MCP 开发手册](docs/guides/mcp-development.md)。价格洞察的本地 DWD 直连路径已经移除，
-业务 Tool 与 Resource 统一通过受治理的 MCP egress 接入。
+[MCP 开发手册](docs/guides/mcp-development.md)。业务 Tool 与 Resource 统一通过受治理的
+MCP egress 接入。

@@ -16,6 +16,7 @@ from auraclaw.composition.services import (
 )
 from auraclaw.config import Settings
 from auraclaw.contracts.internal import ServiceIdentity
+from auraclaw.infrastructure.artifacts.scanner import RemoteArtifactContentScanner
 from auraclaw.infrastructure.clients.policy import RemotePolicyClient
 from auraclaw.infrastructure.persistence.postgres_admin_store import PostgresAdminOperationStore
 from auraclaw.infrastructure.persistence.postgres_artifact_repository import (
@@ -38,6 +39,11 @@ def build_artifact_service_app(spec: ServiceSpec, settings: Settings) -> FastAPI
         requires_policy=True,
     )
     storage = build_object_storage(settings)
+    scanner_url = (settings.artifact_scanner_base_url or "").strip()
+    if settings.deployment_profile == "production" and not scanner_url:
+        raise ValueError(
+            "artifact-service production composition requires an artifact content scanner"
+        )
     repository = (
         PostgresArtifactRepository(settings.resolved_database_url)
         if settings.sql_storage_enabled
@@ -56,19 +62,39 @@ def build_artifact_service_app(spec: ServiceSpec, settings: Settings) -> FastAPI
             bearer_token=token,
             service_identity=ServiceIdentity.ARTIFACT_SERVICE,
         )
+    scanner = (
+        RemoteArtifactContentScanner(
+            scanner_url,
+            bearer_token=token,
+            policy_version=settings.artifact_scanner_policy_version,
+            timeout=settings.artifact_scanner_timeout_seconds,
+        )
+        if scanner_url and token
+        else None
+    )
     closeables: tuple[Any, ...] = (
         *((repository,) if repository is not None else ()),
         *((admin_store,) if admin_store is not None else ()),
         *object_storage_closeables(storage),
         *((policy,) if policy is not None else ()),
+        *((scanner,) if scanner is not None else ()),
     )
+
+    async def artifact_readiness() -> tuple[bool, str]:
+        if storage.verifier is not None:
+            ready, detail = await storage.verifier.readiness()
+            if not ready:
+                return False, f"object-storage:{detail}"
+        if scanner is None:
+            return settings.deployment_profile != "production", "scanner:not-configured"
+        ready, detail = await scanner.readiness()
+        return ready, f"scanner:{detail}"
+
     app = _base_service_app(
         spec,
         settings,
         closeables=closeables,
-        readiness_probe=(
-            storage.verifier.readiness if storage.verifier is not None else None
-        ),
+        readiness_probe=artifact_readiness,
     )
     service = ArtifactInternalService(
         storage.presigner,
@@ -76,6 +102,7 @@ def build_artifact_service_app(spec: ServiceSpec, settings: Settings) -> FastAPI
         object_verifier=storage.verifier,
         policy=policy,
         multipart=storage.multipart,
+        content_scanner=scanner,
         multipart_threshold=settings.artifact_multipart_threshold,
         multipart_part_size=settings.artifact_multipart_part_size,
         claim_ttl=timedelta(seconds=settings.artifact_claim_ttl_seconds),

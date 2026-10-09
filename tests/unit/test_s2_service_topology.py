@@ -92,6 +92,8 @@ def test_single_service_run_allowed_in_production_profile(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("AURACLAW_DEPLOYMENT_PROFILE", "production")
+    monkeypatch.setenv("AURACLAW_RUNTIME_EVENT_BACKEND", "kafka")
+    monkeypatch.setenv("KAFKA_HOST", "kafka.internal")
     get_settings.cache_clear()
     calls: list[tuple[object, ...]] = []
 
@@ -175,7 +177,7 @@ def test_each_service_exposes_health_and_workers_stop_gracefully() -> None:
 def test_production_readiness_fails_when_hard_dependencies_are_missing() -> None:
     production = _settings(
         deployment_profile="production",
-        storage_backend="memory",
+        storage_backend="postgres",
         artifact_backend="local",
     )
     for command in ("model-gateway",):
@@ -228,7 +230,7 @@ def test_fencing_services_reject_process_local_ledger_in_production(command: str
             credential_proxy_workload_token="credential-token",
             action_hands_workload_token="hands-token",
         )
-    with pytest.raises(ValueError, match="persistent fencing token ledger"):
+    with pytest.raises(ValueError, match="production composition requires SQL storage"):
         create_service_app(command, _settings(**values))
 
 
@@ -270,7 +272,9 @@ def test_security_enforcement_services_fail_production_startup_without_identity(
 ) -> None:
     settings = _settings(
         deployment_profile="production",
-        storage_backend="memory",
+        storage_backend="postgres",
+        runtime_event_backend="kafka",
+        kafka_host="kafka.internal",
         artifact_backend="local",
         **configured_tokens,
     )
@@ -284,7 +288,9 @@ def test_policy_enforcement_services_fail_production_startup_without_policy_url(
 ) -> None:
     settings = _settings(
         deployment_profile="production",
-        storage_backend="memory",
+        storage_backend="postgres",
+        runtime_event_backend="kafka",
+        kafka_host="kafka.internal",
         artifact_backend="local",
         policy_base_url=" ",
         task_api_workload_token="task-token",
@@ -295,6 +301,24 @@ def test_policy_enforcement_services_fail_production_startup_without_policy_url(
     )
     with pytest.raises(ValueError, match="policy-base-url"):
         create_service_app(command, settings)
+
+
+def test_artifact_service_requires_content_scanner_in_production() -> None:
+    settings = _settings(
+        deployment_profile="production",
+        storage_backend="postgres",
+        database_url="postgresql://artifact:test@postgres.test/auraclaw",
+        artifact_backend="obs",
+        OBS_ENDPOINT="obs.example.internal",
+        OBS_AK="access",
+        OBS_SK="secret",
+        task_api_workload_token="task-token",
+        action_hands_workload_token="hands-token",
+        delivery_workload_token="delivery-token",
+        artifact_service_workload_token="artifact-token",
+    )
+    with pytest.raises(ValueError, match="requires an artifact content scanner"):
+        create_service_app("artifact", settings)
 
 
 def test_credential_proxy_production_requires_external_vault_and_forbids_debug() -> None:
@@ -437,13 +461,22 @@ def test_container_build_excludes_secrets_and_runs_unprivileged() -> None:
     dockerfile = (ROOT / "Dockerfile").read_text()
     dockerignore = (ROOT / ".dockerignore").read_text().splitlines()
     assert "USER auraclaw" in dockerfile
+    assert "COPY pyproject.toml uv.lock README.md ./" in dockerfile
+    assert "uv sync --locked --no-dev --no-editable" in dockerfile
+    assert "pip install" not in dockerfile
+    assert "/usr/local/lib/python3.13/ensurepip" in dockerfile
+    assert "site-packages/pip-*.dist-info" in dockerfile
+    assert dockerfile.count("python:3.13-slim@sha256:") == 2
+    assert "ghcr.io/astral-sh/uv:0.11.3@sha256:" in dockerfile
     assert ".env" in dockerignore
     assert ".venv" in dockerignore
     assert "__pycache__" in dockerignore
+    assert "artifacts" in dockerignore
 
 
 def test_session_outbox_projectors_include_approval_and_collaboration() -> None:
     from auraclaw.composition.providers import (
+        get_activity_projection,
         get_approval_projection,
         get_collaboration_projection,
         get_task_projection,
@@ -455,6 +488,7 @@ def test_session_outbox_projectors_include_approval_and_collaboration() -> None:
         get_task_projection(),
         get_approval_projection(),
         get_collaboration_projection(),
+        get_activity_projection(),
     )
 
 

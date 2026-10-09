@@ -15,19 +15,24 @@ from auraclaw.action.capability_catalog import (
     CapabilityCatalog,
     RoutedHandsExecutor,
 )
+from auraclaw.action.capability_search import (
+    SEARCH_INDEX_METADATA_KEY,
+    search_index_digest,
+)
 from auraclaw.action.json_schema import JsonSchemaValidator
 from auraclaw.action.ports import (
     CapabilityCatalogStore,
     CapabilityConnector,
     CommittedCatalogSnapshot,
 )
-from auraclaw.action.tool_gateway import ToolRegistry
+from auraclaw.action.tool_gateway import MetricWriter, ToolRegistry
 from auraclaw.contracts.capabilities import (
     CapabilityDescriptor,
     CapabilityInvocationRef,
     CapabilityKind,
     CapabilityStatus,
     McpServerDefinition,
+    McpTrustLevel,
 )
 from auraclaw.contracts.errors import ConnectorExecutionError, StaleCapabilitySnapshotError
 from auraclaw.contracts.hands import (
@@ -38,6 +43,7 @@ from auraclaw.contracts.hands import (
     HandsToolResult,
     HandsTrustedContext,
 )
+from auraclaw.contracts.observability import MetricPoint
 from auraclaw.contracts.tools import (
     RiskLevel,
     ToolCapability,
@@ -129,6 +135,7 @@ class CapabilityCatalogReconciler:
         max_concurrent_per_host: int | None = None,
         server_timeout_seconds: float = 30.0,
         owner: str | None = None,
+        metric_writer: MetricWriter | None = None,
     ) -> None:
         del max_pages
         tenant_limit = (
@@ -156,6 +163,7 @@ class CapabilityCatalogReconciler:
         self._server_timeout_seconds = server_timeout_seconds
         self._lease_ttl = timedelta(seconds=max(3.0, server_timeout_seconds * 2))
         self._owner = owner or f"catalog-reconciler-{uuid.uuid4().hex}"
+        self._metrics = metric_writer
         self._dirty: set[str] = set()
         self._snapshots: dict[str, CapabilitySnapshot] = {}
         self._local_epochs: dict[str, int] = {}
@@ -355,6 +363,22 @@ class CapabilityCatalogReconciler:
                         tenant_id=server.tenant_id,
                     )
             synced_at = datetime.now(UTC).isoformat()
+            current_by_key = {
+                (item.kind, item.canonical_name, item.version): item for item in descriptors
+            }
+            reclassified_read_only = sorted(
+                item.canonical_name
+                for item in existing_items
+                if item.kind is CapabilityKind.TOOL
+                and item.permission == "read-only"
+                and (
+                    current := current_by_key.get(
+                        (item.kind, item.canonical_name, item.version)
+                    )
+                )
+                is not None
+                and current.permission != "read-only"
+            )
             health = await self._store.record_catalog_sync(
                 server.server_id,
                 succeeded=True,
@@ -376,10 +400,16 @@ class CapabilityCatalogReconciler:
                         "active_catalog_generation": (commit.generation),
                         "last_sync_forced": allow_schema_drift,
                         "forced_schema_update_count": schema_drift_count,
+                        "historical_read_only_reclassified_count": len(
+                            reclassified_read_only
+                        ),
+                        "historical_read_only_reclassified_tools": reclassified_read_only[:256],
+                        "historical_read_only_report_truncated": len(reclassified_read_only) > 256,
                     },
                 }
             )
             await self._catalog.register_server(active)
+            await self._emit_permission_metrics(server, descriptors)
             self._dirty.discard(server.server_id)
             return McpReconcileResult(
                 server_id=server.server_id,
@@ -465,6 +495,62 @@ class CapabilityCatalogReconciler:
             )
         finally:
             await self._store.release_catalog_reconcile(lease)
+
+    async def _emit_permission_metrics(
+        self,
+        server: McpServerDefinition,
+        descriptors: tuple[CapabilityDescriptor, ...],
+    ) -> None:
+        if self._metrics is None:
+            return
+        for descriptor in descriptors:
+            if descriptor.kind is not CapabilityKind.TOOL:
+                continue
+            claims = descriptor.metadata.get("remote_tool_claims")
+            if not isinstance(claims, dict):
+                continue
+            final_risk = descriptor.risk_level or "high"
+            claimed_risk = claims.get("risk_level")
+            mismatch = claims.get("read_only_hint") is True and descriptor.permission != "read-only"
+            mismatch = mismatch or (
+                isinstance(claimed_risk, str)
+                and claimed_risk in _RISK_RANK
+                and final_risk in _RISK_RANK
+                and _RISK_RANK[claimed_risk] < _RISK_RANK[final_risk]
+            )
+            metrics: list[tuple[str, str]] = []
+            if mismatch:
+                metrics.append(("mcp_tool_claim_mismatch_total", "claim_mismatch"))
+            if descriptor.metadata.get("tool_permission_reason") == "fail_closed_untrusted_claim":
+                metrics.append(
+                    (
+                        "mcp_tool_permission_fail_closed_total",
+                        str(descriptor.metadata.get("tool_policy_evidence_status", "unknown")),
+                    )
+                )
+            for name, reason in metrics:
+                try:
+                    await self._metrics.write_metric(
+                        MetricPoint(
+                            name=name,
+                            value=1.0,
+                            observed_at=datetime.now(UTC),
+                            tenant_id=server.tenant_id,
+                            labels={
+                                "server_id": server.server_id,
+                                "capability_id": descriptor.capability_id,
+                                "reason": reason,
+                                "policy_version": server.tool_admission_policy_version or "none",
+                            },
+                            deduplication_key=(
+                                f"{name}:{server.server_id}:{server.config_revision or 0}:"
+                                f"{descriptor.content_digest}:{reason}"
+                            ),
+                        )
+                    )
+                except Exception:
+                    # Observability is best-effort and never owns catalog publication.
+                    continue
 
     async def hydrate_committed(self, server: McpServerDefinition) -> bool:
         """Install shared committed state independently of the discovery lease."""
@@ -577,6 +663,16 @@ class CapabilityCatalogReconciler:
             for descriptor in snapshot
             if descriptor.kind == CapabilityKind.TOOL
         )
+        authoritative_read_only = getattr(connector, "set_authoritative_read_only_tools", None)
+        if callable(authoritative_read_only):
+            authoritative_read_only(
+                {
+                    descriptor.canonical_name
+                    for descriptor in snapshot
+                    if descriptor.kind == CapabilityKind.TOOL
+                    and descriptor.permission == "read-only"
+                }
+            )
         executor = ConnectorToolExecutor(connector)
         self._tool_registry.replace_owner(owner, capabilities)
         self._hands_router.replace_owner_routes(
@@ -695,12 +791,45 @@ def _restore_snapshot(
             "_auraclaw_snapshot_digest": committed.snapshot_digest,
         },
     )
-    if committed.snapshot_digest not in {
+    accepted_digests = {
         _catalog_snapshot_digest(server, snapshot, descriptors),
         _catalog_snapshot_digest(server, snapshot, descriptors, include_timestamps=True),
-    }:
+    }
+    indexed_digest = _indexed_snapshot_digest(descriptors)
+    if indexed_digest is not None:
+        accepted_digests.add(indexed_digest)
+    if committed.snapshot_digest not in accepted_digests:
         raise StaleCapabilitySnapshotError("committed MCP snapshot digest mismatch")
     return snapshot, descriptors
+
+
+def _indexed_snapshot_digest(
+    descriptors: tuple[CapabilityDescriptor, ...],
+) -> str | None:
+    """Reproduce the atomic catalog+search-index publication digest."""
+    if not descriptors:
+        return None
+    entries = [item.metadata.get(SEARCH_INDEX_METADATA_KEY) for item in descriptors]
+    if not all(isinstance(entry, dict) for entry in entries):
+        return None
+    source_digests = {
+        entry.get("source_snapshot_digest")
+        for entry in entries
+        if isinstance(entry, dict)
+        and isinstance(entry.get("source_snapshot_digest"), str)
+        and entry.get("source_snapshot_digest")
+    }
+    if len(source_digests) != 1:
+        return None
+    encoded = json.dumps(
+        {
+            "source_snapshot_digest": source_digests.pop(),
+            "search_index_digest": search_index_digest(descriptors),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
 
 
 def _catalog_snapshot_digest(
@@ -766,21 +895,106 @@ def _normalize_tools(
             "outputSchema": tool.output_schema,
             "version": tool.version,
         }
-        normalized.append(
-            _descriptor(
-                server,
-                kind=CapabilityKind.TOOL,
-                canonical_name=tool.name,
-                source=source,
-                title=tool.name,
-                description=tool.description,
-                permission="read-only" if tool.read_only else "write-with-approval",
-                risk_level=tool.risk_level or ("low" if tool.read_only else "high"),
-                version=_capability_semver(tool.version),
-                tags=_tool_search_tags(server, tool.name),
-            )
+        declared_risk = tool.risk_level if tool.risk_level in {"high", "critical"} else "high"
+        descriptor = _descriptor(
+            server,
+            kind=CapabilityKind.TOOL,
+            canonical_name=tool.name,
+            source=source,
+            title=tool.name,
+            description=tool.description,
+            permission="write-with-approval",
+            risk_level=declared_risk,
+            version=_capability_semver(tool.version),
+            tags=_tool_search_tags(server, tool.name),
         )
+        normalized.append(_apply_authoritative_tool_policy(server, tool, descriptor))
     return tuple(normalized)
+
+
+_RISK_RANK = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+
+
+def _apply_authoritative_tool_policy(
+    server: McpServerDefinition,
+    tool: HandsToolDescriptor,
+    descriptor: CapabilityDescriptor,
+) -> CapabilityDescriptor:
+    policy = server.tool_policy_overrides.get(tool.name)
+    claims = {
+        "read_only_hint": tool.read_only,
+        "risk_level": tool.risk_level,
+    }
+    metadata = {
+        **descriptor.metadata,
+        "remote_tool_claims": claims,
+        "tool_admission_policy_version": server.tool_admission_policy_version,
+        "tool_permission_reason": "fail_closed_untrusted_claim",
+        "tool_policy_evidence_status": "policy_missing",
+    }
+    if policy is None:
+        return descriptor.model_copy(update={"metadata": metadata})
+    if policy.revoked:
+        return descriptor.model_copy(
+            update={"metadata": {**metadata, "tool_policy_evidence_status": "policy_revoked"}}
+        )
+    if policy.content_digest != descriptor.content_digest:
+        return descriptor.model_copy(
+            update={"metadata": {**metadata, "tool_policy_evidence_status": "digest_mismatch"}}
+        )
+    if policy.permission == "read-only":
+        if server.trust_level is McpTrustLevel.EXTERNAL_UNTRUSTED:
+            return descriptor.model_copy(
+                update={"metadata": {**metadata, "tool_policy_evidence_status": "server_untrusted"}}
+            )
+        if not tool.read_only:
+            return descriptor.model_copy(
+                update={
+                    "metadata": {**metadata, "tool_policy_evidence_status": "read_claim_missing"}
+                }
+            )
+        if tool.risk_level is not None and tool.risk_level not in _RISK_RANK:
+            return descriptor.model_copy(
+                update={
+                    "metadata": {**metadata, "tool_policy_evidence_status": "invalid_risk_claim"}
+                }
+            )
+        declared_risk = tool.risk_level or "low"
+        if _RISK_RANK[policy.risk_level] < _RISK_RANK[declared_risk]:
+            return descriptor.model_copy(
+                update={"metadata": {**metadata, "tool_policy_evidence_status": "risk_downgrade"}}
+            )
+    permission = policy.permission
+    declared_risk = (
+        tool.risk_level
+        if tool.risk_level in _RISK_RANK
+        else "low"
+        if permission == "read-only" and tool.risk_level is None
+        else "high"
+    )
+    baseline_risk = "low" if permission == "read-only" else "high"
+    risk_level = max(
+        (policy.risk_level, declared_risk, baseline_risk),
+        key=_RISK_RANK.__getitem__,
+    )
+    return descriptor.model_copy(
+        update={
+            "permission": permission,
+            "risk_level": risk_level,
+            "metadata": {
+                **metadata,
+                "tool_permission_reason": "authoritative_exact_name_policy",
+                "tool_policy_evidence_status": "admitted",
+                "tool_policy_revision": policy.revision,
+                "tool_policy_scope": policy.scope,
+                "tool_policy_evidence_ref": policy.evidence_ref,
+                "tool_policy_actor_id": policy.actor_id,
+                "tool_policy_reason": policy.reason,
+                "tool_policy_correlation_id": policy.correlation_id,
+                "tool_policy_causation_id": policy.causation_id,
+            },
+        }
+    )
 
 
 def _normalize_resources(
@@ -884,6 +1098,7 @@ def _descriptor(
             "server_title": server.title,
             "endpoint": server.endpoint,
             "search_aliases": list(_server_search_aliases(server)),
+            "search_alias_governance": server.metadata.get("search_alias_governance"),
         },
     )
 
@@ -895,7 +1110,7 @@ def _server_search_aliases(server: McpServerDefinition) -> tuple[str, ...]:
         if isinstance(configured, (list, tuple))
         else ()
     )
-    return tuple(dict.fromkeys((server.server_id, server.title, *aliases)))
+    return tuple(dict.fromkeys(aliases))
 
 
 def _tool_capability(
@@ -920,6 +1135,12 @@ def _tool_capability(
         runtime_location="remote-mcp",
         invocation_ref=CapabilityInvocationRef.from_descriptor(descriptor),
         owner=owner,
+        timeout_seconds=(
+            120.0
+            if descriptor.canonical_name
+            in {"rag.knowledge.query", "semantic.query.execute"}
+            else 60.0
+        ),
     )
 
 
@@ -944,9 +1165,6 @@ def _capability_semver(value: str) -> str:
     return "1.0.0"
 
 
-_PRICE_INSIGHT_SEARCH_TAGS = ("价格洞察", "采购价格", "price_insight")
-
-
 def _tool_search_tags(server: McpServerDefinition, canonical_name: str) -> tuple[str, ...]:
     tags: list[str] = []
     configured = server.metadata.get("search_tags", ())
@@ -959,9 +1177,6 @@ def _tool_search_tags(server: McpServerDefinition, canonical_name: str) -> tuple
                 continue
             tags.append(str(remote_name))
             tags.extend(part for part in re.split(r"[_.-]+", str(remote_name)) if part)
-    lowered = canonical_name.casefold()
-    if any(marker in lowered for marker in ("price_insight", "price-insight", "procurement.price")):
-        tags.extend(_PRICE_INSIGHT_SEARCH_TAGS)
     tags.extend(part for part in re.split(r"[_.-]+", canonical_name) if part)
     return tuple(dict.fromkeys(tag for tag in tags if tag))
 

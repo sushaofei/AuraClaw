@@ -2,7 +2,7 @@
 name: auraclaw
 
 x-auraclaw-service: &auraclaw-service
-  image: ${AURACLAW_IMAGE:-ghcr.io/example/auraclaw:replace-with-immutable-sha}
+  image: ${AURACLAW_IMAGE:-ghcr.io/sushaofei/auraclaw@sha256:0000000000000000000000000000000000000000000000000000000000000000}
   user: "10001:10001"
   read_only: true
   init: true
@@ -25,6 +25,11 @@ x-common-environment: &common-environment
   AURACLAW_RUNTIME_BUDGET_POLICY_VERSION: ${AURACLAW_RUNTIME_BUDGET_POLICY_VERSION:-1}
   AURACLAW_HOST: 0.0.0.0
   AURACLAW_LOG_LEVEL: ${AURACLAW_LOG_LEVEL:-INFO}
+  AURACLAW_OBSERVABILITY_OTLP_HTTP_ENDPOINT: ${AURACLAW_OBSERVABILITY_OTLP_HTTP_ENDPOINT:?required}
+  AURACLAW_ALERT_RECEIVER_URL: ${AURACLAW_ALERT_RECEIVER_URL:?required}
+  AURACLAW_OBSERVABILITY_EXPORT_TIMEOUT_SECONDS: ${AURACLAW_OBSERVABILITY_EXPORT_TIMEOUT_SECONDS:-2}
+  AURACLAW_OBSERVABILITY_EXPORT_RETRY_ATTEMPTS: ${AURACLAW_OBSERVABILITY_EXPORT_RETRY_ATTEMPTS:-2}
+  AURACLAW_OBSERVABILITY_EXPORT_QUEUE_CAPACITY: ${AURACLAW_OBSERVABILITY_EXPORT_QUEUE_CAPACITY:-2048}
   AURACLAW_STORAGE_BACKEND: ${AURACLAW_STORAGE_BACKEND:-kingbase}
   AURACLAW_SESSION_BASE_URL: http://session:8001
   AURACLAW_PROJECTION_BASE_URL: http://projection-worker:8002
@@ -41,6 +46,10 @@ x-common-environment: &common-environment
   AURACLAW_WORKER_WAKE_ENABLED: ${AURACLAW_WORKER_WAKE_ENABLED:-true}
   AURACLAW_WORKER_IDLE_INTERVAL: ${AURACLAW_WORKER_IDLE_INTERVAL:-0.25}
   AURACLAW_STREAM_DELTA_MIN_INTERVAL_SECONDS: ${AURACLAW_STREAM_DELTA_MIN_INTERVAL_SECONDS:-0.02}
+  AURACLAW_STREAMING_CONNECTION_TTL_SECONDS: ${AURACLAW_STREAMING_CONNECTION_TTL_SECONDS:-30}
+  AURACLAW_STREAMING_GATEWAY_HEARTBEAT_INTERVAL_SECONDS: ${AURACLAW_STREAMING_GATEWAY_HEARTBEAT_INTERVAL_SECONDS:-5}
+  AURACLAW_STREAMING_DRAIN_TIMEOUT_SECONDS: ${AURACLAW_STREAMING_DRAIN_TIMEOUT_SECONDS:-30}
+  AURACLAW_STREAMING_DRAIN_RETRY_AFTER_SECONDS: ${AURACLAW_STREAMING_DRAIN_RETRY_AFTER_SECONDS:-5}
 
 x-healthcheck: &healthcheck
   test:
@@ -83,7 +92,7 @@ services:
         "migrate",
         "up",
         "--target",
-        "${AURACLAW_MIGRATE_TARGET:-0065}",
+        "${AURACLAW_MIGRATE_TARGET:-0071}",
         "--directory",
         "${AURACLAW_MIGRATIONS_DIRECTORY:-/app/migrations}",
       ]
@@ -102,17 +111,17 @@ services:
     environment:
       <<: *common-environment
       AURACLAW_HEALTH_PORT: "8000"
-      AURACLAW_DATABASE_URL_FILE: /run/secrets/database_url
+      AURACLAW_DATABASE_URL_FILE: /run/secrets/task_api_database_url
       AURACLAW_TASK_API_WORKLOAD_TOKEN_FILE: /run/secrets/task_api_workload_token
-      AURACLAW_CHAINTOWER_WORKLOAD_TOKEN_FILE: /run/secrets/chaintower_workload_token
+      AURACLAW_UPSTREAM_WORKLOAD_TOKEN_FILE: /run/secrets/upstream_workload_token
       AURACLAW_AGENT_CONTEXT_SIGNING_KEYS_JSON_FILE: /run/secrets/agent_context_signing_keys_json
-      AURACLAW_AGENT_CONTEXT_ISSUER: ${AURACLAW_AGENT_CONTEXT_ISSUER:-chaintower}
+      AURACLAW_AGENT_CONTEXT_ISSUER: ${AURACLAW_AGENT_CONTEXT_ISSUER:-upstream}
       AURACLAW_AGENT_CONTEXT_AUDIENCE: ${AURACLAW_AGENT_CONTEXT_AUDIENCE:-auraclaw-task-api}
     secrets:
       [
-        database_url,
+        task_api_database_url,
         task_api_workload_token,
-        chaintower_workload_token,
+        upstream_workload_token,
         agent_context_signing_keys_json,
       ]
     command: ["api", "run", "--host", "0.0.0.0", "--port", "8000"]
@@ -120,6 +129,7 @@ services:
     healthcheck: *healthcheck
     labels:
       auraclaw.service-identity: task-api
+      auraclaw.database-role: auraclaw_task_api
     deploy:
       replicas: 3
       update_config: *update-policy
@@ -135,7 +145,7 @@ services:
     environment:
       <<: *common-environment
       AURACLAW_HEALTH_PORT: "8001"
-      AURACLAW_DATABASE_URL_FILE: /run/secrets/database_url
+      AURACLAW_DATABASE_URL_FILE: /run/secrets/session_database_url
       AURACLAW_LEASE_SIGNING_KEY_FILE: /run/secrets/lease_signing_key
       AURACLAW_TASK_API_WORKLOAD_TOKEN_FILE: /run/secrets/task_api_workload_token
       AURACLAW_PROJECTION_WORKLOAD_TOKEN_FILE: /run/secrets/projection_workload_token
@@ -146,7 +156,7 @@ services:
       AURACLAW_STREAMING_GATEWAY_WORKLOAD_TOKEN_FILE: /run/secrets/streaming_gateway_workload_token
       AURACLAW_ACTION_HANDS_WORKLOAD_TOKEN_FILE: /run/secrets/action_hands_workload_token
     secrets:
-      - database_url
+      - session_database_url
       - lease_signing_key
       - task_api_workload_token
       - projection_workload_token
@@ -161,6 +171,7 @@ services:
     healthcheck: *healthcheck
     labels:
       auraclaw.service-identity: session
+      auraclaw.database-role: auraclaw_session
     deploy:
       replicas: 3
       update_config: *update-policy
@@ -176,11 +187,11 @@ services:
     environment:
       <<: *common-environment
       AURACLAW_HEALTH_PORT: "8002"
-      AURACLAW_DATABASE_URL_FILE: /run/secrets/database_url
+      AURACLAW_DATABASE_URL_FILE: /run/secrets/projection_database_url
       AURACLAW_PROJECTION_WORKLOAD_TOKEN_FILE: /run/secrets/projection_workload_token
       AURACLAW_TASK_API_WORKLOAD_TOKEN_FILE: /run/secrets/task_api_workload_token
     secrets:
-      - database_url
+      - projection_database_url
       - projection_workload_token
       - task_api_workload_token
     command: ["projection", "relay", "--watch", "--host", "0.0.0.0", "--port", "8002"]
@@ -188,6 +199,7 @@ services:
     healthcheck: *healthcheck
     labels:
       auraclaw.service-identity: projection-worker
+      auraclaw.database-role: auraclaw_projection
     deploy:
       replicas: 2
       update_config: *update-policy
@@ -203,14 +215,14 @@ services:
     environment:
       <<: *common-environment
       AURACLAW_HEALTH_PORT: "8003"
-      AURACLAW_DATABASE_URL_FILE: /run/secrets/database_url
+      AURACLAW_DATABASE_URL_FILE: /run/secrets/orchestrator_database_url
       AURACLAW_LEASE_SIGNING_KEY_FILE: /run/secrets/lease_signing_key
       AURACLAW_ORCHESTRATOR_WORKLOAD_TOKEN_FILE: /run/secrets/orchestrator_workload_token
       AURACLAW_TASK_API_WORKLOAD_TOKEN_FILE: /run/secrets/task_api_workload_token
       AURACLAW_RUNTIME_WORKLOAD_TOKEN_FILE: /run/secrets/runtime_workload_token
       AURACLAW_ORCHESTRATOR_LEASE_TTL_SECONDS: ${AURACLAW_ORCHESTRATOR_LEASE_TTL_SECONDS:-300}
     secrets:
-      - database_url
+      - orchestrator_database_url
       - lease_signing_key
       - orchestrator_workload_token
       - task_api_workload_token
@@ -220,6 +232,7 @@ services:
     healthcheck: *healthcheck
     labels:
       auraclaw.service-identity: orchestrator
+      auraclaw.database-role: auraclaw_control
     deploy:
       replicas: 3
       update_config: *update-policy
@@ -250,6 +263,7 @@ services:
       AURACLAW_RUNTIME_SKILL_CONTENT_CACHE_TTL_SECONDS: ${AURACLAW_RUNTIME_SKILL_CONTENT_CACHE_TTL_SECONDS:-900}
       AURACLAW_RUNTIME_SKILL_PROMPT_MAX_BYTES: ${AURACLAW_RUNTIME_SKILL_PROMPT_MAX_BYTES:-262144}
       AURACLAW_RUNTIME_SKILL_PROMPT_MAX_ESTIMATED_TOKENS: ${AURACLAW_RUNTIME_SKILL_PROMPT_MAX_ESTIMATED_TOKENS:-65536}
+      AURACLAW_RUNTIME_SKILL_REFERENCE_READ_MAX_BYTES: ${AURACLAW_RUNTIME_SKILL_REFERENCE_READ_MAX_BYTES:-262144}
     secrets: [runtime_workload_token]
     command: ["runtime", "run", "--host", "0.0.0.0", "--port", "8004"]
     expose: ["8004"]
@@ -271,7 +285,7 @@ services:
     environment:
       <<: *common-environment
       AURACLAW_HEALTH_PORT: "8005"
-      AURACLAW_DATABASE_URL_FILE: /run/secrets/database_url
+      AURACLAW_DATABASE_URL_FILE: /run/secrets/model_gateway_database_url
       AURACLAW_MODEL_API_KEY_FILE: /run/secrets/model_api_key
       AURACLAW_POLICY_WORKLOAD_TOKEN_FILE: /run/secrets/policy_workload_token
       AURACLAW_RUNTIME_WORKLOAD_TOKEN_FILE: /run/secrets/runtime_workload_token
@@ -279,10 +293,13 @@ services:
       AURACLAW_MODEL_BASE_URL: ${AURACLAW_MODEL_BASE_URL:-}
       AURACLAW_MODEL_NAME: ${AURACLAW_MODEL_NAME:-}
       AURACLAW_MODEL_PROVIDER: ${AURACLAW_MODEL_PROVIDER:-openai_compatible}
+      AURACLAW_MODEL_THINKING_ENABLED: ${AURACLAW_MODEL_THINKING_ENABLED:-false}
+      AURACLAW_MODEL_RETRY_ATTEMPTS: ${AURACLAW_MODEL_RETRY_ATTEMPTS:-5}
+      AURACLAW_MODEL_RETRY_BASE_DELAY_SECONDS: ${AURACLAW_MODEL_RETRY_BASE_DELAY_SECONDS:-1.0}
       AURACLAW_MODEL_PROMPT_CACHE_KEY_ENABLED: ${AURACLAW_MODEL_PROMPT_CACHE_KEY_ENABLED:-false}
       AURACLAW_MODEL_TENANT_TOKEN_LIMIT_PER_HOUR: ${AURACLAW_MODEL_TENANT_TOKEN_LIMIT_PER_HOUR:-1000000}
     secrets:
-      - database_url
+      - model_gateway_database_url
       - model_api_key
       - policy_workload_token
       - runtime_workload_token
@@ -292,6 +309,7 @@ services:
     healthcheck: *healthcheck
     labels:
       auraclaw.service-identity: model-gateway
+      auraclaw.database-role: auraclaw_model
     deploy:
       replicas: 2
       update_config: *update-policy
@@ -311,12 +329,23 @@ services:
     environment:
       <<: *common-environment
       AURACLAW_HEALTH_PORT: "8006"
-      AURACLAW_DATABASE_URL_FILE: /run/secrets/database_url
+      AURACLAW_DATABASE_URL_FILE: /run/secrets/action_hands_database_url
       AURACLAW_LEASE_SIGNING_KEY_FILE: /run/secrets/lease_signing_key
       AURACLAW_RUNTIME_WORKLOAD_TOKEN_FILE: /run/secrets/runtime_workload_token
       AURACLAW_ACTION_HANDS_WORKLOAD_TOKEN_FILE: /run/secrets/action_hands_workload_token
       AURACLAW_TASK_API_WORKLOAD_TOKEN_FILE: /run/secrets/task_api_workload_token
       AURACLAW_CREDENTIAL_PROXY_WORKLOAD_TOKEN_FILE: /run/secrets/credential_proxy_workload_token
+      AURACLAW_CAPABILITY_SEARCH_SEMANTIC_ENABLED: ${AURACLAW_CAPABILITY_SEARCH_SEMANTIC_ENABLED:-false}
+      AURACLAW_CAPABILITY_SEARCH_EMBEDDING_URL: ${AURACLAW_CAPABILITY_SEARCH_EMBEDDING_URL:-}
+      AURACLAW_CAPABILITY_SEARCH_EMBEDDING_MODEL: ${AURACLAW_CAPABILITY_SEARCH_EMBEDDING_MODEL:-BAAI/bge-m3}
+      AURACLAW_CAPABILITY_SEARCH_EMBEDDING_DIMENSIONS: ${AURACLAW_CAPABILITY_SEARCH_EMBEDDING_DIMENSIONS:-1024}
+      AURACLAW_CAPABILITY_SEARCH_EMBEDDING_TIMEOUT_SECONDS: ${AURACLAW_CAPABILITY_SEARCH_EMBEDDING_TIMEOUT_SECONDS:-12}
+      AURACLAW_CAPABILITY_SEARCH_INDEX_EMBEDDING_TIMEOUT_SECONDS: ${AURACLAW_CAPABILITY_SEARCH_INDEX_EMBEDDING_TIMEOUT_SECONDS:-300}
+      AURACLAW_CAPABILITY_SEARCH_EMBEDDING_MAX_CONCURRENT: ${AURACLAW_CAPABILITY_SEARCH_EMBEDDING_MAX_CONCURRENT:-8}
+      AURACLAW_CAPABILITY_SEARCH_SEMANTIC_MIN_SIMILARITY: ${AURACLAW_CAPABILITY_SEARCH_SEMANTIC_MIN_SIMILARITY:-0.50}
+      AURACLAW_CAPABILITY_SEARCH_LEXICAL_MIN_SCORE: ${AURACLAW_CAPABILITY_SEARCH_LEXICAL_MIN_SCORE:-0.1}
+      AURACLAW_CAPABILITY_SEARCH_CACHE_MAX_ENTRIES: ${AURACLAW_CAPABILITY_SEARCH_CACHE_MAX_ENTRIES:-2048}
+      AURACLAW_CAPABILITY_SEARCH_CACHE_TTL_SECONDS: ${AURACLAW_CAPABILITY_SEARCH_CACHE_TTL_SECONDS:-15}
       AURACLAW_HANDS_MAX_CONCURRENT: ${AURACLAW_HANDS_MAX_CONCURRENT:-32}
       AURACLAW_HANDS_MAX_CONCURRENT_PER_TENANT: ${AURACLAW_HANDS_MAX_CONCURRENT_PER_TENANT:-8}
       AURACLAW_HANDS_MAX_QUEUED: ${AURACLAW_HANDS_MAX_QUEUED:-256}
@@ -340,7 +369,7 @@ services:
       AURACLAW_RESOURCE_GATEWAY_MAX_QUEUED: ${AURACLAW_RESOURCE_GATEWAY_MAX_QUEUED:-128}
       AURACLAW_RESOURCE_GATEWAY_QUEUE_TIMEOUT_SECONDS: ${AURACLAW_RESOURCE_GATEWAY_QUEUE_TIMEOUT_SECONDS:-5}
     secrets:
-      - database_url
+      - action_hands_database_url
       - lease_signing_key
       - runtime_workload_token
       - action_hands_workload_token
@@ -351,6 +380,7 @@ services:
     healthcheck: *healthcheck
     labels:
       auraclaw.service-identity: action-hands
+      auraclaw.database-role: auraclaw_hands
     deploy:
       replicas: 2
       update_config: *update-policy
@@ -366,7 +396,7 @@ services:
     environment:
       <<: *common-environment
       AURACLAW_HEALTH_PORT: "8007"
-      AURACLAW_DATABASE_URL_FILE: /run/secrets/database_url
+      AURACLAW_DATABASE_URL_FILE: /run/secrets/policy_database_url
       AURACLAW_POLICY_WORKLOAD_TOKEN_FILE: /run/secrets/policy_workload_token
       AURACLAW_ACTION_HANDS_WORKLOAD_TOKEN_FILE: /run/secrets/action_hands_workload_token
       AURACLAW_MODEL_GATEWAY_WORKLOAD_TOKEN_FILE: /run/secrets/model_gateway_workload_token
@@ -376,7 +406,7 @@ services:
       AURACLAW_CREDENTIAL_PROXY_WORKLOAD_TOKEN_FILE: /run/secrets/credential_proxy_workload_token
       AURACLAW_ARTIFACT_SERVICE_WORKLOAD_TOKEN_FILE: /run/secrets/artifact_service_workload_token
     secrets:
-      - database_url
+      - policy_database_url
       - policy_workload_token
       - action_hands_workload_token
       - model_gateway_workload_token
@@ -390,6 +420,7 @@ services:
     healthcheck: *healthcheck
     labels:
       auraclaw.service-identity: policy
+      auraclaw.database-role: auraclaw_policy
     deploy:
       replicas: 2
       update_config: *update-policy
@@ -405,7 +436,7 @@ services:
     environment:
       <<: *common-environment
       AURACLAW_HEALTH_PORT: "8008"
-      AURACLAW_DATABASE_URL_FILE: /run/secrets/database_url
+      AURACLAW_DATABASE_URL_FILE: /run/secrets/credential_proxy_database_url
       AURACLAW_CREDENTIAL_VAULT_TOKEN_FILE: /run/secrets/vault_token
       AURACLAW_CREDENTIAL_VAULT_APPROLE_ROLE_ID: ${AURACLAW_CREDENTIAL_VAULT_APPROLE_ROLE_ID:-}
       AURACLAW_CREDENTIAL_VAULT_APPROLE_SECRET_ID_FILE: /run/secrets/vault_approle_secret_id
@@ -418,7 +449,7 @@ services:
       AURACLAW_TASK_API_WORKLOAD_TOKEN_FILE: /run/secrets/task_api_workload_token
       AURACLAW_CREDENTIAL_PROXY_WORKLOAD_TOKEN_FILE: /run/secrets/credential_proxy_workload_token
     secrets:
-      - database_url
+      - credential_proxy_database_url
       - vault_token
       - vault_approle_secret_id
       - action_hands_workload_token
@@ -430,6 +461,7 @@ services:
     healthcheck: *healthcheck
     labels:
       auraclaw.service-identity: credential-proxy
+      auraclaw.database-role: auraclaw_credential
     deploy:
       replicas: 2
       update_config: *update-policy
@@ -445,7 +477,7 @@ services:
     environment:
       <<: *common-environment
       AURACLAW_HEALTH_PORT: "8009"
-      AURACLAW_DATABASE_URL_FILE: /run/secrets/database_url
+      AURACLAW_DATABASE_URL_FILE: /run/secrets/artifact_database_url
       AURACLAW_ARTIFACT_BACKEND: ${AURACLAW_ARTIFACT_BACKEND:-obs}
       SEAWEEDFS_HOST: ${SEAWEEDFS_HOST:-}
       SEAWEEDFS_MASTER_PORT: ${SEAWEEDFS_MASTER_PORT:-9333}
@@ -465,12 +497,15 @@ services:
       OBS_PATH_STYLE: ${OBS_PATH_STYLE:-false}
       OBS_DOMAIN: ${OBS_DOMAIN:-}
       OBS_TENANT_ID: ${OBS_TENANT_ID:-}
+      AURACLAW_ARTIFACT_SCANNER_BASE_URL: ${AURACLAW_ARTIFACT_SCANNER_BASE_URL:?required}
+      AURACLAW_ARTIFACT_SCANNER_POLICY_VERSION: ${AURACLAW_ARTIFACT_SCANNER_POLICY_VERSION:-artifact-content-v1}
+      AURACLAW_ARTIFACT_SCANNER_TIMEOUT_SECONDS: ${AURACLAW_ARTIFACT_SCANNER_TIMEOUT_SECONDS:-30}
       AURACLAW_ACTION_HANDS_WORKLOAD_TOKEN_FILE: /run/secrets/action_hands_workload_token
       AURACLAW_TASK_API_WORKLOAD_TOKEN_FILE: /run/secrets/task_api_workload_token
       AURACLAW_DELIVERY_WORKLOAD_TOKEN_FILE: /run/secrets/delivery_workload_token
       AURACLAW_ARTIFACT_SERVICE_WORKLOAD_TOKEN_FILE: /run/secrets/artifact_service_workload_token
     secrets:
-      - database_url
+      - artifact_database_url
       - obs_ak
       - obs_sk
       - action_hands_workload_token
@@ -482,6 +517,7 @@ services:
     healthcheck: *healthcheck
     labels:
       auraclaw.service-identity: artifact-service
+      auraclaw.database-role: auraclaw_artifact
     deploy:
       replicas: 2
       update_config: *update-policy
@@ -493,23 +529,33 @@ services:
 
   streaming-gateway:
     <<: *auraclaw-service
+    stop_grace_period: 90s
     networks: [auraclaw, platform]
     environment:
       <<: *common-environment
       AURACLAW_HEALTH_PORT: "8010"
-      AURACLAW_DATABASE_URL_FILE: /run/secrets/database_url
+      AURACLAW_DATABASE_URL_FILE: /run/secrets/streaming_database_url
       AURACLAW_RUNTIME_EVENT_BACKEND: ${AURACLAW_RUNTIME_EVENT_BACKEND:-kafka}
       KAFKA_HOST: ${KAFKA_HOST:-host.docker.internal}
       KAFKA_PORT: ${KAFKA_PORT:-9092}
       AURACLAW_STREAMING_GATEWAY_WORKLOAD_TOKEN_FILE: /run/secrets/streaming_gateway_workload_token
+      # Ingress 把 /v1/streams/ 切到本服务，必须与 task-api 使用同一套
+      # 受信上游工作负载凭证和 Agent Context 签名密钥，否则 SSE 会 401。
+      AURACLAW_UPSTREAM_WORKLOAD_TOKEN_FILE: /run/secrets/upstream_workload_token
+      AURACLAW_AGENT_CONTEXT_SIGNING_KEYS_JSON_FILE: /run/secrets/agent_context_signing_keys_json
+      AURACLAW_AGENT_CONTEXT_ISSUER: ${AURACLAW_AGENT_CONTEXT_ISSUER:-upstream}
+      AURACLAW_AGENT_CONTEXT_AUDIENCE: ${AURACLAW_AGENT_CONTEXT_AUDIENCE:-auraclaw-task-api}
     secrets:
-      - database_url
+      - streaming_database_url
       - streaming_gateway_workload_token
+      - upstream_workload_token
+      - agent_context_signing_keys_json
     command: ["streaming", "run", "--host", "0.0.0.0", "--port", "8010"]
     expose: ["8010"]
     healthcheck: *healthcheck
     labels:
       auraclaw.service-identity: streaming-gateway
+      auraclaw.database-role: auraclaw_streaming
     deploy:
       replicas: 3
       update_config: *update-policy
@@ -525,14 +571,14 @@ services:
     environment:
       <<: *common-environment
       AURACLAW_HEALTH_PORT: "8011"
-      AURACLAW_DATABASE_URL_FILE: /run/secrets/database_url
+      AURACLAW_DATABASE_URL_FILE: /run/secrets/delivery_database_url
       AURACLAW_DELIVERY_WORKLOAD_TOKEN_FILE: /run/secrets/delivery_workload_token
       AURACLAW_TASK_API_WORKLOAD_TOKEN_FILE: /run/secrets/task_api_workload_token
       AURACLAW_DELIVERY_MAX_CONCURRENT: ${AURACLAW_DELIVERY_MAX_CONCURRENT:-8}
       AURACLAW_DELIVERY_MAX_CONCURRENT_PER_TENANT: ${AURACLAW_DELIVERY_MAX_CONCURRENT_PER_TENANT:-2}
       AURACLAW_DELIVERY_CLAIM_TTL_SECONDS: ${AURACLAW_DELIVERY_CLAIM_TTL_SECONDS:-30}
     secrets:
-      - database_url
+      - delivery_database_url
       - delivery_workload_token
       - task_api_workload_token
     command: ["delivery", "run", "--host", "0.0.0.0", "--port", "8011"]
@@ -540,6 +586,7 @@ services:
     healthcheck: *healthcheck
     labels:
       auraclaw.service-identity: delivery-worker
+      auraclaw.database-role: auraclaw_delivery
     deploy:
       replicas: 2
       update_config: *update-policy
@@ -554,7 +601,7 @@ services:
     user: "101:101"
     read_only: true
     restart: unless-stopped
-    stop_grace_period: 30s
+    stop_grace_period: 90s
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     tmpfs:
@@ -564,7 +611,7 @@ services:
     depends_on:
       task-api: {condition: service_healthy}
       streaming-gateway: {condition: service_healthy}
-    ports: ["${AURACLAW_INGRESS_PORT:-8080}:8080"]
+    ports: ["${AURACLAW_INGRESS_BIND_ADDRESS:-127.0.0.1}:${AURACLAW_INGRESS_PORT:-8080}:8080"]
     volumes:
       - ./deploy/nginx.conf:/etc/nginx/conf.d/default.conf:ro
     networks: [auraclaw, edge]
@@ -592,7 +639,17 @@ networks:
     external: true
 
 secrets:
-  database_url: {file: "${AURACLAW_SECRET_DIR:-.runtime/compose-secrets}/database_url"}
+  task_api_database_url: {file: "${AURACLAW_SECRET_DIR:-.runtime/compose-secrets}/task_api_database_url"}
+  session_database_url: {file: "${AURACLAW_SECRET_DIR:-.runtime/compose-secrets}/session_database_url"}
+  projection_database_url: {file: "${AURACLAW_SECRET_DIR:-.runtime/compose-secrets}/projection_database_url"}
+  orchestrator_database_url: {file: "${AURACLAW_SECRET_DIR:-.runtime/compose-secrets}/orchestrator_database_url"}
+  model_gateway_database_url: {file: "${AURACLAW_SECRET_DIR:-.runtime/compose-secrets}/model_gateway_database_url"}
+  action_hands_database_url: {file: "${AURACLAW_SECRET_DIR:-.runtime/compose-secrets}/action_hands_database_url"}
+  policy_database_url: {file: "${AURACLAW_SECRET_DIR:-.runtime/compose-secrets}/policy_database_url"}
+  credential_proxy_database_url: {file: "${AURACLAW_SECRET_DIR:-.runtime/compose-secrets}/credential_proxy_database_url"}
+  artifact_database_url: {file: "${AURACLAW_SECRET_DIR:-.runtime/compose-secrets}/artifact_database_url"}
+  streaming_database_url: {file: "${AURACLAW_SECRET_DIR:-.runtime/compose-secrets}/streaming_database_url"}
+  delivery_database_url: {file: "${AURACLAW_SECRET_DIR:-.runtime/compose-secrets}/delivery_database_url"}
   migration_database_url: {file: "${AURACLAW_SECRET_DIR:-.runtime/compose-secrets}/migration_database_url"}
   task_api_workload_token: {file: "${AURACLAW_SECRET_DIR:-.runtime/compose-secrets}/task_api_workload_token"}
   projection_workload_token: {file: "${AURACLAW_SECRET_DIR:-.runtime/compose-secrets}/projection_workload_token"}
@@ -611,5 +668,5 @@ secrets:
   vault_approle_secret_id: {file: "${AURACLAW_SECRET_DIR:-.runtime/compose-secrets}/vault_approle_secret_id"}
   obs_ak: {file: "${AURACLAW_SECRET_DIR:-.runtime/compose-secrets}/obs_ak"}
   obs_sk: {file: "${AURACLAW_SECRET_DIR:-.runtime/compose-secrets}/obs_sk"}
-  chaintower_workload_token: {file: "${AURACLAW_SECRET_DIR:-.runtime/compose-secrets}/chaintower_workload_token"}
+  upstream_workload_token: {file: "${AURACLAW_SECRET_DIR:-.runtime/compose-secrets}/upstream_workload_token"}
   agent_context_signing_keys_json: {file: "${AURACLAW_SECRET_DIR:-.runtime/compose-secrets}/agent_context_signing_keys_json"}

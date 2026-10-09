@@ -13,10 +13,38 @@ Response、凭证或 Secret；敏感 Payload 只允许保存受控 `payload_ref`
 GET /v1/operations/sessions/{session_id}/timeline
 GET /v1/operations/metrics
 GET /v1/operations/metrics/summary?window_hours=24
+GET /v1/operations/audits?action=tool.execute&outcome=denied&limit=50
 ```
 
 `metrics/summary` 在 tenant 边界内按指标返回 count、sum、average、min、max、p50、p95、p99，窗口限制
-1～720 小时。Skill 加载灰度至少观察以下门禁：
+1～720 小时。
+
+审计检索始终使用请求身份中的 tenant，支持 action、outcome、actor、session 和稳定时间游标过滤；响应
+只包含结构化、脱敏后的审计字段，不返回 Canonical Event payload 或 Secret。分页时同时回传
+`next_before` 与 `next_before_id`，下一页必须成对提交。
+
+## 外部观测出口
+
+生产部署必须显式配置 `AURACLAW_OBSERVABILITY_OTLP_HTTP_ENDPOINT` 和
+`AURACLAW_ALERT_RECEIVER_URL`。Trace 与 Metric 使用 OTLP/HTTP JSON，分别投递到 Collector 的
+`/v1/traces`、`/v1/metrics`；规则告警使用 Alertmanager v2 `POST /api/v2/alerts`。两个地址在
+production profile 下必须使用 HTTPS。若平台需要应用层令牌，分别通过
+`AURACLAW_OBSERVABILITY_EXPORTER_TOKEN_FILE`、`AURACLAW_ALERT_RECEIVER_TOKEN_FILE` 注入，令牌不写入
+环境模板、日志或告警标签。
+
+投递顺序固定为先写 PostgreSQL 观测表，再进入有界异步队列执行外部投递。超时、重试和队列容量由
+`AURACLAW_OBSERVABILITY_EXPORT_TIMEOUT_SECONDS`、
+`AURACLAW_OBSERVABILITY_EXPORT_RETRY_ATTEMPTS`、
+`AURACLAW_OBSERVABILITY_EXPORT_QUEUE_CAPACITY` 控制。Collector 或 Alertmanager 不可用时记录
+`observability_export_failed` 结构化错误，但不得回滚 Canonical Event、改变 Session 状态或触发工具重放；
+PostgreSQL 中的 Trace、Metric、Alert 仍是补采和事故审计依据。告警接收端按 `alertname`、`tenant_id`、
+`session_id` 和稳定 `alert_id` 聚合，禁止将 Prompt、Response、凭据或 Artifact 正文复制进标签。
+
+发布前至少验证：Collector 对两类 OTLP 请求返回 2xx、Alertmanager 对合成告警返回 2xx、应用日志中没有
+Authorization 值、关闭外部端点后业务请求仍只产生可观测性降级而非业务失败。连续投递失败必须由平台侧
+日志告警捕获；恢复后根据 PostgreSQL 保留窗口补采缺口，补采不得写回业务事件。
+
+Skill 加载灰度至少观察以下门禁：
 
 - 同一 run 第二轮后的 `skill.runtime.content_cache.miss.count` 应为 0；持续非零停止放量。
 - `skill.runtime.prompt.rejected.count` 应为 0；出现时按 prompt budget 处理，不复制正文到工单。
@@ -72,7 +100,9 @@ uv run auraclaw operations redrive --tenant TENANT --queue projection --item-id 
 uv run auraclaw projection rebuild --tenant TENANT
 ```
 
-重建前后抽样比对 Task/Approval/Collaboration View；Canonical Event 不删除、不改写。
+重建前后抽样比对 Task/Approval/Collaboration View；Canonical Event 不删除、不改写。租户全量重建从
+Session owner 的分页 tenant feed 发现事实，不依赖当前 Task View 的 session 清单；空表、漏行或损坏的
+Projection 仍可恢复。未传 `--tenant` 的全局重建会被拒绝。
 
 ### Runtime 崩溃或 Lease 丢失
 
@@ -94,11 +124,11 @@ uv run auraclaw operations redrive --tenant TENANT --queue delivery --item-id DE
 
 重投增加 attempt，不覆盖历史；稳定 `delivery_id` 和接收方 Idempotency-Key 防止重复业务效果。
 
-### chaintower Assertion 验签失败或密钥不可用
+### upstream Assertion 验签失败或密钥不可用
 
 Task API 写与敏感读必须 fail closed（401）。先确认 `kid` 仍在 N/N-1 集合、clock skew
-未超出配置，再检查 chaintower 签发服务。禁止为恢复流量改回裸 `X-Tenant-ID` /
-`X-Actor-ID`。轮换时先加载新 `kid`，chaintower 切签发后再撤旧密钥。
+未超出配置，再检查 upstream 签发服务。禁止为恢复流量改回裸 `X-Tenant-ID` /
+`X-Actor-ID`。轮换时先加载新 `kid`，upstream 切签发后再撤旧密钥。
 
 ## 保留、GC 与安全
 
@@ -134,8 +164,8 @@ Task API 401/403 和 Secret 扫描；任一门禁失败立即停止放量：
 4. 审批后的写工具。
 5. Child DAG 与 Reviewer。
 6. 外部 Webhook Delivery。
-7. chaintower signed Agent Context（保留 development Header adapter，生产不得开启）。
-8. Hands → chaintower MCP `workload_trusted_context`。
+7. upstream signed Agent Context（保留 development Header adapter，生产不得开启）。
+8. Hands → upstream MCP `workload_trusted_context`。
 
 应用回滚不得回滚或删除 Canonical Event。Schema 回滚仅在确认新表没有继续写入且已导出审计记录后，
 执行 `0007_m6_observability_reliability.down.sql`；通常优先回滚应用并保留向前兼容的观测 Schema。

@@ -533,11 +533,11 @@ snapshot digest 用于诊断和幂等观测，不作为可加载状态。produce
 revision fence 必须消除副作用。Kafka 延迟、停机或 poison event 不能放宽治理，启动 snapshot、冷 miss
 read-through 和周期 reconciliation 继续保证最终收敛。
 
-Agent Runtime 为每个 `(tenant_id, session_id, run_id, package_digest, path)` 维护容量、条目数和 TTL
-有界的进程内正文 cache，并用 single-flight 合并同一 run 的并发读取。它只避免同一 run 在后续模型轮次
-重复从 Hands 获取不可变 `SKILL.md`；每轮仍重新查询固定 binding disposition，cache 命中不得跳过
-Publication/Trust/撤销决策。正文不进入 Runtime checkpoint、Session Event、Kafka 或 Model Gateway
-遥测，run 完成、失败、取消或因撤销暂停时立即释放，进程异常时随进程消失。
+Agent Runtime 为每个 `(tenant_id, publisher, name, version, package_digest, path)` 维护容量、条目数和
+TTL 有界的进程内正文 cache，并用 single-flight 合并并发读取。不可变 digest 内容允许跨 Run 复用；
+Run 完成只取消该 Run 尚未完成的 waiter，不驱逐已验证正文。每轮仍重新查询固定 binding disposition，
+cache 命中不得跳过 Publication/Trust/撤销决策。正文不进入 Runtime checkpoint、Session Event、Kafka
+或 Model Gateway 遥测，进程异常时随进程消失。
 
 完整 Skill system message 仍在每个模型请求中提供，以保持执行语义；稳定顺序和稳定前缀允许 Provider
 采用 prompt caching，但不能假设任意 Provider 已启用。Runtime 只向 Model Gateway 传递 allowlist 内的
@@ -648,7 +648,7 @@ Tool Router。schema/content digest 在未 bump version 时发生变化会把本
 Capability search/load 还必须核对当前 Action Hands 副本的 backing：进程内 Resource 需要 tenant
 可见的 Registry 条目，远端 Resource 需要当前已装载的 Connector，Capability generation 必须等于
 Server 的 active generation。缺少任一条件的记录不进入候选；升级迁移 `0053` 清除已移除的
-`auraclaw-price-insight` Provider 及非 active generation 残留。Resource 在 load 后、read 前消失属于
+`legacy-local-provider` 及非 active generation 残留。Resource 在 load 后、read 前消失属于
 可恢复竞态，Runtime 返回结构化 `resource_not_found`、撤销该候选并允许模型重新搜索或降级继续，
 不得直接使 Run 失败。
 
@@ -759,12 +759,22 @@ Skill Runner 不创建独立事实源。步骤进度可以发 Runtime Event；�
 
 ### 4.6 Capability-Aware Agent Loop
 
+Agent Router 在首轮生成式模型之前运行。当前 `assist` 实现采用可信任务范围内被目标精确选择的唯一
+Skill，也采用目标中唯一、完整的 dotted canonical Tool/Skill 引用；仅列入 `skill_names` 不等于被选择。
+显式引用先经受管 Search 验证策略可见且唯一，再经受管 Load 或正常 Skill resolver、Policy、包完整性
+和依赖链固定当前 binding，并把决定摘要保存在 checkpoint。2–8 个显式能力仅在全部为策略可见、当前
+binding 已固定的 `read-only` Tool 时编译为有界结构化 `sequential_plan`；计划校验 task key、依赖无环、
+输出合同、受管分配、预算、深度和宽度，并在当前 Session 执行，不创建 Child。写能力、Skill、歧义、
+无意图证据或准备失败均回退下述 Agent Loop。路由命中后不再向首轮模型暴露重复的发现/加载/激活
+控制工具，但不会跳过实时 binding disposition、Policy、Approval、预算、身份或撤销检查。
+
 普通任务不预加载全量目录。Runtime 每轮只向模型暴露四个稳定控制能力和已经显式加载的业务
 Tool：
 
 ```text
 auraclaw.capabilities.search
 auraclaw.capabilities.load
+auraclaw.skills.resolve_and_activate
 auraclaw.skills.activate
 auraclaw.resources.read
 ```
@@ -772,6 +782,17 @@ auraclaw.resources.read
 `search` 和 `load` 通过 Action Hands 执行。后两者是 Runtime control tools：模型只能提出请求，
 Runtime 使用可信 Assignment、固定 binding 和 Capability Client 完成激活或读取，不能由模型提供
 tenant、Role、Policy、Credential、Server URL 或任意 URI。
+
+`skills.resolve_and_activate` 是通用快速路径：内部顺序复用 search、load 和 activate 的全部治理，
+仅在策略可见搜索得到唯一 Skill 时继续；多候选必须返回模型重新选择，不能以相关度猜测替代授权。
+它减少模型轮次，不减少 canonical activation 事实，也不缓存最终用户授权结论。
+
+Action Hands 对 `capabilities.search` 维护每副本有界 LRU/短 TTL L1，并用 single-flight 合并同 key
+冷请求。key 包含 tenant、Catalog revision（可见 Server 的 config revision、active generation、
+enabled/status）、搜索策略版本、部署环境、受管角色和全部过滤条件；Catalog 发布、禁用或隔离后，
+下一次读取 revision 即绕过旧条目。缓存仅保存已完成权威可见性过滤的搜索结果，默认 15 秒且可关闭；
+`load`、Skill binding/activation、Policy、Approval 和工具调用仍逐次读取权威状态。精确 capability id、
+canonical name 和 server id 使用定向 Store 查询，避免为了已知名称扫描完整目录；默认不引入 Redis/L2。
 
 任务循环为：
 

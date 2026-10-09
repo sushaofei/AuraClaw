@@ -6,9 +6,9 @@
 
 ## 根因
 
-ChainTowerMCP 的 `dashboard.chart.preview` 描述约 8 KB、深度 17，超过原 16 层限制。
-另有 5 项同版本 Schema 变化：`dashboard.chart.preview`、`price_insight.dataset.status`、
-`price_insight.history.average_price.query`、`semantic.query.compile`、`semantic.query.execute`。
+Upstream MCP 的 `dashboard.chart.preview` 描述约 8 KB、深度 17，超过原 16 层限制。
+另有 3 项同版本 Schema 变化：`dashboard.chart.preview`、`semantic.query.compile`、
+`semantic.query.execute`。
 远端发现 76 项 Tool，白名单内为 25 项。原目录只有第 2800 代的 20 条记录，
 并非混入多个过期版本；generation 是发布代号，不是历史数据条数。
 
@@ -26,7 +26,7 @@ ChainTowerMCP 的 `dashboard.chart.preview` 描述约 8 KB、深度 17，超过�
 ## 恢复点与后续发布
 
 测试服务主机上的备份：
-`/home/jcroot/workspace/AuraClaw/.runtime/mcp-catalog-backups/20260903/chaintowermcp-baseline-20260903.json`。
+`/home/jcroot/workspace/AuraClaw/.runtime/mcp-catalog-backups/20260903/upstream-mcp-baseline-20260903.json`。
 旧镜像：`auraclaw:mcp-catalog-base-20260903`；单模块修复镜像：`auraclaw:mcp-catalog-fix-20260903`。
 后续正常发布需重新构建包含源码修复的镜像，不要以旧镜像覆盖。
 恢复目录须再次取得租约、核验配置及活跃任务，不能直接覆盖旧 generation/fencing token。

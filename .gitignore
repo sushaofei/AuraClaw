@@ -40,7 +40,7 @@ logs/
 .postgresql.local.env
 !.postgresql.env.example
 .host.env
-.chaintower
+.upstream
 .eng.debug
 
 # Tool caches

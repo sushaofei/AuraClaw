@@ -16,6 +16,7 @@ from auraclaw.action.skill_publishers import (
     SkillPublisherTrustService,
 )
 from auraclaw.api.dependencies import (
+    get_artifact_share_gateway,
     get_collaboration_projection,
     get_observability_service,
     get_sync_invocation_gateway,
@@ -27,6 +28,7 @@ from auraclaw.api.dependencies import (
 from auraclaw.api.routes.admin_mcp import create_mcp_admin_router
 from auraclaw.api.routes.admin_skills import create_skill_admin_router
 from auraclaw.composition.api import create_app
+from auraclaw.composition.observability import exporting_observability_store
 from auraclaw.composition.services import (
     ServiceSpec,
     _capability_catalog_store,
@@ -42,6 +44,7 @@ from auraclaw.gateways.query.waiter import TaskResultWaiter
 from auraclaw.gateways.task.commands import TaskCommandGateway
 from auraclaw.gateways.task.invocations import SyncInvocationGateway
 from auraclaw.infrastructure.clients.artifact import RemoteSkillPackageUploadClient
+from auraclaw.infrastructure.clients.artifact_share import RemoteArtifactShareClient
 from auraclaw.infrastructure.clients.mcp_registry import RemoteMcpRegistryClient
 from auraclaw.infrastructure.clients.policy import RemotePolicyClient, RemoteTaskAdmissionController
 from auraclaw.infrastructure.clients.session import NoOpOutboxRelay, RemoteSessionEventStore
@@ -55,6 +58,9 @@ from auraclaw.infrastructure.persistence.postgres_mcp_registry import (
 )
 from auraclaw.infrastructure.persistence.postgres_skill_lifecycle import (
     PostgresSkillLifecycleStore,
+)
+from auraclaw.infrastructure.projection.postgres_activity_store import (
+    PostgresActivityProjection,
 )
 from auraclaw.infrastructure.projection.postgres_approval_store import (
     PostgresApprovalProjection,
@@ -86,6 +92,10 @@ def build_task_api_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         bearer_token=token or secrets.token_urlsafe(32),
         service_identity=ServiceIdentity.TASK_API,
     )
+    artifact_shares = RemoteArtifactShareClient(
+        settings.artifact_base_url,
+        bearer_token=token or secrets.token_urlsafe(32),
+    )
     if not settings.sql_storage_enabled:
         raise ValueError(
             "task-api requires SQL storage; use `auraclaw serve` with .env.dev "
@@ -94,6 +104,7 @@ def build_task_api_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
     task_projection = PostgresTaskProjection(settings.resolved_database_url)
     approval_projection = PostgresApprovalProjection(settings.resolved_database_url)
     collaboration_projection = PostgresCollaborationProjection(settings.resolved_database_url)
+    activity_projection = PostgresActivityProjection(settings.resolved_database_url)
     task_service = TaskService(
         runtime_budget=settings.runtime_budget_snapshot(),
         event_store=remote_session,
@@ -104,7 +115,12 @@ def build_task_api_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         approval_notifier=policy,
     )
     gateway = TaskCommandGateway(task_service)
-    query = TaskQueryService(task_projection, collaboration_projection, remote_session)
+    query = TaskQueryService(
+        task_projection,
+        collaboration_projection,
+        remote_session,
+        activity_projection,
+    )
     waiter = TaskResultWaiter(
         query,
         poll_interval=settings.sync_invoke_poll_interval_seconds,
@@ -113,9 +129,14 @@ def build_task_api_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         max_timeout_seconds=settings.sync_invoke_max_timeout_seconds,
     )
     invocations = SyncInvocationGateway(gateway, waiter)
-    observability_store = PostgresObservabilityStore(settings.resolved_database_url)
+    observability_store = exporting_observability_store(
+        settings,
+        service_name="task-api",
+        store=PostgresObservabilityStore(settings.resolved_database_url),
+    )
     observability = ObservabilityService(observability_store, remote_session)
     app.dependency_overrides[get_task_command_gateway] = lambda: gateway
+    app.dependency_overrides[get_artifact_share_gateway] = lambda: artifact_shares
     app.dependency_overrides[get_task_projection] = lambda: task_projection
     app.dependency_overrides[get_task_query_service] = lambda: query
     app.dependency_overrides[get_task_result_waiter] = lambda: waiter
@@ -123,6 +144,8 @@ def build_task_api_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
     app.dependency_overrides[get_collaboration_projection] = lambda: collaboration_projection
     app.dependency_overrides[get_observability_service] = lambda: observability
     app.state.observability_service = observability
+    app.state.maintenance_ticks = (task_service.process_due_approval_slas,)
+    app.state.maintenance_interval = settings.approval_sla_scan_interval_seconds
     identity_closeables = (
         (app.state.identity_verifier,) if hasattr(app.state.identity_verifier, "close") else ()
     )
@@ -130,9 +153,11 @@ def build_task_api_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         *identity_closeables,
         remote_session,
         policy,
+        artifact_shares,
         task_projection,
         approval_projection,
         collaboration_projection,
+        activity_projection,
         observability_store,
     )
     mcp_registry, mcp_store = _mcp_registry_service(settings)
@@ -194,9 +219,7 @@ def build_task_api_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
             upload_service=skill_uploads,
             publisher_service=publisher_management,
             admission_reader=skill_publication if skill_lifecycle is None else skill_lifecycle,
-            capability_availability=SkillDependencyAvailability(
-                capability_catalog_store
-            ),
+            capability_availability=SkillDependencyAvailability(capability_catalog_store),
             admission_metrics_window_hours=settings.skill_admission_metrics_window_hours,
             admission_quarantine_alert_ratio=(settings.skill_admission_quarantine_alert_ratio),
             admission_quarantine_alert_min_samples=(

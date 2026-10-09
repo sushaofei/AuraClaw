@@ -22,6 +22,7 @@ class TaskCommandGateway:
         interaction_mode: InteractionMode | None = None,
         approval_mode: ApprovalMode | None = None,
         read_refresh: list[dict[str, Any]] | None = None,
+        skill_names: list[str] | None = None,
     ) -> dict[str, Any]:
         return await self._service.create_task(
             goal=goal,
@@ -32,6 +33,7 @@ class TaskCommandGateway:
             interaction_mode=interaction_mode,
             approval_mode=approval_mode,
             read_refresh=read_refresh,
+            skill_names=skill_names,
         )
 
     async def append_message(
@@ -87,5 +89,39 @@ class TaskCommandGateway:
             approval_id=approval_id,
             decision=decision,
             feedback=feedback,
+            context=context,
+        )
+
+    async def delegate_approval(
+        self,
+        *,
+        session_id: str,
+        approval_id: str,
+        to_approver: str,
+        reason: str,
+        context: CommandContext,
+    ) -> dict[str, Any]:
+        return await self._service.delegate_approval(
+            session_id=session_id,
+            approval_id=approval_id,
+            to_approver=to_approver,
+            reason=reason,
+            context=context,
+        )
+
+    async def escalate_approval(
+        self,
+        *,
+        session_id: str,
+        approval_id: str,
+        approvers: tuple[str, ...],
+        reason: str,
+        context: CommandContext,
+    ) -> dict[str, Any]:
+        return await self._service.escalate_approval(
+            session_id=session_id,
+            approval_id=approval_id,
+            approvers=approvers,
+            reason=reason,
             context=context,
         )

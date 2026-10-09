@@ -6,7 +6,7 @@ import time
 from collections.abc import Sequence
 from dataclasses import replace
 from datetime import timedelta
-from typing import Protocol
+from typing import Any, Protocol
 
 from auraclaw.contracts.events import CanonicalEvent
 from auraclaw.control.ports import (
@@ -31,7 +31,12 @@ COLLABORATION_CONTROL_EVENTS = {
     "run.cancelled",
 }
 
-APPROVAL_RESUME_EVENTS = {"approval.approved", "approval.rejected"}
+APPROVAL_RESUME_EVENTS = {
+    "approval.approved",
+    "approval.rejected",
+    "approval.expired",
+    "approval.cancelled",
+}
 
 
 class ControlFeedSource(Protocol):
@@ -192,7 +197,7 @@ class RunnableFeedConsumer:
             events = await self._source.load(assignment.tenant_id, assignment.session_id)
             decided = any(
                 event.run_id == assignment.run_id
-                and event.type in {"approval.approved", "approval.rejected"}
+                and event.type in APPROVAL_RESUME_EVENTS
                 for event in events
             )
             if decided:
@@ -277,6 +282,7 @@ class RunnableFeedConsumer:
                     else None
                 ),
             )
+        skill_names = [str(item) for item in event.payload.get("skill_names", ()) if item]
         return RunnableItem(
             task_id=f"{event.tenant_id}:{event.session_id}:{run_id}",
             tenant_id=event.tenant_id,
@@ -286,6 +292,9 @@ class RunnableFeedConsumer:
             source_version=event.aggregate_version,
             queue_partition=event.tenant_id,
             role=role,
+            required_capability=(
+                {"tool_permissions": skill_names} if skill_names else {}
+            ),
             budget=budget,
             user_id=event.actor.id,
             dept_id=_optional_str(event.payload.get("dept_id")),
@@ -299,6 +308,7 @@ class RunnableFeedConsumer:
         dependencies: list[str] = []
         run_id: str | None = None
         budget = RuntimeBudget()
+        resource_profile: dict[str, Any] = {}
         terminal_runs: set[str] = set()
         owner_user_id = RunnableFeedConsumer._owner_user_id(events)
         owner_dept_id = RunnableFeedConsumer._owner_dept_id(events)
@@ -306,6 +316,16 @@ class RunnableFeedConsumer:
             if event.type in {"session.created", "child.created"}:
                 role = str(event.payload.get("role", role))
                 dependencies = list(event.payload.get("dependency_ids", dependencies))
+                if event.type == "child.created":
+                    resource_profile = RunnableFeedConsumer._child_resource_profile(
+                        event.payload
+                    )
+                elif event.payload.get("skill_names"):
+                    resource_profile = {
+                        "tool_permissions": [
+                            str(item) for item in event.payload.get("skill_names", ()) if item
+                        ]
+                    }
                 configured = event.payload.get("budget")
                 if isinstance(configured, dict):
                     budget = RuntimeBudget(
@@ -354,6 +374,7 @@ class RunnableFeedConsumer:
             source_version=source_version,
             queue_partition=latest.tenant_id,
             role=role,
+            required_capability=resource_profile,
             budget=budget,
             user_id=owner_user_id,
             dept_id=owner_dept_id,
@@ -372,12 +393,16 @@ class RunnableFeedConsumer:
         selected_graph = graph or CollaborationAggregate.from_events(tenant_id, root, events)
         latest_versions: dict[str, int] = {}
         runtime_budgets: dict[str, RuntimeBudget] = {}
+        resource_profiles: dict[str, dict[str, Any]] = {}
         for event in events:
             latest_versions[event.session_id] = max(
                 latest_versions.get(event.session_id, 0), event.aggregate_version
             )
             if event.type != "child.created":
                 continue
+            resource_profiles[event.session_id] = RunnableFeedConsumer._child_resource_profile(
+                event.payload
+            )
             configured = event.payload.get("runtime_budget")
             if isinstance(configured, dict):
                 runtime_budgets[event.session_id] = RuntimeBudget(
@@ -406,12 +431,32 @@ class RunnableFeedConsumer:
                     source_version=latest_versions[node.session_id],
                     queue_partition=tenant_id,
                     role=node.role.value,
+                    required_capability=resource_profiles.get(node.session_id, {}),
                     budget=runtime_budgets.get(node.session_id, RuntimeBudget()),
                     user_id=owner_user_id,
                     dept_id=owner_dept_id,
                 )
             )
         return items
+
+    @staticmethod
+    def _child_resource_profile(payload: dict[str, Any]) -> dict[str, Any]:
+        metadata = payload.get("metadata")
+        selected_metadata = metadata if isinstance(metadata, dict) else {}
+        required_capabilities = selected_metadata.get("required_capabilities", ())
+        required_skills = selected_metadata.get("required_skills", ())
+        profile: dict[str, Any] = {
+            "tool_permissions": [str(item) for item in payload.get("tool_permissions", ())]
+        }
+        if isinstance(required_capabilities, (list, tuple)):
+            profile["required_capabilities"] = [
+                dict(item) for item in required_capabilities if isinstance(item, dict)
+            ]
+        if isinstance(required_skills, (list, tuple)) and required_skills:
+            profile["required_skills"] = [
+                dict(item) for item in required_skills if isinstance(item, dict)
+            ]
+        return profile
 
     async def _wake_waiting_coordinator(self, graph: CollaborationAggregate) -> bool:
         root = graph.nodes.get(graph.root_session_id)
@@ -421,10 +466,19 @@ class RunnableFeedConsumer:
         checkpoint = await self._store.load_checkpoint(
             graph.tenant_id, graph.root_session_id, root.run_id
         )
+        task_id = f"{graph.tenant_id}:{graph.root_session_id}:{root.run_id}"
         if checkpoint is None or checkpoint.phase not in {
             "agent.waiting_children",
             "collaboration.waiting_children",
         }:
+            # A Child can become terminal before the Coordinator atomically registers its
+            # wait checkpoint. Persist a one-shot wake latch on the active assignment so
+            # the subsequent suspension becomes runnable instead of losing this signal.
+            if any(
+                node.parent_session_id is not None and node.status in terminal
+                for node in graph.nodes.values()
+            ):
+                await self._store.wake_assignment(task_id)
             return False
         waiting = tuple(str(item) for item in checkpoint.state.get("waiting_child_ids", ()))
         if not waiting:
@@ -450,9 +504,7 @@ class RunnableFeedConsumer:
             for child_id in waiting
         ):
             return False
-        return await self._store.wake_assignment(
-            f"{graph.tenant_id}:{graph.root_session_id}:{root.run_id}"
-        )
+        return await self._store.wake_assignment(task_id)
 
     @staticmethod
     def _owner_user_id(events: Sequence[CanonicalEvent]) -> str | None:

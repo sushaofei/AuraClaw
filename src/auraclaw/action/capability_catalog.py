@@ -4,12 +4,31 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import re
+import time
+from collections import OrderedDict
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
+from auraclaw.action.capability_search import (
+    SEARCH_POLICY_VERSION,
+    CapabilityEmbeddingProvider,
+    SearchMatch,
+    SearchOutcome,
+    capability_source_digest,
+    cosine_similarity,
+    exact_reasons,
+    governed_search_aliases,
+    index_capabilities,
+    lexical_scores,
+    normalize_vector,
+    read_search_index,
+    reciprocal_rank_fusion,
+    search_index_digest,
+)
 from auraclaw.action.ports import (
     CapabilityCatalogStore,
     CatalogCommitResult,
@@ -26,6 +45,7 @@ from auraclaw.contracts.capabilities import (
     McpServerDefinition,
 )
 from auraclaw.contracts.errors import AuthorizationError, StaleCapabilitySnapshotError
+from auraclaw.contracts.observability import MetricPoint
 from auraclaw.contracts.skills import (
     SkillBinding,
     SkillInstallationRecord,
@@ -53,6 +73,16 @@ SKILL_BINDING_STATUS_TOOL_NAME = "auraclaw.skills.binding-status"
 _LATIN_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_.-]+")
 _CJK_RUN_PATTERN = re.compile(r"[\u3400-\u9FFF\uF900-\uFAFF]+")
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _SearchCacheEntry:
+    outcome: SearchOutcome
+    expires_at: float
+
+
+class CapabilitySearchMetricWriter(Protocol):
+    async def write_metric(self, metric: MetricPoint) -> None: ...
 
 
 class SkillResolverPort(Protocol):
@@ -111,11 +141,14 @@ class InMemoryCapabilityCatalogStore:
         self._source_revisions: dict[str, str | None] = {}
         self._lock = asyncio.Lock()
 
-    async def upsert_server(self, server: McpServerDefinition) -> None:
+    async def upsert_server(
+        self, server: McpServerDefinition, *, allow_rollback: bool = False
+    ) -> None:
         async with self._lock:
             current = self._servers.get(server.server_id)
             if (
-                current is not None
+                not allow_rollback
+                and current is not None
                 and current.config_revision is not None
                 and server.config_revision is not None
                 and server.config_revision < current.config_revision
@@ -292,6 +325,33 @@ class InMemoryCapabilityCatalogStore:
             if capability.tenant_id is None or capability.tenant_id == tenant_id
         )
 
+    async def catalog_revision(self, tenant_id: str) -> str:
+        encoded = json.dumps(
+            [
+                {
+                    "server_id": server.server_id,
+                    "config_revision": server.config_revision,
+                    "generation": self._generations.get(server.server_id, 0),
+                    "enabled": server.enabled,
+                    "status": server.status.value,
+                }
+                for server in sorted(self._servers.values(), key=lambda item: item.server_id)
+                if server.tenant_id in {None, tenant_id}
+            ],
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+
+    async def find_capabilities_by_canonical_name(
+        self, tenant_id: str, canonical_name: str
+    ) -> tuple[CapabilityDescriptor, ...]:
+        return tuple(
+            capability
+            for capability in await self.list_capabilities(tenant_id)
+            if capability.canonical_name == canonical_name
+        )
+
     async def list_server_capabilities(
         self, tenant_id: str, server_id: str
     ) -> tuple[CapabilityDescriptor, ...]:
@@ -328,9 +388,36 @@ class CapabilityCatalog:
         store: CapabilityCatalogStore,
         *,
         availability: CapabilityAvailability | None = None,
+        embedding_provider: CapabilityEmbeddingProvider | None = None,
+        metric_writer: CapabilitySearchMetricWriter | None = None,
+        environment: str | None = None,
+        semantic_min_similarity: float = 0.50,
+        lexical_min_score: float = 0.1,
+        index_embedding_timeout_seconds: float = 300.0,
+        search_cache_max_entries: int = 2048,
+        search_cache_ttl_seconds: float = 15.0,
     ) -> None:
+        if (
+            not -1.0 <= semantic_min_similarity <= 1.0
+            or lexical_min_score < 0
+            or index_embedding_timeout_seconds <= 0
+            or search_cache_max_entries < 0
+            or search_cache_ttl_seconds < 0
+        ):
+            raise ValueError("Capability search confidence thresholds are invalid")
         self._store = store
         self._availability = availability
+        self._embedding_provider = embedding_provider
+        self._metric_writer = metric_writer
+        self._environment = environment
+        self._semantic_min_similarity = semantic_min_similarity
+        self._lexical_min_score = lexical_min_score
+        self._index_embedding_timeout_seconds = index_embedding_timeout_seconds
+        self._search_cache_max_entries = search_cache_max_entries
+        self._search_cache_ttl_seconds = search_cache_ttl_seconds
+        self._search_cache: OrderedDict[tuple[object, ...], _SearchCacheEntry] = OrderedDict()
+        self._search_loads: dict[tuple[object, ...], asyncio.Task[SearchOutcome]] = {}
+        self._search_cache_lock = asyncio.Lock()
 
     def set_availability(self, availability: CapabilityAvailability) -> None:
         self._availability = availability
@@ -343,8 +430,10 @@ class CapabilityCatalog:
     async def get_server_definition(self, server_id: str) -> McpServerDefinition | None:
         return await self._store.get_server(server_id)
 
-    async def register_server(self, server: McpServerDefinition) -> None:
-        await self._store.upsert_server(server)
+    async def register_server(
+        self, server: McpServerDefinition, *, allow_rollback: bool = False
+    ) -> None:
+        await self._store.upsert_server(server, allow_rollback=allow_rollback)
 
     async def remove_server(self, server_id: str) -> None:
         await self._store.remove_server(server_id)
@@ -366,44 +455,160 @@ class CapabilityCatalog:
                 raise ValueError("Capability server_id does not match the publication")
             if capability.tenant_id != server.tenant_id:
                 raise ValueError("Capability tenant does not match the MCP server")
+        source_snapshot_digest = snapshot_digest or capability_source_digest(capabilities)
         owned_lease = lease is None
         if lease is None:
-            lease = await self._store.claim_catalog_reconcile(
-                server_id=server_id,
-                owner=f"catalog-direct-{id(self)}",
-                ttl=timedelta(seconds=30),
-            )
-            if lease is None:
-                raise StaleCapabilitySnapshotError("Capability catalog reconcile is already owned")
-        if snapshot_digest is None:
-            encoded = json.dumps(
-                [
-                    item.model_dump(mode="json")
-                    for item in sorted(
-                        capabilities,
-                        key=lambda value: (
-                            value.kind.value,
-                            value.canonical_name,
-                            value.version,
-                            value.capability_id,
-                        ),
+            lease_seconds = max(30.0, self._index_embedding_timeout_seconds + 30.0)
+            wait_deadline = time.monotonic() + lease_seconds
+            while lease is None:
+                matching = await self._matching_committed_index(
+                    tenant_id=server.tenant_id or "__platform__",
+                    server_id=server_id,
+                    capabilities=capabilities,
+                    source_snapshot_digest=source_snapshot_digest,
+                    source_revision=source_revision,
+                )
+                if matching is not None:
+                    return matching
+                lease = await self._store.claim_catalog_reconcile(
+                    server_id=server_id,
+                    owner=f"catalog-direct-{id(self)}",
+                    ttl=timedelta(seconds=lease_seconds),
+                )
+                if lease is not None:
+                    break
+                if time.monotonic() >= wait_deadline:
+                    raise StaleCapabilitySnapshotError(
+                        "Capability catalog reconcile remained owned past its deadline"
                     )
-                ],
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode()
-            snapshot_digest = f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+                await asyncio.sleep(0.25)
         try:
-            return await self._store.replace_capabilities(
+            matching = await self._matching_committed_index(
+                tenant_id=server.tenant_id or "__platform__",
+                server_id=server_id,
+                capabilities=capabilities,
+                source_snapshot_digest=source_snapshot_digest,
+                source_revision=source_revision,
+            )
+            if matching is not None:
+                return matching
+            published_capabilities = capabilities
+            if self._embedding_provider is not None:
+                index_started = time.monotonic()
+                try:
+                    published_capabilities = await index_capabilities(
+                        capabilities,
+                        generation=lease.previous_generation + 1,
+                        provider=self._embedding_provider,
+                        source_snapshot_digest=source_snapshot_digest,
+                        timeout_seconds=self._index_embedding_timeout_seconds,
+                    )
+                except Exception:
+                    await self._emit_metric(
+                        "capability_search_index_build_total",
+                        1.0,
+                        server.tenant_id,
+                        outcome="failed",
+                        server_id=server_id,
+                        model_version=self._embedding_provider.model_version,
+                        policy_version=SEARCH_POLICY_VERSION,
+                    )
+                    logger.warning(
+                        "capability_search_index_build server=%s tenant=%s generation=%s "
+                        "model=%s policy=%s outcome=failed",
+                        server_id,
+                        server.tenant_id,
+                        lease.previous_generation + 1,
+                        self._embedding_provider.model_version,
+                        SEARCH_POLICY_VERSION,
+                    )
+                    raise
+                await self._emit_metric(
+                    "capability_search_index_build_latency_seconds",
+                    time.monotonic() - index_started,
+                    server.tenant_id,
+                    outcome="succeeded",
+                    server_id=server_id,
+                    model_version=self._embedding_provider.model_version,
+                    policy_version=SEARCH_POLICY_VERSION,
+                )
+            if self._embedding_provider is not None:
+                encoded = json.dumps(
+                    {
+                        "source_snapshot_digest": source_snapshot_digest,
+                        "search_index_digest": search_index_digest(published_capabilities),
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+                snapshot_digest = f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+            else:
+                snapshot_digest = source_snapshot_digest
+            result = await self._store.replace_capabilities(
                 server_id,
-                capabilities,
+                published_capabilities,
                 lease=lease,
                 snapshot_digest=snapshot_digest,
                 source_revision=source_revision,
             )
+            await self._emit_metric(
+                "capability_search_index_publish_total",
+                1.0,
+                server.tenant_id,
+                outcome="published" if result.committed else "unchanged",
+                server_id=server_id,
+                policy_version=SEARCH_POLICY_VERSION,
+            )
+            logger.info(
+                "capability_search_index_publish server=%s tenant=%s generation=%s "
+                "snapshot_digest=%s policy=%s committed=%s",
+                server_id,
+                server.tenant_id,
+                result.generation,
+                result.snapshot_digest,
+                SEARCH_POLICY_VERSION,
+                result.committed,
+            )
+            return result
         finally:
             if owned_lease:
                 await self._store.release_catalog_reconcile(lease)
+
+    async def _matching_committed_index(
+        self,
+        *,
+        tenant_id: str,
+        server_id: str,
+        capabilities: tuple[CapabilityDescriptor, ...],
+        source_snapshot_digest: str,
+        source_revision: str | None,
+    ) -> CatalogCommitResult | None:
+        if self._embedding_provider is None:
+            return None
+        current = await self._store.read_committed_snapshot(tenant_id, server_id)
+        if current is None:
+            return None
+        entries = tuple(
+            read_search_index(item, provider=self._embedding_provider)
+            for item in current.capabilities
+        )
+        if (
+            current.source_revision != source_revision
+            or capability_source_digest(current.capabilities)
+            != capability_source_digest(capabilities)
+            or any(entry is None for entry in entries)
+            or any(
+                entry.source_snapshot_digest != source_snapshot_digest
+                for entry in entries
+                if entry is not None
+            )
+        ):
+            return None
+        return CatalogCommitResult(
+            generation=current.generation,
+            committed=False,
+            snapshot_digest=current.snapshot_digest,
+        )
 
     async def search(
         self,
@@ -416,14 +621,163 @@ class CapabilityCatalog:
         canonical_name: str | None = None,
         server_id: str | None = None,
         limit: int = 10,
+        actor_role: str | None = None,
+        deadline: datetime | None = None,
     ) -> tuple[CapabilityDescriptor, ...]:
+        outcome = await self.search_with_evidence(
+            tenant_id=tenant_id,
+            query=query,
+            kinds=kinds,
+            required_permissions=required_permissions,
+            capability_id=capability_id,
+            canonical_name=canonical_name,
+            server_id=server_id,
+            limit=limit,
+            actor_role=actor_role,
+            deadline=deadline,
+        )
+        return tuple(item.capability for item in outcome.matches)
+
+    async def search_with_evidence(
+        self,
+        *,
+        tenant_id: str,
+        query: str = "",
+        kinds: tuple[CapabilityKind, ...] = (),
+        required_permissions: tuple[str, ...] = (),
+        capability_id: str | None = None,
+        canonical_name: str | None = None,
+        server_id: str | None = None,
+        limit: int = 10,
+        actor_role: str | None = None,
+        deadline: datetime | None = None,
+    ) -> SearchOutcome:
         if limit < 1 or limit > 50:
             raise ValueError("Capability search limit must be between 1 and 50")
+        if self._search_cache_max_entries == 0 or self._search_cache_ttl_seconds == 0:
+            return await self._search_uncached(
+                tenant_id=tenant_id,
+                query=query,
+                kinds=kinds,
+                required_permissions=required_permissions,
+                capability_id=capability_id,
+                canonical_name=canonical_name,
+                server_id=server_id,
+                limit=limit,
+                actor_role=actor_role,
+                deadline=deadline,
+            )
+        revision = await self._store.catalog_revision(tenant_id)
+        key = (
+            tenant_id,
+            revision,
+            SEARCH_POLICY_VERSION,
+            self._environment,
+            actor_role,
+            query.strip(),
+            tuple(sorted(kind.value for kind in kinds)),
+            tuple(sorted(required_permissions)),
+            capability_id,
+            canonical_name,
+            server_id,
+            limit,
+            _deadline_bucket(deadline),
+        )
+        now = time.monotonic()
+        async with self._search_cache_lock:
+            entry = self._search_cache.get(key)
+            if entry is not None and entry.expires_at > now:
+                self._search_cache.move_to_end(key)
+                cache_outcome = "hit"
+                task: asyncio.Task[SearchOutcome] | None = None
+                cached = entry.outcome
+            else:
+                if entry is not None:
+                    self._search_cache.pop(key, None)
+                cached = None
+                task = self._search_loads.get(key)
+                cache_outcome = "coalesced" if task is not None else "miss"
+                if task is None:
+                    task = asyncio.create_task(
+                        self._populate_search_cache(
+                            key,
+                            tenant_id=tenant_id,
+                            query=query,
+                            kinds=kinds,
+                            required_permissions=required_permissions,
+                            capability_id=capability_id,
+                            canonical_name=canonical_name,
+                            server_id=server_id,
+                            limit=limit,
+                            actor_role=actor_role,
+                            deadline=deadline,
+                        )
+                    )
+                    self._search_loads[key] = task
+        await self._emit_metric(
+            "capability_search_cache_requests_total",
+            1.0,
+            tenant_id,
+            outcome=cache_outcome,
+            policy_version=SEARCH_POLICY_VERSION,
+        )
+        if cached is not None:
+            return cached
+        assert task is not None
+        return await asyncio.shield(task)
+
+    async def _populate_search_cache(
+        self,
+        key: tuple[object, ...],
+        **arguments: Any,
+    ) -> SearchOutcome:
+        try:
+            outcome = await self._search_uncached(**arguments)
+            async with self._search_cache_lock:
+                self._search_cache[key] = _SearchCacheEntry(
+                    outcome=outcome,
+                    expires_at=time.monotonic() + self._search_cache_ttl_seconds,
+                )
+                self._search_cache.move_to_end(key)
+                while len(self._search_cache) > self._search_cache_max_entries:
+                    self._search_cache.popitem(last=False)
+            return outcome
+        finally:
+            async with self._search_cache_lock:
+                if self._search_loads.get(key) is asyncio.current_task():
+                    self._search_loads.pop(key, None)
+
+    async def _search_uncached(
+        self,
+        *,
+        tenant_id: str,
+        query: str = "",
+        kinds: tuple[CapabilityKind, ...] = (),
+        required_permissions: tuple[str, ...] = (),
+        capability_id: str | None = None,
+        canonical_name: str | None = None,
+        server_id: str | None = None,
+        limit: int = 10,
+        actor_role: str | None = None,
+        deadline: datetime | None = None,
+    ) -> SearchOutcome:
+        started = time.monotonic()
         kind_filter = set(kinds)
         permission_filter = set(required_permissions)
-        query_tokens = _tokens(query)
-        ranked: list[tuple[int, CapabilityDescriptor]] = []
-        for capability in await self._store.list_capabilities(tenant_id):
+        visible: list[CapabilityDescriptor] = []
+        candidates: tuple[CapabilityDescriptor, ...]
+        if capability_id is not None:
+            exact = await self._store.get_capability(tenant_id, capability_id)
+            candidates = () if exact is None else (exact,)
+        elif canonical_name is not None:
+            candidates = await self._store.find_capabilities_by_canonical_name(
+                tenant_id, canonical_name
+            )
+        elif server_id is not None:
+            candidates = await self._store.list_server_capabilities(tenant_id, server_id)
+        else:
+            candidates = await self._store.list_capabilities(tenant_id)
+        for capability in candidates:
             if capability.status not in {
                 CapabilityStatus.ACTIVE,
                 CapabilityStatus.DEGRADED,
@@ -439,21 +793,313 @@ class CapabilityCatalog:
                 continue
             if server_id is not None and capability.server_id != server_id:
                 continue
+            allowed_roles = capability.metadata.get("allowed_roles")
+            if isinstance(allowed_roles, (list, tuple)) and (
+                actor_role is None or actor_role not in {str(value) for value in allowed_roles}
+            ):
+                continue
+            environments = capability.metadata.get("environments")
+            if (
+                self._environment is not None
+                and isinstance(environments, (list, tuple))
+                and self._environment not in {str(value) for value in environments}
+            ):
+                continue
             if not await self._is_available(tenant_id, capability):
                 continue
-            score = _score(capability, query_tokens)
-            if query_tokens and score == 0:
+            visible.append(capability)
+        # Multiple MCP publications can mirror the same Skill package.  Collapse
+        # only byte-identical tenant identities; conflicting digests remain
+        # visible and therefore ambiguous.  Tool identities stay server-owned.
+        equivalent_skills: dict[
+            tuple[str | None, str, str, str], CapabilityDescriptor
+        ] = {}
+        distinct: list[CapabilityDescriptor] = []
+        for capability in visible:
+            if capability.kind is not CapabilityKind.SKILL:
+                distinct.append(capability)
                 continue
-            ranked.append((score, capability))
-        ranked.sort(
-            key=lambda item: (
-                -item[0],
-                item[1].status == CapabilityStatus.DEGRADED,
-                item[1].canonical_name,
-                item[1].version,
+            key = (
+                capability.tenant_id,
+                capability.canonical_name,
+                capability.version,
+                capability.content_digest,
             )
+            existing = equivalent_skills.get(key)
+            if existing is None or capability.capability_id < existing.capability_id:
+                equivalent_skills[key] = capability
+        visible = [*distinct, *equivalent_skills.values()]
+        visible.sort(key=lambda item: (item.canonical_name, item.version, item.capability_id))
+
+        if (
+            not query.strip()
+            and capability_id is None
+            and canonical_name is None
+            and server_id is None
+        ):
+            browse_matches = tuple(
+                SearchMatch(
+                    capability=item,
+                    match_reasons=("browse",),
+                    exact_rank=None,
+                    lexical_rank=None,
+                    semantic_rank=None,
+                    lexical_score=0.0,
+                    semantic_score=None,
+                    fused_score=0.0,
+                )
+                for item in visible[:limit]
+            )
+            outcome = SearchOutcome(
+                matches=browse_matches,
+                semantic_degraded=False,
+                degraded_reason=None,
+                search_policy_version=SEARCH_POLICY_VERSION,
+                candidate_counts={
+                    "authorized": len(visible),
+                    "exact": 0,
+                    "lexical": 0,
+                    "semantic": 0,
+                },
+                generation_lag=0,
+            )
+            await self._emit_search_metrics(
+                tenant_id, outcome, "browse", time.monotonic() - started
+            )
+            return outcome
+
+        exact_by_id: dict[str, tuple[str, ...]] = {}
+        for item in visible:
+            reasons = list(exact_reasons(query, item))
+            if capability_id is not None:
+                reasons.append("exact:capability_id_filter")
+            if canonical_name is not None:
+                reasons.append("exact:canonical_name_filter")
+            if server_id is not None:
+                reasons.append("exact:server_id_filter")
+            if reasons:
+                exact_by_id[item.capability_id] = tuple(reasons)
+        exact_priority = {
+            "exact:capability_id": 0,
+            "exact:capability_id_filter": 0,
+            "exact:canonical_name": 1,
+            "exact:canonical_name_filter": 1,
+            "exact:server_id": 2,
+            "exact:server_id_filter": 2,
+        }
+        exact_order = sorted(
+            exact_by_id,
+            key=lambda item_id: (
+                min(exact_priority[reason] for reason in exact_by_id[item_id]),
+                item_id,
+            ),
         )
-        return tuple(capability for _score_value, capability in ranked[:limit])
+        lexical = lexical_scores(query, visible)
+        by_id = {item.capability_id: item for item in visible}
+        lexical_order = sorted(
+            lexical,
+            key=lambda item_id: (
+                -lexical[item_id],
+                by_id[item_id].canonical_name,
+                by_id[item_id].version,
+                item_id,
+            ),
+        )
+
+        semantic: dict[str, float] = {}
+        semantic_degraded = False
+        degraded_reason: str | None = None
+        generation_lag = 0
+        if not query.strip():
+            pass
+        elif self._embedding_provider is None:
+            semantic_degraded = True
+            degraded_reason = "embedding_unconfigured"
+        else:
+            entries = {}
+            for item in visible:
+                entry = read_search_index(item, provider=self._embedding_provider)
+                if entry is None:
+                    generation_lag += 1
+                else:
+                    entries[item.capability_id] = entry
+            if generation_lag:
+                semantic_degraded = True
+                degraded_reason = "index_generation_lag"
+            if entries:
+                try:
+                    query_vector = normalize_vector(
+                        (await self._embedding_provider.embed((query,)))[0],
+                        dimensions=self._embedding_provider.dimensions,
+                    )
+                    semantic = {
+                        item_id: similarity
+                        for item_id, entry in entries.items()
+                        if (similarity := cosine_similarity(query_vector, entry.vector))
+                        >= self._semantic_min_similarity
+                    }
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    semantic_degraded = True
+                    degraded_reason = "embedding_query_failed"
+                    semantic = {}
+            elif visible:
+                semantic_degraded = True
+                degraded_reason = degraded_reason or "index_unavailable"
+        semantic_order = sorted(
+            semantic,
+            key=lambda item_id: (
+                -semantic[item_id],
+                by_id[item_id].canonical_name,
+                by_id[item_id].version,
+                item_id,
+            ),
+        )
+        fused = reciprocal_rank_fusion(
+            exact=exact_order,
+            lexical=lexical_order,
+            semantic=semantic_order,
+        )
+        ordered = sorted(
+            fused,
+            key=lambda item_id: (
+                item_id not in exact_by_id,
+                *_execution_rerank(by_id[item_id], deadline),
+                -fused[item_id],
+                by_id[item_id].status == CapabilityStatus.DEGRADED,
+                by_id[item_id].canonical_name,
+                by_id[item_id].version,
+            ),
+        )
+        exact_ranks = {item_id: rank for rank, item_id in enumerate(exact_order, start=1)}
+        lexical_ranks = {item_id: rank for rank, item_id in enumerate(lexical_order, start=1)}
+        semantic_ranks = {item_id: rank for rank, item_id in enumerate(semantic_order, start=1)}
+        ranked_matches: list[SearchMatch] = []
+        for item_id in ordered:
+            lexical_score = lexical.get(item_id, 0.0)
+            semantic_score = semantic.get(item_id)
+            if (
+                item_id not in exact_by_id
+                and lexical_score < self._lexical_min_score
+                and (semantic_score is None or semantic_score < self._semantic_min_similarity)
+            ):
+                continue
+            reasons = list(exact_by_id.get(item_id, ()))
+            if item_id in lexical:
+                reasons.append("lexical:bm25")
+            if item_id in semantic:
+                reasons.append("semantic:cosine")
+            ranked_matches.append(
+                SearchMatch(
+                    capability=by_id[item_id],
+                    match_reasons=tuple(reasons),
+                    exact_rank=exact_ranks.get(item_id),
+                    lexical_rank=lexical_ranks.get(item_id),
+                    semantic_rank=semantic_ranks.get(item_id),
+                    lexical_score=lexical_score,
+                    semantic_score=semantic_score,
+                    fused_score=fused[item_id],
+                )
+            )
+            if len(ranked_matches) >= limit:
+                break
+        outcome = SearchOutcome(
+            matches=tuple(ranked_matches),
+            semantic_degraded=semantic_degraded,
+            degraded_reason=degraded_reason,
+            search_policy_version=SEARCH_POLICY_VERSION,
+            candidate_counts={
+                "authorized": len(visible),
+                "exact": len(exact_order),
+                "lexical": len(lexical_order),
+                "semantic": len(semantic_order),
+            },
+            generation_lag=generation_lag,
+        )
+        mode = "hybrid" if semantic and not semantic_degraded else "lexical_degraded"
+        if exact_order:
+            mode = "exact"
+        await self._emit_search_metrics(tenant_id, outcome, mode, time.monotonic() - started)
+        return outcome
+
+    async def _emit_search_metrics(
+        self,
+        tenant_id: str,
+        outcome: SearchOutcome,
+        mode: str,
+        latency: float,
+    ) -> None:
+        if self._metric_writer is None:
+            return
+        metric_writer = self._metric_writer
+        points = [
+            (
+                "capability_search_requests_total",
+                1.0,
+                {"mode": mode, "outcome": "hit" if outcome.matches else "empty"},
+            ),
+            ("capability_search_latency_seconds", latency, {"mode": mode}),
+            ("capability_search_index_generation_lag", float(outcome.generation_lag), {}),
+            *[
+                ("capability_search_candidate_count", float(count), {"channel": channel})
+                for channel, count in outcome.candidate_counts.items()
+            ],
+        ]
+        if not outcome.matches:
+            points.append(("capability_search_zero_result_total", 1.0, {}))
+        if outcome.semantic_degraded:
+            points.append(
+                (
+                    "capability_search_semantic_degraded_total",
+                    1.0,
+                    {"reason": outcome.degraded_reason or "unknown"},
+                )
+            )
+
+        async def write(name: str, value: float, labels: dict[str, str]) -> None:
+            try:
+                await asyncio.wait_for(
+                    metric_writer.write_metric(
+                        MetricPoint(
+                            name=name,
+                            value=value,
+                            observed_at=datetime.now(UTC),
+                            tenant_id=tenant_id,
+                            labels=labels,
+                        )
+                    ),
+                    timeout=0.1,
+                )
+            except Exception:
+                return
+
+        await asyncio.gather(*(write(name, value, labels) for name, value, labels in points))
+
+    async def _emit_metric(
+        self,
+        name: str,
+        value: float,
+        tenant_id: str | None,
+        **labels: str,
+    ) -> None:
+        if self._metric_writer is None:
+            return
+        try:
+            await asyncio.wait_for(
+                self._metric_writer.write_metric(
+                    MetricPoint(
+                        name=name,
+                        value=value,
+                        observed_at=datetime.now(UTC),
+                        tenant_id=tenant_id,
+                        labels=labels,
+                    )
+                ),
+                timeout=0.1,
+            )
+        except Exception:
+            return
 
     async def list_server_tools(
         self, *, tenant_id: str, server_id: str
@@ -512,33 +1158,38 @@ class CapabilitySearchExecutor:
         kinds = tuple(CapabilityKind(str(value)) for value in arguments.get("kinds", ()))
         permissions = tuple(str(value) for value in arguments.get("required_permissions", ()))
         query = str(arguments.get("query", ""))
-        results = list(
-            await self.catalog.search(
-                tenant_id=invocation.tenant_id,
-                query=query,
-                kinds=kinds,
-                required_permissions=permissions,
-                capability_id=_optional(arguments.get("capability_id")),
-                canonical_name=_optional(arguments.get("canonical_name")),
-                server_id=_optional(arguments.get("server_id")),
-                limit=50,
-            )
-        )
-        query_tokens = _tokens(query)
-        results.sort(
-            key=lambda item: (
-                -_score(item, query_tokens),
-                item.status == CapabilityStatus.DEGRADED,
-                item.canonical_name,
-                item.version,
-            )
-        )
         limit = int(arguments.get("limit", 10))
-        page = [descriptor.as_search_result() for descriptor in results[:limit]]
+        outcome = await self.catalog.search_with_evidence(
+            tenant_id=invocation.tenant_id,
+            query=query,
+            kinds=kinds,
+            required_permissions=permissions,
+            capability_id=_optional(arguments.get("capability_id")),
+            canonical_name=_optional(arguments.get("canonical_name")),
+            server_id=_optional(arguments.get("server_id")),
+            limit=limit,
+            actor_role=invocation.actor_role,
+            deadline=invocation.deadline,
+        )
+        page: list[dict[str, Any]] = []
+        for match in outcome.matches:
+            item = match.capability.as_search_result()
+            item.update(
+                {
+                    "match_reasons": list(match.match_reasons),
+                    "search_policy_version": outcome.search_policy_version,
+                    "semantic_degraded": outcome.semantic_degraded,
+                }
+            )
+            page.append(item)
         payload: dict[str, object] = {
             "capabilities": page,
-            "truncated": len(results) > limit or len(results) == 50,
+            "truncated": len(outcome.matches) >= limit,
+            "search_policy_version": outcome.search_policy_version,
+            "semantic_degraded": outcome.semantic_degraded,
         }
+        if outcome.degraded_reason is not None:
+            payload["semantic_degraded_reason"] = outcome.degraded_reason
         if not page:
             browse = await self.catalog.search(tenant_id=invocation.tenant_id, limit=50)
             domains = sorted(
@@ -557,13 +1208,18 @@ class CapabilitySearchExecutor:
                 "An administrator can inspect Skill availability in the management catalog."
             )
         logger.info(
-            "capability_search tenant=%s query=%r kinds=%s permissions=%s hits=%s "
+            "capability_search tenant=%s query_digest=%s query_length=%s kinds=%s "
+            "permissions=%s hits=%s policy=%s semantic_degraded=%s degraded_reason=%s "
             "generations=%s empty_reason=%s",
             invocation.tenant_id,
-            "".join(character for character in query[:1024] if character >= " "),
+            hashlib.sha256(query.encode()).hexdigest()[:16],
+            len(query),
             tuple(kind.value for kind in kinds),
             permissions,
             tuple(item["capability_id"] for item in page),
+            outcome.search_policy_version,
+            outcome.semantic_degraded,
+            outcome.degraded_reason,
             tuple(
                 sorted(
                     {
@@ -892,12 +1548,19 @@ def capability_search_tool() -> ToolCapability:
                 "hint": {"type": "string"},
                 "empty_reason": {"type": "string"},
                 "truncated": {"type": "boolean"},
+                "search_policy_version": {"type": "string"},
+                "semantic_degraded": {"type": "boolean"},
+                "semantic_degraded_reason": {"type": "string"},
                 "available_domains": {
                     "type": "array",
                     "items": {"type": "string"},
                 },
             },
-            "required": ["capabilities"],
+            "required": [
+                "capabilities",
+                "search_policy_version",
+                "semantic_degraded",
+            ],
             "additionalProperties": False,
         },
         permission=ToolPermission.READ_ONLY,
@@ -1034,6 +1697,19 @@ def _optional(value: object) -> str | None:
     return parsed or None
 
 
+def _deadline_bucket(deadline: datetime | None) -> str:
+    if deadline is None:
+        return "none"
+    remaining = (deadline - datetime.now(UTC)).total_seconds()
+    if remaining <= 5:
+        return "le-5s"
+    if remaining <= 30:
+        return "le-30s"
+    if remaining <= 120:
+        return "le-120s"
+    return "gt-120s"
+
+
 def _tokens(value: str) -> tuple[str, ...]:
     tokens: list[str] = []
     seen: set[str] = set()
@@ -1098,9 +1774,7 @@ def _score(
 
 def _capability_metadata_terms(capability: CapabilityDescriptor) -> dict[str, str]:
     metadata = capability.metadata
-    aliases = metadata.get("search_aliases", ())
-    if not isinstance(aliases, (list, tuple)):
-        aliases = ()
+    aliases = governed_search_aliases(capability)
     return {
         "server_id": capability.server_id.casefold(),
         "server_title": str(metadata.get("server_title", "")).casefold(),
@@ -1108,3 +1782,26 @@ def _capability_metadata_terms(capability: CapabilityDescriptor) -> dict[str, st
         "source_type": str(metadata.get("source_type", "")).casefold(),
         "aliases": " ".join(str(item).casefold() for item in aliases),
     }
+
+
+def _execution_rerank(
+    capability: CapabilityDescriptor,
+    deadline: datetime | None,
+) -> tuple[int, int, int, float]:
+    metadata = capability.metadata
+    deprecated = metadata.get("deprecated") is True
+    drifted = metadata.get("schema_drift") is True
+    timeout_infeasible = False
+    estimate = metadata.get("estimated_timeout_seconds")
+    if deadline is not None and isinstance(estimate, (int, float)) and estimate >= 0:
+        timeout_infeasible = float(estimate) > max(
+            0.0,
+            (deadline - datetime.now(UTC)).total_seconds(),
+        )
+    raw_quality = metadata.get("historical_quality_score", 1.0)
+    quality = (
+        float(raw_quality)
+        if isinstance(raw_quality, (int, float)) and math.isfinite(float(raw_quality))
+        else 0.0
+    )
+    return (int(deprecated), int(drifted), int(timeout_infeasible), -quality)

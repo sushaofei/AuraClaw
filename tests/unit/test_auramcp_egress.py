@@ -203,9 +203,9 @@ async def _exercise(port: int) -> None:
         async def send(self, **kwargs: Any) -> Any:
             headers = kwargs["headers"]
             if headers.get("Mcp-Method") == "tools/call":
-                assert headers["X-CT-Tenant-ID"] == "tenant-a"
-                assert headers["X-CT-User-ID"] == "user-a"
-                assert headers["X-CT-Dept-ID"] == "9"
+                assert headers["X-Aura-Tenant-ID"] == "tenant-a"
+                assert headers["X-Aura-User-ID"] == "user-a"
+                assert headers["X-Aura-Dept-ID"] == "9"
             return await super().send(**kwargs)
 
     adapter = ManagedMcpEgressAdapter(

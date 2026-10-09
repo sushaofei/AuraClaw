@@ -61,7 +61,7 @@ async def check_approval_modes(connection, database_url: str, migration_dir: Pat
         accepted = await service.create_task(
             goal="read a sensitive report",
             context=ctx,
-            interaction_mode=InteractionMode.NON_STREAMING,
+            interaction_mode=InteractionMode.STREAMING,
             approval_mode=ApprovalMode.AUTO_REVIEW,
         )
         with pytest.raises(VersionConflictError):
@@ -117,6 +117,9 @@ async def check_approval_modes(connection, database_url: str, migration_dir: Pat
             "effective_approval_mode"
         ] == "auto_review"
         # Projection is disposable: field rollback/up and canonical rebuild restore mode.
+        # Drop cached prepared statements before applying DDL from a separate connection.
+        # asyncpg cannot transparently reuse plans after the projected table shape changes.
+        await projection.close()
         await connection.execute((migration_dir / "0059_approval_modes.down.sql").read_text())
         await connection.execute((migration_dir / "0059_approval_modes.sql").read_text())
         await projection.rebuild(events, tenant_id="approval-pg")

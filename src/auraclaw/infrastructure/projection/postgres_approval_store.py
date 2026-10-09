@@ -34,9 +34,10 @@ class PostgresApprovalProjection(LazyPool):
                         (tenant_id, approval_id, session_id, run_id, action_digest,
                          tool_name, redacted_arguments, risk, reason, expected_effect,
                          allowed_decisions, assigned_approvers, policy_version, expires_at,
+                         required_approvals, votes, escalation_at, escalation_level,
                          status, source_version, source_event_id, projected_at)
                         VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11::jsonb,
-                                $12::jsonb,$13,$14,$15,$16,$17,$18)
+                                $12::jsonb,$13,$14,$15,$16::jsonb,$17,$18,$19,$20,$21,$22)
                         ON CONFLICT (tenant_id, approval_id) DO NOTHING""",
                         event.tenant_id,
                         str(payload["approval_id"]),
@@ -52,23 +53,103 @@ class PostgresApprovalProjection(LazyPool):
                         json_dumps(payload.get("assigned_approvers", [])),
                         str(payload["policy_version"]),
                         datetime.fromisoformat(str(payload["expires_at"])),
+                        max(1, int(payload.get("required_approvals", 1))),
+                        json_dumps(payload.get("votes", [])),
+                        (
+                            datetime.fromisoformat(str(payload["escalation_at"]))
+                            if payload.get("escalation_at")
+                            else None
+                        ),
+                        int(payload.get("escalation_level", 0)),
                         str(payload.get("status", "waiting")),
+                        event.aggregate_version,
+                        event.event_id,
+                        event.occurred_at,
+                    )
+                elif event.type == "approval.vote.recorded":
+                    vote = {
+                        "actor_id": str(payload["actor_id"]),
+                        "decision": str(payload["decision"]),
+                        "feedback": payload.get("feedback"),
+                        "recorded_at": event.occurred_at.isoformat(),
+                    }
+                    await connection.execute(
+                        """UPDATE projection.approval_view
+                        SET votes=votes || $3::jsonb, source_version=$4,
+                            source_event_id=$5, projected_at=$6
+                        WHERE tenant_id=$1 AND approval_id=$2""",
+                        event.tenant_id,
+                        str(payload["approval_id"]),
+                        json_dumps([vote]),
+                        event.aggregate_version,
+                        event.event_id,
+                        event.occurred_at,
+                    )
+                elif event.type in {"approval.delegated", "approval.escalated"}:
+                    current = await connection.fetchrow(
+                        """SELECT assigned_approvers FROM projection.approval_view
+                        WHERE tenant_id=$1 AND approval_id=$2""",
+                        event.tenant_id,
+                        str(payload["approval_id"]),
+                    )
+                    if current is None:
+                        continue
+                    approvers = [str(item) for item in json_loads(current["assigned_approvers"])]
+                    if event.type == "approval.delegated":
+                        before = str(payload["from_approver"])
+                        after = str(payload["to_approver"])
+                        approvers = [after if item == before else item for item in approvers]
+                        level = None
+                        escalation_at = None
+                    else:
+                        approvers.extend(str(item) for item in payload["approvers"])
+                        level = int(payload["escalation_level"])
+                        escalation_at = (
+                            datetime.fromisoformat(str(payload["next_escalation_at"]))
+                            if payload.get("next_escalation_at")
+                            else None
+                        )
+                    await connection.execute(
+                        """UPDATE projection.approval_view
+                        SET assigned_approvers=$3::jsonb,
+                            escalation_level=COALESCE($4, escalation_level),
+                            escalation_at=CASE WHEN $4::integer IS NULL
+                                THEN escalation_at ELSE $5 END,
+                            source_version=$6, source_event_id=$7, projected_at=$8
+                        WHERE tenant_id=$1 AND approval_id=$2""",
+                        event.tenant_id,
+                        str(payload["approval_id"]),
+                        json_dumps(list(dict.fromkeys(approvers))),
+                        level,
+                        escalation_at,
                         event.aggregate_version,
                         event.event_id,
                         event.occurred_at,
                     )
                 else:
                     status = event.type.split(".", 1)[1]
+                    terminal_vote = []
+                    if payload.get("actor_id") is not None:
+                        terminal_vote.append(
+                            {
+                                "actor_id": str(payload["actor_id"]),
+                                "decision": str(payload.get("decision", status)),
+                                "feedback": payload.get("feedback"),
+                                "recorded_at": event.occurred_at.isoformat(),
+                            }
+                        )
                     await connection.execute(
                         """UPDATE projection.approval_view
-                        SET status=$3, decision=$4, feedback=$5, source_version=$6,
-                            source_event_id=$7, projected_at=$8
+                        SET status=$3, decision=$4, feedback=$5,
+                            votes=votes || $6::jsonb, source_version=$7,
+                            source_event_id=$8, projected_at=$9
                         WHERE tenant_id=$1 AND approval_id=$2""",
                         event.tenant_id,
                         str(payload["approval_id"]),
                         status,
                         payload.get("decision"),
                         payload.get("feedback"),
+                        json_dumps(terminal_vote),
                         event.aggregate_version,
                         event.event_id,
                         event.occurred_at,
@@ -83,6 +164,20 @@ class PostgresApprovalProjection(LazyPool):
             approval_id,
         )
         return self._record(row) if row is not None else None
+
+    async def list_due(self, now: datetime, *, limit: int = 100) -> list[ApprovalRecord]:
+        pool = await self.pool()
+        rows = await pool.fetch(
+            """SELECT * FROM projection.approval_view
+            WHERE status IN ('requested','waiting')
+              AND (expires_at <= $1 OR escalation_at <= $1)
+            ORDER BY LEAST(expires_at, COALESCE(escalation_at, expires_at)),
+                     tenant_id, approval_id
+            LIMIT $2""",
+            now,
+            limit,
+        )
+        return [self._record(row) for row in rows]
 
     async def find_approved(
         self,
@@ -107,6 +202,35 @@ class PostgresApprovalProjection(LazyPool):
         )
         return self._record(row) if row is not None else None
 
+    async def rebuild(
+        self, events: Sequence[CanonicalEvent], tenant_id: str | None = None
+    ) -> int:
+        pool = await self.pool()
+        selected = [
+            event
+            for event in events
+            if tenant_id is None or event.tenant_id == tenant_id
+        ]
+        event_ids = [event.event_id for event in selected]
+        async with pool.acquire() as connection, connection.transaction():
+            if tenant_id is None:
+                await connection.execute("DELETE FROM projection.approval_view")
+                await connection.execute(
+                    "DELETE FROM projection.processed_event WHERE projector_id='approval'"
+                )
+            else:
+                await connection.execute(
+                    "DELETE FROM projection.approval_view WHERE tenant_id=$1", tenant_id
+                )
+                if event_ids:
+                    await connection.execute(
+                        """DELETE FROM projection.processed_event
+                        WHERE projector_id='approval' AND event_id=ANY($1::text[])""",
+                        event_ids,
+                    )
+        await self.project(selected)
+        return len(selected)
+
     @staticmethod
     def _record(row: asyncpg.Record) -> ApprovalRecord:
         return ApprovalRecord(
@@ -124,6 +248,10 @@ class PostgresApprovalProjection(LazyPool):
             assigned_approvers=tuple(json_loads(row["assigned_approvers"])),
             policy_version=str(row["policy_version"]),
             expires_at=row["expires_at"],
+            required_approvals=int(row["required_approvals"]),
+            votes=tuple(json_loads(row["votes"])),
+            escalation_at=row["escalation_at"],
+            escalation_level=int(row["escalation_level"]),
             status=ApprovalStatus(str(row["status"])),
             decision=row["decision"],
             feedback=row["feedback"],

@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from time import perf_counter
@@ -17,12 +18,14 @@ from auraclaw.composition.providers import (
 from auraclaw.config import get_settings
 from auraclaw.contracts.commands import CommandContext
 from auraclaw.contracts.events import Actor, CanonicalEvent
-from auraclaw.contracts.observability import TraceContext
+from auraclaw.contracts.observability import MetricPoint, TraceContext
 from auraclaw.contracts.state import Visibility
 from auraclaw.gateways.task.admission import AllowAllAdmissionController
 from auraclaw.infrastructure.artifacts.store import ArtifactStore, InMemoryObjectStorage
 from auraclaw.infrastructure.observability.stores import (
     InMemoryObservabilityStore,
+    JsonLogFormatter,
+    PostgresObservabilityStore,
     StructuredLogger,
 )
 from auraclaw.infrastructure.persistence.memory_event_store import InMemoryEventStore
@@ -144,6 +147,188 @@ def test_metric_summary_is_windowed_and_tenant_isolated() -> None:
         assert summary.p50 == 2.5
         assert summary.p95 == pytest.approx(3.85)
         assert summary.p99 == pytest.approx(3.97)
+
+    asyncio.run(scenario())
+
+
+def test_audit_search_is_tenant_scoped_filtered_paginated_and_redacted() -> None:
+    async def scenario() -> None:
+        store = InMemoryObservabilityStore()
+        service = ObservabilityService(store, InMemoryEventStore())
+        tenant = TraceContext(
+            trace_id="a" * 32,
+            span_id="b" * 16,
+            tenant_id="tenant-audit",
+            session_id="session-audit",
+        )
+        other = TraceContext(
+            trace_id="c" * 32,
+            span_id="d" * 16,
+            tenant_id="other-tenant",
+            session_id="session-audit",
+        )
+        for audit_id, outcome in (("audit-1", "allowed"), ("audit-2", "denied")):
+            await service.audit(
+                context=tenant,
+                action="tool.execute",
+                outcome=outcome,
+                actor_type="runtime",
+                actor_id="runtime-audit",
+                metadata={"token": "secret", "reason": outcome},
+                audit_id=audit_id,
+            )
+        await service.audit(
+            context=other,
+            action="tool.execute",
+            outcome="denied",
+            actor_type="runtime",
+            actor_id="runtime-audit",
+            audit_id="audit-other",
+        )
+
+        first = await service.search_audits(
+            "tenant-audit", action="tool.execute", session_id="session-audit", limit=1
+        )
+        assert len(first["audits"]) == 1
+        assert first["next_before"] is not None
+        assert "secret" not in json.dumps(first)
+        second = await service.search_audits(
+            "tenant-audit",
+            action="tool.execute",
+            session_id="session-audit",
+            before=datetime.fromisoformat(str(first["next_before"])),
+            before_id=str(first["next_before_id"]),
+            limit=1,
+        )
+        assert len(second["audits"]) == 1
+        assert second["audits"][0]["audit_id"] != first["audits"][0]["audit_id"]
+
+    asyncio.run(scenario())
+
+
+def test_metric_snapshot_is_bounded_and_tenant_isolated() -> None:
+    async def scenario() -> None:
+        store = InMemoryObservabilityStore()
+        service = ObservabilityService(store, InMemoryEventStore())
+        tenant = TraceContext(trace_id="a" * 32, span_id="b" * 16, tenant_id="tenant-a")
+        other = TraceContext(trace_id="c" * 32, span_id="d" * 16, tenant_id="tenant-b")
+
+        await service.metric("global.count", 1.0)
+        await service.metric("tenant.count", 2.0, context=tenant)
+        await service.metric("other.count", 3.0, context=other)
+
+        visible = await service.metrics("tenant-a")
+        assert [(point.name, point.value) for point in visible] == [
+            ("global.count", 1.0),
+            ("tenant.count", 2.0),
+        ]
+        assert await store.metric_snapshot("tenant-a", limit=1) == [visible[-1]]
+
+    asyncio.run(scenario())
+
+
+def test_postgres_metric_snapshot_uses_bounded_tenant_recent_scan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakePool:
+        query = ""
+        arguments: tuple[object, ...] = ()
+
+        async def fetch(self, query: str, *arguments: object) -> list[dict[str, object]]:
+            self.query = query
+            self.arguments = arguments
+            return [
+                {
+                    "metric_name": "model.ttft.seconds",
+                    "value": 1.25,
+                    "observed_at": datetime.now(UTC),
+                    "tenant_id": "tenant-a",
+                    "root_session_id": "root-a",
+                    "session_id": "session-a",
+                    "run_id": "run-a",
+                    # Production asyncpg connections intentionally use the default
+                    # JSON/JSONB text codec, so snapshots must decode this value.
+                    "labels": '{"source":"production-codec"}',
+                    "deduplication_key": None,
+                }
+            ]
+
+    async def scenario() -> None:
+        pool = FakePool()
+        store = PostgresObservabilityStore("postgresql://unused")
+
+        async def fake_pool() -> FakePool:
+            return pool
+
+        monkeypatch.setattr(store, "pool", fake_pool)
+        points = await store.metric_snapshot("tenant-a", limit=17)
+
+        assert pool.arguments == ("tenant-a", 17)
+        assert "WITH recent AS" in pool.query
+        assert "WHERE tenant_id = $1" in pool.query
+        assert "WHERE tenant_id IS NULL" in pool.query
+        assert "LIMIT $2" in pool.query
+        assert [(point.name, point.tenant_id, point.labels) for point in points] == [
+            ("model.ttft.seconds", "tenant-a", {"source": "production-codec"})
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_postgres_runtime_metrics_share_one_bulk_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakePool:
+        query = ""
+        rows: list[tuple[object, ...]] = []
+
+        async def executemany(
+            self, query: str, rows: list[tuple[object, ...]]
+        ) -> None:
+            self.query = query
+            self.rows = rows
+
+    async def scenario() -> None:
+        pool = FakePool()
+        store = PostgresObservabilityStore("postgresql://unused")
+
+        async def fake_pool() -> FakePool:
+            return pool
+
+        monkeypatch.setattr(store, "pool", fake_pool)
+        observed_at = datetime.now(UTC)
+        await store.write_metrics(
+            [
+                MetricPoint(
+                    name="router.requests.count",
+                    value=1,
+                    observed_at=observed_at,
+                    tenant_id="tenant-a",
+                    session_id="session-a",
+                    run_id="run-a",
+                    deduplication_key="router-request",
+                ),
+                MetricPoint(
+                    name="router.fast_path.count",
+                    value=1,
+                    observed_at=observed_at,
+                    tenant_id="tenant-a",
+                    session_id="session-a",
+                    run_id="run-a",
+                    deduplication_key="router-fast-path",
+                ),
+            ]
+        )
+
+        assert "INSERT INTO observability.metric_point" in pool.query
+        assert [row[0] for row in pool.rows] == [
+            "router.requests.count",
+            "router.fast_path.count",
+        ]
+        assert [row[-1] for row in pool.rows] == [
+            "router-request",
+            "router-fast-path",
+        ]
 
     asyncio.run(scenario())
 
@@ -281,6 +466,17 @@ def test_http_trace_context_is_returned_and_tenant_timeline_is_authorized(
         )
         assert metrics.status_code == 200
         assert metrics.json()["window_hours"] == 24
+        audits = client.get(
+            "/v1/operations/audits?limit=10",
+            headers={"X-Tenant-ID": "tenant-m6-api"},
+        )
+        assert audits.status_code == 200
+        assert audits.json()["tenant_id"] == "tenant-m6-api"
+        invalid_cursor = client.get(
+            "/v1/operations/audits?before_id=audit-only",
+            headers={"X-Tenant-ID": "tenant-m6-api"},
+        )
+        assert invalid_cursor.status_code == 422
     get_settings.cache_clear()
 
 
@@ -348,6 +544,31 @@ def test_structured_logging_and_trace_secret_scan_have_zero_hits() -> None:
     assert not contains_sensitive(
         record, known_secrets=("real-super-secret", "real-api-key")
     )
+
+
+def test_json_log_contract_carries_service_context_and_redacts_fields() -> None:
+    log_record = logging.LogRecord(
+        name="auraclaw.worker",
+        level=logging.WARNING,
+        pathname=__file__,
+        lineno=1,
+        msg="work delayed",
+        args=(),
+        exc_info=None,
+    )
+    log_record.structured_fields = {
+        "tenant_id": "tenant-m6",
+        "authorization": "Bearer real-super-secret",
+    }
+    payload = json.loads(JsonLogFormatter(service="projection-worker").format(log_record))
+
+    assert payload["service"] == "projection-worker"
+    assert payload["logger"] == "auraclaw.worker"
+    assert payload["level"] == "warning"
+    assert payload["message"] == "work delayed"
+    assert payload["tenant_id"] == "tenant-m6"
+    assert payload["authorization"] == "[REDACTED]"
+    assert "timestamp" in payload
 
 
 def test_architecture_completion_standards_have_automated_regression_coverage() -> None:

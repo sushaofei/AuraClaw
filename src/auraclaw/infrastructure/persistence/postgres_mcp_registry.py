@@ -491,7 +491,9 @@ def _stored_config(value: Any) -> McpServerConfig:
     # Historical revisions remain immutable, including their original digest.
     # Retired trust settings are discarded only when materializing a revision.
     config = dict(json_loads(value))
-    config.pop("trust_level", None)
+    if not config.get("tool_admission_policy_version"):
+        config.pop("trust_level", None)
+        config.pop("tool_policy_overrides", None)
     config.pop("allowed_tool_prefixes", None)
     metadata = dict(config.get("metadata") or {})
     metadata.pop("tool_policy_overrides", None)

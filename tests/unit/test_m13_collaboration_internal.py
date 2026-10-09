@@ -12,6 +12,15 @@ from auraclaw.contracts.internal import (
     LeaseAssertion,
     ServiceIdentity,
 )
+from auraclaw.contracts.routing import (
+    PlanAssignment,
+    PlanBudget,
+    PlanOutputContract,
+    PlanRiskClass,
+    RouteKind,
+    RoutingPlan,
+    RoutingPlanStep,
+)
 from auraclaw.gateways.task.admission import AllowAllAdmissionController
 from auraclaw.infrastructure.clients.session import NoOpOutboxRelay
 from auraclaw.infrastructure.persistence.memory_event_store import InMemoryEventStore
@@ -131,6 +140,55 @@ def test_internal_collaboration_commands_derive_actor_and_commit_child_terminal(
             type="coordinator", id="runtime-m13"
         )
         assert child_events[0].payload["runtime_budget"]["max_steps"] == 12
+
+        plan = RoutingPlan.create(
+            route_kind=RouteKind.COORDINATOR_DAG,
+            success_criteria=("facts are summarized",),
+            risk_class=PlanRiskClass.LOW,
+            steps=(
+                RoutingPlanStep(
+                    task_key="plan-collect",
+                    goal="collect facts",
+                    output_contract=PlanOutputContract(result_kind="child_result"),
+                    assignment=PlanAssignment(execution_scope="child", role="worker"),
+                    budget=PlanBudget(fraction=0.4, max_steps=4),
+                ),
+                RoutingPlanStep(
+                    task_key="plan-summarize",
+                    goal="summarize facts",
+                    dependencies=("plan-collect",),
+                    output_contract=PlanOutputContract(result_kind="child_result"),
+                    assignment=PlanAssignment(execution_scope="child", role="worker"),
+                    budget=PlanBudget(fraction=0.4, max_steps=4),
+                ),
+            ),
+        )
+        submitted = await service.command(
+            request.model_copy(
+                update={
+                    "command_id": "tool-call-submit-plan",
+                    "operation": "submit_plan",
+                    "arguments": {"plan": plan.model_dump(mode="json")},
+                    "context": request.context.model_copy(
+                        update={
+                            "request_id": "submit-plan",
+                            "causation_id": "tool-call-submit-plan",
+                        }
+                    ),
+                }
+            )
+        )
+        assert [item["status"] for item in submitted.result["children"]] == [
+            "runnable",
+            "blocked",
+        ]
+        assert len(
+            [
+                event
+                for event in await events.load_all("tenant-m13")
+                if event.type == "child.created"
+            ]
+        ) == 3
 
         child_run_id = str(child_events[1].payload["run_id"])
         published = await service.command(

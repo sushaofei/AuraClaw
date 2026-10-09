@@ -38,6 +38,7 @@ MIGRATIONS = tuple(
         "migrations/0003_m2_managed_runtime.sql",
         "migrations/0010_s4_claim_recovery.sql",
         "migrations/0040_runtime_execution_claims.sql",
+        "migrations/0066_durable_child_wakeup.sql",
     )
 )
 pytestmark = pytest.mark.skipif(DATABASE_URL is None, reason="PostgreSQL test URL not configured")
@@ -88,6 +89,15 @@ async def _apply_migrations() -> None:
               AND column_name='registration_id'"""
         ) is None:
             await connection.execute(MIGRATIONS[4])
+        if (
+            await connection.fetchval(
+                """SELECT 1 FROM information_schema.columns
+            WHERE table_schema='control' AND table_name='assignment'
+              AND column_name='wake_pending'"""
+            )
+            is None
+        ):
+            await connection.execute(MIGRATIONS[5])
     finally:
         await connection.close()
 
@@ -267,6 +277,96 @@ def test_postgres_control_claim_lease_fencing_checkpoint_and_capacity(policy_ver
                 )
                 await connection.execute(
                     "DELETE FROM control.capacity_reservation WHERE scope=$1", scope
+                )
+                await connection.execute(
+                    "DELETE FROM control.runtime_lease WHERE resource_id=$1", resource_id
+                )
+            finally:
+                await connection.close()
+
+    asyncio.run(scenario())
+
+
+def test_postgres_child_wake_before_suspend_is_not_lost() -> None:
+    async def scenario() -> None:
+        assert DATABASE_URL is not None
+        await _apply_migrations()
+        suffix = uuid4().hex
+        tenant_id = f"tenant-wake-{suffix}"
+        session_id = f"root-wake-{suffix}"
+        run_id = f"run-wake-{suffix}"
+        task_id = f"{tenant_id}:{session_id}:{run_id}"
+        runtime_id = f"runtime-wake-{suffix}"
+        resource_id = f"session:{tenant_id}:{session_id}"
+        store = PostgresControlStateStore(DATABASE_URL)
+        try:
+            await store.register_runtime(
+                RuntimeInstance(
+                    runtime_id=runtime_id,
+                    runtime_type="agent",
+                    role="root",
+                    node_id="wake-test",
+                    capabilities={},
+                    capacity=1,
+                )
+            )
+            item = RunnableItem(
+                task_id=task_id,
+                tenant_id=tenant_id,
+                root_session_id=session_id,
+                session_id=session_id,
+                run_id=run_id,
+                source_version=1,
+            )
+            assert await store.enqueue(item)
+            claim = (await store.claim("wake-test"))[0]
+            lease = await store.acquire_lease(
+                resource_id, "wake-test", ttl=timedelta(seconds=30)
+            )
+            assert lease is not None
+            assignment = RuntimeAssignment(
+                tenant_id=tenant_id,
+                root_session_id=session_id,
+                session_id=session_id,
+                run_id=run_id,
+                runtime_id=runtime_id,
+                lease_id=lease.lease_id,
+                fencing_token=lease.fencing_token,
+                role="root",
+                resource_profile={},
+                lease_expires_at=lease.expires_at,
+            )
+            assert await store.assign(task_id, assignment, claim_token=claim.claim_token)
+            assert await store.wake_assignment(task_id) is False
+            await store.suspend_with_checkpoint(
+                task_id,
+                RuntimeCheckpoint(
+                    tenant_id=tenant_id,
+                    session_id=session_id,
+                    run_id=run_id,
+                    fencing_token=lease.fencing_token,
+                    phase="agent.waiting_children",
+                    state={"waiting_child_ids": [f"child-{suffix}"]},
+                    updated_at=datetime.now(UTC),
+                ),
+                "waiting_children",
+            )
+            resumed = await store.claim("wake-test-resume", limit=10)
+            assert [candidate.item.task_id for candidate in resumed] == [task_id]
+            assert await store.wake_assignment(task_id) is False
+        finally:
+            await store.close()
+            connection = await asyncpg.connect(DATABASE_URL)
+            try:
+                await connection.execute(
+                    "DELETE FROM control.runtime_checkpoint WHERE tenant_id=$1", tenant_id
+                )
+                await connection.execute("DELETE FROM control.assignment WHERE task_id=$1", task_id)
+                await connection.execute(
+                    "DELETE FROM control.runnable_item WHERE task_id=$1", task_id
+                )
+                await connection.execute(
+                    "DELETE FROM control.runtime_instance WHERE runtime_id=$1", runtime_id
                 )
                 await connection.execute(
                     "DELETE FROM control.runtime_lease WHERE resource_id=$1", resource_id

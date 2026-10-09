@@ -8,13 +8,22 @@ import httpx
 import pytest
 from pydantic import ValidationError
 
+from auraclaw.action.capability_catalog import (
+    CapabilityCatalog,
+    InMemoryCapabilityCatalogStore,
+)
 from auraclaw.action.mcp_connection_manager import McpConnectionManager
 from auraclaw.action.mcp_registry import (
     InMemoryMcpServerRegistryStore,
     McpServerRegistryService,
 )
 from auraclaw.action.ports import CapabilityConnector
-from auraclaw.contracts.capabilities import McpAuthStrategy, McpNetworkMode
+from auraclaw.contracts.capabilities import (
+    McpAuthStrategy,
+    McpNetworkMode,
+    McpToolPolicyOverride,
+    McpTrustLevel,
+)
 from auraclaw.contracts.errors import (
     AuthorizationError,
     CredentialAccessError,
@@ -136,6 +145,15 @@ class _BoomConnector(_FakeConnector):
     async def snapshot(self, trusted: HandsTrustedContext) -> CapabilitySnapshot:
         del trusted
         raise RuntimeError("probe failed")
+
+
+class _CapturingConnector(_FakeConnector):
+    def __init__(self) -> None:
+        self.trusted: HandsTrustedContext | None = None
+
+    async def snapshot(self, trusted: HandsTrustedContext) -> CapabilitySnapshot:
+        self.trusted = trusted
+        return CapabilitySnapshot(connector_id=self.connector_id)
 
 
 class _FakeEgress:
@@ -359,6 +377,66 @@ def test_connection_manager_hot_swaps_and_restore() -> None:
     asyncio.run(scenario())
 
 
+def test_connection_manager_repairs_same_revision_catalog_authority_projection() -> None:
+    from auraclaw.action.capability_catalog import (
+        CapabilityCatalog,
+        InMemoryCapabilityCatalogStore,
+    )
+
+    async def scenario() -> None:
+        policy = McpToolPolicyOverride(
+            permission="read-only",
+            risk_level="low",
+            content_digest=f"sha256:{'2' * 64}",
+            evidence_ref="security-review://order.list/2",
+            actor_id="security-admin",
+            reason="verified read-only contract",
+            revision=2,
+            correlation_id="corr-policy-2",
+            causation_id="change-policy-2",
+        )
+        config = _config(
+            trust_level=McpTrustLevel.TENANT_VERIFIED,
+            tool_admission_policy_version="mcp-tool-policy-v1",
+            tool_policy_overrides={"order.list": policy},
+        )
+        registry_store = InMemoryMcpServerRegistryStore()
+        service = McpServerRegistryService(registry_store, allow_private_auth_none=True)
+        catalog = CapabilityCatalog(InMemoryCapabilityCatalogStore())
+        stale = config.materialize(
+            revision=1,
+            desired_state=McpDesiredState.ENABLED,
+            observed_state=McpObservedState.ACTIVE,
+        ).model_copy(
+            update={
+                "trust_level": McpTrustLevel.EXTERNAL_UNTRUSTED,
+                "tool_admission_policy_version": None,
+                "tool_policy_overrides": {},
+            }
+        )
+        await catalog.register_server(stale)
+        manager = McpConnectionManager(
+            registry=service,
+            connectors={},
+            factory=lambda _server: _FakeConnector(),
+            catalog=catalog,
+            drain_seconds=0,
+        )
+        service.bind_runtime(manager)
+
+        await service.create(_write(config))
+        assert (await service.enable("local-order-mcp", _life())).status.value == "succeeded"
+
+        repaired = await catalog.get_server_definition("local-order-mcp")
+        assert repaired is not None
+        assert repaired.config_revision == 1
+        assert repaired.trust_level is McpTrustLevel.TENANT_VERIFIED
+        assert repaired.tool_admission_policy_version == "mcp-tool-policy-v1"
+        assert repaired.tool_policy_overrides == {"order.list": policy}
+
+    asyncio.run(scenario())
+
+
 def test_connection_manager_restore_skips_unreachable_server() -> None:
     async def scenario() -> None:
         boom = False
@@ -529,6 +607,39 @@ def test_connection_manager_test_records_last_test_at() -> None:
     asyncio.run(scenario())
 
 
+def test_connection_manager_discovery_probe_uses_workload_identity_only() -> None:
+    async def scenario() -> None:
+        store = InMemoryMcpServerRegistryStore()
+        service = McpServerRegistryService(store)
+        connector = _CapturingConnector()
+        manager = McpConnectionManager(
+            registry=service,
+            connectors={},
+            factory=lambda _server: connector,
+            drain_seconds=0,
+        )
+        service.bind_runtime(manager)
+        await service.create(
+            _write(
+                _config(
+                    tenant_id=None,
+                    auth_strategy="workload_trusted_context",
+                    credential_ref="vault/upstream-mcp#workload",
+                )
+            )
+        )
+
+        result = await service.test("local-order-mcp", _life(command_id="cmd-probe-identity"))
+
+        assert result.status.value == "succeeded"
+        assert connector.trusted is not None
+        assert connector.trusted.tenant_id == "platform"
+        assert connector.trusted.user_id is None
+        assert connector.trusted.dept_id is None
+
+    asyncio.run(scenario())
+
+
 def test_connection_manager_test_loads_then_revokes_egress() -> None:
     async def scenario() -> None:
         store = InMemoryMcpServerRegistryStore()
@@ -600,6 +711,52 @@ def test_connection_manager_disable_revokes_egress() -> None:
         assert "local-order-mcp" not in connectors
         assert egress.loaded == set()
         assert egress.events[-1] == ("revoke", "local-order-mcp")
+
+    asyncio.run(scenario())
+
+
+def test_connection_manager_applies_authoritative_revision_rollback() -> None:
+    async def scenario() -> None:
+        store = InMemoryMcpServerRegistryStore()
+        service = McpServerRegistryService(store)
+        catalog = CapabilityCatalog(InMemoryCapabilityCatalogStore())
+        manager = McpConnectionManager(
+            registry=service,
+            connectors={},
+            factory=lambda _server: _FakeConnector(),
+            egress=_FakeEgress(),
+            catalog=catalog,
+            drain_seconds=0,
+        )
+        service.bind_runtime(manager)
+        await service.create(_write(_config()))
+        await service.enable("local-order-mcp", _life())
+        await service.update(
+            _write(
+                _config(title="Revision two"),
+                command_id="cmd-update-2",
+                expected_revision=1,
+            )
+        )
+        await service.enable(
+            "local-order-mcp",
+            _life(command_id="cmd-enable-2", expected_revision=2, target_revision=2),
+        )
+        assert manager._generations["local-order-mcp"] == 2
+
+        rolled_back = await service.enable(
+            "local-order-mcp",
+            _life(command_id="cmd-rollback-1", expected_revision=2, target_revision=1),
+        )
+
+        assert rolled_back.status.value == "succeeded"
+        assert manager._generations["local-order-mcp"] == 1
+        published = await catalog.get_server_definition("local-order-mcp")
+        assert published is not None
+        assert published.config_revision == 1
+        assert published.title == "Local Order MCP"
+        snapshot = await service.active_snapshot()
+        assert snapshot[0].revision == 1
 
     asyncio.run(scenario())
 
@@ -951,9 +1108,35 @@ def test_historical_mcp_config_load_discards_retired_trust_without_mutation() ->
     original = deepcopy(legacy)
     loaded = _stored_config(legacy)
     assert legacy == original
-    assert "trust_level" not in loaded.model_dump()
+    assert loaded.trust_level.value == "external_untrusted"
     assert loaded.metadata == {"tool_name_aliases": {"order.old": "order.list"}}
-    assert "trust_level" not in McpServerConfig.model_json_schema()["properties"]
+    assert "trust_level" in McpServerConfig.model_json_schema()["properties"]
+
+
+def test_read_only_policy_requires_trusted_server_and_audited_evidence() -> None:
+    policy = McpToolPolicyOverride(
+        permission="read-only",
+        risk_level="low",
+        content_digest=f"sha256:{'1' * 64}",
+        evidence_ref="security-review://order.list/1",
+        actor_id="security-admin",
+        reason="verified read-only contract",
+        revision=1,
+        correlation_id="corr-policy-1",
+        causation_id="change-policy-1",
+    )
+    with pytest.raises(ValidationError, match="untrusted MCP servers"):
+        _config(
+            tool_admission_policy_version="mcp-tool-policy-v1",
+            tool_policy_overrides={"order.list": policy},
+        )
+
+    admitted = _config(
+        trust_level=McpTrustLevel.TENANT_VERIFIED,
+        tool_admission_policy_version="mcp-tool-policy-v1",
+        tool_policy_overrides={"order.list": policy},
+    )
+    assert admitted.tool_policy_overrides["order.list"].evidence_ref.endswith("/1")
 
 
 @pytest.mark.parametrize("prefixes", [["old."], [], [""], None])
@@ -1053,6 +1236,44 @@ def test_egress_revision_fence_and_authoritative_removal() -> None:
         assert "mcp:auramcp" not in adapters
         with pytest.raises(Exception, match="stale MCP"):
             await manager.apply(entry)
+
+    asyncio.run(scenario())
+
+
+def test_egress_authority_allows_intentional_revision_rollback() -> None:
+    from auraclaw.infrastructure.credentials.mcp_egress_manager import McpEgressManager
+    from auraclaw.infrastructure.credentials.proxy import CredentialProxy, InMemoryVault
+
+    async def scenario() -> None:
+        entry_v1 = McpActiveSnapshotEntry(
+            server_id="auramcp",
+            tenant_id="platform",
+            revision=1,
+            config=_config(server_id="auramcp", tenant_id="platform"),
+            desired_state=McpDesiredState.ENABLED,
+            observed_state=McpObservedState.ACTIVE,
+        )
+        desired = (entry_v1,)
+
+        async def authority():
+            return desired
+
+        manager = McpEgressManager(
+            adapters={},
+            proxy=CredentialProxy(InMemoryVault({})),
+            snapshot_provider=authority,
+            drain_seconds=0,
+        )
+        await manager.apply(entry_v1)
+        entry_v2 = entry_v1.model_copy(update={"revision": 2})
+        desired = (entry_v2,)
+        await manager.apply(entry_v2)
+        assert manager.loaded_revision("auramcp") == 2
+
+        desired = (entry_v1,)
+        await manager.apply(entry_v1)
+
+        assert manager.loaded_revision("auramcp") == 1
 
     asyncio.run(scenario())
 

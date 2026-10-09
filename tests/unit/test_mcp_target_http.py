@@ -22,7 +22,6 @@ from auraclaw.action.capability_catalog import (
 from auraclaw.action.catalog_reconciler import CapabilityCatalogReconciler
 from auraclaw.action.hands import HandsGateway
 from auraclaw.action.hands_http import StaticHandsAuthenticator, create_hands_http_app
-from auraclaw.action.policy import PolicyEngine
 from auraclaw.action.ports import PolicyEvaluation
 from auraclaw.action.tool_gateway import ToolGateway, ToolRegistry
 from auraclaw.contracts.capabilities import CapabilityStatus, McpAuthStrategy, McpNetworkMode
@@ -126,6 +125,14 @@ class Allow:
         return PolicyEvaluation(
             decision=PolicyDecision.ALLOW, decision_id="test", policy_version="v1"
         )
+
+
+class AllowToolPolicy:
+    version = "routing-test-v1"
+
+    def evaluate(self, capability: Any, invocation: Any = None) -> PolicyDecision:
+        del capability, invocation
+        return PolicyDecision.ALLOW
 
 
 class NoFallback:
@@ -283,7 +290,7 @@ def _exercise_two_servers(
                 registry=registry,
                 gateway=ToolGateway(
                     registry=registry,
-                    policy=PolicyEngine(),
+                    policy=AllowToolPolicy(),
                     hands=router,
                     approvals=InMemoryApprovalProjection(),
                     artifacts=ArtifactStore(

@@ -10,54 +10,66 @@ from auraclaw.config import get_settings
 from auraclaw.infrastructure.persistence.postgres_common import asyncpg_url
 
 ROOT = Path(__file__).resolve().parents[2]
-DOTENV = dotenv_values(ROOT / ".env.dev")
+DOTENV = (
+    {}
+    if os.environ.get("AURACLAW_DISABLE_ENV_FILE") == "1"
+    else dotenv_values(ROOT / ".env.dev")
+)
 SETTINGS = get_settings()
 
 ROLE_TARGETS = {
-    "SESSION_DATABASE_URL": (
+    "AURACLAW_SESSION_DATABASE_URL": (
         "auraclaw_session",
         "session_core.session_head",
         "tenant_id",
     ),
-    "PROJECTION_DATABASE_URL": (
+    "AURACLAW_PROJECTION_DATABASE_URL": (
         "auraclaw_projection",
         "projection.task_view",
         "tenant_id",
     ),
-    "CONTROL_DATABASE_URL": (
+    "AURACLAW_ORCHESTRATOR_DATABASE_URL": (
         "auraclaw_control",
         "control.runtime_lease",
         "resource_id",
     ),
-    "DELIVERY_DATABASE_URL": (
+    "AURACLAW_DELIVERY_DATABASE_URL": (
         "auraclaw_delivery",
         "delivery.delivery_job",
         "tenant_id",
     ),
-    "HANDS_DATABASE_URL": ("auraclaw_hands", "hands.invocation", "tenant_id"),
-    "POLICY_DATABASE_URL": ("auraclaw_policy", "policy.decision", "tenant_id"),
-    "CREDENTIAL_DATABASE_URL": (
+    "AURACLAW_ACTION_HANDS_DATABASE_URL": (
+        "auraclaw_hands",
+        "hands.invocation",
+        "tenant_id",
+    ),
+    "AURACLAW_POLICY_DATABASE_URL": (
+        "auraclaw_policy",
+        "policy.decision",
+        "tenant_id",
+    ),
+    "AURACLAW_CREDENTIAL_PROXY_DATABASE_URL": (
         "auraclaw_credential",
         "credential.reference",
         "tenant_id",
     ),
-    "ARTIFACT_DATABASE_URL": (
+    "AURACLAW_ARTIFACT_DATABASE_URL": (
         "auraclaw_artifact",
         "artifact.metadata",
         "tenant_id",
     ),
-    "STREAMING_DATABASE_URL": (
+    "AURACLAW_STREAMING_DATABASE_URL": (
         "auraclaw_streaming",
         "streaming.runtime_event",
         "tenant_id",
     ),
-    "MODEL_DATABASE_URL": (
+    "AURACLAW_MODEL_GATEWAY_DATABASE_URL": (
         "auraclaw_model",
         "model_gateway.model_call",
         "tenant_id",
     ),
 }
-QUERY_ROLE = ("TASK_QUERY_DATABASE_URL", "auraclaw_task_query_ro")
+TASK_API_ROLE = ("AURACLAW_TASK_API_DATABASE_URL", "auraclaw_task_api")
 
 
 def _configured_url(name: str) -> str | None:
@@ -117,6 +129,30 @@ async def _assert_catalog_role(
             owner_table,
             privilege,
         )
+    if expected_role == "auraclaw_streaming":
+        for table in (
+            "streaming.gateway_instance",
+            "streaming.connection_registry",
+        ):
+            for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE"):
+                assert await connection.fetchval(
+                    "SELECT has_table_privilege($1,$2,$3)",
+                    expected_role,
+                    table,
+                    privilege,
+                )
+    if expected_role == "auraclaw_projection":
+        for table in (
+            "projection.activity_state",
+            "projection.activity_node",
+        ):
+            for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE"):
+                assert await connection.fetchval(
+                    "SELECT has_table_privilege($1,$2,$3)",
+                    expected_role,
+                    table,
+                    privilege,
+                )
     for foreign_table in tables:
         if foreign_table == owner_table:
             continue
@@ -144,23 +180,51 @@ async def _assert_owner_dml(
     await connection.execute(f"DELETE FROM {table} WHERE FALSE")
 
 
-async def _assert_write_denied(
-    connection: asyncpg.Connection, table: str, update_column: str
-) -> None:
-    statements = (
-        f"INSERT INTO {table} SELECT * FROM {table} WHERE FALSE",
-        f"UPDATE {table} SET {update_column} = {update_column} WHERE FALSE",
-        f"DELETE FROM {table} WHERE FALSE",
+async def _assert_task_api_privileges(connection: asyncpg.Connection) -> None:
+    role = TASK_API_ROLE[1]
+    assert await connection.fetchval(
+        "SELECT has_table_privilege($1,'projection.task_view','SELECT')", role
     )
-    for statement in statements:
-        with pytest.raises(asyncpg.InsufficientPrivilegeError):
-            await connection.execute(statement)
+    assert not await connection.fetchval(
+        "SELECT has_table_privilege($1,'projection.task_view','UPDATE')", role
+    )
+    for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE"):
+        assert await connection.fetchval(
+            "SELECT has_table_privilege($1,'hands.invocation',$2)", role, privilege
+        )
+    assert await connection.fetchval(
+        "SELECT has_table_privilege($1,'observability.audit_event','SELECT')", role
+    )
+    assert not await connection.fetchval(
+        "SELECT has_table_privilege($1,'observability.audit_event','UPDATE')", role
+    )
+    for table in ("projection.activity_state", "projection.activity_node"):
+        assert await connection.fetchval(
+            "SELECT has_table_privilege($1,$2,'SELECT')", role, table
+        )
+        assert not await connection.fetchval(
+            "SELECT has_table_privilege($1,$2,'UPDATE')", role, table
+        )
+    for table in (
+        "session_core.session_head",
+        "control.runtime_lease",
+        "delivery.delivery_job",
+        "policy.decision",
+        "credential.reference",
+        "artifact.metadata",
+        "streaming.runtime_event",
+        "streaming.gateway_instance",
+        "model_gateway.model_call",
+    ):
+        assert not await connection.fetchval(
+            "SELECT has_table_privilege($1,$2,'SELECT')", role, table
+        )
 
 
-def test_production_roles_enforce_owner_and_query_boundaries() -> None:
+def test_production_roles_enforce_owner_and_task_api_boundaries() -> None:
     if not SETTINGS.postgres_enabled:
         pytest.skip("PostgreSQL role grant matrix requires postgres primary storage")
-    required_names = (*ROLE_TARGETS, QUERY_ROLE[0])
+    required_names = (*ROLE_TARGETS, TASK_API_ROLE[0])
     urls = {name: _configured_url(name) for name in required_names}
     missing = [name for name, url in urls.items() if url is None]
     fallback_url = (
@@ -170,7 +234,7 @@ def test_production_roles_enforce_owner_and_query_boundaries() -> None:
         pytest.skip("production role DSNs and catalog connection are not configured")
     if missing and fallback_url is not None:
         required_roles = tuple(
-            [target[0] for target in ROLE_TARGETS.values()] + [QUERY_ROLE[1]]
+            [target[0] for target in ROLE_TARGETS.values()] + [TASK_API_ROLE[1]]
         )
         if not asyncio.run(_catalog_has_roles(fallback_url, required_roles)):
             pytest.skip("optional PostgreSQL production roles are not installed")
@@ -192,6 +256,18 @@ def test_production_roles_enforce_owner_and_query_boundaries() -> None:
             try:
                 await _assert_hardened_login(connection, expected_role)
                 await _assert_owner_dml(connection, owner_table, update_column)
+                if expected_role == "auraclaw_streaming":
+                    await _assert_owner_dml(
+                        connection,
+                        "streaming.gateway_instance",
+                        "owner_id",
+                    )
+                if expected_role == "auraclaw_projection":
+                    await _assert_owner_dml(
+                        connection,
+                        "projection.activity_state",
+                        "source_version",
+                    )
                 for foreign_table in tables:
                     if foreign_table == owner_table:
                         continue
@@ -210,41 +286,18 @@ def test_production_roles_enforce_owner_and_query_boundaries() -> None:
             finally:
                 await connection.close()
 
-        query_url = urls[QUERY_ROLE[0]]
-        query_connection = await asyncpg.connect(query_url) if query_url else None
+        task_api_url = urls[TASK_API_ROLE[0]]
+        task_api_connection = (
+            await asyncpg.connect(task_api_url) if task_api_url else catalog_connection
+        )
         try:
-            if query_connection is None:
-                assert catalog_connection is not None
-                role = QUERY_ROLE[1]
-                assert await catalog_connection.fetchval(
-                    "SELECT has_table_privilege($1,'projection.task_view','SELECT')",
-                    role,
-                )
-                assert not await catalog_connection.fetchval(
-                    "SELECT has_table_privilege($1,'projection.task_view','UPDATE')",
-                    role,
-                )
-                for table in tables:
-                    if table != "projection.task_view":
-                        assert not await catalog_connection.fetchval(
-                            "SELECT has_table_privilege($1,$2,'SELECT')", role, table
-                        )
-                return
-            await _assert_hardened_login(query_connection, QUERY_ROLE[1])
-            await query_connection.execute(
-                "SELECT 1 FROM projection.task_view WHERE FALSE"
-            )
-            await _assert_write_denied(
-                query_connection, "projection.task_view", "tenant_id"
-            )
-            for table in tables:
-                if table == "projection.task_view":
-                    continue
-                with pytest.raises(asyncpg.InsufficientPrivilegeError):
-                    await query_connection.execute(f"SELECT 1 FROM {table} WHERE FALSE")
+            assert task_api_connection is not None
+            if task_api_url:
+                await _assert_hardened_login(task_api_connection, TASK_API_ROLE[1])
+            await _assert_task_api_privileges(task_api_connection)
         finally:
-            if query_connection is not None:
-                await query_connection.close()
+            if task_api_url and task_api_connection is not None:
+                await task_api_connection.close()
             if catalog_connection is not None:
                 await catalog_connection.close()
 

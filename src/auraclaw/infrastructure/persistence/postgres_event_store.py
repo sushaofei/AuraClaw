@@ -22,7 +22,12 @@ from auraclaw.infrastructure.persistence.postgres_common import (
     json_dumps,
     json_loads,
 )
-from auraclaw.session.ports import AppendResult, ClaimedOutboxRecord, SessionSnapshot
+from auraclaw.session.ports import (
+    AppendResult,
+    ClaimedOutboxRecord,
+    SessionSnapshot,
+    StreamAppend,
+)
 
 
 @dataclass
@@ -78,6 +83,27 @@ class PostgresEventStore(LazyPool):
                 WHERE tenant_id = $1 ORDER BY session_id, aggregate_version""",
                 tenant_id,
             )
+        return [event_from_record(row) for row in rows]
+
+    async def load_tenant_page(
+        self,
+        tenant_id: str,
+        *,
+        after_session_id: str | None = None,
+        after_version: int | None = None,
+        limit: int = 1000,
+    ) -> list[CanonicalEvent]:
+        pool = await self.pool()
+        rows = await pool.fetch(
+            """SELECT * FROM session_core.canonical_event
+            WHERE tenant_id=$1
+              AND ($2::text IS NULL OR (session_id,aggregate_version) > ($2::text,$3::int))
+            ORDER BY session_id,aggregate_version LIMIT $4""",
+            tenant_id,
+            after_session_id,
+            after_version,
+            limit,
+        )
         return [event_from_record(row) for row in rows]
 
     async def has_skill_package_reference(self, tenant_id: str, package_digest: str) -> bool:
@@ -387,6 +413,182 @@ class PostgresEventStore(LazyPool):
             finally:
                 pass
 
+    async def append_batch(
+        self,
+        *,
+        root_session_id: str,
+        context: CommandContext,
+        appends: Sequence[StreamAppend],
+        command_result: dict[str, Any],
+    ) -> AppendResult:
+        if not appends:
+            raise ValueError("batch append requires at least one stream")
+        by_session = {item.session_id: item for item in appends}
+        if len(by_session) != len(appends):
+            raise ValueError("batch append session ids must be unique")
+
+        pool = await self.pool()
+        async with pool.acquire() as connection, connection.transaction():
+            lock_key = f"{context.tenant_id}:{context.operation}:{context.command_id}"
+            await connection.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", lock_key
+            )
+            await connection.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+                f"runtime-budget:{context.tenant_id}:{root_session_id}",
+            )
+            previous = await connection.fetchrow(
+                """SELECT response FROM session_core.command_dedup
+                WHERE tenant_id = $1 AND operation = $2 AND command_id = $3""",
+                context.tenant_id,
+                context.operation,
+                context.command_id,
+            )
+            if previous is not None:
+                saved_response = dict(json_loads(previous["response"]))
+                if command_result.get("_request_fingerprint") != saved_response.get(
+                    "_request_fingerprint"
+                ):
+                    raise VersionConflictError("command was reused with a different request")
+                return AppendResult(
+                    events=[], command_result=saved_response, deduplicated=True
+                )
+
+            for session_id in sorted(by_session):
+                item = by_session[session_id]
+                if item.expected_version == 0:
+                    await connection.execute(
+                        """INSERT INTO session_core.session_head
+                        (tenant_id, session_id, root_session_id, aggregate_version)
+                        VALUES ($1, $2, $3, 0) ON CONFLICT DO NOTHING""",
+                        context.tenant_id,
+                        session_id,
+                        root_session_id,
+                    )
+                head = await connection.fetchrow(
+                    """SELECT aggregate_version FROM session_core.session_head
+                    WHERE tenant_id = $1 AND session_id = $2 FOR UPDATE""",
+                    context.tenant_id,
+                    session_id,
+                )
+                actual_version = int(head["aggregate_version"]) if head is not None else -1
+                if actual_version != item.expected_version:
+                    raise VersionConflictError(
+                        f"expected Session version {item.expected_version}, "
+                        f"got {actual_version}"
+                    )
+
+            from types import SimpleNamespace
+
+            rows = await connection.fetch(
+                "SELECT event_type,session_id,run_id,payload "
+                "FROM session_core.canonical_event "
+                "WHERE tenant_id=$1 AND root_session_id=$2 "
+                "AND event_type IN ('run.requested','child.created',"
+                "'runtime.budget.reserved','model.turn.completed','tool.call.completed') "
+                "ORDER BY occurred_at,aggregate_version",
+                context.tenant_id,
+                root_session_id,
+            )
+            root_events: list[Any] = [
+                SimpleNamespace(
+                    type=row["event_type"],
+                    session_id=row["session_id"],
+                    run_id=row["run_id"],
+                    payload=json_loads(row["payload"]),
+                )
+                for row in rows
+            ]
+            canonical: list[CanonicalEvent] = []
+            versions: dict[str, int] = {}
+            for item in appends:
+                governed = govern(
+                    root_events,
+                    item.events,
+                    session_id=item.session_id,
+                    root_session_id=root_session_id,
+                    run_id=item.run_id,
+                )
+                for offset, new_event in enumerate(governed, start=1):
+                    event = CanonicalEvent(
+                        event_id=f"evt_{uuid4().hex}",
+                        tenant_id=context.tenant_id,
+                        root_session_id=root_session_id,
+                        session_id=item.session_id,
+                        run_id=item.run_id,
+                        aggregate_version=item.expected_version + offset,
+                        type=new_event.type,
+                        occurred_at=utc_now(),
+                        actor=context.actor,
+                        correlation_id=context.correlation_id,
+                        causation_id=context.causation_id or context.command_id,
+                        visibility=new_event.visibility,
+                        schema_version=1,
+                        payload=dict(new_event.payload),
+                    )
+                    canonical.append(event)
+                    root_events.append(event)
+                    await connection.execute(
+                        """INSERT INTO session_core.canonical_event
+                        (event_id, tenant_id, root_session_id, session_id, run_id,
+                         aggregate_version, event_type, occurred_at, actor, correlation_id,
+                         causation_id, visibility, schema_version, payload)
+                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11,$12,$13,$14::jsonb)""",
+                        event.event_id,
+                        event.tenant_id,
+                        event.root_session_id,
+                        event.session_id,
+                        event.run_id,
+                        event.aggregate_version,
+                        event.type,
+                        event.occurred_at,
+                        json_dumps({"type": event.actor.type, "id": event.actor.id}),
+                        event.correlation_id,
+                        event.causation_id,
+                        event.visibility.value,
+                        event.schema_version,
+                        json_dumps(event.payload),
+                    )
+                    for destination in self._outbox_destinations(event.type):
+                        await connection.execute(
+                            """INSERT INTO session_core.outbox
+                            (event_id, destination, payload)
+                            VALUES ($1, $2, $3::jsonb)""",
+                            event.event_id,
+                            destination,
+                            json_dumps(event.as_dict()),
+                        )
+                versions[item.session_id] = item.expected_version + len(governed)
+
+            for session_id, version in versions.items():
+                await connection.execute(
+                    """UPDATE session_core.session_head
+                    SET aggregate_version = $3, updated_at = now()
+                    WHERE tenant_id = $1 AND session_id = $2""",
+                    context.tenant_id,
+                    session_id,
+                    version,
+                )
+            await connection.execute(
+                """INSERT INTO session_core.command_dedup
+                (tenant_id, operation, command_id, response)
+                VALUES ($1, $2, $3, $4::jsonb)""",
+                context.tenant_id,
+                context.operation,
+                context.command_id,
+                json_dumps(command_result),
+            )
+            return AppendResult(events=canonical, command_result=dict(command_result))
+
+    @staticmethod
+    def _outbox_destinations(event_type: str) -> tuple[str, ...]:
+        destinations = ["projection"]
+        if event_type in DELIVERY_TRIGGER_EVENTS:
+            destinations.append("delivery")
+        if event_type in CONTROL_TRIGGER_EVENTS:
+            destinations.append("control")
+        return tuple(destinations)
+
     async def pending_outbox(self) -> list[PostgresOutboxRecord]:
         pool = await self.pool()
         rows = await pool.fetch(
@@ -394,6 +596,7 @@ class PostgresEventStore(LazyPool):
             FROM session_core.outbox o
             JOIN session_core.canonical_event e ON e.event_id = o.event_id
             WHERE o.destination = 'projection' AND o.published_at IS NULL
+              AND o.poisoned_at IS NULL
               AND o.next_attempt_at <= now()
             ORDER BY o.outbox_id LIMIT 100"""
         )
@@ -413,6 +616,7 @@ class PostgresEventStore(LazyPool):
             FROM session_core.outbox o
             JOIN session_core.canonical_event e ON e.event_id = o.event_id
             WHERE o.destination = 'delivery' AND o.published_at IS NULL
+              AND o.poisoned_at IS NULL
               AND o.next_attempt_at <= now()
             ORDER BY o.outbox_id LIMIT 100"""
         )
@@ -438,7 +642,9 @@ class PostgresEventStore(LazyPool):
             """UPDATE session_core.outbox SET publish_attempt = publish_attempt + 1,
             next_attempt_at = now() + interval '1 second' * LEAST(
                 60, power(2, LEAST(publish_attempt, 6))
-            )
+            ), poisoned_at = CASE WHEN destination='projection'
+                                    AND publish_attempt + 1 >= 5 THEN now()
+                                  ELSE poisoned_at END
             WHERE outbox_id = $1""",
             outbox_id,
         )
@@ -539,7 +745,10 @@ class PostgresEventStore(LazyPool):
             "ack": "published_at=now()",
             "nack": (
                 "next_attempt_at=now() + interval '1 second' * "
-                "LEAST(60, power(2, LEAST(publish_attempt, 6)))"
+                "LEAST(60, power(2, LEAST(publish_attempt, 6))), "
+                "poisoned_at=CASE WHEN destination='projection' "
+                "AND publish_attempt >= 5 THEN now() "
+                "ELSE poisoned_at END"
             ),
             "poison": "poisoned_at=now()",
         }
@@ -557,5 +766,18 @@ class PostgresEventStore(LazyPool):
             worker_id,
             claim_token,
             None if disposition == "ack" else reason,
+        )
+        return str(result) == "UPDATE 1"
+
+    async def redrive_outbox(self, destination: str, event_id: str) -> bool:
+        pool = await self.pool()
+        result = await pool.execute(
+            """UPDATE session_core.outbox
+            SET poisoned_at=NULL,publish_attempt=0,next_attempt_at=now(),last_error=NULL,
+                claimed_by=NULL,claim_token=NULL,claim_expires_at=NULL
+            WHERE destination=$1 AND event_id=$2 AND published_at IS NULL
+              AND poisoned_at IS NOT NULL""",
+            destination,
+            event_id,
         )
         return str(result) == "UPDATE 1"

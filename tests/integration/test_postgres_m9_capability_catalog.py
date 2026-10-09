@@ -113,6 +113,11 @@ def test_postgres_capability_catalog_is_shared_and_tenant_scoped() -> None:
                 )
             ] == [capability_id]
             assert await store_b.get_active_generation(server_id) == 1
+            first_revision = await store_b.catalog_revision(tenant_id)
+            exact = await store_b.find_capabilities_by_canonical_name(
+                tenant_id, "tenant.docs.release"
+            )
+            assert [item.capability_id for item in exact] == [capability_id]
             loaded = await catalog_b.get(
                 tenant_id=tenant_id, capability_id=capability_id
             )
@@ -151,6 +156,7 @@ def test_postgres_capability_catalog_is_shared_and_tenant_scoped() -> None:
                 source_revision="2",
             )
             assert committed.committed and committed.generation == 2
+            assert await store_b.catalog_revision(tenant_id) != first_revision
             with pytest.raises(StaleCapabilitySnapshotError):
                 await catalog_a.replace_server_capabilities(
                     server_id,

@@ -20,6 +20,7 @@ from auraclaw.control.ports import (
     RuntimeCheckpoint,
     RuntimeInstance,
     RuntimeLease,
+    runtime_requirements_from_profile,
 )
 from auraclaw.infrastructure.persistence.postgres_common import (
     LazyPool as _LazyPool,
@@ -288,7 +289,7 @@ class PostgresControlStateStore(_LazyPool):
                       assignment_status='assigned', assigned_at=now(), started_at=NULL,
                       completed_at=NULL, deadline=EXCLUDED.deadline,
                       fencing_token=EXCLUDED.fencing_token, role=EXCLUDED.role,
-                      resource_profile=EXCLUDED.resource_profile
+                      resource_profile=EXCLUDED.resource_profile, wake_pending=false
                     WHERE control.assignment.assignment_status
                       IN ('expired','completed','failed','waiting_children',
                           'waiting_for_human','waiting_for_tool')
@@ -370,7 +371,7 @@ class PostgresControlStateStore(_LazyPool):
             LIMIT 1""",
             AGENT_RUNTIME_POOL,
             item.role,
-            _json({**item.required_capability, **(
+            _json({**runtime_requirements_from_profile(item.required_capability), **(
                 {"runtime_governance_v2": True} if item.budget.policy_version == "2" else {})}),
         )
         if row is None:
@@ -613,14 +614,29 @@ class PostgresControlStateStore(_LazyPool):
                       AND lease.lease_id=assignment.lease_id""",
                     task_id,
                 )
-            await connection.execute(
-                """UPDATE control.assignment SET assignment_status=$2, completed_at=now()
-                WHERE task_id=$1""",
+            wake_pending = await connection.fetchval(
+                """UPDATE control.assignment
+                SET assignment_status=$2, completed_at=now(),
+                    wake_pending=CASE WHEN $2 IN (
+                      'waiting_children','waiting_for_human','waiting_for_tool'
+                    ) THEN wake_pending ELSE false END
+                WHERE task_id=$1 RETURNING wake_pending""",
                 task_id,
                 outcome,
             )
             await connection.execute(
-                "UPDATE control.runnable_item SET status='acked' WHERE task_id=$1", task_id
+                """UPDATE control.runnable_item
+                SET status=CASE WHEN $2 THEN 'queued' ELSE 'acked' END,
+                    claimed_by=CASE WHEN $2 THEN NULL ELSE claimed_by END,
+                    claim_token=CASE WHEN $2 THEN NULL ELSE claim_token END,
+                    claim_expires_at=CASE WHEN $2 THEN NULL ELSE claim_expires_at END,
+                    available_at=CASE WHEN $2 THEN now() ELSE available_at END
+                WHERE task_id=$1""",
+                task_id,
+                bool(wake_pending),
+            )
+            await connection.execute(
+                "UPDATE control.assignment SET wake_pending=false WHERE task_id=$1", task_id
             )
 
     async def suspend_assignment(self, task_id: str, reason: str) -> None:
@@ -666,18 +682,30 @@ class PostgresControlStateStore(_LazyPool):
                 task_id,
             )
             if saved is None:
-                raise FencingTokenError(
-                    "checkpoint suspension rejected for stale Runtime"
-                )
-            await connection.execute(
+                raise FencingTokenError("checkpoint suspension rejected for stale Runtime")
+            wake_pending = await connection.fetchval(
                 """UPDATE control.assignment
-                SET assignment_status=$2, completed_at=now() WHERE task_id=$1""",
+                SET assignment_status=$2, completed_at=now(),
+                    wake_pending=CASE WHEN $2 IN (
+                      'waiting_children','waiting_for_human','waiting_for_tool'
+                    ) THEN wake_pending ELSE false END
+                WHERE task_id=$1 RETURNING wake_pending""",
                 task_id,
                 reason,
             )
             await connection.execute(
-                "UPDATE control.runnable_item SET status='acked' WHERE task_id=$1",
+                """UPDATE control.runnable_item
+                SET status=CASE WHEN $2 THEN 'queued' ELSE 'acked' END,
+                    claimed_by=CASE WHEN $2 THEN NULL ELSE claimed_by END,
+                    claim_token=CASE WHEN $2 THEN NULL ELSE claim_token END,
+                    claim_expires_at=CASE WHEN $2 THEN NULL ELSE claim_expires_at END,
+                    available_at=CASE WHEN $2 THEN now() ELSE available_at END
+                WHERE task_id=$1""",
                 task_id,
+                bool(wake_pending),
+            )
+            await connection.execute(
+                "UPDATE control.assignment SET wake_pending=false WHERE task_id=$1", task_id
             )
             await connection.execute(
                 "DELETE FROM control.runtime_lease WHERE resource_id=$1",
@@ -691,7 +719,14 @@ class PostgresControlStateStore(_LazyPool):
                 "SELECT assignment_status FROM control.assignment WHERE task_id=$1 FOR UPDATE",
                 task_id,
             )
-            if status is None or str(status) not in {
+            if status is None:
+                return False
+            if str(status) in {"assigned", "running"}:
+                await connection.execute(
+                    "UPDATE control.assignment SET wake_pending=true WHERE task_id=$1", task_id
+                )
+                return False
+            if str(status) not in {
                 "waiting_children",
                 "waiting_for_human",
                 "waiting_for_tool",
@@ -704,6 +739,10 @@ class PostgresControlStateStore(_LazyPool):
                 WHERE task_id=$1 AND status='acked' RETURNING task_id""",
                 task_id,
             )
+            if updated is not None:
+                await connection.execute(
+                    "UPDATE control.assignment SET wake_pending=false WHERE task_id=$1", task_id
+                )
             return updated is not None
 
     async def list_waiting_assignments(

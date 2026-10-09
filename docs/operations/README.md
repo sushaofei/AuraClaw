@@ -5,4 +5,4 @@
 - [生产部署与故障演练](./production-deployment.md)：Docker Compose 生产拓扑、蓝绿和演练。
 - [横向扩展与恢复](./scaling-and-recovery.md)：副本、接管、游标和恢复语义。
 - [观测与灰度发布](./observability-and-canary.md)：时间线、告警、保留、DLQ 和回滚。
-
+- [错误与失败队列治理](./failure-governance.md)：统一错误信封、队列状态、owner 与恢复动作。

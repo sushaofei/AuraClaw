@@ -287,7 +287,9 @@ class CredentialInvoker(Protocol):
 
 
 class CapabilityCatalogStore(Protocol):
-    async def upsert_server(self, server: McpServerDefinition) -> None: ...
+    async def upsert_server(
+        self, server: McpServerDefinition, *, allow_rollback: bool = False
+    ) -> None: ...
 
     async def get_server(self, server_id: str) -> McpServerDefinition | None: ...
 
@@ -328,6 +330,12 @@ class CapabilityCatalogStore(Protocol):
     async def remove_server(self, server_id: str) -> None: ...
 
     async def list_capabilities(self, tenant_id: str) -> tuple[CapabilityDescriptor, ...]: ...
+
+    async def catalog_revision(self, tenant_id: str) -> str: ...
+
+    async def find_capabilities_by_canonical_name(
+        self, tenant_id: str, canonical_name: str
+    ) -> tuple[CapabilityDescriptor, ...]: ...
 
     async def list_server_capabilities(
         self, tenant_id: str, server_id: str

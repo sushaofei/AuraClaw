@@ -35,6 +35,7 @@ from auraclaw.contracts.internal import (
     LoadCheckpointRequest,
     ModelGenerateRequest,
     ModelGenerateResponse,
+    OutboxRedriveRequest,
     PolicyEvaluateRequest,
     PolicyEvaluateResponse,
     RuntimeServiceConfig,
@@ -42,6 +43,7 @@ from auraclaw.contracts.internal import (
     ServiceIdentity,
     SessionAppendRequest,
     SessionAppendResponse,
+    SessionTenantFeedRequest,
 )
 from auraclaw.contracts.tools import RiskLevel, ToolCapability, ToolPermission
 from auraclaw.control.internal_service import ControlInternalService
@@ -168,6 +170,72 @@ def test_session_in_process_and_http_adapters_share_the_contract() -> None:
             assert response.api_version == INTERNAL_API_VERSION
             assert response.events[0]["causation_id"] == "causation-s1"
             assert response.events[0]["actor"] == {"type": "runtime", "id": "runtime-s1"}
+
+    asyncio.run(scenario())
+
+
+def test_projection_tenant_feed_and_redrive_are_identity_restricted() -> None:
+    async def scenario() -> None:
+        store = InMemoryEventStore()
+        service = SessionInternalService(store, lease_verifier=_verifier())
+        await service.append(
+            SessionAppendRequest(
+                context=_context(ServiceIdentity.TASK_API),
+                root_session_id="session-admin",
+                session_id="session-admin",
+                command_id="command-admin",
+                expected_version=0,
+                operation="task.create",
+                actor_type="user",
+                actor_id="operator",
+                events=(EventInput(type="session.created", payload={"goal": "admin"}),),
+            )
+        )
+        with pytest.raises(AuthorizationError):
+            await service.tenant_feed(
+                SessionTenantFeedRequest(
+                    context=_context(ServiceIdentity.TASK_API),
+                )
+            )
+        feed = await service.tenant_feed(
+            SessionTenantFeedRequest(
+                context=_context(ServiceIdentity.PROJECTION_WORKER),
+            )
+        )
+        event_id = str(feed.events[0]["event_id"])
+
+        for _ in range(5):
+            claim = (
+                await store.claim_outbox(
+                    "projection",
+                    "projection-worker",
+                    limit=1,
+                    claim_ttl=timedelta(seconds=30),
+                )
+            )[0]
+            assert await store.disposition_outbox(
+                "projection",
+                "projection-worker",
+                claim.outbox_id,
+                claim.claim_token,
+                "nack",
+            )
+        with pytest.raises(AuthorizationError):
+            await service.redrive_outbox(
+                OutboxRedriveRequest(
+                    context=_context(ServiceIdentity.TASK_API),
+                    destination="projection",
+                    event_id=event_id,
+                )
+            )
+        response = await service.redrive_outbox(
+            OutboxRedriveRequest(
+                context=_context(ServiceIdentity.PROJECTION_WORKER),
+                destination="projection",
+                event_id=event_id,
+            )
+        )
+        assert response.accepted
 
     asyncio.run(scenario())
 

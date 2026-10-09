@@ -27,7 +27,7 @@ Credential Proxy 和网络边界继续生效。
    `up -d --force-recreate --wait` 重建全部服务，让 Hands 正常获取 `tools/list` 并重新对账。
    不手工改目录权限，不绕过租约或同版本 Schema 漂移检查。
 4. 确认目录发布 active、同步成功，管理接口 `read_only` 与 MCP 声明一致。
-   在本次已检查的 ChainTowerMCP 快照中，预期为 20 个只读、5 个写入需审批；
+   在本次已检查的 Upstream MCP 快照中，预期为 20 个只读、5 个写入需审批；
    工具集合变化时以新的 `tools/list` 为准。
 
 ## 回滚

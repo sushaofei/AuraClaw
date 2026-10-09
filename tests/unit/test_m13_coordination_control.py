@@ -80,6 +80,104 @@ def test_agent_runtime_pool_accepts_every_semantic_role() -> None:
     asyncio.run(scenario())
 
 
+def test_assignment_profile_does_not_become_a_runtime_node_requirement() -> None:
+    async def scenario() -> None:
+        control = InMemoryControlStateStore()
+        runtime = RuntimeInstance(
+            runtime_id="runtime-shared",
+            runtime_type="agent",
+            role=AGENT_RUNTIME_POOL,
+            node_id="node-a",
+            capabilities={},
+            capacity=1,
+        )
+        await control.register_runtime(runtime)
+        selected = await control.select_runtime(
+            RunnableItem(
+                task_id="tenant:root:run",
+                tenant_id="tenant",
+                root_session_id="root",
+                session_id="root",
+                run_id="run",
+                source_version=1,
+                required_capability={
+                    "tool_permissions": ["inventory.read"],
+                    "required_capabilities": [
+                        {"capability_id": "cap-inventory", "version": "1.0.0"}
+                    ],
+                },
+            )
+        )
+        assert selected == runtime
+
+        unavailable = await control.select_runtime(
+            RunnableItem(
+                task_id="tenant:gpu:run",
+                tenant_id="tenant",
+                root_session_id="gpu",
+                session_id="gpu",
+                run_id="run",
+                source_version=1,
+                required_capability={"runtime_requirements": {"gpu": True}},
+            )
+        )
+        assert unavailable is None
+
+    asyncio.run(scenario())
+
+
+def test_child_wake_before_wait_registration_is_consumed_atomically() -> None:
+    async def scenario() -> None:
+        control = InMemoryControlStateStore()
+        item = RunnableItem(
+            task_id="tenant-m13:root:run-root",
+            tenant_id="tenant-m13",
+            root_session_id="root",
+            session_id="root",
+            run_id="run-root",
+            source_version=1,
+        )
+        assert await control.enqueue(item)
+        claim = (await control.claim("orchestrator-race"))[0]
+        lease = await control.acquire_lease(
+            "session:tenant-m13:root", "orchestrator-race", ttl=timedelta(seconds=30)
+        )
+        assert lease is not None
+        assignment = RuntimeAssignment(
+            tenant_id="tenant-m13",
+            root_session_id="root",
+            session_id="root",
+            run_id="run-root",
+            runtime_id="runtime-race",
+            lease_id=lease.lease_id,
+            fencing_token=lease.fencing_token,
+            role="root",
+            resource_profile={},
+            lease_expires_at=lease.expires_at,
+        )
+        assert await control.assign(item.task_id, assignment, claim_token=claim.claim_token)
+
+        # The Child terminal outbox is consumed while Root is still executing.
+        assert await control.wake_assignment(item.task_id) is False
+        checkpoint = RuntimeCheckpoint(
+            tenant_id="tenant-m13",
+            session_id="root",
+            run_id="run-root",
+            fencing_token=lease.fencing_token,
+            phase="agent.waiting_children",
+            state={"waiting_child_ids": ["child-fast-failure"]},
+            updated_at=datetime.now(UTC),
+        )
+        await control.suspend_with_checkpoint(item.task_id, checkpoint, "waiting_children")
+
+        resumed = await control.claim("orchestrator-after-race", limit=10)
+        assert [candidate.item.task_id for candidate in resumed] == [item.task_id]
+        # Duplicate terminal delivery is folded into the already queued assignment.
+        assert await control.wake_assignment(item.task_id) is False
+
+    asyncio.run(scenario())
+
+
 def test_child_completion_requeues_newly_runnable_dependency() -> None:
     async def scenario() -> None:
         store = InMemoryEventStore()
@@ -101,6 +199,7 @@ def test_child_completion_requeues_newly_runnable_dependency() -> None:
 
         root_response = await tasks.create_task(
             goal="run a serial graph",
+            skill_names=["inventory.collect", "inventory.summarize"],
             context=CommandContext(
                 command_id="create-root",
                 tenant_id="tenant-m13",
@@ -123,6 +222,16 @@ def test_child_completion_requeues_newly_runnable_dependency() -> None:
                     goal=f"complete {task_key}",
                     output_contract=OutputContract(),
                     dependency_ids=dependencies,
+                    tool_permissions=("inventory.read",),
+                    metadata={
+                        "required_capabilities": [
+                            {
+                                "capability_id": f"cap-{task_key}",
+                                "version": "1.0.0",
+                                "content_digest": "sha256:" + "a" * 64,
+                            }
+                        ]
+                    },
                 ),
                 context=CommandContext(
                     command_id=f"create-{task_key}",
@@ -145,6 +254,21 @@ def test_child_completion_requeues_newly_runnable_dependency() -> None:
         assert root_id in initial_ids
         assert first in initial_ids
         assert second not in initial_ids
+        queued_root = next(claim.item for claim in initial if claim.item.session_id == root_id)
+        assert queued_root.required_capability == {
+            "tool_permissions": ["inventory.collect", "inventory.summarize"]
+        }
+        first_item = next(claim.item for claim in initial if claim.item.session_id == first)
+        assert first_item.required_capability == {
+            "tool_permissions": ["inventory.read"],
+            "required_capabilities": [
+                {
+                    "capability_id": "cap-first",
+                    "version": "1.0.0",
+                    "content_digest": "sha256:" + "a" * 64,
+                }
+            ],
+        }
 
         root_claim = next(claim for claim in initial if claim.item.session_id == root_id)
         lease = await control.acquire_lease(
@@ -221,7 +345,7 @@ def test_child_completion_requeues_newly_runnable_dependency() -> None:
     asyncio.run(scenario())
 
 
-def test_failed_child_recovers_root_with_missing_checkpoint_wait_set() -> None:
+def test_failed_child_before_wait_registration_durably_wakes_root() -> None:
     async def scenario() -> None:
         store = InMemoryEventStore()
         task_projection = InMemoryTaskProjection()
@@ -310,19 +434,6 @@ def test_failed_child_recovers_root_with_missing_checkpoint_wait_set() -> None:
             assignment,
             claim_token=root_claim.claim_token,
         )
-        await control.save_checkpoint(
-            RuntimeCheckpoint(
-                tenant_id="tenant-m13",
-                session_id=root_id,
-                run_id=root_run_id,
-                fencing_token=lease.fencing_token,
-                phase="agent.waiting_children",
-                state={},
-                updated_at=datetime.now(UTC),
-            )
-        )
-        await control.suspend_assignment(root_claim.item.task_id, "waiting_children")
-
         child_events = await store.load("tenant-m13", child_id)
         await store.append(
             root_session_id=root_id,
@@ -346,6 +457,22 @@ def test_failed_child_recovers_root_with_missing_checkpoint_wait_set() -> None:
         )
         await feed.run_once(limit=100)
         await asyncio.sleep(0)
+
+        # The terminal outbox has already been acknowledged before Root registers
+        # its wait. The durable latch must make this suspension immediately runnable.
+        await control.suspend_with_checkpoint(
+            root_claim.item.task_id,
+            RuntimeCheckpoint(
+                tenant_id="tenant-m13",
+                session_id=root_id,
+                run_id=root_run_id,
+                fencing_token=lease.fencing_token,
+                phase="agent.waiting_children",
+                state={"waiting_child_ids": [child_id]},
+                updated_at=datetime.now(UTC),
+            ),
+            "waiting_children",
+        )
         recovered = await control.claim("orchestrator-after-failure", limit=10)
         assert root_id in {item.item.session_id for item in recovered}
 

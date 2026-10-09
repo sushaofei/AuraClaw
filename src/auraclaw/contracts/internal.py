@@ -137,6 +137,20 @@ class SessionRootFeedResponse(ContractModel):
     events: tuple[dict[str, Any], ...]
 
 
+class SessionTenantFeedRequest(ContractModel):
+    context: InternalRequestContext
+    after_session_id: str | None = None
+    after_version: int | None = Field(default=None, ge=1)
+    limit: int = Field(default=1000, ge=1, le=1000)
+
+
+class SessionTenantFeedResponse(ContractModel):
+    api_version: str = INTERNAL_API_VERSION
+    events: tuple[dict[str, Any], ...]
+    next_session_id: str | None = None
+    next_version: int | None = None
+
+
 class SkillBindingReferenceRequest(ContractModel):
     context: InternalRequestContext
     package_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
@@ -168,6 +182,7 @@ class CollaborationCommandRequest(ContractModel):
     operation: Literal[
         "get_graph",
         "create_child",
+        "submit_plan",
         "set_dependencies",
         "request_review",
         "cancel_child",
@@ -216,6 +231,17 @@ class OutboxDispositionRequest(ContractModel):
 
 
 class OutboxDispositionResponse(ContractModel):
+    api_version: str = INTERNAL_API_VERSION
+    accepted: bool
+
+
+class OutboxRedriveRequest(ContractModel):
+    context: InternalRequestContext
+    destination: Literal["projection", "delivery", "control"]
+    event_id: str
+
+
+class OutboxRedriveResponse(ContractModel):
     api_version: str = INTERNAL_API_VERSION
     accepted: bool
 
@@ -615,6 +641,25 @@ class ArtifactDownloadResponse(ContractModel):
     expires_at: datetime
 
 
+class ArtifactShareRequest(ContractModel):
+    context: InternalRequestContext
+    artifact_id: str = Field(min_length=1, max_length=256)
+    version: int = Field(ge=1)
+    actor_id: str = Field(min_length=1, max_length=256)
+    audience: str = Field(min_length=1, max_length=256)
+    ttl_seconds: int = Field(default=300, ge=30, le=3600)
+
+
+class ArtifactShareResponse(ContractModel):
+    api_version: str = INTERNAL_API_VERSION
+    artifact_id: str
+    version: int
+    audience: str
+    share_url: str
+    expires_at: datetime
+    policy_decision_id: str
+
+
 class ArtifactDeleteRequest(ContractModel):
     context: InternalRequestContext
     artifact_id: str
@@ -962,6 +1007,8 @@ class McpCapabilityTestResponse(ContractModel):
     status: Literal["passed", "failed"]
     kind: str
     output: Any = None
+    transport_reachable: bool
+    business_success: bool
     schema_valid: bool | None = None
     expectation_matched: bool | None = None
     duration_ms: int = Field(ge=0)

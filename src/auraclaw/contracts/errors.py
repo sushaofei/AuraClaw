@@ -23,6 +23,11 @@ class NotFoundError(AuraClawError):
     status_code = 404
 
 
+class ServiceDrainingError(AuraClawError):
+    code = "service_draining"
+    status_code = 503
+
+
 class VersionConflictError(AuraClawError):
     code = "version_conflict"
     status_code = 409
@@ -126,6 +131,18 @@ class ModelProviderError(AuraClawError):
     status_code = 502
 
 
+class ModelConnectError(ModelProviderError):
+    code = "model_connect_error"
+
+
+class ModelReadError(ModelProviderError):
+    code = "model_read_error"
+
+
+class ModelProtocolError(ModelProviderError):
+    code = "model_protocol_error"
+
+
 class SchemaValidationError(AuraClawError):
     def __init__(
         self,
@@ -221,6 +238,11 @@ class McpTransportError(ConnectorExecutionError, CredentialAccessError):
 
 class CollaborationValidationError(AuraClawError):
     code = "collaboration_invalid"
+    status_code = 409
+
+
+class RoutingPlanValidationError(AuraClawError):
+    code = "routing_plan_invalid"
     status_code = 409
 
 

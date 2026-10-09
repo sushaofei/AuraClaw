@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "environment": "pending-production-environment",
+  "image_ref": "registry.example/auraclaw@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "git_commit": "0000000000000000000000000000000000000000",
+  "operator": "pending",
+  "started_at": "2026-01-01T00:00:00Z",
+  "ended_at": "2026-01-01T00:00:01Z",
+  "scenarios": [
+    {"id": "dual_cluster_cutover", "status": "pending", "started_at": "2026-01-01T00:00:00Z", "ended_at": "2026-01-01T00:00:01Z", "evidence_refs": []},
+    {"id": "ingress_connection_drain", "status": "pending", "started_at": "2026-01-01T00:00:00Z", "ended_at": "2026-01-01T00:00:01Z", "evidence_refs": []},
+    {"id": "database_backup_restore", "status": "pending", "started_at": "2026-01-01T00:00:00Z", "ended_at": "2026-01-01T00:00:01Z", "evidence_refs": []},
+    {"id": "migration_rollback", "status": "pending", "started_at": "2026-01-01T00:00:00Z", "ended_at": "2026-01-01T00:00:01Z", "evidence_refs": []},
+    {"id": "kafka_replay", "status": "pending", "started_at": "2026-01-01T00:00:00Z", "ended_at": "2026-01-01T00:00:01Z", "evidence_refs": []},
+    {"id": "projection_rebuild", "status": "pending", "started_at": "2026-01-01T00:00:00Z", "ended_at": "2026-01-01T00:00:01Z", "evidence_refs": []},
+    {"id": "capacity_baseline", "status": "pending", "started_at": "2026-01-01T00:00:00Z", "ended_at": "2026-01-01T00:00:01Z", "evidence_refs": []},
+    {"id": "fault_injection", "status": "pending", "started_at": "2026-01-01T00:00:00Z", "ended_at": "2026-01-01T00:00:01Z", "evidence_refs": []}
+  ],
+  "slo_metrics": {},
+  "capacity": {}
+}

@@ -171,6 +171,8 @@ class McpConnectionManager:
         started = monotonic()
         schema_valid: bool | None = None
         error: str | None = None
+        transport_reachable = False
+        business_success = False
 
         if capability.kind is CapabilityKind.TOOL:
             if capability.permission != "read-only":
@@ -186,6 +188,8 @@ class McpConnectionManager:
                 arguments=input_payload,
                 invocation_id=f"mcp-test-{uuid4()}",
             )
+            transport_reachable = True
+            business_success = result.status == "success"
             output: Any = result.content
             if output is None:
                 output = result.as_dict()
@@ -217,6 +221,8 @@ class McpConnectionManager:
             if not allowed:
                 raise AuthorizationError("Resource test URI must match the selected capability")
             contents = await connector.read_resource(trusted, uri)
+            transport_reachable = True
+            business_success = True
             output = [item.model_dump(mode="json") for item in contents]
         elif capability.kind is CapabilityKind.PROMPT:
             if any(not isinstance(value, str) for value in input_payload.values()):
@@ -226,6 +232,8 @@ class McpConnectionManager:
                 capability.canonical_name,
                 arguments={key: str(value) for key, value in input_payload.items()},
             )
+            transport_reachable = True
+            business_success = True
             output = prompt_result.model_dump(mode="json")
         else:
             raise InvalidTransitionError("This capability kind cannot be tested")
@@ -238,6 +246,8 @@ class McpConnectionManager:
             "status": "passed" if passed else "failed",
             "kind": capability.kind.value,
             "output": output,
+            "transport_reachable": transport_reachable,
+            "business_success": business_success,
             "schema_valid": schema_valid,
             "expectation_matched": expectation_matched,
             "duration_ms": max(0, round((monotonic() - started) * 1000)),
@@ -253,8 +263,17 @@ class McpConnectionManager:
         force_schema_update: bool = False,
     ) -> None:
         async with self._server_locks.setdefault(entry.server_id, asyncio.Lock()):
-            if self._generations.get(entry.server_id, 0) > entry.revision:
-                return
+            # Revision numbers identify immutable configurations; they are not a
+            # monotonic execution fence.  An administrator may deliberately roll
+            # the active pointer back to an older reviewed revision.  Fence the
+            # apply against the authoritative active snapshot instead of silently
+            # retaining a newer (and potentially less restrictive) generation.
+            desired_before = {
+                item.server_id: item for item in await self._registry.active_snapshot()
+            }
+            authoritative = desired_before.get(entry.server_id)
+            if authoritative is None or authoritative.revision != entry.revision:
+                raise InvalidTransitionError("stale MCP apply rejected by authority")
             await self._apply(
                 entry,
                 restore=restore,
@@ -307,8 +326,18 @@ class McpConnectionManager:
         self._generations[entry.server_id] = entry.revision
         if self._catalog is not None:
             published = await self._catalog.get_server_definition(entry.server_id)
-            if published is None or published.config_revision != definition.config_revision:
-                await self._catalog.register_server(definition)
+            if (
+                published is None
+                or published.config_revision != definition.config_revision
+                or published.trust_level != definition.trust_level
+                or published.tool_admission_policy_version
+                != definition.tool_admission_policy_version
+                or published.tool_policy_overrides != definition.tool_policy_overrides
+            ):
+                # apply() already fenced this entry against the registry's active
+                # snapshot, so an explicitly selected older revision is an
+                # authoritative rollback rather than a stale catalog write.
+                await self._catalog.register_server(definition, allow_rollback=True)
         now = datetime.now(UTC)
         tested_at = None if restore else now
         await self._registry.record_runtime(
@@ -615,7 +644,6 @@ def _probe_context(entry: McpActiveSnapshotEntry) -> Any:
         lease_id="mcp-test",
         fencing_token=1,
         deadline=None,
-        user_id="mcp-admin",
     )
 
 

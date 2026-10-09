@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -23,9 +24,21 @@ WORKLOAD_TOKENS = (
     "AURACLAW_DELIVERY_WORKLOAD_TOKEN",
     "AURACLAW_STREAMING_GATEWAY_WORKLOAD_TOKEN",
 )
+SERVICE_DATABASE_URLS = (
+    "AURACLAW_TASK_API_DATABASE_URL",
+    "AURACLAW_SESSION_DATABASE_URL",
+    "AURACLAW_PROJECTION_DATABASE_URL",
+    "AURACLAW_ORCHESTRATOR_DATABASE_URL",
+    "AURACLAW_MODEL_GATEWAY_DATABASE_URL",
+    "AURACLAW_ACTION_HANDS_DATABASE_URL",
+    "AURACLAW_POLICY_DATABASE_URL",
+    "AURACLAW_CREDENTIAL_PROXY_DATABASE_URL",
+    "AURACLAW_ARTIFACT_DATABASE_URL",
+    "AURACLAW_STREAMING_DATABASE_URL",
+    "AURACLAW_DELIVERY_DATABASE_URL",
+)
 BASE_REQUIRED = (
     "AURACLAW_IMAGE",
-    "AURACLAW_DATABASE_URL",
     "AURACLAW_MIGRATION_DATABASE_URL",
     *WORKLOAD_TOKENS,
     "AURACLAW_LEASE_SIGNING_KEY",
@@ -33,8 +46,11 @@ BASE_REQUIRED = (
     "AURACLAW_MODEL_BASE_URL",
     "AURACLAW_MODEL_NAME",
     "AURACLAW_CREDENTIAL_VAULT_ADDR",
-    "AURACLAW_CHAINTOWER_WORKLOAD_TOKEN",
+    "AURACLAW_UPSTREAM_WORKLOAD_TOKEN",
     "AURACLAW_AGENT_CONTEXT_SIGNING_KEYS_JSON",
+    "AURACLAW_ARTIFACT_SCANNER_BASE_URL",
+    "AURACLAW_OBSERVABILITY_OTLP_HTTP_ENDPOINT",
+    "AURACLAW_ALERT_RECEIVER_URL",
 )
 SEAWEEDFS_REQUIRED = (
     "SEAWEEDFS_HOST",
@@ -48,6 +64,16 @@ OBS_REQUIRED = (
     "OBS_SK",
     "OBS_REGION",
 )
+OCI_DIGEST_REFERENCE = re.compile(
+    r"^[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]+)?/"
+    r"[a-z0-9]+(?:[._/-][a-z0-9]+)*@sha256:[0-9a-f]{64}$"
+)
+
+
+def is_immutable_image_reference(value: str) -> bool:
+    if not OCI_DIGEST_REFERENCE.fullmatch(value):
+        return False
+    return value.rsplit("sha256:", 1)[1] != "0" * 64
 
 
 def _compose_file_for_env(env_path: Path) -> Path:
@@ -72,13 +98,20 @@ def _resolved_artifact_backend(values: dict[str, str]) -> str:
     return "obs"
 
 
-def required_variables(values: dict[str, str]) -> tuple[str, ...]:
+def required_variables(
+    values: dict[str, str], *, role_scoped_database: bool | None = None
+) -> tuple[str, ...]:
     backend = _resolved_artifact_backend(values)
+    if role_scoped_database is None:
+        role_scoped_database = any(values.get(name) for name in SERVICE_DATABASE_URLS)
+    database_variables = (
+        SERVICE_DATABASE_URLS if role_scoped_database else ("AURACLAW_DATABASE_URL",)
+    )
     if backend == "obs":
-        return (*BASE_REQUIRED, *OBS_REQUIRED)
+        return (*BASE_REQUIRED, *database_variables, *OBS_REQUIRED)
     if backend == "local":
-        return BASE_REQUIRED
-    return (*BASE_REQUIRED, *SEAWEEDFS_REQUIRED)
+        return (*BASE_REQUIRED, *database_variables)
+    return (*BASE_REQUIRED, *database_variables, *SEAWEEDFS_REQUIRED)
 
 
 def main() -> int:
@@ -88,6 +121,11 @@ def main() -> int:
         "--compose-file",
         default=None,
         help="Compose file (default: compose.test.yml for .env.test, else compose.prod.yml)",
+    )
+    parser.add_argument(
+        "--readiness-evidence",
+        default=None,
+        help="Validated production drill/SLO evidence required before a production cutover",
     )
     args = parser.parse_args()
     env_path = Path(args.env_file)
@@ -107,13 +145,18 @@ def main() -> int:
             *BASE_REQUIRED,
             *SEAWEEDFS_REQUIRED,
             *OBS_REQUIRED,
+            *SERVICE_DATABASE_URLS,
+            "AURACLAW_DATABASE_URL",
             "AURACLAW_ARTIFACT_BACKEND",
             "AURACLAW_CREDENTIAL_VAULT_TOKEN",
             "AURACLAW_CREDENTIAL_VAULT_APPROLE_ROLE_ID",
             "AURACLAW_CREDENTIAL_VAULT_APPROLE_SECRET_ID",
         )
     }
-    required = required_variables(backend_inputs)
+    role_scoped_database = compose_path.name == "compose.prod.yml"
+    required = required_variables(
+        backend_inputs, role_scoped_database=role_scoped_database
+    )
     values = {
         name: os.environ.get(name) or file_values.get(name) or "" for name in required
     }
@@ -129,27 +172,33 @@ def main() -> int:
         failures.append("Vault AppRole requires both role_id and secret_id")
 
     image = values["AURACLAW_IMAGE"]
-    if image and (
-        image.endswith(":latest")
-        or "replace-with-immutable-sha" in image
-        or ":" not in image.split("/")[-1]
+    if image and role_scoped_database and not is_immutable_image_reference(image):
+        failures.append(
+            "production AURACLAW_IMAGE must use a fully qualified, non-placeholder "
+            "image@sha256 digest"
+        )
+    elif image and not role_scoped_database and (
+        image.endswith(":latest") or ":" not in image.split("/")[-1]
     ):
-        failures.append("AURACLAW_IMAGE must use an immutable digest or version/SHA tag")
+        failures.append("AURACLAW_IMAGE must use a version or SHA tag")
 
     token_values = [values[name] for name in WORKLOAD_TOKENS if values[name]]
     if any(len(value) < 32 for value in token_values):
         failures.append("workload tokens must contain at least 32 characters")
     if len(token_values) != len(set(token_values)):
         failures.append("workload tokens must be unique per service identity")
+    database_values = [values[name] for name in SERVICE_DATABASE_URLS if values.get(name)]
+    if role_scoped_database and len(database_values) != len(set(database_values)):
+        failures.append("database URLs must use unique least-privilege service accounts")
     lease_key = values["AURACLAW_LEASE_SIGNING_KEY"]
     if lease_key and len(lease_key) < 32:
         failures.append("AURACLAW_LEASE_SIGNING_KEY must contain at least 32 characters")
-    chaintower_token = values["AURACLAW_CHAINTOWER_WORKLOAD_TOKEN"]
-    if chaintower_token and len(chaintower_token) < 32:
-        failures.append("AURACLAW_CHAINTOWER_WORKLOAD_TOKEN must contain at least 32 characters")
-    if chaintower_token and chaintower_token in token_values:
+    upstream_token = values["AURACLAW_UPSTREAM_WORKLOAD_TOKEN"]
+    if upstream_token and len(upstream_token) < 32:
+        failures.append("AURACLAW_UPSTREAM_WORKLOAD_TOKEN must contain at least 32 characters")
+    if upstream_token and upstream_token in token_values:
         failures.append(
-            "AURACLAW_CHAINTOWER_WORKLOAD_TOKEN must differ from internal service tokens"
+            "AURACLAW_UPSTREAM_WORKLOAD_TOKEN must differ from internal service tokens"
         )
     signing_keys = values["AURACLAW_AGENT_CONTEXT_SIGNING_KEYS_JSON"]
     if signing_keys:
@@ -182,6 +231,19 @@ def main() -> int:
     )
     if completed.returncode:
         failures.append("docker compose config validation failed")
+    if args.readiness_evidence:
+        readiness = subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "scripts/production_readiness_gate.py"),
+                "--evidence",
+                str(args.readiness_evidence),
+            ],
+            cwd=ROOT,
+            check=False,
+        )
+        if readiness.returncode:
+            failures.append("production readiness evidence validation failed")
     if failures:
         print("Compose preflight failed")
         for failure in failures:

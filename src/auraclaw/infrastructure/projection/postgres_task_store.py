@@ -18,20 +18,45 @@ class PostgresTaskProjection(LazyPool):
     """Disposable Task read model with atomic checkpoint and event dedup."""
 
     async def project(self, events: Sequence[CanonicalEvent]) -> None:
+        for event in events:
+            try:
+                await self._project_unchecked((event,))
+            except (
+                UnsupportedEventError,
+                ProjectionGapError,
+                KeyError,
+                TypeError,
+                ValueError,
+            ) as exc:
+                await self._quarantine(event, type(exc).__name__)
+                raise
+
+    async def _quarantine(self, event: CanonicalEvent, reason_code: str) -> None:
+        pool = await self.pool()
+        await pool.execute(
+            """INSERT INTO projection.poison_event
+            (projector_id,event_id,tenant_id,session_id,reason,payload)
+            VALUES ('task',$1,$2,$3,$4,$5::jsonb)
+            ON CONFLICT (projector_id,event_id) DO UPDATE SET
+              reason=EXCLUDED.reason,payload=EXCLUDED.payload,
+              quarantined_at=now(),resolved_at=NULL""",
+            event.event_id,
+            event.tenant_id,
+            event.session_id,
+            f"{reason_code}:{event.type}",
+            json_dumps(
+                {
+                    "event_id": event.event_id,
+                    "event_type": event.type,
+                    "aggregate_version": event.aggregate_version,
+                }
+            ),
+        )
+
+    async def _project_unchecked(self, events: Sequence[CanonicalEvent]) -> None:
         pool = await self.pool()
         for event in events:
             if event.type not in KNOWN_TASK_EVENTS:
-                await pool.execute(
-                    """INSERT INTO projection.poison_event
-                    (projector_id, event_id, tenant_id, session_id, reason, payload)
-                    VALUES ('task', $1, $2, $3, $4, $5::jsonb)
-                    ON CONFLICT (projector_id, event_id) DO NOTHING""",
-                    event.event_id,
-                    event.tenant_id,
-                    event.session_id,
-                    f"unsupported canonical event: {event.type}",
-                    json_dumps(event.as_dict()),
-                )
                 raise UnsupportedEventError(f"unsupported canonical event: {event.type}")
             async with pool.acquire() as connection, connection.transaction():
                 inserted = await connection.fetchval(
@@ -40,6 +65,11 @@ class PostgresTaskProjection(LazyPool):
                     event.event_id,
                 )
                 if inserted is None:
+                    await connection.execute(
+                        """DELETE FROM projection.poison_event
+                        WHERE projector_id='task' AND event_id=$1""",
+                        event.event_id,
+                    )
                     continue
                 row = await connection.fetchrow(
                     """SELECT * FROM projection.task_view
@@ -132,6 +162,11 @@ class PostgresTaskProjection(LazyPool):
                       checkpoint=EXCLUDED.checkpoint, updated_at=now()""",
                     f"{event.tenant_id}:{event.session_id}",
                     json_dumps({"version": event.aggregate_version, "event_id": event.event_id}),
+                )
+                await connection.execute(
+                    """DELETE FROM projection.poison_event
+                    WHERE projector_id='task' AND event_id=$1""",
+                    event.event_id,
                 )
 
     async def get_task(self, tenant_id: str, session_id: str) -> dict[str, Any] | None:
@@ -241,34 +276,52 @@ class PostgresTaskProjection(LazyPool):
             "projected_at": row["projected_at"].isoformat(),
         }
 
-    async def redrive_poison(self, tenant_id: str, event_id: str) -> bool:
+    async def has_poison(self, tenant_id: str, event_id: str) -> bool:
         pool = await self.pool()
-        result: str = await pool.execute(
-            """DELETE FROM projection.poison_event
-            WHERE tenant_id=$1 AND event_id=$2""",
-            tenant_id,
-            event_id,
+        return bool(
+            await pool.fetchval(
+                """SELECT EXISTS(SELECT 1 FROM projection.poison_event
+                WHERE projector_id='task' AND tenant_id=$1 AND event_id=$2
+                  AND resolved_at IS NULL)""",
+                tenant_id,
+                event_id,
+            )
         )
-        return result == "DELETE 1"
+
+    async def poison_items(
+        self, tenant_id: str | None = None, *, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        pool = await self.pool()
+        rows = await pool.fetch(
+            """SELECT event_id,tenant_id,session_id,reason,quarantined_at
+            FROM projection.poison_event
+            WHERE projector_id='task' AND ($1::text IS NULL OR tenant_id=$1)
+              AND resolved_at IS NULL
+            ORDER BY quarantined_at DESC,event_id DESC LIMIT $2""",
+            tenant_id,
+            limit,
+        )
+        return [
+            {
+                "event_id": str(row["event_id"]),
+                "tenant_id": str(row["tenant_id"]),
+                "session_id": str(row["session_id"]),
+                "reason": str(row["reason"]),
+                "quarantined_at": row["quarantined_at"].isoformat(),
+            }
+            for row in rows
+        ]
 
     async def poison_count(self, tenant_id: str | None = None) -> int:
         pool = await self.pool()
         return int(
             await pool.fetchval(
                 """SELECT count(*) FROM projection.poison_event
-                WHERE $1::text IS NULL OR tenant_id=$1""",
+                WHERE projector_id='task' AND resolved_at IS NULL
+                  AND ($1::text IS NULL OR tenant_id=$1)""",
                 tenant_id,
             )
         )
-
-    async def session_keys(self, tenant_id: str | None = None) -> list[tuple[str, str]]:
-        pool = await self.pool()
-        rows = await pool.fetch(
-            """SELECT tenant_id,session_id FROM projection.task_view
-            WHERE $1::text IS NULL OR tenant_id=$1 ORDER BY tenant_id,session_id""",
-            tenant_id,
-        )
-        return [(str(row["tenant_id"]), str(row["session_id"])) for row in rows]
 
     async def rebuild(self, events: Sequence[CanonicalEvent], tenant_id: str | None = None) -> int:
         pool = await self.pool()

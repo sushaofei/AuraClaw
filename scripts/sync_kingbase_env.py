@@ -8,8 +8,8 @@ from urllib.parse import quote
 
 from dotenv import dotenv_values
 
-DEFAULT_DATABASE = "chaintower_agent"
-CURRENT_MIGRATION_TARGET = "0065"
+DEFAULT_DATABASE = "auraclaw"
+CURRENT_MIGRATION_TARGET = "0071"
 
 
 def _required(values: dict[str, str | None], *names: str) -> str:
@@ -100,14 +100,14 @@ def ensure_database_name(path: Path, values: dict[str, str | None]) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="synchronize test/production database settings from .host.env KingBase values"
+        description="synchronize shared test database settings from .host.env KingBase values"
     )
     parser.add_argument("--host-env", default=".host.env")
     parser.add_argument(
         "--env-file",
         action="append",
         dest="env_files",
-        help="target env file; repeat for multiple files (default: .env.test and .env.prod)",
+        help="test env file (default: .env.test); production requires role-scoped DSNs",
     )
     args = parser.parse_args()
     host_path = Path(args.host_env)
@@ -116,9 +116,14 @@ def main() -> int:
         return 1
     host_values = dict(dotenv_values(host_path))
     ensure_database_name(host_path, host_values)
-    targets = tuple(Path(item) for item in (args.env_files or (".env.test", ".env.prod")))
+    targets = tuple(Path(item) for item in (args.env_files or (".env.test",)))
     try:
         for target in targets:
+            if target.name in {".env.prod", ".env.prod.example"}:
+                raise ValueError(
+                    "production database settings require role-scoped DSNs; "
+                    "sync_kingbase_env.py only supports shared test credentials"
+                )
             if not target.is_file():
                 raise ValueError(f"missing {target}")
             sync_environment(target, host_values)

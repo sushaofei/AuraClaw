@@ -6,6 +6,7 @@ from typing import Any
 
 from auraclaw.contracts.collaboration import PUBLISHABLE_CHILD_RESULT_FIELDS
 from auraclaw.contracts.errors import AuthorizationError, CollaborationValidationError
+from auraclaw.contracts.routing import RouteKind, RoutingPlan
 from auraclaw.control.ports import RuntimeAssignment
 from auraclaw.runtime.ports import CollaborationClient, ToolCall
 
@@ -74,7 +75,9 @@ class RuntimeCollaborationController:
                         "tools only when decomposition adds value. Never invent Session ids, "
                         "actors, tenants, owners, or result lineage. If children are active, "
                         "await them; after required results and accepted reviews exist, call "
-                        "join. Current authoritative collaboration graph:\n"
+                        "join. When the graph has no children, never call join; finish with a "
+                        "normal assistant response instead. Current authoritative "
+                        "collaboration graph:\n"
                         + json.dumps(graph, ensure_ascii=False, sort_keys=True)
                     ),
                 },
@@ -156,6 +159,17 @@ class RuntimeCollaborationController:
                         "summary": exc.message,
                     }
                 )
+        if call.name == JOIN and not self._strings(arguments, "child_session_ids"):
+            return CollaborationExecution(
+                result={
+                    "status": "denied",
+                    "error_code": "join_not_applicable",
+                    "summary": (
+                        "The Root collaboration graph has no selected children. "
+                        "Return the final assistant response directly without calling join."
+                    ),
+                }
+            )
         result = await self._client.execute(
             assignment,
             operation=operation,
@@ -197,6 +211,82 @@ class RuntimeCollaborationController:
             and child.get("status") not in {"completed", "failed", "cancelled"}
         )
         return all_children, active
+
+    async def submit_routing_plan(
+        self,
+        assignment: RuntimeAssignment,
+        plan: RoutingPlan,
+    ) -> dict[str, Any]:
+        """Submit a Router-owned plan without exposing the write tool to the model."""
+        if assignment.role not in {"root", "coordinator"}:
+            raise AuthorizationError("only a Coordinator can submit a routing plan")
+        if plan.route_kind is not RouteKind.COORDINATOR_DAG:
+            raise CollaborationValidationError(
+                "Router submission requires a coordinator DAG"
+            )
+        if any(step.assignment.execution_scope != "child" for step in plan.steps):
+            raise CollaborationValidationError(
+                "Router submission requires child-scoped plan steps"
+            )
+        return await self._client.execute(
+            assignment,
+            operation="submit_plan",
+            arguments={"plan": plan.model_dump(mode="json")},
+            command_id=(
+                f"runtime:router:submit_plan:{assignment.run_id}:"
+                f"{plan.plan_digest.removeprefix('sha256:')}"
+            ),
+        )
+
+    async def join_routing_plan(
+        self,
+        assignment: RuntimeAssignment,
+        child_session_ids: tuple[str, ...],
+    ) -> dict[str, Any]:
+        """Deterministically join a Router-owned DAG after every Child succeeds."""
+        if assignment.role not in {"root", "coordinator"}:
+            raise AuthorizationError("only a Coordinator can join a routing plan")
+        if not child_session_ids:
+            raise CollaborationValidationError("routing plan join requires children")
+        graph = await self._client.execute(
+            assignment,
+            operation="get_graph",
+            arguments={},
+            command_id=f"runtime:router:join_graph:{assignment.run_id}",
+        )
+        by_id = {
+            str(child["session_id"]): child
+            for child in graph.get("children", ())
+            if isinstance(child, dict) and child.get("session_id")
+        }
+        selected = [by_id.get(child_id) for child_id in child_session_ids]
+        if any(child is None for child in selected):
+            raise CollaborationValidationError("routing plan Child is missing from Root graph")
+        incomplete = [
+            child_id
+            for child_id, child in zip(child_session_ids, selected, strict=True)
+            if child is None or child.get("status") != "completed"
+        ]
+        if incomplete:
+            raise CollaborationValidationError(
+                "routing plan Child is not completed: " + ", ".join(incomplete)
+            )
+        parts: list[str] = []
+        for child in selected:
+            assert child is not None
+            result = child.get("result")
+            summary = str(result.get("summary", "")) if isinstance(result, dict) else ""
+            parts.append(f"{child.get('task_key', child['session_id'])}: {summary}".strip())
+        result_summary = "Routing plan completed. " + "; ".join(parts)
+        return await self._client.execute(
+            assignment,
+            operation="join",
+            arguments={
+                "child_session_ids": list(child_session_ids),
+                "result_summary": result_summary[:8_000],
+            },
+            command_id=f"runtime:router:join:{assignment.run_id}",
+        )
 
     @staticmethod
     def _authorize_tool(role: str, name: str) -> None:

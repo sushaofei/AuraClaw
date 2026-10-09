@@ -54,13 +54,16 @@ class McpEgressManager:
         async with self._locks.setdefault(entry.server_id, asyncio.Lock()):
             is_probe = entry.desired_state is not McpDesiredState.ENABLED
             current = self._generations.get(entry.server_id, 0)
-            if not is_probe and current > entry.revision:
-                return
             if self._snapshot_provider is not None and not is_probe:
                 desired = {item.server_id: item for item in await self._snapshot_provider()}
                 authoritative = desired.get(entry.server_id)
                 if authoritative is None or authoritative.revision != entry.revision:
                     raise CredentialAccessError("stale MCP egress apply rejected by authority")
+            elif not is_probe and current > entry.revision:
+                # Without an authority source we can only use the local monotonic
+                # fence.  Production supplies snapshot_provider, which also permits
+                # an intentional rollback to an older immutable revision.
+                return
             if current == entry.revision:
                 adapter = self._adapters.get(f"mcp:{entry.server_id}")
                 if adapter is not None and not is_probe:

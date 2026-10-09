@@ -156,7 +156,7 @@ def test_tool_gateway_surfaces_controlled_boundary_reason() -> None:
     class DenyingHands:
         async def execute(self, invocation: ToolInvocation, capability: ToolCapability) -> object:
             del invocation, capability
-            raise PolicyDeniedError("chaintower MCP call is missing trusted user context")
+            raise PolicyDeniedError("upstream MCP call is missing trusted user context")
 
     async def scenario() -> None:
         artifacts = ArtifactStore(InMemoryObjectStorage(), signing_key=b"m3-test-signing-key")
@@ -170,7 +170,7 @@ def test_tool_gateway_surfaces_controlled_boundary_reason() -> None:
         result = await gateway.execute(_invocation())
         assert result.status.value == "denied"
         assert result.error_code == "policy_denied"
-        assert result.summary == "chaintower MCP call is missing trusted user context"
+        assert result.summary == "upstream MCP call is missing trusted user context"
 
     asyncio.run(scenario())
 
