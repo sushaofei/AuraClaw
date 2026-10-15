@@ -19,7 +19,7 @@ from auraclaw.gateways.query.activity import build_activity, page_activity
 from auraclaw.main import create_app
 from auraclaw.projection.approval.projector import CompositeProjection
 from auraclaw.projection.relay import OutboxRelay
-from auraclaw.runtime.harness import AgentHarness
+from auraclaw.runtime.execution.messages import model_input_evidence
 from auraclaw.runtime.ports import ModelPolicy, ModelRequest
 
 
@@ -216,7 +216,7 @@ def test_activity_handles_retry_cancel_failure_old_events_and_large_results() ->
 
 
 def test_model_input_evidence_never_persists_trusted_prompt_content() -> None:
-    evidence = AgentHarness._model_input_evidence(
+    evidence = model_input_evidence(
         ModelRequest(
             model_call_id="mdl-1",
             tenant_id="tenant-1",

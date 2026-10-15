@@ -1,5 +1,21 @@
 # 开发阶段校验清单
 
+## 模块重构 R3：执行引擎恢复、预算与消息边界（2026-10-15，Issue #105）
+
+方案：[模块内聚与依赖重构](implementation/modularity-refactor.md#r3执行引擎与恢复语义)。
+
+- [x] 引擎保留阶段推进、Router 接入、撤销处置和回合调度；恢复/失败/等待、预算、可信上下文、消息和检查点编解码归独立组件。
+- [x] 共用原 Guard、Committer、ProgressStore；恢复只持有调用状态查询/资源释放及 Child 状态/join 窄端口，不持有 Model/Tool 执行客户端。
+- [x] Canonical Events 继续是事实源；预算 v2 优先采用本 Run 最新 progress，v1 控制检查点、审批/Child phase 与游标、模型/工具幂等身份保持兼容。
+- [x] 模型证据、预算预留、实际派发与结果结算顺序保持；取消/截止后的未知写结果继续查询补录，未派发批次全部终结为 not_started。
+- [x] 不改变可信消息顺序、Router 计划说明、工具可见性和摘要输入；摘要证据不保存可信提示词正文。无租户、身份、权限、Secret 路径变化。
+- [x] 新增 13 项组件测试；定向回归 176 passed，覆盖 v1/v2 预算、恢复优先级、Run 隔离、先 fencing 后查询、上下文顺序与旧响应往返；原故障、审批、Child、撤销与截断用例继续通过。
+- [x] 完整 Pytest 943 passed、74 skipped；跳过项不视为外部数据库等环境或生产验收。完整回归包含真实 localhost HTTP/MCP 与 Skill 控制面 E2E。
+- [x] Ruff、Mypy strict（300 个源码文件）、16 条 import-linter 合同和仓库 release gate 全部通过；新增两条执行组件依赖方向/职责独立性合同沿用 CI。
+- [x] 无数据库迁移、依赖/镜像变更、事件或检查点格式迁移、生产部署及数据清理；可整体回退本阶段提交。
+- [x] 架构映射、Runtime Pool、Capability Loop、实施方案和阶段门禁已同步；差异不含环境文件、缓存或 Secret。
+- [x] Git 交付要求为单一阶段提交推送当前分支；远端核验与完成凭据记录在 Issue #105。R2 CI 的镜像漏洞扫描发布阻断继续单独跟踪，不由本地 release gate 通过替代。
+
 ## 模块重构 R2：Capability Controller 职责与状态边界（2026-10-15，Issue #105）
 
 方案：[模块内聚与依赖重构](implementation/modularity-refactor.md#r2能力控制器与状态所有权)。

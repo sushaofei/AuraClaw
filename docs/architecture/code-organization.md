@@ -96,6 +96,25 @@ import-linter 约束。
 
 包与部署单元不是 1:1。组件归属以职责和稳定端口为边界，具体适配器只在 `composition` 中选择。
 
+## Runtime 执行组件
+
+`runtime/execution_engine.py` 负责阶段推进、路由接入和 Model/Tool Round 调度。
+`runtime/execution/` 中的组件复用同一 Guard、CanonicalEventCommitter 和 ProgressStore：
+
+| 模块 | 所有权 |
+|---|---|
+| `recovery.py` | 待确认写结果只读补录、失败结算、未派发工具终结、审批/Child 等待恢复、检查点选择 |
+| `budget.py` | Canonical 预算预留、累计用量校验、结束原因和单回合输出分配 |
+| `context.py` | 可信说明拼装、Router 首轮计划、可见工具过滤与结束轮约束 |
+| `messages.py` | Canonical 历史到模型消息的映射、输入摘要证据、请求身份与工具来源信息 |
+| `serialization.py` | 原检查点 response/tool call 形状的编解码、finish reason 分类 |
+| `contracts.py` | 故障注入点和 finish reason 枚举；原 engine/harness 出口保留 |
+
+恢复组件的能力端口只允许查询 invocation 状态和释放 Run 资源；它不持有 Model/Tool Client。
+协作端口只允许读取 Child 状态和 join 已完成的 Router DAG。Context 的端口只提供可信说明和
+工具 Schema。三个组件相互独立，且整个 execution 包不得导入 engine、harness 或具体 controller/router；
+两条新增 import-linter 合同在 CI 执行。业务事件仍经原 Session/Committer 边界写入。
+
 ## 变更检查
 
 调整包边界或进程归属时，至少同步：

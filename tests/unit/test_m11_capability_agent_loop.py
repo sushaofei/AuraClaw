@@ -69,7 +69,7 @@ from auraclaw.runtime.capability_controller import (
     CapabilityAdmissionError,
     RuntimeCapabilityController,
 )
-from auraclaw.runtime.execution_engine import RuntimeExecutionEngine
+from auraclaw.runtime.execution.messages import scope_model_call_id_to_request
 from auraclaw.runtime.hands_adapter import HandsRuntimeAdapter
 from auraclaw.runtime.harness import AgentHarness, InjectionPoint
 from auraclaw.runtime.ports import (
@@ -1383,9 +1383,9 @@ def test_model_call_id_changes_when_recovered_turn_request_changes() -> None:
         session_id="session-a",
         messages=({"role": "user", "content": "before child"},),
     )
-    same = RuntimeExecutionEngine._scope_model_call_id_to_request(base)
-    retry = RuntimeExecutionEngine._scope_model_call_id_to_request(base)
-    changed = RuntimeExecutionEngine._scope_model_call_id_to_request(
+    same = scope_model_call_id_to_request(base)
+    retry = scope_model_call_id_to_request(base)
+    changed = scope_model_call_id_to_request(
         replace(
             base,
             messages=({"role": "user", "content": "after child"},),

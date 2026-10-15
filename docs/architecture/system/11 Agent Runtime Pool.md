@@ -52,6 +52,13 @@ Specialist Runtime
 checkpoint/suspend 分别位于独立模块，可以单独测试。`RuntimePhase` 是 `str` 枚举，因此已有
 checkpoint 的持久化值与跨版本恢复格式不变。
 
+`runtime/execution/` 承载恢复、预算和模型上下文职责。Recovery 选择旧控制检查点，
+预算策略 v2 则优先采用本 Run 最新 Canonical progress；审批未批准或 Child 未终态时继续等待。
+待确认写结果只通过原 invocation id 查询并补录；结算路径不持有模型或工具执行客户端。
+Budget 在原有提交位置预留并校验累计用量，返回结束原因和类型化单轮分配结果；
+Context 通过只读端口拼装说明和工具，Canonical 消息映射和检查点编解码保持原格式。
+`AgentHarness`、故障注入点与 finish reason 枚举的兼容出口保持。
+
 能力分发通过 `runtime/capability_controller.py` 的稳定入口，缓存、Skill 上下文预算、
 激活/工作流恢复、Resource 与声明引用读取分别位于 `runtime/capabilities/`。
 组件入口使用拥有自身数据的 `CapabilityState`，给检查点接收方的进度是副本；

@@ -16,7 +16,7 @@ from auraclaw.contracts.routing import (
 )
 from auraclaw.control.ports import RuntimeAssignment, RuntimeBudget
 from auraclaw.runtime.capability_controller import CapabilityExecution
-from auraclaw.runtime.execution_engine import RuntimeExecutionEngine
+from auraclaw.runtime.execution.messages import build_capability_messages
 from auraclaw.runtime.ports import ModelRequest, ModelResponse, ToolCall
 from auraclaw.runtime.route_planner import StructuredPlanValidator, compile_semantic_plan
 from auraclaw.runtime.semantic_planner import SUBMIT_PLAN_TOOL, SemanticPlanProposer
@@ -467,7 +467,7 @@ def test_semantic_shadow_model_event_is_not_replayed_into_agent_conversation() -
         ),
     ]
 
-    messages = RuntimeExecutionEngine._build_capability_messages(
+    messages = build_capability_messages(
         events,
         current_run_id="run-a",
     )

@@ -9,7 +9,7 @@ from auraclaw.contracts.errors import (
     RuntimeOutputTokenBudgetExceededError,
 )
 from auraclaw.control.ports import RuntimeAssignment, RuntimeBudget
-from auraclaw.runtime.execution_engine import RuntimeExecutionEngine
+from auraclaw.runtime.execution.budget import RuntimeBudgetService
 from auraclaw.runtime.execution_guard import RuntimeExecutionGuard
 
 
@@ -21,12 +21,12 @@ def assignment():
 
 
 def test_token_and_cost_limits_have_distinct_reasons():
-    RuntimeExecutionEngine._validate_cumulative_usage(
+    RuntimeBudgetService.validate_cumulative_usage(
         assignment(), {"output_tokens": 8192, "cost": 1})
     with pytest.raises(RuntimeOutputTokenBudgetExceededError):
-        RuntimeExecutionEngine._validate_cumulative_usage(assignment(), {"output_tokens": 8193})
+        RuntimeBudgetService.validate_cumulative_usage(assignment(), {"output_tokens": 8193})
     with pytest.raises(RuntimeCostBudgetExceededError):
-        RuntimeExecutionEngine._validate_cumulative_usage(assignment(), {"cost": 1.01})
+        RuntimeBudgetService.validate_cumulative_usage(assignment(), {"cost": 1.01})
 
 
 @pytest.mark.asyncio

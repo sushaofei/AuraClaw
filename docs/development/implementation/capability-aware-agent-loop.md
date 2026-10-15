@@ -7,7 +7,8 @@ Session、Control 和内部 Action Hands Contract，不增加服务或外部凭�
 
 核心组件：
 
-- `runtime/harness.py`：可恢复的 bounded multi-turn loop；
+- `runtime/harness.py`：稳定入口，状态推进归 `runtime/execution_engine.py`；
+- `runtime/execution/`：恢复结算、预算、可信上下文、消息映射和兼容检查点编解码；
 - `runtime/capability_controller.py`：bootstrap control tools、候选和固定 binding；
 - `runtime/capabilities/`：内容缓存、提示词构建、Skill 激活/恢复、资源读取、加载预算与模型工具展示；
 - `action/capability_catalog.py`：按 `capability_id` 加载权威契约和内部 Skill resolve；
@@ -44,6 +45,13 @@ Issue #105 R2 通过 `CapabilityState.from_checkpoint/to_checkpoint` 导入/导�
 状态副本，保留缺省字段和未知扩展字段，不修改上述持久化格式。组件通过类型化快照交接，
 工作流 progress 回调收到独立 state/events；事件恢复不把 Canonical payload 作为可变运行状态。
 缓存拥有自己的加载任务与锁：同 Run 合并加载，不同 Run 独立取消，已完成的不可变内容可复用。
+
+Issue #105 R3 将恢复和消息准备从执行引擎移到独立组件。模型调用前仍按
+checkpoint → 输入证据 →（v2）预算预留 → Model Round 的原顺序推进；
+模型完成证据先提交，再校验累计用量，工具预留仍发生在派发前。
+恢复只查询原 invocation 状态，未知副作用继续等待；未派发的批次仍逐条写 requested/completed
+拒绝结算，避免后续 Run 继承孤儿 Tool 消息。审批与 Child 等待保留原 phase 和游标字段。
+消息摘要不保存可信提示词正文，请求 digest 的输入和生成方式保持兼容。
 
 ## 3. 安全控制
 

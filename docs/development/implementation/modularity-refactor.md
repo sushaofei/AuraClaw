@@ -90,6 +90,31 @@ Canonical payload 隔离、加载合并、取消、跨 Run 字节计数、TTL/LR
 验收覆盖模型/工具执行前后故障恢复、待确认结果补录、审批/子任务等待、取消、过期租约、
 旧 fencing token、截断恢复与预算耗尽；现有检查点可继续恢复。
 
+### R3 实现边界
+
+执行引擎从 2009 行缩减为 1169 行，保留阶段迁移、Router 接入、撤销处置、故障注入和
+Model/Tool Round 调度。新增组件位于 `runtime/execution/`：
+
+| 模块 | 所有权 |
+|---|---|
+| `recovery.py` | 待确认结果补录、失败与未派发工具结算、审批证据和等待恢复、Canonical/Control 检查点选择 |
+| `budget.py` | 预留、用量校验、结束原因、`TurnBudget`；不拥有执行游标或本地预算账本 |
+| `context.py` | `RuntimeModelContext`、可信说明顺序、Router 首轮说明、发现工具过滤与结束轮禁止工具 |
+| `messages.py` | Canonical 历史消息、输入摘要、工具来源和请求身份摘要 |
+| `serialization.py`、`contracts.py` | 检查点兼容编解码、finish reason 分类与注入点兼容枚举 |
+
+组件共用原 Guard、Committer、ProgressStore，不引入第二套持久化或状态机。
+恢复能力端口仅提供 invocation 状态查询和 Run 资源释放；协作恢复端口仅提供 Child 状态和
+既有 DAG 的 join，不提供通用工具执行。上下文端口只提供说明和 Schema。
+预算服务返回原因和分配结果，由引擎写入执行 state；v1 终结预留和截断提示、v2 结束轮
+预算与无工具约束保持原样。v2 最新 Canonical progress 优先于控制检查点，v1 保持旧恢复路径。
+
+保留 `AgentHarness`、engine/harness 的注入枚举出口、事件和检查点字段。
+原测试直接调用的私有辅助函数改为验证对应组件的公开函数，不保留重复实现。
+新增 13 项组件测试覆盖 v1/v2 分配矩阵、预留与硬耗尽的不同错误、原因优先级与状态只读、
+Canonical progress 选择及 Run 隔离、恢复先校验 fencing、可信说明顺序/工具过滤和旧响应往返。
+新增两条架构合同约束组件无反向依赖且恢复、预算、上下文互不依赖。
+
 ## R4：目录与管理 API
 
 分离 Capability Catalog 的存储适配器、索引发布、搜索服务与工具执行器。
@@ -105,5 +130,5 @@ Canonical payload 隔离、加载合并、取消、跨 Run 字节计数、TTL/LR
 提交并推送当前分支。外部数据库、Kafka、Vault 或对象存储用例若缺少环境，明确记录跳过；
 不得把跳过当作生产验收通过。
 
-R1/R2 不修改持久化数据、检查点格式或部署配置，可整体回退对应阶段提交并重新构建。
+R1/R2/R3 不修改持久化数据、检查点格式或部署配置，可整体回退对应阶段提交并重新构建。
 后续状态/检查点格式变化必须先补充迁移与回滚策略，再实施。
