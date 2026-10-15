@@ -8,12 +8,12 @@ from fastapi import FastAPI
 from auraclaw.admin.internal_service import OwnerAdminService
 from auraclaw.artifact.internal_service import ArtifactInternalService
 from auraclaw.composition.object_storage import build_object_storage, object_storage_closeables
-from auraclaw.composition.services import (
-    ServiceSpec,
-    _base_service_app,
-    _configured_identities,
-    _require_production_security_configuration,
+from auraclaw.composition.security import (
+    configured_identities,
+    require_production_security_configuration,
 )
+from auraclaw.composition.service_host import base_service_app
+from auraclaw.composition.service_spec import ServiceSpec
 from auraclaw.config import Settings
 from auraclaw.contracts.internal import ServiceIdentity
 from auraclaw.infrastructure.artifacts.scanner import RemoteArtifactContentScanner
@@ -27,7 +27,7 @@ from auraclaw.internal.routes import admin_routes, artifact_routes
 
 
 def build_artifact_service_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
-    _require_production_security_configuration(
+    require_production_security_configuration(
         settings,
         spec.name,
         (
@@ -90,7 +90,7 @@ def build_artifact_service_app(spec: ServiceSpec, settings: Settings) -> FastAPI
         ready, detail = await scanner.readiness()
         return ready, f"scanner:{detail}"
 
-    app = _base_service_app(
+    app = base_service_app(
         spec,
         settings,
         closeables=closeables,
@@ -131,7 +131,7 @@ def build_artifact_service_app(spec: ServiceSpec, settings: Settings) -> FastAPI
     contract_app = create_contract_app(
         "artifact-service",
         routes,
-        workload_identities=_configured_identities(
+        workload_identities=configured_identities(
             settings,
             (
                 ServiceIdentity.ACTION_HANDS,

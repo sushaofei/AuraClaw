@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import ast
+import subprocess
+import sys
 from pathlib import Path
 
 from auraclaw.composition.services import SERVICE_BUILDERS
@@ -59,23 +61,50 @@ def test_service_builders_do_not_depend_on_each_other() -> None:
         ), path.name
 
 
-def test_services_module_is_only_the_dispatch_and_lifecycle_facade() -> None:
+def test_service_builders_import_without_loading_the_dispatcher() -> None:
+    # A fresh interpreter catches transitive and import-time dependencies hidden
+    # by the dispatcher already being present in this test process's sys.modules.
+    script = """
+import importlib
+import importlib.abc
+import sys
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[1])
+
+class RejectDispatcher(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path, target=None):
+        if fullname == "auraclaw.composition.services":
+            raise AssertionError("builder imported the service dispatcher")
+        return None
+
+sys.meta_path.insert(0, RejectDispatcher())
+for path in sorted(Path(sys.argv[2]).glob("*.py")):
+    if path.stem != "__init__":
+        importlib.import_module("auraclaw.composition.builders." + path.stem)
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(ROOT / "src"), str(BUILDERS)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_services_module_is_only_the_dispatch_facade() -> None:
     services_path = ROOT / "src" / "auraclaw" / "composition" / "services.py"
     tree = ast.parse(services_path.read_text())
     function_names = {
         node.name for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
 
-    assert not function_names.intersection(
-        {
-            "_orchestrator_app",
-            "_hands_app",
-            "_policy_app",
-            "_credential_proxy_app",
-            "_artifact_app",
-            "_delivery_app",
-            "_projection_app",
-            "_model_gateway_app",
-            "_runtime_app",
-        }
-    )
+    assert function_names == {
+        "create_service_app",
+        *("_" + name + "_builder" for name in (
+            "task_api", "streaming_gateway", "session", "orchestrator", "runtime",
+            "model_gateway", "hands", "policy", "credential_proxy", "artifact_service",
+            "delivery", "projection", "base",
+        )),
+    }
+    assert not any(isinstance(node, ast.ClassDef) for node in tree.body)

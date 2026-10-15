@@ -1,5 +1,22 @@
 # 开发阶段校验清单
 
+## 模块重构 R1：composition 单向依赖（2026-10-15，Issue #105）
+
+方案：[模块内聚与依赖重构](implementation/modularity-refactor.md)。
+
+- [x] 范围限定为服务装配结构；Runtime/Skill 业务规则与持久化格式不变。
+- [x] 12 个 builder 不再依赖 services；服务规格、生命周期、安全、Skill/MCP、凭据初始化与 Runtime worker 归属明确。
+- [x] 保留 create_service_app/service_spec 与 CLI 所用兼容出口；不改变 12 进程部署和信任边界。
+- [x] 新增两条 import-linter 合同，并接入 CI；新解释器中阻断 services 后可独立加载 builders。
+- [x] tenant、身份、幂等、fencing、续租、取消、超时和 Secret 装配逻辑保持原样；无数据库迁移或生产部署。
+- [x] 完整 Pytest：920 passed、74 skipped；缺少外部 PostgreSQL/Kafka/Vault/对象存储环境的用例跳过，不视为生产验收。
+- [x] Ruff 通过；Mypy strict 检查 284 个源码文件通过；12 条 import-linter 合同全部通过。
+- [x] 真实 Uvicorn loopback 冒烟：live 200、info 200、wake 204；内存配置 readiness 按预期 503；worker 执行并优雅关闭资源。
+- [x] 25 个迁移定义经 AST 对比，除辅助函数改名外语义结构保持；两个配置测试显式使用 `_env_file=None`，避免读取本地旧数据库配置。
+- [x] 架构映射、ADR 与后续 R2–R4 方案已同步。
+- [x] 交付差异已检查，不包含环境文件、缓存或 Secret。
+- [x] Git 交付门禁要求已明确：当前分支按单一 intentional commit 提交并推送，远端提交核验与完成凭据统一记录在 Issue #105。
+
 本清单是每个开发阶段的完成门禁。阶段只有在功能、架构、质量和交付项全部通过后，
 才允许标记完成、提交 Git 并推送远端。
 

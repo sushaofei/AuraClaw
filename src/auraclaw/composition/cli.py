@@ -32,12 +32,8 @@ from auraclaw.composition.local_ingress import (
     create_local_ingress_app,
     loopback_connect_host,
 )
-from auraclaw.composition.services import (
-    DATABASE_SERVICES,
-    SERVICE_BY_COMMAND,
-    create_service_app,
-    service_spec,
-)
+from auraclaw.composition.service_spec import DATABASE_SERVICES, SERVICE_BY_COMMAND, service_spec
+from auraclaw.composition.services import create_service_app
 from auraclaw.config import Settings, get_settings
 from auraclaw.contracts.errors import SkillContentRejectedError
 from auraclaw.contracts.internal import ServiceIdentity

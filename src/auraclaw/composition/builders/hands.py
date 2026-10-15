@@ -61,20 +61,22 @@ from auraclaw.action.skill_reliability import SkillPublicationReliabilityWorker
 from auraclaw.action.skill_upgrade_cleanup import SkillUpgradeCleanupWorker
 from auraclaw.action.tool_gateway import ToolGateway, ToolRegistry
 from auraclaw.composition.observability import exporting_observability_store
-from auraclaw.composition.services import (
+from auraclaw.composition.security import (
+    agent_runtime_token,
+    configured_identities,
+    fencing_token_ledger,
+    lease_signing_key,
+    require_production_security_configuration,
+    service_bearer_token,
+)
+from auraclaw.composition.service_host import base_service_app
+from auraclaw.composition.service_spec import ServiceSpec
+from auraclaw.composition.skill_services import (
     EmptyApprovalReader,
-    ServiceSpec,
-    _agent_runtime_token,
-    _base_service_app,
-    _capability_catalog_store,
-    _configured_identities,
-    _fencing_token_ledger,
-    _lease_signing_key,
-    _mcp_registry_service,
-    _require_production_security_configuration,
-    _service_bearer_token,
-    _skill_publication_service,
-    _skill_registry_service,
+    build_capability_catalog_store,
+    mcp_registry_service,
+    skill_publication_service,
+    skill_registry_service,
 )
 from auraclaw.config import Settings
 from auraclaw.contracts.capabilities import CapabilityStatus
@@ -135,7 +137,7 @@ logger = logging.getLogger(__name__)
 
 
 def build_action_hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
-    _require_production_security_configuration(
+    require_production_security_configuration(
         settings,
         spec.name,
         (
@@ -145,10 +147,10 @@ def build_action_hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         ),
         requires_policy=True,
     )
-    fencing_ledger = _fencing_token_ledger(settings, "hands")
-    capability_catalog_store = _capability_catalog_store(settings)
-    mcp_registry, mcp_registry_store = _mcp_registry_service(settings)
-    hands_token = _service_bearer_token(settings, ServiceIdentity.ACTION_HANDS)
+    fencing_ledger = fencing_token_ledger(settings, "hands")
+    capability_catalog_store = build_capability_catalog_store(settings)
+    mcp_registry, mcp_registry_store = mcp_registry_service(settings)
+    hands_token = service_bearer_token(settings, ServiceIdentity.ACTION_HANDS)
     policy = RemotePolicyClient(settings.policy_base_url, bearer_token=hands_token)
     credential_proxy = RemoteCredentialProxy(
         settings.credential_proxy_base_url,
@@ -160,16 +162,16 @@ def build_action_hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
     )
     artifacts = RemoteArtifactWriter(
         settings.artifact_base_url,
-        bearer_token=_service_bearer_token(settings, ServiceIdentity.ACTION_HANDS),
+        bearer_token=service_bearer_token(settings, ServiceIdentity.ACTION_HANDS),
     )
     artifact_reader = RemoteArtifactReader(
         settings.artifact_base_url,
-        bearer_token=_service_bearer_token(settings, ServiceIdentity.ACTION_HANDS),
+        bearer_token=service_bearer_token(settings, ServiceIdentity.ACTION_HANDS),
         policy=policy,
     )
     skill_artifacts = RemoteSkillArtifactLifecycle(
         settings.artifact_base_url,
-        bearer_token=_service_bearer_token(settings, ServiceIdentity.ACTION_HANDS),
+        bearer_token=service_bearer_token(settings, ServiceIdentity.ACTION_HANDS),
         policy=policy,
     )
     skill_binding_references = RemoteSkillBindingReferenceReader(
@@ -246,7 +248,7 @@ def build_action_hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         ),
         *((fencing_ledger,) if isinstance(fencing_ledger, PostgresFencingTokenLedger) else ()),
     )
-    app = _base_service_app(spec, settings, closeables=closeables)
+    app = base_service_app(spec, settings, closeables=closeables)
     capability_catalog = CapabilityCatalog(
         capability_catalog_store,
         embedding_provider=capability_embedding_provider,
@@ -260,8 +262,8 @@ def build_action_hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         search_cache_max_entries=settings.capability_search_cache_max_entries,
         search_cache_ttl_seconds=settings.capability_search_cache_ttl_seconds,
     )
-    skill_registry = _skill_registry_service(settings, artifacts=artifacts)
-    skill_publication, _ = _skill_publication_service(
+    skill_registry = skill_registry_service(settings, artifacts=artifacts)
+    skill_publication, _ = skill_publication_service(
         settings,
         skill_registry,
         skill_lifecycle,
@@ -473,8 +475,8 @@ def build_action_hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         queue_timeout=settings.hands_queue_timeout_seconds,
         metric_writer=hands_metric_store,
     )
-    token = _agent_runtime_token(settings) or ""
-    key = _lease_signing_key(settings)
+    token = agent_runtime_token(settings) or ""
+    key = lease_signing_key(settings)
     authenticator: HandsWorkloadAuthenticator = SignedLeaseHandsAuthenticator(
         {token: "*"} if token else {},
         verifier=LeaseAssertionVerifier(
@@ -673,7 +675,7 @@ def build_action_hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
     app.state.initialize = initialize_and_schedule
     app.state.tick = reconcile_due_jobs
     app.state.worker_interval = min(interval for _name, interval, _run in periodic_jobs)
-    mcp_identities = _configured_identities(
+    mcp_identities = configured_identities(
         settings,
         (
             ServiceIdentity.TASK_API,
@@ -717,7 +719,7 @@ def build_action_hands_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
                     package_cache=skill_content_cache,
                 )
             ),
-            workload_identities=_configured_identities(
+            workload_identities=configured_identities(
                 settings, (ServiceIdentity.TASK_API,)
             ),
         ),

@@ -66,7 +66,7 @@ def test_schema_check_is_read_only_and_closes_its_connection(tmp_path, monkeypat
 def test_startup_checks_database_owners_but_not_agent_runtime(monkeypatch):
     check = AsyncMock(side_effect=MigrationError("migration 0058 is pending"))
     monkeypatch.setattr(cli, "create_migration_runner", lambda *_args: SimpleNamespace(check=check))
-    settings = Settings(storage_backend="postgres")
+    settings = Settings(_env_file=None, storage_backend="postgres")
     with pytest.raises(MigrationError, match="pending"):
         cli._check_service_schema("api", settings)
     cli._check_service_schema("runtime", settings)

@@ -4,7 +4,10 @@ from pathlib import Path
 
 import pytest
 
-from auraclaw.composition.services import RemoteRuntimeWorker, _runtime_instance_identity
+from auraclaw.composition.adapters.remote_runtime_worker import (
+    RemoteRuntimeWorker,
+    runtime_instance_identity,
+)
 from auraclaw.config import Settings
 from auraclaw.contracts.errors import LeaseConflictError
 from auraclaw.control.ports import RuntimeAssignment, RuntimeInstance, RuntimeLease
@@ -35,11 +38,14 @@ def test_production_runtime_identity_uses_instance_hostname(
 ) -> None:
     monkeypatch.delenv("AURACLAW_RUNTIME_INSTANCE_UID", raising=False)
     monkeypatch.delenv("POD_UID", raising=False)
-    monkeypatch.setattr("auraclaw.composition.services.socket.gethostname", lambda: "pod-a")
+    monkeypatch.setattr(
+        "auraclaw.composition.adapters.remote_runtime_worker.socket.gethostname",
+        lambda: "pod-a",
+    )
     settings = Settings.model_construct(
         deployment_profile="production", runtime_id=None, runtime_node_id="local"
     )
-    assert _runtime_instance_identity(settings) == ("runtime-pod-a", "pod-a")
+    assert runtime_instance_identity(settings) == ("runtime-pod-a", "pod-a")
 
 
 def test_production_manifests_do_not_share_a_fixed_runtime_identity() -> None:

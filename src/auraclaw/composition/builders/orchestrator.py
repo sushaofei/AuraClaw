@@ -6,14 +6,13 @@ from typing import Any
 
 from fastapi import FastAPI
 
-from auraclaw.composition.services import (
-    ServiceSpec,
-    _base_service_app,
-    _configured_identities,
-    _fencing_token_ledger,
-    _lease_signing_key,
-    _worker_post_tick_wait,
+from auraclaw.composition.security import (
+    configured_identities,
+    fencing_token_ledger,
+    lease_signing_key,
 )
+from auraclaw.composition.service_host import base_service_app, worker_post_tick_wait
+from auraclaw.composition.service_spec import ServiceSpec
 from auraclaw.config import Settings
 from auraclaw.contracts.internal import ServiceIdentity
 from auraclaw.control.internal_service import ControlInternalService
@@ -36,9 +35,9 @@ def build_orchestrator_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         if settings.sql_storage_enabled
         else InMemoryControlStateStore()
     )
-    key = _lease_signing_key(settings)
+    key = lease_signing_key(settings)
     closeables: tuple[Any, ...] = (store,) if settings.sql_storage_enabled else ()
-    fencing_ledger = _fencing_token_ledger(settings, "control")
+    fencing_ledger = fencing_token_ledger(settings, "control")
     if isinstance(fencing_ledger, PostgresFencingTokenLedger):
         closeables += (fencing_ledger,)
     token = settings.workload_token_value(ServiceIdentity.ORCHESTRATOR.value)
@@ -91,11 +90,11 @@ def build_orchestrator_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
     closeables += (feed_session, lifecycle_session)
     if runtime_wake_client is not None:
         closeables += (runtime_wake_client,)
-    app = _base_service_app(
+    app = base_service_app(
         spec,
         settings,
         tick=schedule_tick,
-        worker_interval=_worker_post_tick_wait(settings, settings.orchestrator_worker_interval),
+        worker_interval=worker_post_tick_wait(settings, settings.orchestrator_worker_interval),
         closeables=closeables,
     )
     service = ControlInternalService(
@@ -110,7 +109,7 @@ def build_orchestrator_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
     contract_app = create_contract_app(
         "orchestrator",
         control_routes(service),
-        workload_identities=_configured_identities(
+        workload_identities=configured_identities(
             settings,
             (ServiceIdentity.AGENT_RUNTIME, ServiceIdentity.TASK_API),
         ),

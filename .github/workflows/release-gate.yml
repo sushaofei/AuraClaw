@@ -21,6 +21,7 @@ jobs:
         run: |
           uv run ruff check .
           uv run mypy src/auraclaw
+          uv run lint-imports
       - name: Automated architecture and reliability coverage
         run: uv run pytest
         env:

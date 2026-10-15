@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from fastapi.testclient import TestClient
 
-import auraclaw.composition.services as services
+import auraclaw.composition.skill_services as skill_services
 from auraclaw.action.skill_lifecycle import InMemorySkillLifecycleStore
 from auraclaw.action.skill_management import (
     InProcessSkillStateProjector,
@@ -54,7 +54,7 @@ def setup_function() -> None:
     get_event_store.cache_clear()
     get_task_projection.cache_clear()
     get_approval_projection.cache_clear()
-    services._SKILL_PACKAGE_REGISTRY = None
+    skill_services._SKILL_PACKAGE_REGISTRY = None
 
 
 def _package(*, markdown: bytes = b"# Release\n\nPrepare the audited release.") -> SkillPackage:
@@ -80,7 +80,7 @@ def _package(*, markdown: bytes = b"# Release\n\nPrepare the audited release.") 
 
 def test_skill_admission_queries_are_tenant_scoped_filterable_and_aggregated() -> None:
     app = create_app(profile="task-api")
-    registry = services._skill_registry_service(get_settings())
+    registry = skill_services.skill_registry_service(get_settings())
     lifecycle = InMemorySkillLifecycleStore()
     publication_service = SkillPublicationService(
         registry=registry,
@@ -206,7 +206,7 @@ def test_skill_admin_manages_installation_and_revocation_separately() -> None:
             return self.available
 
     app = create_app(profile="task-api")
-    registry = services._skill_registry_service(get_settings())
+    registry = skill_services.skill_registry_service(get_settings())
     lifecycle = InMemorySkillLifecycleStore()
     publication_service = SkillPublicationService(
         registry=registry,
@@ -474,7 +474,7 @@ def test_skill_package_upload_is_proxied_and_integrity_checked() -> None:
     app = create_app(profile="task-api")
     app.include_router(
         create_skill_admin_router(
-            services._skill_registry_service(get_settings()),
+            skill_services.skill_registry_service(get_settings()),
             upload_service=Uploads(),
         )
     )
@@ -502,7 +502,7 @@ def test_skill_package_upload_is_proxied_and_integrity_checked() -> None:
 
 def test_skill_admin_publishes_base64_package_through_application_service() -> None:
     app = create_app(profile="task-api")
-    registry = services._skill_registry_service(get_settings())
+    registry = skill_services.skill_registry_service(get_settings())
     lifecycle = InMemorySkillLifecycleStore()
     publication_service = SkillPublicationService(
         registry=registry,
@@ -553,7 +553,7 @@ def test_skill_admin_publishes_staged_artifact_through_same_admission_service() 
             return archive
 
     app = create_app(profile="task-api")
-    registry = services._skill_registry_service(get_settings())
+    registry = skill_services.skill_registry_service(get_settings())
     lifecycle = InMemorySkillLifecycleStore()
     publication_service = SkillPublicationService(
         registry=registry,

@@ -7,12 +7,9 @@ from fastapi import FastAPI
 
 from auraclaw.admin.internal_service import OwnerAdminService
 from auraclaw.composition.observability import exporting_observability_store
-from auraclaw.composition.services import (
-    ServiceSpec,
-    _base_service_app,
-    _configured_identities,
-    _worker_post_tick_wait,
-)
+from auraclaw.composition.security import configured_identities
+from auraclaw.composition.service_host import base_service_app, worker_post_tick_wait
+from auraclaw.composition.service_spec import ServiceSpec
 from auraclaw.config import Settings
 from auraclaw.contracts.internal import ServiceIdentity
 from auraclaw.delivery.worker import ResultDeliveryWorker
@@ -101,11 +98,11 @@ def build_delivery_worker_app(
     closeables: tuple[Any, ...] = (session, policy, credentials)
     if settings.sql_storage_enabled:
         closeables += (store, admin_store, delivery_metric_store)
-    app = _base_service_app(
+    app = base_service_app(
         spec,
         settings,
         tick=worker.run_once,
-        worker_interval=_worker_post_tick_wait(settings, worker_interval),
+        worker_interval=worker_post_tick_wait(settings, worker_interval),
         closeables=closeables,
     )
     app.state.session_access = "http"
@@ -151,7 +148,7 @@ def build_delivery_worker_app(
                 store=admin_store,
             )
         ),
-        workload_identities=_configured_identities(settings, (ServiceIdentity.TASK_API,)),
+        workload_identities=configured_identities(settings, (ServiceIdentity.TASK_API,)),
     )
     app.mount("/", admin_app)
     return app

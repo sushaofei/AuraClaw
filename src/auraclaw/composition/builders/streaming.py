@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from auraclaw.api.dependencies import get_streaming_gateway
 from auraclaw.composition import providers
 from auraclaw.composition.api import create_app
-from auraclaw.composition.services import ServiceSpec
+from auraclaw.composition.service_spec import ServiceSpec
 from auraclaw.config import Settings
 from auraclaw.gateways.streaming.gateway import StreamingGateway
 from auraclaw.infrastructure.projection.postgres_task_store import PostgresTaskProjection

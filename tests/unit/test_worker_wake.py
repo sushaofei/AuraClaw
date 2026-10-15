@@ -77,6 +77,7 @@ async def test_outbox_wake_notifier_posts_destinations(
 
 def test_orchestrator_wake_endpoint_signals_gate() -> None:
     settings = Settings(
+        _env_file=None,
         deployment_profile="development",
         storage_backend="memory",
         worker_wake_enabled=True,

@@ -6,7 +6,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi.testclient import TestClient
 
-import auraclaw.composition.services as services
+import auraclaw.composition.skill_services as skill_services
 from auraclaw.action.skill_publishers import (
     InMemorySkillPublisherStore,
     SkillPublisherService,
@@ -30,7 +30,7 @@ def setup_function() -> None:
     get_event_store.cache_clear()
     get_task_projection.cache_clear()
     get_approval_projection.cache_clear()
-    services._SKILL_PACKAGE_REGISTRY = None
+    skill_services._SKILL_PACKAGE_REGISTRY = None
 
 
 def _public_key() -> str:
@@ -46,7 +46,7 @@ def test_admin_manages_tenant_publisher_and_key_rotation() -> None:
     publishers = SkillPublisherService(InMemorySkillPublisherStore())
     app.include_router(
         create_skill_admin_router(
-            services._skill_registry_service(get_settings()),
+            skill_services.skill_registry_service(get_settings()),
             publisher_service=publishers,
         )
     )

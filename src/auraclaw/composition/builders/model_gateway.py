@@ -5,13 +5,11 @@ import secrets
 from fastapi import FastAPI
 
 from auraclaw.composition import providers
+from auraclaw.composition.adapters.unavailable_model import UnavailableModelClient
 from auraclaw.composition.observability import exporting_observability_store
-from auraclaw.composition.services import (
-    ServiceSpec,
-    UnavailableModelClient,
-    _base_service_app,
-    _configured_identities,
-)
+from auraclaw.composition.security import configured_identities
+from auraclaw.composition.service_host import base_service_app
+from auraclaw.composition.service_spec import ServiceSpec
 from auraclaw.config import Settings
 from auraclaw.contracts.internal import ServiceIdentity
 from auraclaw.infrastructure.clients.policy import RemotePolicyClient
@@ -60,7 +58,7 @@ def build_model_gateway_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         configured_model=settings.model_name,
         data_region=settings.model_data_region,
     )
-    app = _base_service_app(
+    app = base_service_app(
         spec,
         settings,
         closeables=(
@@ -77,7 +75,7 @@ def build_model_gateway_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         "model-gateway",
         model_routes(model_service),
         stream_routes=model_stream_routes(model_service),
-        workload_identities=_configured_identities(
+        workload_identities=configured_identities(
             settings, (ServiceIdentity.AGENT_RUNTIME, ServiceIdentity.POLICY)
         ),
     )

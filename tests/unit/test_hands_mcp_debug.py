@@ -58,7 +58,7 @@ def test_hands_retries_transient_mcp_restore_failure(
         return None
 
     monkeypatch.setattr(McpConnectionManager, "restore", flaky_restore)
-    monkeypatch.setattr("auraclaw.composition.services.asyncio.sleep", no_delay)
+    monkeypatch.setattr("auraclaw.composition.builders.hands.asyncio.sleep", no_delay)
     app = create_service_app(
         "hands",
         _settings(

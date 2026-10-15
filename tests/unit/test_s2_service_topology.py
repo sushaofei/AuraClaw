@@ -10,13 +10,10 @@ from fastapi.testclient import TestClient
 
 from auraclaw.composition.api import create_app
 from auraclaw.composition.cli import _serve_topology, build_parser, main
-from auraclaw.composition.services import (
-    SERVICE_BY_COMMAND,
-    _readiness,
-    _seed_managed_connector_credentials,
-    create_service_app,
-    service_spec,
-)
+from auraclaw.composition.credential_services import seed_managed_connector_credentials
+from auraclaw.composition.service_host import readiness
+from auraclaw.composition.service_spec import SERVICE_BY_COMMAND, service_spec
+from auraclaw.composition.services import create_service_app
 from auraclaw.config import RUNTIME_POOL_ROLE, Settings, get_settings
 from auraclaw.contracts.hands import HANDS_TOOLS_LIST
 from auraclaw.contracts.internal import LeaseAssertion
@@ -205,11 +202,11 @@ def test_session_readiness_requires_action_hands_identity() -> None:
         "delivery_workload_token": "delivery-token",
         "streaming_gateway_workload_token": "streaming-token",
     }
-    ready, dependencies = _readiness("session", _settings(**values))
+    ready, dependencies = readiness("session", _settings(**values))
     assert not ready
     assert dependencies["workload_identities"] == "missing"
 
-    ready, dependencies = _readiness(
+    ready, dependencies = readiness(
         "session",
         _settings(**values, action_hands_workload_token="hands-token"),
     )
@@ -367,7 +364,7 @@ def test_managed_connector_seed_is_async_and_production_has_no_debug_tenants() -
     production = Recorder()
     assert (
         asyncio.run(
-            _seed_managed_connector_credentials(
+            seed_managed_connector_credentials(
                 production,  # type: ignore[arg-type]
                 _settings(
                     deployment_profile="production",
@@ -382,7 +379,7 @@ def test_managed_connector_seed_is_async_and_production_has_no_debug_tenants() -
     development = Recorder()
     assert (
         asyncio.run(
-            _seed_managed_connector_credentials(
+            seed_managed_connector_credentials(
                 development,  # type: ignore[arg-type]
                 _settings(java_api_servers_json=configured),
             )
@@ -510,7 +507,7 @@ def test_distributed_projection_consumes_runtime_budget_metrics(monkeypatch) -> 
     monkeypatch.setattr(projection, 'CompositeProjection', composite)
     monkeypatch.setattr(projection.providers, 'get_observability_store', lambda: store)
     monkeypatch.setattr(projection.providers, 'session_outbox_projectors', lambda: ())
-    monkeypatch.setattr(projection, '_base_service_app', lambda *a, **kw: FastAPI())
+    monkeypatch.setattr(projection, 'base_service_app', lambda *a, **kw: FastAPI())
     settings = _settings(storage_backend='postgres')
     projection.build_projection_app(
         service_spec('projection', settings), settings, worker_interval=1

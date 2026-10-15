@@ -6,13 +6,13 @@ import httpx
 from fastapi import FastAPI
 
 from auraclaw.composition import providers
-from auraclaw.composition.services import (
+from auraclaw.composition.adapters.remote_runtime_worker import (
     RemoteRuntimeWorker,
-    ServiceSpec,
-    _agent_runtime_token,
-    _base_service_app,
-    _runtime_instance_identity,
+    runtime_instance_identity,
 )
+from auraclaw.composition.security import agent_runtime_token
+from auraclaw.composition.service_host import base_service_app
+from auraclaw.composition.service_spec import ServiceSpec
 from auraclaw.config import Settings
 from auraclaw.infrastructure.clients.model import RemoteModelClient
 from auraclaw.infrastructure.clients.runtime import (
@@ -30,9 +30,9 @@ from auraclaw.runtime.task_router import RuntimeTaskRouter
 
 
 def build_agent_runtime_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
-    token = _agent_runtime_token(settings) or ""
+    token = agent_runtime_token(settings) or ""
     bearer_token = token
-    runtime_id, node_id = _runtime_instance_identity(settings)
+    runtime_id, node_id = runtime_instance_identity(settings)
     control = RemoteRuntimeControlClient(
         settings.control_base_url,
         bearer_token=bearer_token,
@@ -93,7 +93,7 @@ def build_agent_runtime_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         ),
     )
     worker = RemoteRuntimeWorker(control, harness)
-    app = _base_service_app(
+    app = base_service_app(
         spec,
         settings,
         tick=worker.tick,

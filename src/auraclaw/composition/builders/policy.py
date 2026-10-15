@@ -2,12 +2,9 @@ from __future__ import annotations
 
 from fastapi import FastAPI
 
-from auraclaw.composition.services import (
-    ServiceSpec,
-    _base_service_app,
-    _configured_identities,
-    _service_bearer_token,
-)
+from auraclaw.composition.security import configured_identities, service_bearer_token
+from auraclaw.composition.service_host import base_service_app
+from auraclaw.composition.service_spec import ServiceSpec
 from auraclaw.config import Settings
 from auraclaw.contracts.internal import ServiceIdentity
 from auraclaw.infrastructure.clients.approval_reviewer import RemoteAutoApprovalReviewer
@@ -26,13 +23,13 @@ def build_policy_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         if settings.sql_storage_enabled
         else None
     )
-    token = _service_bearer_token(settings, ServiceIdentity.POLICY)
+    token = service_bearer_token(settings, ServiceIdentity.POLICY)
     events = RemoteSessionEventStore(
         settings.session_base_url, service_identity=ServiceIdentity.POLICY, bearer_token=token
     )
     reviewer = RemoteAutoApprovalReviewer(settings.model_gateway_base_url, bearer_token=token)
     resolver = ApprovalModeResolver(events, reviewer)
-    app = _base_service_app(
+    app = base_service_app(
         spec,
         settings,
         closeables=(events, reviewer, *((store,) if store is not None else ())),
@@ -61,7 +58,7 @@ def build_policy_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
                 ),
             )
         ),
-        workload_identities=_configured_identities(
+        workload_identities=configured_identities(
             settings,
             (
                 ServiceIdentity.TASK_API,

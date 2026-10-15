@@ -60,9 +60,17 @@ filter 与 dependency availability 语义归 `action/skill_admin_catalog.py`。H
 ## 生产进程映射
 
 `auraclaw serve` 在本地启动与生产同构的 12 进程拓扑。`composition/services.py`
-只保留服务规格、公共生命周期和薄分发入口；12 个生产对象图分别由
+只保留 builder 注册、生产存储前置检查和薄分发入口；服务规格在 `service_spec.py`，
+公共生命周期、readiness 与 worker 唤醒在 `service_host.py`，安全装配在 `security.py`，
+Skill/MCP 与凭据初始化分别归 `skill_services.py`、`credential_services.py`，
+远端 Runtime worker 归 `composition/adapters/remote_runtime_worker.py`。12 个生产对象图分别由
 `composition/builders/` 下的独立 builder 装配。builder 之间不互相依赖，development 与
 production 复用同一 builder，仅由 Settings/provider 选择不同 adapter。
+builders 与公共装配模块不依赖 `services.py`，公共装配模块也不依赖 builders；
+两条方向约束由 import-linter 在 CI 执行。
+
+分阶段重构方案与兼容约束见
+[模块内聚与依赖重构](../development/implementation/modularity-refactor.md)。
 
 | CLI | 服务 | 主归属代码 |
 |---|---|---|

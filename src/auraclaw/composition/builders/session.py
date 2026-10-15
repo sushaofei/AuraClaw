@@ -3,13 +3,13 @@ from __future__ import annotations
 from fastapi import FastAPI
 
 from auraclaw.composition import providers
-from auraclaw.composition.services import (
-    ServiceSpec,
-    _base_service_app,
-    _configured_identities,
-    _fencing_token_ledger,
-    _lease_signing_key,
+from auraclaw.composition.security import (
+    configured_identities,
+    fencing_token_ledger,
+    lease_signing_key,
 )
+from auraclaw.composition.service_host import base_service_app
+from auraclaw.composition.service_spec import ServiceSpec
 from auraclaw.config import Settings
 from auraclaw.contracts.internal import ServiceIdentity
 from auraclaw.infrastructure.clients.session import NoOpOutboxRelay
@@ -39,11 +39,11 @@ def build_session_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
             }
         )
         closeables = (wake,)
-    fencing_ledger = _fencing_token_ledger(settings, "session")
+    fencing_ledger = fencing_token_ledger(settings, "session")
     if isinstance(fencing_ledger, PostgresFencingTokenLedger):
         closeables += (fencing_ledger,)
-    app = _base_service_app(spec, settings, closeables=closeables)
-    key = _lease_signing_key(settings)
+    app = base_service_app(spec, settings, closeables=closeables)
+    key = lease_signing_key(settings)
     verifier = LeaseAssertionVerifier(
         {"development": key},
         ledger=fencing_ledger,
@@ -64,7 +64,7 @@ def build_session_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         lease_verifier=verifier,
         outbox_wake=None if wake is None else wake.schedule,
     )
-    identities = _configured_identities(
+    identities = configured_identities(
         settings,
         (
             ServiceIdentity.TASK_API,

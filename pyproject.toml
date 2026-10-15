@@ -35,6 +35,33 @@ dev = [
 root_package = "auraclaw"
 
 [[tool.importlinter.contracts]]
+name = "Service builders and support do not depend on the dispatcher"
+type = "forbidden"
+source_modules = [
+  "auraclaw.composition.builders",
+  "auraclaw.composition.adapters",
+  "auraclaw.composition.service_spec",
+  "auraclaw.composition.service_host",
+  "auraclaw.composition.security",
+  "auraclaw.composition.skill_services",
+  "auraclaw.composition.credential_services",
+]
+forbidden_modules = ["auraclaw.composition.services"]
+
+[[tool.importlinter.contracts]]
+name = "Composition support does not depend on service builders"
+type = "forbidden"
+source_modules = [
+  "auraclaw.composition.adapters",
+  "auraclaw.composition.service_spec",
+  "auraclaw.composition.service_host",
+  "auraclaw.composition.security",
+  "auraclaw.composition.skill_services",
+  "auraclaw.composition.credential_services",
+]
+forbidden_modules = ["auraclaw.composition.builders"]
+
+[[tool.importlinter.contracts]]
 name = "Contracts are framework independent"
 type = "forbidden"
 source_modules = ["auraclaw.contracts"]

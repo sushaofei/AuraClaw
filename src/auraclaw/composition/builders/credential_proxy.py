@@ -2,14 +2,16 @@ from __future__ import annotations
 
 from fastapi import FastAPI
 
-from auraclaw.composition.services import (
-    ServiceSpec,
-    _base_service_app,
-    _configured_identities,
-    _hands_mcp_snapshot,
-    _require_production_security_configuration,
-    _seed_managed_connector_credentials,
+from auraclaw.composition.credential_services import (
+    hands_mcp_snapshot,
+    seed_managed_connector_credentials,
 )
+from auraclaw.composition.security import (
+    configured_identities,
+    require_production_security_configuration,
+)
+from auraclaw.composition.service_host import base_service_app
+from auraclaw.composition.service_spec import ServiceSpec
 from auraclaw.config import Settings
 from auraclaw.contracts.internal import ServiceIdentity
 from auraclaw.contracts.mcp_registry import McpActiveSnapshotEntry
@@ -31,7 +33,7 @@ from auraclaw.internal.routes import credential_routes
 
 
 def build_credential_proxy_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
-    _require_production_security_configuration(
+    require_production_security_configuration(
         settings,
         spec.name,
         (
@@ -100,7 +102,7 @@ def build_credential_proxy_app(spec: ServiceSpec, settings: Settings) -> FastAPI
         *((policy,) if policy is not None else ()),
         *java_api_adapters.values(),
     )
-    app = _base_service_app(
+    app = base_service_app(
         spec,
         settings,
         closeables=closeables,
@@ -114,7 +116,7 @@ def build_credential_proxy_app(spec: ServiceSpec, settings: Settings) -> FastAPI
         **java_api_adapters,
     }
     async def mcp_snapshot_authority() -> tuple[McpActiveSnapshotEntry, ...]:
-        snapshot = await _hands_mcp_snapshot(settings)
+        snapshot = await hands_mcp_snapshot(settings)
         if snapshot is None:
             raise RuntimeError("MCP snapshot authority is unavailable")
         return snapshot
@@ -130,17 +132,17 @@ def build_credential_proxy_app(spec: ServiceSpec, settings: Settings) -> FastAPI
     )
 
     async def restore_mcp_egress() -> None:
-        snapshot = await _hands_mcp_snapshot(settings)
+        snapshot = await hands_mcp_snapshot(settings)
         if snapshot is None:
             return
         await mcp_egress.restore(snapshot)
 
     async def initialize() -> None:
-        await _seed_managed_connector_credentials(proxy, settings)
+        await seed_managed_connector_credentials(proxy, settings)
         await restore_mcp_egress()
 
     async def reconcile_mcp_egress() -> int:
-        snapshot = await _hands_mcp_snapshot(settings)
+        snapshot = await hands_mcp_snapshot(settings)
         if snapshot is None:
             return 0
         return await mcp_egress.reconcile(snapshot)
@@ -152,7 +154,7 @@ def build_credential_proxy_app(spec: ServiceSpec, settings: Settings) -> FastAPI
     contract_app = create_contract_app(
         "credential-proxy",
         credential_routes(service),
-        workload_identities=_configured_identities(
+        workload_identities=configured_identities(
             settings,
             (
                 ServiceIdentity.TASK_API,

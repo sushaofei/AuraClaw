@@ -8,12 +8,9 @@ from fastapi import FastAPI
 from auraclaw.admin.internal_service import OwnerAdminService
 from auraclaw.composition import providers
 from auraclaw.composition.observability import exporting_observability_store
-from auraclaw.composition.services import (
-    ServiceSpec,
-    _base_service_app,
-    _configured_identities,
-    _worker_post_tick_wait,
-)
+from auraclaw.composition.security import configured_identities
+from auraclaw.composition.service_host import base_service_app, worker_post_tick_wait
+from auraclaw.composition.service_spec import ServiceSpec
 from auraclaw.config import Settings
 from auraclaw.contracts.internal import ServiceIdentity
 from auraclaw.infrastructure.clients.session import (
@@ -36,7 +33,7 @@ def build_projection_app(
     worker_interval: float,
 ) -> FastAPI:
     if not settings.sql_storage_enabled:
-        return _base_service_app(spec, settings, worker_interval=worker_interval)
+        return base_service_app(spec, settings, worker_interval=worker_interval)
 
     task_projection = providers.get_task_projection()
     approval_projection = providers.get_approval_projection()
@@ -77,11 +74,11 @@ def build_projection_app(
         admin_store,
         observability_store,
     )
-    app = _base_service_app(
+    app = base_service_app(
         spec,
         settings,
         tick=relay.relay_once,
-        worker_interval=_worker_post_tick_wait(settings, worker_interval),
+        worker_interval=worker_post_tick_wait(settings, worker_interval),
         closeables=closeables,
     )
 
@@ -141,7 +138,7 @@ def build_projection_app(
                 store=admin_store,
             )
         ),
-        workload_identities=_configured_identities(settings, (ServiceIdentity.TASK_API,)),
+        workload_identities=configured_identities(settings, (ServiceIdentity.TASK_API,)),
     )
     app.mount("/", admin_app)
     return app

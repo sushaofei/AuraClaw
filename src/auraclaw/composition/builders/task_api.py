@@ -29,13 +29,13 @@ from auraclaw.api.routes.admin_mcp import create_mcp_admin_router
 from auraclaw.api.routes.admin_skills import create_skill_admin_router
 from auraclaw.composition.api import create_app
 from auraclaw.composition.observability import exporting_observability_store
-from auraclaw.composition.services import (
-    ServiceSpec,
-    _capability_catalog_store,
-    _mcp_registry_service,
-    _service_bearer_token,
-    _skill_publication_service,
-    _skill_registry_service,
+from auraclaw.composition.security import service_bearer_token
+from auraclaw.composition.service_spec import ServiceSpec
+from auraclaw.composition.skill_services import (
+    build_capability_catalog_store,
+    mcp_registry_service,
+    skill_publication_service,
+    skill_registry_service,
 )
 from auraclaw.config import Settings
 from auraclaw.contracts.internal import ServiceIdentity
@@ -160,12 +160,12 @@ def build_task_api_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
         activity_projection,
         observability_store,
     )
-    mcp_registry, mcp_store = _mcp_registry_service(settings)
+    mcp_registry, mcp_store = mcp_registry_service(settings)
     mcp_lifecycle = RemoteMcpRegistryClient(
         settings.hands_url,
-        bearer_token=_service_bearer_token(settings, ServiceIdentity.TASK_API),
+        bearer_token=service_bearer_token(settings, ServiceIdentity.TASK_API),
     )
-    capability_catalog_store = _capability_catalog_store(settings)
+    capability_catalog_store = build_capability_catalog_store(settings)
     app.include_router(
         create_mcp_admin_router(
             mcp_registry,
@@ -173,7 +173,7 @@ def build_task_api_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
             catalog=CapabilityCatalog(capability_catalog_store),
         )
     )
-    skill_registry = _skill_registry_service(settings)
+    skill_registry = skill_registry_service(settings)
     skill_lifecycle: SkillLifecycleStore | None = None
     skill_publication: SkillPublicationService | RemoteSkillPublicationClient
     skill_management: SkillManagementService | RemoteSkillPublicationClient
@@ -182,18 +182,18 @@ def build_task_api_app(spec: ServiceSpec, settings: Settings) -> FastAPI:
     if settings.sql_storage_enabled:
         skill_publication = RemoteSkillPublicationClient(
             settings.hands_url,
-            bearer_token=_service_bearer_token(settings, ServiceIdentity.TASK_API),
+            bearer_token=service_bearer_token(settings, ServiceIdentity.TASK_API),
         )
         skill_management = skill_publication
         publisher_management = skill_publication
         skill_uploads = RemoteSkillPackageUploadClient(
             settings.artifact_base_url,
-            bearer_token=_service_bearer_token(settings, ServiceIdentity.TASK_API),
+            bearer_token=service_bearer_token(settings, ServiceIdentity.TASK_API),
         )
     else:
         publisher_store = InMemorySkillPublisherStore()
         publisher_management = SkillPublisherService(publisher_store)
-        skill_publication, skill_lifecycle = _skill_publication_service(
+        skill_publication, skill_lifecycle = skill_publication_service(
             settings,
             skill_registry,
             publisher_trust=SkillPublisherTrustService(publisher_store),

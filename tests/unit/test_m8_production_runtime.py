@@ -7,7 +7,7 @@ from typing import Any
 import httpx
 import pytest
 
-from auraclaw.composition.services import RemoteRuntimeWorker
+from auraclaw.composition.adapters.remote_runtime_worker import RemoteRuntimeWorker
 from auraclaw.config import Settings
 from auraclaw.contracts.errors import (
     ModelAuthenticationError,

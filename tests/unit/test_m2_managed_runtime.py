@@ -524,7 +524,7 @@ def test_recover_expired_reclaims_missing_or_stale_runtime_not_live() -> None:
 
 def test_remote_runtime_worker_heartbeats_during_slow_execute() -> None:
     async def scenario() -> None:
-        from auraclaw.composition.services import RemoteRuntimeWorker
+        from auraclaw.composition.adapters.remote_runtime_worker import RemoteRuntimeWorker
 
         # Event-driven: execute finishes only after keep-alive has recovered
         # from one failure and delivered two successful pulses (no wall-clock race).

@@ -219,5 +219,10 @@ SeaweedFS、Vault、Kafka、PostgreSQL 与 Replay Router 成为需要演练的�
 
 ## 验证入口
 
+2026-10-15 的 Issue #105 R1 仅调整 Python 装配依赖，不调整本 ADR 的进程或信任边界。
+`services` 单向分发到 builders，规格、生命周期、安全与资源装配各有独立归属；
+公共装配模块不得反向依赖 builders 或服务分发入口。详见
+[模块内聚与依赖重构](../../development/implementation/modularity-refactor.md)。
+
 阶段门禁见 [开发阶段校验清单](../../development/stage-gates.md) 的 S0–S5。目标实现与当前缺口映射见
 [代码组织与部署映射](../code-organization.md)。
