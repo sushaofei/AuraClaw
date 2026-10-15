@@ -33,6 +33,15 @@ execute(invocation, runtimeContext)
 
 Runtime Context 包含：Sandbox Spec、网络策略、Tool Permission、Artifact Mount、Deadline、Fencing Token 和受控 Credential Reference。
 
+## Catalog 实现边界
+
+`action/capability_catalog.py` 保留稳定公共入口，内存参考存储、索引发布、搜索与执行器分别位于
+`action/catalog/memory.py`、`publication.py`、`search.py` 和 `executors.py`。
+Search/Load 执行器只依赖只读 Catalog 协议；发布组件通过原 Store Port 提交，搜索组件拥有自己的
+revision/tenant/role 隔离缓存和在途加载。同一查询的等待者取消不取消共享加载。
+索引 generation、租约 fencing、来源摘要、搜索证据和调用路由身份保持原契约；
+PostgreSQL 适配器、工具实际执行、准入和 Secret 读取路径均未迁移。
+
 ## Sandbox 恢复
 
 - Sandbox 是可替换资源，不是任务事实源。

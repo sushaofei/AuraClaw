@@ -384,6 +384,12 @@ Task API 不再维护发布结果兼容缓存。Admin Catalog 经内部契约读
 只负责鉴权、参数和响应映射。跨服务客户端共享 workload bearer、timeout、command/query context 与有限
 瞬时故障重试策略；写调用复用稳定 command id，服务端命令账本继续承担幂等事实。
 
+Issue #105 R4 进一步将管理记录过滤与版本管理视图聚合放入 `SkillAdminManagementQueryService`，
+发布者过滤放入 `SkillAdminPublisherQueryService`，准入窗口与告警放入 `SkillAdmissionMetricsService`。
+Admin HTTP 按目录、准入、发布者、安装、发布/包生命周期拆分，公共 factory 和 27 路径/29 操作的
+参数、Schema、响应状态保持兼容。准入指标使用可注入时钟；直接调用应用服务也校验窗口上界，
+无样本和未达最少样本量继续为 insufficient_data，比例严格大于阈值才告警。
+
 持久 Lifecycle Adapter 以单一事务维护聚合间不变量，但 Package、Publication、Installation 与 Source 的
 SQL 行映射分别隔离。拆分只改变代码所有权，不改变数据库 schema、事务边界、revision CAS、Outbox 或
 Canonical Event 语义；内存与 PostgreSQL 适配器仍必须满足相同 Lifecycle Port 契约。

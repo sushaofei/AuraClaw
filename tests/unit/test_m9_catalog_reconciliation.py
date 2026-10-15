@@ -1273,7 +1273,7 @@ def test_upgrade_republishes_previously_filtered_tools_to_each_replica() -> None
 def test_same_named_mcp_targets_keep_server_identity_through_gateway(other_version) -> None:
     from dataclasses import replace
 
-    from auraclaw.action.capability_catalog import _load_result
+    from auraclaw.action.catalog.executors import load_result as _load_result
     from auraclaw.action.tool_gateway import ToolGateway
     from auraclaw.infrastructure.artifacts.store import ArtifactStore, InMemoryObjectStorage
     from auraclaw.infrastructure.observability.stores import InMemoryObservabilityStore

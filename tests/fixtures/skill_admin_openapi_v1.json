@@ -1,0 +1,2075 @@
+{
+  "operations": {
+    "GET /v1/admin/skill-admissions": {
+      "operationId": "list_skill_admissions_v1_admin_skill_admissions_get",
+      "parameters": [
+        "parameter_30",
+        "parameter_37",
+        "parameter_22",
+        "parameter_36",
+        "parameter_23",
+        "parameter_28",
+        "parameter_17",
+        "parameter_4",
+        "parameter_15",
+        "parameter_3",
+        "parameter_7",
+        "parameter_6",
+        "parameter_0"
+      ],
+      "responses": "response_7",
+      "summary": "List Skill Admissions",
+      "tags": [
+        "skill-admin"
+      ]
+    },
+    "GET /v1/admin/skill-admissions/metrics": {
+      "operationId": "skill_admission_metrics_v1_admin_skill_admissions_metrics_get",
+      "parameters": [
+        "parameter_39",
+        "parameter_17",
+        "parameter_4",
+        "parameter_15",
+        "parameter_3",
+        "parameter_7",
+        "parameter_6",
+        "parameter_0"
+      ],
+      "responses": "response_13",
+      "summary": "Skill Admission Metrics",
+      "tags": [
+        "skill-admin"
+      ]
+    },
+    "GET /v1/admin/skill-installations": {
+      "operationId": "list_skill_installations_v1_admin_skill_installations_get",
+      "parameters": [
+        "parameter_38",
+        "parameter_32",
+        "parameter_24",
+        "parameter_28",
+        "parameter_17",
+        "parameter_4",
+        "parameter_15",
+        "parameter_3",
+        "parameter_7",
+        "parameter_6",
+        "parameter_0"
+      ],
+      "responses": "response_8",
+      "summary": "List Skill Installations",
+      "tags": [
+        "skill-admin"
+      ]
+    },
+    "GET /v1/admin/skill-packages": {
+      "operationId": "list_skill_packages_v1_admin_skill_packages_get",
+      "parameters": [
+        "parameter_34",
+        "parameter_32",
+        "parameter_29",
+        "parameter_27",
+        "parameter_24",
+        "parameter_28",
+        "parameter_17",
+        "parameter_4",
+        "parameter_15",
+        "parameter_3",
+        "parameter_7",
+        "parameter_6",
+        "parameter_0"
+      ],
+      "responses": "response_9",
+      "summary": "List Skill Packages",
+      "tags": [
+        "skill-admin"
+      ]
+    },
+    "GET /v1/admin/skill-packages/{publisher}/{name}/versions/{version}": {
+      "operationId": "get_skill_package_state_v1_admin_skill_packages__publisher___name__versions__version__get",
+      "parameters": [
+        "parameter_20",
+        "parameter_19",
+        "parameter_21",
+        "parameter_17",
+        "parameter_4",
+        "parameter_15",
+        "parameter_3",
+        "parameter_7",
+        "parameter_6",
+        "parameter_0"
+      ],
+      "responses": "response_2",
+      "summary": "Get Skill Package State",
+      "tags": [
+        "skill-admin"
+      ]
+    },
+    "GET /v1/admin/skill-publications": {
+      "operationId": "list_skill_publications_v1_admin_skill_publications_get",
+      "parameters": [
+        "parameter_38",
+        "parameter_32",
+        "parameter_29",
+        "parameter_24",
+        "parameter_28",
+        "parameter_17",
+        "parameter_4",
+        "parameter_15",
+        "parameter_3",
+        "parameter_7",
+        "parameter_6",
+        "parameter_0"
+      ],
+      "responses": "response_10",
+      "summary": "List Skill Publications",
+      "tags": [
+        "skill-admin"
+      ]
+    },
+    "GET /v1/admin/skill-publications/{publisher}/{name}/versions/{version}": {
+      "operationId": "get_skill_publication_state_v1_admin_skill_publications__publisher___name__versions__version__get",
+      "parameters": [
+        "parameter_20",
+        "parameter_19",
+        "parameter_21",
+        "parameter_17",
+        "parameter_4",
+        "parameter_15",
+        "parameter_3",
+        "parameter_7",
+        "parameter_6",
+        "parameter_0"
+      ],
+      "responses": "response_3",
+      "summary": "Get Skill Publication State",
+      "tags": [
+        "skill-admin"
+      ]
+    },
+    "GET /v1/admin/skill-publishers": {
+      "operationId": "list_skill_publishers_v1_admin_skill_publishers_get",
+      "parameters": [
+        "parameter_38",
+        "parameter_33",
+        "parameter_24",
+        "parameter_28",
+        "parameter_17",
+        "parameter_4",
+        "parameter_15",
+        "parameter_3",
+        "parameter_7",
+        "parameter_6",
+        "parameter_0"
+      ],
+      "responses": "response_11",
+      "summary": "List Skill Publishers",
+      "tags": [
+        "skill-admin"
+      ]
+    },
+    "GET /v1/admin/skill-publishers/{publisher}": {
+      "operationId": "get_skill_publisher_v1_admin_skill_publishers__publisher__get",
+      "parameters": [
+        "parameter_20",
+        "parameter_17",
+        "parameter_4",
+        "parameter_15",
+        "parameter_3",
+        "parameter_7",
+        "parameter_6",
+        "parameter_0"
+      ],
+      "responses": "response_4",
+      "summary": "Get Skill Publisher",
+      "tags": [
+        "skill-admin"
+      ]
+    },
+    "GET /v1/admin/skills": {
+      "operationId": "list_skills_v1_admin_skills_get",
+      "parameters": [
+        "parameter_33",
+        "parameter_32",
+        "parameter_35",
+        "parameter_31",
+        "parameter_26",
+        "parameter_24",
+        "parameter_28",
+        "parameter_17",
+        "parameter_4",
+        "parameter_15",
+        "parameter_3",
+        "parameter_7",
+        "parameter_6",
+        "parameter_0"
+      ],
+      "responses": "response_12",
+      "summary": "List Skills",
+      "tags": [
+        "skill-admin"
+      ]
+    },
+    "GET /v1/admin/skills/{publisher}/{name}": {
+      "operationId": "get_skill_v1_admin_skills__publisher___name__get",
+      "parameters": [
+        "parameter_20",
+        "parameter_19",
+        "parameter_17",
+        "parameter_4",
+        "parameter_15",
+        "parameter_3",
+        "parameter_7",
+        "parameter_6",
+        "parameter_0"
+      ],
+      "responses": "response_5",
+      "summary": "Get Skill",
+      "tags": [
+        "skill-admin"
+      ]
+    },
+    "GET /v1/admin/skills/{publisher}/{name}/installation": {
+      "operationId": "get_skill_installation_v1_admin_skills__publisher___name__installation_get",
+      "parameters": [
+        "parameter_20",
+        "parameter_19",
+        "parameter_17",
+        "parameter_4",
+        "parameter_15",
+        "parameter_3",
+        "parameter_7",
+        "parameter_6",
+        "parameter_0"
+      ],
+      "responses": "response_0",
+      "summary": "Get Skill Installation",
+      "tags": [
+        "skill-admin"
+      ]
+    },
+    "GET /v1/admin/skills/{publisher}/{name}/management": {
+      "operationId": "get_skill_management_view_v1_admin_skills__publisher___name__management_get",
+      "parameters": [
+        "parameter_20",
+        "parameter_19",
+        "parameter_17",
+        "parameter_4",
+        "parameter_15",
+        "parameter_3",
+        "parameter_7",
+        "parameter_6",
+        "parameter_0"
+      ],
+      "responses": "response_1",
+      "summary": "Get Skill Management View",
+      "tags": [
+        "skill-admin"
+      ]
+    },
+    "GET /v1/admin/skills/{publisher}/{name}/versions/{version}": {
+      "operationId": "get_skill_version_v1_admin_skills__publisher___name__versions__version__get",
+      "parameters": [
+        "parameter_20",
+        "parameter_19",
+        "parameter_21",
+        "parameter_17",
+        "parameter_4",
+        "parameter_15",
+        "parameter_3",
+        "parameter_7",
+        "parameter_6",
+        "parameter_0"
+      ],
+      "responses": "response_6",
+      "summary": "Get Skill Version",
+      "tags": [
+        "skill-admin"
+      ]
+    },
+    "POST /v1/admin/skill-package-uploads": {
+      "operationId": "proxy_skill_package_upload_v1_admin_skill_package_uploads_post",
+      "parameters": [
+        "parameter_1",
+        "parameter_16",
+        "parameter_5",
+        "parameter_17",
+        "parameter_4",
+        "parameter_15",
+        "parameter_3",
+        "parameter_7",
+        "parameter_6"
+      ],
+      "responses": "response_14",
+      "summary": "Proxy Skill Package Upload",
+      "tags": [
+        "skill-admin"
+      ]
+    },
+    "POST /v1/admin/skill-packages/{publisher}/{name}/versions/{version}:purge": {
+      "operationId": "purge_skill_package_v1_admin_skill_packages__publisher___name__versions__version__purge_post",
+      "parameters": [
+        "parameter_20",
+        "parameter_19",
+        "parameter_21",
+        "parameter_2",
+        "parameter_9",
+        "parameter_12",
+        "parameter_17",
+        "parameter_4",
+        "parameter_15",
+        "parameter_3",
+        "parameter_7",
+        "parameter_6"
+      ],
+      "responses": "response_20",
+      "summary": "Purge Skill Package",
+      "tags": [
+        "skill-admin"
+      ]
+    },
+    "POST /v1/admin/skill-publications": {
+      "operationId": "publish_skill_v1_admin_skill_publications_post",
+      "parameters": [
+        "parameter_2",
+        "parameter_8",
+        "parameter_17",
+        "parameter_4",
+        "parameter_15",
+        "parameter_3",
+        "parameter_7",
+        "parameter_6"
+      ],
+      "requestBody": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/PublishSkillRequest"
+            }
+          }
+        },
+        "required": true
+      },
+      "responses": "response_15",
+      "summary": "Publish Skill",
+      "tags": [
+        "skill-admin"
+      ]
+    },
+    "POST /v1/admin/skill-publications/{publisher}/{name}/versions/{version}:restore": {
+      "operationId": "restore_skill_publication_v1_admin_skill_publications__publisher___name__versions__version__restore_post",
+      "parameters": [
+        "parameter_20",
+        "parameter_19",
+        "parameter_21",
+        "parameter_2",
+        "parameter_9",
+        "parameter_12",
+        "parameter_17",
+        "parameter_4",
+        "parameter_15",
+        "parameter_3",
+        "parameter_7",
+        "parameter_6"
+      ],
+      "responses": "response_21",
+      "summary": "Restore Skill Publication",
+      "tags": [
+        "skill-admin"
+      ]
+    },
+    "POST /v1/admin/skill-publications/{publisher}/{name}/versions/{version}:revoke": {
+      "operationId": "revoke_skill_publication_v1_admin_skill_publications__publisher___name__versions__version__revoke_post",
+      "parameters": [
+        "parameter_20",
+        "parameter_19",
+        "parameter_21",
+        "parameter_2",
+        "parameter_9",
+        "parameter_12",
+        "parameter_14",
+        "parameter_17",
+        "parameter_4",
+        "parameter_15",
+        "parameter_3",
+        "parameter_7",
+        "parameter_6"
+      ],
+      "responses": "response_23",
+      "summary": "Revoke Skill Publication",
+      "tags": [
+        "skill-admin"
+      ]
+    },
+    "POST /v1/admin/skill-publishers/{publisher}": {
+      "operationId": "register_skill_publisher_v1_admin_skill_publishers__publisher__post",
+      "parameters": [
+        "parameter_20",
+        "parameter_2",
+        "parameter_8",
+        "parameter_17",
+        "parameter_4",
+        "parameter_15",
+        "parameter_3",
+        "parameter_7",
+        "parameter_6"
+      ],
+      "requestBody": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/RegisterSkillPublisherRequest"
+            }
+          }
+        },
+        "required": true
+      },
+      "responses": "response_16",
+      "summary": "Register Skill Publisher",
+      "tags": [
+        "skill-admin"
+      ]
+    },
+    "POST /v1/admin/skill-publishers/{publisher}/keys/{key_id}:revoke": {
+      "operationId": "revoke_skill_publisher_key_v1_admin_skill_publishers__publisher__keys__key_id__revoke_post",
+      "parameters": [
+        "parameter_20",
+        "parameter_18",
+        "parameter_2",
+        "parameter_9",
+        "parameter_12",
+        "parameter_13",
+        "parameter_11",
+        "parameter_10",
+        "parameter_17",
+        "parameter_4",
+        "parameter_15",
+        "parameter_3",
+        "parameter_7",
+        "parameter_6"
+      ],
+      "responses": "response_24",
+      "summary": "Revoke Skill Publisher Key",
+      "tags": [
+        "skill-admin"
+      ]
+    },
+    "POST /v1/admin/skill-publishers/{publisher}/keys:rotate": {
+      "operationId": "rotate_skill_publisher_key_v1_admin_skill_publishers__publisher__keys_rotate_post",
+      "parameters": [
+        "parameter_20",
+        "parameter_2",
+        "parameter_9",
+        "parameter_17",
+        "parameter_4",
+        "parameter_15",
+        "parameter_3",
+        "parameter_7",
+        "parameter_6"
+      ],
+      "requestBody": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/RotateSkillPublisherKeyRequest"
+            }
+          }
+        },
+        "required": true
+      },
+      "responses": "response_26",
+      "summary": "Rotate Skill Publisher Key",
+      "tags": [
+        "skill-admin"
+      ]
+    },
+    "POST /v1/admin/skill-publishers/{publisher}/status:resume": {
+      "operationId": "resume_skill_publisher_v1_admin_skill_publishers__publisher__status_resume_post",
+      "parameters": [
+        "parameter_20",
+        "parameter_2",
+        "parameter_9",
+        "parameter_12",
+        "parameter_17",
+        "parameter_4",
+        "parameter_15",
+        "parameter_3",
+        "parameter_7",
+        "parameter_6"
+      ],
+      "responses": "response_22",
+      "summary": "Resume Skill Publisher",
+      "tags": [
+        "skill-admin"
+      ]
+    },
+    "POST /v1/admin/skill-publishers/{publisher}/status:revoke": {
+      "operationId": "revoke_skill_publisher_v1_admin_skill_publishers__publisher__status_revoke_post",
+      "parameters": [
+        "parameter_20",
+        "parameter_2",
+        "parameter_9",
+        "parameter_12",
+        "parameter_13",
+        "parameter_11",
+        "parameter_10",
+        "parameter_17",
+        "parameter_4",
+        "parameter_15",
+        "parameter_3",
+        "parameter_7",
+        "parameter_6"
+      ],
+      "responses": "response_25",
+      "summary": "Revoke Skill Publisher",
+      "tags": [
+        "skill-admin"
+      ]
+    },
+    "POST /v1/admin/skill-publishers/{publisher}/status:suspend": {
+      "operationId": "suspend_skill_publisher_v1_admin_skill_publishers__publisher__status_suspend_post",
+      "parameters": [
+        "parameter_20",
+        "parameter_2",
+        "parameter_9",
+        "parameter_12",
+        "parameter_17",
+        "parameter_4",
+        "parameter_15",
+        "parameter_3",
+        "parameter_7",
+        "parameter_6"
+      ],
+      "responses": "response_27",
+      "summary": "Suspend Skill Publisher",
+      "tags": [
+        "skill-admin"
+      ]
+    },
+    "POST /v1/admin/skills/{publisher}/{name}:disable": {
+      "operationId": "disable_skill_v1_admin_skills__publisher___name__disable_post",
+      "parameters": [
+        "parameter_20",
+        "parameter_19",
+        "parameter_2",
+        "parameter_9",
+        "parameter_12",
+        "parameter_17",
+        "parameter_4",
+        "parameter_15",
+        "parameter_3",
+        "parameter_7",
+        "parameter_6"
+      ],
+      "responses": "response_17",
+      "summary": "Disable Skill",
+      "tags": [
+        "skill-admin"
+      ]
+    },
+    "POST /v1/admin/skills/{publisher}/{name}:enable": {
+      "operationId": "enable_skill_v1_admin_skills__publisher___name__enable_post",
+      "parameters": [
+        "parameter_20",
+        "parameter_19",
+        "parameter_2",
+        "parameter_9",
+        "parameter_17",
+        "parameter_4",
+        "parameter_15",
+        "parameter_3",
+        "parameter_7",
+        "parameter_6"
+      ],
+      "responses": "response_18",
+      "summary": "Enable Skill",
+      "tags": [
+        "skill-admin"
+      ]
+    },
+    "POST /v1/admin/skills/{publisher}/{name}:install": {
+      "operationId": "install_skill_v1_admin_skills__publisher___name__install_post",
+      "parameters": [
+        "parameter_20",
+        "parameter_19",
+        "parameter_2",
+        "parameter_9",
+        "parameter_17",
+        "parameter_4",
+        "parameter_15",
+        "parameter_3",
+        "parameter_7",
+        "parameter_6"
+      ],
+      "responses": "response_19",
+      "summary": "Install Skill",
+      "tags": [
+        "skill-admin"
+      ]
+    },
+    "POST /v1/admin/skills/{publisher}/{name}:uninstall": {
+      "operationId": "uninstall_skill_v1_admin_skills__publisher___name__uninstall_post",
+      "parameters": [
+        "parameter_20",
+        "parameter_19",
+        "parameter_25",
+        "parameter_2",
+        "parameter_9",
+        "parameter_12",
+        "parameter_17",
+        "parameter_4",
+        "parameter_15",
+        "parameter_3",
+        "parameter_7",
+        "parameter_6"
+      ],
+      "responses": "response_28",
+      "summary": "Uninstall Skill",
+      "tags": [
+        "skill-admin"
+      ]
+    }
+  },
+  "parameters": {
+    "parameter_0": {
+      "in": "header",
+      "name": "Idempotency-Key",
+      "required": false,
+      "schema": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Idempotency-Key"
+      }
+    },
+    "parameter_1": {
+      "in": "header",
+      "name": "Idempotency-Key",
+      "required": true,
+      "schema": {
+        "maxLength": 256,
+        "minLength": 1,
+        "title": "Idempotency-Key",
+        "type": "string"
+      }
+    },
+    "parameter_10": {
+      "in": "header",
+      "name": "X-Policy-Decision-ID",
+      "required": false,
+      "schema": {
+        "anyOf": [
+          {
+            "maxLength": 256,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "X-Policy-Decision-Id"
+      }
+    },
+    "parameter_11": {
+      "in": "header",
+      "name": "X-Policy-Version",
+      "required": false,
+      "schema": {
+        "default": "skill-revocation-v1",
+        "maxLength": 128,
+        "minLength": 1,
+        "title": "X-Policy-Version",
+        "type": "string"
+      }
+    },
+    "parameter_12": {
+      "in": "header",
+      "name": "X-Reason-Code",
+      "required": true,
+      "schema": {
+        "maxLength": 128,
+        "minLength": 1,
+        "title": "X-Reason-Code",
+        "type": "string"
+      }
+    },
+    "parameter_13": {
+      "in": "header",
+      "name": "X-Revocation-Action",
+      "required": false,
+      "schema": {
+        "default": "cancel",
+        "enum": [
+          "pause",
+          "cancel"
+        ],
+        "title": "X-Revocation-Action",
+        "type": "string"
+      }
+    },
+    "parameter_14": {
+      "in": "header",
+      "name": "X-Skill-Revocation-Action",
+      "required": false,
+      "schema": {
+        "$ref": "#/components/schemas/SkillRevocationAction",
+        "default": "cancel"
+      }
+    },
+    "parameter_15": {
+      "in": "header",
+      "name": "X-Tenant-ID",
+      "required": false,
+      "schema": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "X-Tenant-Id"
+      }
+    },
+    "parameter_16": {
+      "in": "header",
+      "name": "X-Upload-Name",
+      "required": true,
+      "schema": {
+        "maxLength": 512,
+        "minLength": 1,
+        "title": "X-Upload-Name",
+        "type": "string"
+      }
+    },
+    "parameter_17": {
+      "in": "header",
+      "name": "authorization",
+      "required": false,
+      "schema": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Authorization"
+      }
+    },
+    "parameter_18": {
+      "in": "path",
+      "name": "key_id",
+      "required": true,
+      "schema": {
+        "title": "Key Id",
+        "type": "string"
+      }
+    },
+    "parameter_19": {
+      "in": "path",
+      "name": "name",
+      "required": true,
+      "schema": {
+        "title": "Name",
+        "type": "string"
+      }
+    },
+    "parameter_2": {
+      "in": "header",
+      "name": "Idempotency-Key",
+      "required": true,
+      "schema": {
+        "title": "Idempotency-Key",
+        "type": "string"
+      }
+    },
+    "parameter_20": {
+      "in": "path",
+      "name": "publisher",
+      "required": true,
+      "schema": {
+        "title": "Publisher",
+        "type": "string"
+      }
+    },
+    "parameter_21": {
+      "in": "path",
+      "name": "version",
+      "required": true,
+      "schema": {
+        "title": "Version",
+        "type": "string"
+      }
+    },
+    "parameter_22": {
+      "in": "query",
+      "name": "content_policy_version",
+      "required": false,
+      "schema": {
+        "anyOf": [
+          {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Content Policy Version"
+      }
+    },
+    "parameter_23": {
+      "in": "query",
+      "name": "cursor",
+      "required": false,
+      "schema": {
+        "anyOf": [
+          {
+            "maxLength": 2048,
+            "minLength": 1,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Cursor"
+      }
+    },
+    "parameter_24": {
+      "in": "query",
+      "name": "cursor",
+      "required": false,
+      "schema": {
+        "anyOf": [
+          {
+            "maxLength": 2048,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Cursor"
+      }
+    },
+    "parameter_25": {
+      "in": "query",
+      "name": "force",
+      "required": false,
+      "schema": {
+        "default": false,
+        "title": "Force",
+        "type": "boolean"
+      }
+    },
+    "parameter_26": {
+      "in": "query",
+      "name": "installation_status",
+      "required": false,
+      "schema": {
+        "anyOf": [
+          {
+            "maxLength": 64,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Installation Status"
+      }
+    },
+    "parameter_27": {
+      "in": "query",
+      "name": "legal_hold",
+      "required": false,
+      "schema": {
+        "anyOf": [
+          {
+            "type": "boolean"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Legal Hold"
+      }
+    },
+    "parameter_28": {
+      "in": "query",
+      "name": "limit",
+      "required": false,
+      "schema": {
+        "default": 100,
+        "maximum": 500,
+        "minimum": 1,
+        "title": "Limit",
+        "type": "integer"
+      }
+    },
+    "parameter_29": {
+      "in": "query",
+      "name": "name",
+      "required": false,
+      "schema": {
+        "anyOf": [
+          {
+            "maxLength": 256,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Name"
+      }
+    },
+    "parameter_3": {
+      "in": "header",
+      "name": "X-Actor-ID",
+      "required": false,
+      "schema": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "X-Actor-Id"
+      }
+    },
+    "parameter_30": {
+      "in": "query",
+      "name": "outcome",
+      "required": false,
+      "schema": {
+        "anyOf": [
+          {
+            "enum": [
+              "accepted",
+              "rejected",
+              "quarantined"
+            ],
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Outcome"
+      }
+    },
+    "parameter_31": {
+      "in": "query",
+      "name": "publication_status",
+      "required": false,
+      "schema": {
+        "anyOf": [
+          {
+            "maxLength": 64,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Publication Status"
+      }
+    },
+    "parameter_32": {
+      "in": "query",
+      "name": "publisher",
+      "required": false,
+      "schema": {
+        "anyOf": [
+          {
+            "maxLength": 128,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Publisher"
+      }
+    },
+    "parameter_33": {
+      "in": "query",
+      "name": "q",
+      "required": false,
+      "schema": {
+        "anyOf": [
+          {
+            "maxLength": 256,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Q"
+      }
+    },
+    "parameter_34": {
+      "in": "query",
+      "name": "retention_status",
+      "required": false,
+      "schema": {
+        "anyOf": [
+          {
+            "maxLength": 64,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Retention Status"
+      }
+    },
+    "parameter_35": {
+      "in": "query",
+      "name": "risk_level",
+      "required": false,
+      "schema": {
+        "anyOf": [
+          {
+            "maxLength": 64,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Risk Level"
+      }
+    },
+    "parameter_36": {
+      "in": "query",
+      "name": "since",
+      "required": false,
+      "schema": {
+        "anyOf": [
+          {
+            "format": "date-time",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Since"
+      }
+    },
+    "parameter_37": {
+      "in": "query",
+      "name": "stage",
+      "required": false,
+      "schema": {
+        "anyOf": [
+          {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Stage"
+      }
+    },
+    "parameter_38": {
+      "in": "query",
+      "name": "status",
+      "required": false,
+      "schema": {
+        "anyOf": [
+          {
+            "maxLength": 64,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Status"
+      }
+    },
+    "parameter_39": {
+      "in": "query",
+      "name": "window_hours",
+      "required": false,
+      "schema": {
+        "anyOf": [
+          {
+            "maximum": 2160,
+            "minimum": 1,
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Window Hours"
+      }
+    },
+    "parameter_4": {
+      "in": "header",
+      "name": "X-Aura-Agent-Context",
+      "required": false,
+      "schema": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "X-Aura-Agent-Context"
+      }
+    },
+    "parameter_5": {
+      "in": "header",
+      "name": "X-Content-SHA256",
+      "required": true,
+      "schema": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "X-Content-Sha256",
+        "type": "string"
+      }
+    },
+    "parameter_6": {
+      "in": "header",
+      "name": "X-Correlation-ID",
+      "required": false,
+      "schema": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "X-Correlation-Id"
+      }
+    },
+    "parameter_7": {
+      "in": "header",
+      "name": "X-Dept-ID",
+      "required": false,
+      "schema": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "X-Dept-Id"
+      }
+    },
+    "parameter_8": {
+      "in": "header",
+      "name": "X-Expected-Revision",
+      "required": false,
+      "schema": {
+        "default": 0,
+        "minimum": 0,
+        "title": "X-Expected-Revision",
+        "type": "integer"
+      }
+    },
+    "parameter_9": {
+      "in": "header",
+      "name": "X-Expected-Revision",
+      "required": true,
+      "schema": {
+        "minimum": 1,
+        "title": "X-Expected-Revision",
+        "type": "integer"
+      }
+    }
+  },
+  "responses": {
+    "response_0": {
+      "200": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "additionalProperties": true,
+              "title": "Response Get Skill Installation V1 Admin Skills  Publisher   Name  Installation Get",
+              "type": "object"
+            }
+          }
+        },
+        "description": "Successful Response"
+      },
+      "422": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/HTTPValidationError"
+            }
+          }
+        },
+        "description": "Validation Error"
+      }
+    },
+    "response_1": {
+      "200": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "additionalProperties": true,
+              "title": "Response Get Skill Management View V1 Admin Skills  Publisher   Name  Management Get",
+              "type": "object"
+            }
+          }
+        },
+        "description": "Successful Response"
+      },
+      "422": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/HTTPValidationError"
+            }
+          }
+        },
+        "description": "Validation Error"
+      }
+    },
+    "response_10": {
+      "200": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "additionalProperties": true,
+              "title": "Response List Skill Publications V1 Admin Skill Publications Get",
+              "type": "object"
+            }
+          }
+        },
+        "description": "Successful Response"
+      },
+      "422": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/HTTPValidationError"
+            }
+          }
+        },
+        "description": "Validation Error"
+      }
+    },
+    "response_11": {
+      "200": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "additionalProperties": true,
+              "title": "Response List Skill Publishers V1 Admin Skill Publishers Get",
+              "type": "object"
+            }
+          }
+        },
+        "description": "Successful Response"
+      },
+      "422": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/HTTPValidationError"
+            }
+          }
+        },
+        "description": "Validation Error"
+      }
+    },
+    "response_12": {
+      "200": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "additionalProperties": true,
+              "title": "Response List Skills V1 Admin Skills Get",
+              "type": "object"
+            }
+          }
+        },
+        "description": "Successful Response"
+      },
+      "422": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/HTTPValidationError"
+            }
+          }
+        },
+        "description": "Validation Error"
+      }
+    },
+    "response_13": {
+      "200": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "additionalProperties": true,
+              "title": "Response Skill Admission Metrics V1 Admin Skill Admissions Metrics Get",
+              "type": "object"
+            }
+          }
+        },
+        "description": "Successful Response"
+      },
+      "422": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/HTTPValidationError"
+            }
+          }
+        },
+        "description": "Validation Error"
+      }
+    },
+    "response_14": {
+      "201": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "additionalProperties": true,
+              "title": "Response Proxy Skill Package Upload V1 Admin Skill Package Uploads Post",
+              "type": "object"
+            }
+          }
+        },
+        "description": "Successful Response"
+      },
+      "422": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/HTTPValidationError"
+            }
+          }
+        },
+        "description": "Validation Error"
+      }
+    },
+    "response_15": {
+      "201": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "additionalProperties": true,
+              "title": "Response Publish Skill V1 Admin Skill Publications Post",
+              "type": "object"
+            }
+          }
+        },
+        "description": "Successful Response"
+      },
+      "422": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/HTTPValidationError"
+            }
+          }
+        },
+        "description": "Validation Error"
+      }
+    },
+    "response_16": {
+      "201": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "additionalProperties": true,
+              "title": "Response Register Skill Publisher V1 Admin Skill Publishers  Publisher  Post",
+              "type": "object"
+            }
+          }
+        },
+        "description": "Successful Response"
+      },
+      "422": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/HTTPValidationError"
+            }
+          }
+        },
+        "description": "Validation Error"
+      }
+    },
+    "response_17": {
+      "202": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "additionalProperties": true,
+              "title": "Response Disable Skill V1 Admin Skills  Publisher   Name  Disable Post",
+              "type": "object"
+            }
+          }
+        },
+        "description": "Successful Response"
+      },
+      "422": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/HTTPValidationError"
+            }
+          }
+        },
+        "description": "Validation Error"
+      }
+    },
+    "response_18": {
+      "202": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "additionalProperties": true,
+              "title": "Response Enable Skill V1 Admin Skills  Publisher   Name  Enable Post",
+              "type": "object"
+            }
+          }
+        },
+        "description": "Successful Response"
+      },
+      "422": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/HTTPValidationError"
+            }
+          }
+        },
+        "description": "Validation Error"
+      }
+    },
+    "response_19": {
+      "202": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "additionalProperties": true,
+              "title": "Response Install Skill V1 Admin Skills  Publisher   Name  Install Post",
+              "type": "object"
+            }
+          }
+        },
+        "description": "Successful Response"
+      },
+      "422": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/HTTPValidationError"
+            }
+          }
+        },
+        "description": "Validation Error"
+      }
+    },
+    "response_2": {
+      "200": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "additionalProperties": true,
+              "title": "Response Get Skill Package State V1 Admin Skill Packages  Publisher   Name  Versions  Version  Get",
+              "type": "object"
+            }
+          }
+        },
+        "description": "Successful Response"
+      },
+      "422": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/HTTPValidationError"
+            }
+          }
+        },
+        "description": "Validation Error"
+      }
+    },
+    "response_20": {
+      "202": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "additionalProperties": true,
+              "title": "Response Purge Skill Package V1 Admin Skill Packages  Publisher   Name  Versions  Version  Purge Post",
+              "type": "object"
+            }
+          }
+        },
+        "description": "Successful Response"
+      },
+      "422": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/HTTPValidationError"
+            }
+          }
+        },
+        "description": "Validation Error"
+      }
+    },
+    "response_21": {
+      "202": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "additionalProperties": true,
+              "title": "Response Restore Skill Publication V1 Admin Skill Publications  Publisher   Name  Versions  Version  Restore Post",
+              "type": "object"
+            }
+          }
+        },
+        "description": "Successful Response"
+      },
+      "422": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/HTTPValidationError"
+            }
+          }
+        },
+        "description": "Validation Error"
+      }
+    },
+    "response_22": {
+      "202": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "additionalProperties": true,
+              "title": "Response Resume Skill Publisher V1 Admin Skill Publishers  Publisher  Status Resume Post",
+              "type": "object"
+            }
+          }
+        },
+        "description": "Successful Response"
+      },
+      "422": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/HTTPValidationError"
+            }
+          }
+        },
+        "description": "Validation Error"
+      }
+    },
+    "response_23": {
+      "202": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "additionalProperties": true,
+              "title": "Response Revoke Skill Publication V1 Admin Skill Publications  Publisher   Name  Versions  Version  Revoke Post",
+              "type": "object"
+            }
+          }
+        },
+        "description": "Successful Response"
+      },
+      "422": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/HTTPValidationError"
+            }
+          }
+        },
+        "description": "Validation Error"
+      }
+    },
+    "response_24": {
+      "202": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "additionalProperties": true,
+              "title": "Response Revoke Skill Publisher Key V1 Admin Skill Publishers  Publisher  Keys  Key Id  Revoke Post",
+              "type": "object"
+            }
+          }
+        },
+        "description": "Successful Response"
+      },
+      "422": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/HTTPValidationError"
+            }
+          }
+        },
+        "description": "Validation Error"
+      }
+    },
+    "response_25": {
+      "202": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "additionalProperties": true,
+              "title": "Response Revoke Skill Publisher V1 Admin Skill Publishers  Publisher  Status Revoke Post",
+              "type": "object"
+            }
+          }
+        },
+        "description": "Successful Response"
+      },
+      "422": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/HTTPValidationError"
+            }
+          }
+        },
+        "description": "Validation Error"
+      }
+    },
+    "response_26": {
+      "202": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "additionalProperties": true,
+              "title": "Response Rotate Skill Publisher Key V1 Admin Skill Publishers  Publisher  Keys Rotate Post",
+              "type": "object"
+            }
+          }
+        },
+        "description": "Successful Response"
+      },
+      "422": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/HTTPValidationError"
+            }
+          }
+        },
+        "description": "Validation Error"
+      }
+    },
+    "response_27": {
+      "202": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "additionalProperties": true,
+              "title": "Response Suspend Skill Publisher V1 Admin Skill Publishers  Publisher  Status Suspend Post",
+              "type": "object"
+            }
+          }
+        },
+        "description": "Successful Response"
+      },
+      "422": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/HTTPValidationError"
+            }
+          }
+        },
+        "description": "Validation Error"
+      }
+    },
+    "response_28": {
+      "202": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "additionalProperties": true,
+              "title": "Response Uninstall Skill V1 Admin Skills  Publisher   Name  Uninstall Post",
+              "type": "object"
+            }
+          }
+        },
+        "description": "Successful Response"
+      },
+      "422": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/HTTPValidationError"
+            }
+          }
+        },
+        "description": "Validation Error"
+      }
+    },
+    "response_3": {
+      "200": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "additionalProperties": true,
+              "title": "Response Get Skill Publication State V1 Admin Skill Publications  Publisher   Name  Versions  Version  Get",
+              "type": "object"
+            }
+          }
+        },
+        "description": "Successful Response"
+      },
+      "422": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/HTTPValidationError"
+            }
+          }
+        },
+        "description": "Validation Error"
+      }
+    },
+    "response_4": {
+      "200": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "additionalProperties": true,
+              "title": "Response Get Skill Publisher V1 Admin Skill Publishers  Publisher  Get",
+              "type": "object"
+            }
+          }
+        },
+        "description": "Successful Response"
+      },
+      "422": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/HTTPValidationError"
+            }
+          }
+        },
+        "description": "Validation Error"
+      }
+    },
+    "response_5": {
+      "200": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "additionalProperties": true,
+              "title": "Response Get Skill V1 Admin Skills  Publisher   Name  Get",
+              "type": "object"
+            }
+          }
+        },
+        "description": "Successful Response"
+      },
+      "422": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/HTTPValidationError"
+            }
+          }
+        },
+        "description": "Validation Error"
+      }
+    },
+    "response_6": {
+      "200": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "additionalProperties": true,
+              "title": "Response Get Skill Version V1 Admin Skills  Publisher   Name  Versions  Version  Get",
+              "type": "object"
+            }
+          }
+        },
+        "description": "Successful Response"
+      },
+      "422": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/HTTPValidationError"
+            }
+          }
+        },
+        "description": "Validation Error"
+      }
+    },
+    "response_7": {
+      "200": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "additionalProperties": true,
+              "title": "Response List Skill Admissions V1 Admin Skill Admissions Get",
+              "type": "object"
+            }
+          }
+        },
+        "description": "Successful Response"
+      },
+      "422": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/HTTPValidationError"
+            }
+          }
+        },
+        "description": "Validation Error"
+      }
+    },
+    "response_8": {
+      "200": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "additionalProperties": true,
+              "title": "Response List Skill Installations V1 Admin Skill Installations Get",
+              "type": "object"
+            }
+          }
+        },
+        "description": "Successful Response"
+      },
+      "422": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/HTTPValidationError"
+            }
+          }
+        },
+        "description": "Validation Error"
+      }
+    },
+    "response_9": {
+      "200": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "additionalProperties": true,
+              "title": "Response List Skill Packages V1 Admin Skill Packages Get",
+              "type": "object"
+            }
+          }
+        },
+        "description": "Successful Response"
+      },
+      "422": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/HTTPValidationError"
+            }
+          }
+        },
+        "description": "Validation Error"
+      }
+    }
+  },
+  "schemas": {
+    "HTTPValidationError": {
+      "properties": {
+        "detail": {
+          "items": {
+            "$ref": "#/components/schemas/ValidationError"
+          },
+          "title": "Detail",
+          "type": "array"
+        }
+      },
+      "title": "HTTPValidationError",
+      "type": "object"
+    },
+    "PublishSkillRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "activate": {
+          "default": true,
+          "title": "Activate",
+          "type": "boolean"
+        },
+        "artifact_ref": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Artifact Ref"
+        },
+        "expected_digest": {
+          "anyOf": [
+            {
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Expected Digest"
+        },
+        "expected_installation_revision": {
+          "anyOf": [
+            {
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Expected Installation Revision"
+        },
+        "files": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "maxProperties": 512,
+              "minProperties": 1,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Files"
+        }
+      },
+      "title": "PublishSkillRequest",
+      "type": "object"
+    },
+    "RegisterSkillPublisherRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "display_name": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Display Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "display_name"
+      ],
+      "title": "RegisterSkillPublisherRequest",
+      "type": "object"
+    },
+    "RotateSkillPublisherKeyRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "key_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Key Id",
+          "type": "string"
+        },
+        "public_key": {
+          "maxLength": 64,
+          "minLength": 43,
+          "pattern": "^[A-Za-z0-9_-]+$",
+          "title": "Public Key",
+          "type": "string"
+        }
+      },
+      "required": [
+        "key_id",
+        "public_key"
+      ],
+      "title": "RotateSkillPublisherKeyRequest",
+      "type": "object"
+    },
+    "SkillRevocationAction": {
+      "enum": [
+        "continue",
+        "pause",
+        "cancel"
+      ],
+      "title": "SkillRevocationAction",
+      "type": "string"
+    },
+    "ValidationError": {
+      "properties": {
+        "ctx": {
+          "title": "Context",
+          "type": "object"
+        },
+        "input": {
+          "title": "Input"
+        },
+        "loc": {
+          "items": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              }
+            ]
+          },
+          "title": "Location",
+          "type": "array"
+        },
+        "msg": {
+          "title": "Message",
+          "type": "string"
+        },
+        "type": {
+          "title": "Error Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "loc",
+        "msg",
+        "type"
+      ],
+      "title": "ValidationError",
+      "type": "object"
+    }
+  }
+}

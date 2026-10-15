@@ -96,6 +96,30 @@ import-linter 约束。
 
 包与部署单元不是 1:1。组件归属以职责和稳定端口为边界，具体适配器只在 `composition` 中选择。
 
+## Capability Catalog 与 Skill Admin
+
+`action/capability_catalog.py` 是兼容入口与薄分发；核心职责位于 `action/catalog/`：
+
+| 模块 | 所有权 |
+|---|---|
+| `memory.py` | 原内存参考存储：Server、generation、reconcile lease 和 committed snapshot |
+| `publication.py` | 校验发布范围、租约竞争、embedding 索引构建、摘要复用和 generation 提交 |
+| `search.py` | 权限/角色/环境可见性、混合搜索、证据、live get、按 revision 隔离的有界缓存 |
+| `executors.py` | Search/Load/Skill resolve/binding status 的 Hands 适配与工具路由 |
+| `tools.py`、`contracts.py` | 模型工具 Schema、稳定名称和只读/解析/安全查询协议 |
+| `telemetry.py` | 有界尽力写入搜索、缓存与索引发布指标 |
+
+PostgreSQL Catalog 仍实现原 `CapabilityCatalogStore`，未改变事务、租约、CAS 或表结构。
+组件不反向导入兼容入口；存储、发布、搜索、执行器与 Schema 互不依赖，通过 Port 和公共契约交接。
+
+`api/routes/admin_skills.py` 保留原 factory 参数与兼容出口，只组装 `skill_admin/` 下的
+catalog、admissions、publishers、installations、publications 五组路由。
+`contracts.py` 保存 HTTP 请求模型和服务协议，`presentation.py` 保存响应映射、配置缺失错误和游标编码。
+过滤与管理视图聚合归 `action/skill_admin_queries.py`；latest-version 与依赖可用性继续归
+`action/skill_admin_catalog.py`；准入时间窗口、计数和 quarantine 告警归 `action/skill_admission_query.py`。
+路由继续从认证上下文构建命令，保留 command id、expected revision、tenant 和 correlation/causation。
+路由组相互独立且不导入 factory；应用查询不依赖 API 或具体基础设施。上述边界由五条新增合同约束。
+
 ## Runtime 执行组件
 
 `runtime/execution_engine.py` 负责阶段推进、路由接入和 Model/Tool Round 调度。

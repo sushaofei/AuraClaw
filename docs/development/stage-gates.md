@@ -1,5 +1,21 @@
 # 开发阶段校验清单
 
+## 模块重构 R4：Capability Catalog 与 Skill Admin（2026-10-15，Issue #105）
+
+方案：[模块内聚与依赖重构](implementation/modularity-refactor.md#r4目录与管理-api)。
+
+- [x] Catalog 按内存参考存储、索引发布、搜索/缓存、执行器、工具 Schema 与指标拆分，保留构造参数和公开兼容出口；PostgreSQL 实现继续使用原 Store Port。
+- [x] generation、reconcile lease/CAS、摘要复用、权限可见性、搜索证据、缓存失效与调用身份保持；不新增共享可变字典或反向依赖。
+- [x] Admin 按目录、准入、发布者、安装、发布/包生命周期分组；记录过滤/版本聚合与准入窗口/告警归应用服务，HTTP 保留身份、命令和响应映射。
+- [x] 拆分前 OpenAPI fixture 验证 27 路径/29 操作、参数/鉴权 Header/请求模型/状态码/响应 Schema 完全兼容；保留发布/安装 expected revision 和 command 幂等上下文。
+- [x] 新增 18 项回归覆盖缓存 tenant/role 隔离与取消、准入配置/窗口/告警边界、管理聚合与过滤、发布者 key 配对和 HTTP 契约；原搜索 golden、并发对账、租约失效、发布与安装测试通过。
+- [x] 定向回归 110 passed；完整 Pytest 961 passed、74 skipped，包含真实 localhost HTTP/MCP 与 Skill 控制面 E2E；跳过项不作为外部环境/生产验收。
+- [x] Ruff、Mypy strict（318 源码文件）、21 条 import-linter 合同和仓库 release gate 通过；新增五条合同沿用 CI 架构门禁。
+- [x] 48 个目录迁移函数、23 个保持原职责的 Admin handler 经 AST 对比，除引用改名外行为结构一致；无身份、Secret、租户或信任边界变更。
+- [x] 无数据库迁移、事件/检查点格式迁移、依赖/基础镜像变更、生产部署或数据清理；回滚为整体回退本阶段提交。
+- [x] 实施方案、架构映射、Hands 和 MCP 能力平面说明已同步；交付差异无环境文件、缓存或 Secret。
+- [x] 单一阶段提交推送当前分支，远端核验与凭据记录在 Issue #105；既有 CI 镜像漏洞扫描发布阻断继续单独保留，不由本地门禁通过替代。
+
 ## 模块重构 R3：执行引擎恢复、预算与消息边界（2026-10-15，Issue #105）
 
 方案：[模块内聚与依赖重构](implementation/modularity-refactor.md#r3执行引擎与恢复语义)。

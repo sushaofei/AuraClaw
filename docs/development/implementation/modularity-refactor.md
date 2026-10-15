@@ -124,11 +124,37 @@ Canonical progress 选择及 Run 隔离、恢复先校验 fencing、可信说明
 验收覆盖搜索 golden fixtures、目录并发对账与缓存失效、权限可见性、管理查询过滤/分页、
 发布与安装 expected revision、tenant 隔离及 HTTP 契约兼容。
 
+### R4 实现边界
+
+`action/capability_catalog.py` 从 1807 行缩减到 217 行，保留原构造参数、公开类/协议/工具函数
+出口和薄分发。`action/catalog/` 分别拥有内存参考存储、租约与索引发布、混合搜索/缓存、
+Hands 执行器、工具 Schema 和尽力指标写入。PostgreSQL 实现继续依赖原 Store Port。
+Search/Load 执行器只依赖 `CatalogReader`；组件之间不通过 facade 或私有字典交接。
+
+`api/routes/admin_skills.py` 从 1412 行缩减到 111 行，组装 `skill_admin/` 的目录、准入、
+发布者、安装、发布/包生命周期路由。HTTP 身份、command/expected revision 和响应映射保留；
+管理记录过滤、版本聚合及发布者过滤归 `skill_admin_queries.py`，latest-version 复用原
+`skill_admin_catalog.py`，准入窗口聚合/告警归 `skill_admission_query.py`。
+应用服务直接调用也拒绝越界指标窗口；HTTP 原先已对同一范围执行校验，公共契约不变。
+
+保留 generation、lease CAS、内容/索引摘要、缓存 key/TTL/取消语义、工具权限与搜索证据。
+删除无调用方的旧 `_tokens/_score/_capability_metadata_terms` 私有词法回退辅助函数；实际检索继续
+使用原 `capability_search.py` 的 BM25、exact、semantic/RRF 和 execution rerank，排序未变。
+
+新增 18 项回归：缓存租户/角色隔离、取消等待者不取消共享加载，准入窗口、告警边界、
+配置校验、管理视图缺失包/Installation、legal hold=false 过滤、发布者查询与 key 配对。
+以拆分前生成的 OpenAPI 保存去重后的完整 HTTP 契约 fixture，逐项比较 27 路径/29 操作、
+请求模型、参数、鉴权 Header、状态码和响应 Schema。48 个目录迁移函数、23 个保持原职责的
+Admin handler 经 AST 对比，仅改动组件/辅助函数引用。新增五条 import-linter 合同约束新边界。
+
+定向回归 110 passed；完整回归 961 passed、74 skipped，缺少环境的跳过项不视为生产验收。
+Ruff、Mypy strict（318 源码文件）、21 条架构合同和仓库 release gate 通过。
+
 ## 阶段交付与回滚
 
 每阶段运行 Ruff、Mypy、Pytest、import-linter，更新架构映射和 stage-gates，按单一意图
 提交并推送当前分支。外部数据库、Kafka、Vault 或对象存储用例若缺少环境，明确记录跳过；
 不得把跳过当作生产验收通过。
 
-R1/R2/R3 不修改持久化数据、检查点格式或部署配置，可整体回退对应阶段提交并重新构建。
+R1/R2/R3/R4 不修改持久化数据、检查点格式或部署配置，可整体回退对应阶段提交并重新构建。
 后续状态/检查点格式变化必须先补充迁移与回滚策略，再实施。

@@ -522,3 +522,61 @@ def test_search_aliases_require_tenant_actor_source_and_revision() -> None:
             endpoint="https://a.example/mcp",
             metadata={"search_aliases": ["ungoverned alias"]},
         )
+
+
+def test_cached_searches_do_not_share_tenant_or_role_visibility() -> None:
+    async def scenario() -> None:
+        catalog, _ = await seeded_catalog()
+        finance = await catalog.search(tenant_id="a", actor_role="finance-reviewer")
+        worker = await catalog.search(tenant_id="a", actor_role="worker")
+        tenant_b = await catalog.search(tenant_id="b", actor_role="finance-reviewer")
+        assert "cap-hidden-role" in {item.capability_id for item in finance}
+        assert "cap-hidden-role" not in {item.capability_id for item in worker}
+        assert {item.capability_id for item in tenant_b} == {"cap-b-secret"}
+        assert await catalog.search(tenant_id="a", actor_role="worker") == worker
+        assert await catalog.search(tenant_id="a", actor_role="finance-reviewer") == finance
+
+    asyncio.run(scenario())
+
+
+def test_cancelled_search_waiter_does_not_cancel_shared_cache_load() -> None:
+    async def scenario() -> None:
+        provider = SemanticFixture()
+        catalog, _ = await seeded_catalog(provider=provider)
+        provider.started.clear()
+        provider.block = True
+        before = len(provider.batch_sizes)
+        first = asyncio.create_task(
+            catalog.search_with_evidence(
+                tenant_id="a",
+                query="登记一个程序缺陷",
+                actor_role="worker",
+            )
+        )
+        await provider.started.wait()
+        second = asyncio.create_task(
+            catalog.search_with_evidence(
+                tenant_id="a",
+                query="登记一个程序缺陷",
+                actor_role="worker",
+            )
+        )
+        await asyncio.sleep(0)
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        provider.release.set()
+        outcome = await second
+        assert outcome.matches
+        assert len(provider.batch_sizes) == before + 1
+        assert (
+            await catalog.search_with_evidence(
+                tenant_id="a",
+                query="登记一个程序缺陷",
+                actor_role="worker",
+            )
+            == outcome
+        )
+        assert len(provider.batch_sizes) == before + 1
+
+    asyncio.run(scenario())

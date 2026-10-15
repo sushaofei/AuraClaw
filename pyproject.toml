@@ -35,6 +35,49 @@ dev = [
 root_package = "auraclaw"
 
 [[tool.importlinter.contracts]]
+name = "Catalog components do not depend on the compatibility facade"
+type = "forbidden"
+source_modules = ["auraclaw.action.catalog"]
+forbidden_modules = ["auraclaw.action.capability_catalog"]
+
+[[tool.importlinter.contracts]]
+name = "Catalog storage publication search execution and schemas are independent"
+type = "independence"
+modules = [
+  "auraclaw.action.catalog.memory",
+  "auraclaw.action.catalog.publication",
+  "auraclaw.action.catalog.search",
+  "auraclaw.action.catalog.executors",
+  "auraclaw.action.catalog.tools",
+]
+
+[[tool.importlinter.contracts]]
+name = "Skill admin route groups do not depend on the router factory"
+type = "forbidden"
+source_modules = ["auraclaw.api.routes.skill_admin"]
+forbidden_modules = ["auraclaw.api.routes.admin_skills"]
+
+[[tool.importlinter.contracts]]
+name = "Skill admin route groups are independent"
+type = "independence"
+modules = [
+  "auraclaw.api.routes.skill_admin.catalog",
+  "auraclaw.api.routes.skill_admin.admissions",
+  "auraclaw.api.routes.skill_admin.publishers",
+  "auraclaw.api.routes.skill_admin.installations",
+  "auraclaw.api.routes.skill_admin.publications",
+]
+
+[[tool.importlinter.contracts]]
+name = "Skill admin queries do not depend on delivery or concrete adapters"
+type = "forbidden"
+source_modules = [
+  "auraclaw.action.skill_admin_queries",
+  "auraclaw.action.skill_admission_query",
+]
+forbidden_modules = ["auraclaw.api", "auraclaw.composition", "auraclaw.infrastructure"]
+
+[[tool.importlinter.contracts]]
 name = "Execution services do not depend on their callers or controllers"
 type = "forbidden"
 source_modules = ["auraclaw.runtime.execution"]
