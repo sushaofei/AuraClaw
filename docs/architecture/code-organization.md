@@ -72,6 +72,13 @@ builders 与公共装配模块不依赖 `services.py`，公共装配模块也不
 分阶段重构方案与兼容约束见
 [模块内聚与依赖重构](../development/implementation/modularity-refactor.md)。
 
+Runtime 能力控制器保留稳定入口和操作分发，内容缓存、提示词预算、Skill 激活/恢复、
+资源读取、加载预算和模型工具展示归 `runtime/capabilities/` 的独立组件。
+组件通过 `CapabilityState` 接收拥有自身数据的快照，持久化仍导出原检查点字段；
+进度接收方与 Canonical Event payload 不共享可变工作流状态。
+组件不得反向依赖 controller/engine/router；激活、提示词、资源读取和工具展示的独立性由
+import-linter 约束。
+
 | CLI | 服务 | 主归属代码 |
 |---|---|---|
 | `auraclaw api run` | Task API | `api/`、`gateways/task/` |

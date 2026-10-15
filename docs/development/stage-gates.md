@@ -1,5 +1,21 @@
 # 开发阶段校验清单
 
+## 模块重构 R2：Capability Controller 职责与状态边界（2026-10-15，Issue #105）
+
+方案：[模块内聚与依赖重构](implementation/modularity-refactor.md#r2能力控制器与状态所有权)。
+
+- [x] 提取内容缓存、提示词预算、Skill 激活/工作流恢复、资源/引用读取、加载预算与模型工具展示；controller 保留公共入口与分发。
+- [x] 组件入口使用 CapabilityState；导入/导出保留旧检查点的缺省/未知字段；进度 state/events 与 Canonical payload 均不共享可变工作状态。
+- [x] 缓存按 tenant/version/digest/path 隔离，Run 内合并，跨 Run 独立取消；并发替换内容按真实字节计数，TTL/LRU 与大小上限可独立验证。
+- [x] 不改变角色、策略、租户、审批、幂等键、绑定撤销或未知副作用恢复；无 Secret 路径变化。
+- [x] 新增组件依赖方向与职责独立性合同，沿用 CI 架构检查。
+- [x] 定向回归 106 passed；完整 Pytest 930 passed、74 skipped，外部依赖等条件不满足的跳过项不视为生产验收。
+- [x] Ruff 通过；Mypy strict 检查 293 个源码文件通过；14 条 import-linter 合同全部通过。
+- [x] 完整回归包含真实 localhost MCP HTTP 的 cold/warm 与流式参数链、Skill 控制面 E2E，以及审批恢复、未知副作用补录、绑定撤销、提示词预算和检查点隔离验证。
+- [x] 无数据库迁移、检查点格式迁移、生产部署或数据清理；回滚为阶段提交整体回退。
+- [x] 实施方案、架构映射、Runtime Pool 与 Capability Loop 说明已同步。
+- [x] 交付差异已检查，无环境文件、缓存或 Secret；Git 交付要求为单一阶段提交推送当前分支，远端核验与完成凭据统一记录在 Issue #105。
+
 ## 模块重构 R1：composition 单向依赖（2026-10-15，Issue #105）
 
 方案：[模块内聚与依赖重构](implementation/modularity-refactor.md)。

@@ -2278,8 +2278,10 @@ def test_unknown_workflow_result_suspends_without_terminal_or_another_model_turn
     from auraclaw.runtime.capability_controller import CapabilityExecution
 
     class PendingWorkflowController(RuntimeCapabilityController):
-        async def _activate_skill(self, assignment, call, state, *, progress):
-            result = await super()._activate_skill(assignment, call, state, progress=progress)
+        async def execute(self, assignment, call, state, *, progress=None):
+            result = await super().execute(assignment, call, state, progress=progress)
+            if call.name != "auraclaw.skills.activate":
+                return result
             result.state["active_skills"][0]["workflow_status"] = "unknown"
             return CapabilityExecution(
                 result={"status": "unknown", "skill_activation_id": "pending-activation",

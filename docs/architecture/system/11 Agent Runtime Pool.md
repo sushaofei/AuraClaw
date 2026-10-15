@@ -52,6 +52,12 @@ Specialist Runtime
 checkpoint/suspend 分别位于独立模块，可以单独测试。`RuntimePhase` 是 `str` 枚举，因此已有
 checkpoint 的持久化值与跨版本恢复格式不变。
 
+能力分发通过 `runtime/capability_controller.py` 的稳定入口，缓存、Skill 上下文预算、
+激活/工作流恢复、Resource 与声明引用读取分别位于 `runtime/capabilities/`。
+组件入口使用拥有自身数据的 `CapabilityState`，给检查点接收方的进度是副本；
+持久化继续导出原字段，Canonical Event payload 不作为可变执行状态。
+内容缓存可跨 Run 复用已完成的不可变字节，但在途读取与取消按 tenant/session/run 隔离。
+
 ## 状态外置
 
 必须外置：

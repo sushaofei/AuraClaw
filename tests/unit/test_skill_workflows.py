@@ -812,3 +812,55 @@ def test_write_request_is_committed_before_dispatch_and_settled_before_next_step
         ]
 
     asyncio.run(scenario())
+
+
+def test_capability_progress_checkpoints_are_isolated_from_live_workflow_state() -> None:
+    async def scenario() -> None:
+        package = _package()
+        client = _Client(package, _binding(package))
+        controller = RuntimeCapabilityController(client)  # type: ignore[arg-type]
+        original = _controller_state(package)
+        snapshots: list[dict[str, Any]] = []
+
+        async def progress(state: dict[str, Any], events: tuple[Any, ...]) -> None:
+            snapshots.append(state)
+            # A checkpoint sink may retain or transform its input. Neither can
+            # change the descriptors or activation driving the next workflow step.
+            state["loaded"].clear()
+            if events and events[0].type == "skill.activated":
+                events[0].payload["activation"]["binding"]["skill_name"] = "changed-by-sink"
+
+        result = await controller.execute(
+            _assignment(), _activation_call(), original, progress=progress,
+        )
+        assert result.result["status"] == "completed"
+        assert result.result["skill_name"] == "inventory.check"
+        assert client.resource_uris == ["policy://cn-east"]
+        assert "active_skills" not in original
+        assert snapshots
+        assert snapshots[0]["active_skills"][0].get("workflow_status") is None
+        assert "workflow_completed_steps" not in snapshots[0]["active_skills"][0]
+        assert result.state["loaded"]
+
+    asyncio.run(scenario())
+
+
+def test_restored_skill_state_does_not_alias_canonical_activation_payload() -> None:
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    package = _package()
+    activation = SkillActivation(
+        skill_activation_id="ska_restored", activation_key="key", binding=_binding(package),
+        input_digest="sha256:" + "1" * 64,
+    ).model_dump(mode="json")
+    event = SimpleNamespace(
+        type="skill.activated", occurred_at=datetime.now(UTC),
+        payload={"activation": activation, "skill_activation_id": "ska_restored"},
+    )
+    controller = RuntimeCapabilityController(object())  # type: ignore[arg-type]
+    checkpoint = {"extension": {"preserve": True}}
+    controller.restore_skill_events(checkpoint, [event])
+    assert checkpoint["extension"] == {"preserve": True}
+    checkpoint["active_skills"][0]["binding"]["skill_name"] = "changed-after-restore"
+    assert event.payload["activation"]["binding"]["skill_name"] == "inventory.check"

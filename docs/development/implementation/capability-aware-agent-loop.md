@@ -9,6 +9,7 @@ Session、Control 和内部 Action Hands Contract，不增加服务或外部凭�
 
 - `runtime/harness.py`：可恢复的 bounded multi-turn loop；
 - `runtime/capability_controller.py`：bootstrap control tools、候选和固定 binding；
+- `runtime/capabilities/`：内容缓存、提示词构建、Skill 激活/恢复、资源读取、加载预算与模型工具展示；
 - `action/capability_catalog.py`：按 `capability_id` 加载权威契约和内部 Skill resolve；
 - `runtime/hands_adapter.py`：Capability、Resource 和 Skill 的单一受控 Hands 客户端；
 - `session/internal_service.py`：Runtime 写入 Skill 和 Resource 证据的身份边界。
@@ -38,6 +39,11 @@ Checkpoint 是恢复控制状态，不替代：
 - Canonical Event：模型终态、Tool、Skill、Resource 采用和 Run 终态；
 - Hands Invocation Store：Tool 幂等、副作用和未知终态；
 - Artifact Store：大型 Resource、Tool Result 和 Skill Package。
+
+Issue #105 R2 通过 `CapabilityState.from_checkpoint/to_checkpoint` 导入/导出拥有自身数据的
+状态副本，保留缺省字段和未知扩展字段，不修改上述持久化格式。组件通过类型化快照交接，
+工作流 progress 回调收到独立 state/events；事件恢复不把 Canonical payload 作为可变运行状态。
+缓存拥有自己的加载任务与锁：同 Run 合并加载，不同 Run 独立取消，已完成的不可变内容可复用。
 
 ## 3. 安全控制
 

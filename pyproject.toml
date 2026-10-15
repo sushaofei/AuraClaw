@@ -35,6 +35,26 @@ dev = [
 root_package = "auraclaw"
 
 [[tool.importlinter.contracts]]
+name = "Capability components do not depend on their callers"
+type = "forbidden"
+source_modules = ["auraclaw.runtime.capabilities"]
+forbidden_modules = [
+  "auraclaw.runtime.capability_controller",
+  "auraclaw.runtime.execution_engine",
+  "auraclaw.runtime.task_router",
+]
+
+[[tool.importlinter.contracts]]
+name = "Capability responsibilities are independent"
+type = "independence"
+modules = [
+  "auraclaw.runtime.capabilities.skills",
+  "auraclaw.runtime.capabilities.prompts",
+  "auraclaw.runtime.capabilities.resources",
+  "auraclaw.runtime.capabilities.model_tools",
+]
+
+[[tool.importlinter.contracts]]
 name = "Service builders and support do not depend on the dispatcher"
 type = "forbidden"
 source_modules = [
