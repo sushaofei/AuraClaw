@@ -1,0 +1,12 @@
+[Unit]
+Description=Proxy loopback HTTP to the isolated AppWorld Unix socket
+Requires=appworld-environment.service
+After=appworld-environment.service
+
+[Service]
+User=appworld-eval
+ExecStart=/usr/lib/systemd/systemd-socket-proxyd /data4/appworld/run/environment.sock
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true

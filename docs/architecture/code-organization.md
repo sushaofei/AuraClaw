@@ -164,3 +164,8 @@ pass^k 汇总；不依赖 API、具体适配器或 composition。`composition/ev
 两条 import-linter 合同约束上述方向。评测不新增生产依赖。
 
 方案、成绩语义和实际运行限制见 [Agent 任务评测](../development/agent-evaluation.md)。
+
+E2 的 `benchmarks/deploy/` 是显式选择的开发评测部署入口，不被生产包导入；
+`run_service.py` 调用既有 composition 子进程生命周期，生产 CLI 的部署 profile 约束不变。
+分布式 Collaboration 投影从 Session root-feed 获取 Canonical Events，SQL 只维护可重建视图；
+单库参考拓扑保留本地事件读取。评测环境统一 SQL 账号不改变上述组件职责。

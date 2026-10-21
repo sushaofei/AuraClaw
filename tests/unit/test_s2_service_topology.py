@@ -494,6 +494,7 @@ def test_distributed_projection_consumes_runtime_budget_metrics(monkeypatch) -> 
 
     from auraclaw.composition.builders import projection
     from auraclaw.contracts.events import Actor, CanonicalEvent
+    from auraclaw.contracts.internal import ServiceIdentity
     from auraclaw.contracts.state import Visibility
     from auraclaw.infrastructure.observability.stores import InMemoryObservabilityStore
 
@@ -506,7 +507,11 @@ def test_distributed_projection_consumes_runtime_budget_metrics(monkeypatch) -> 
         return value
     monkeypatch.setattr(projection, 'CompositeProjection', composite)
     monkeypatch.setattr(projection.providers, 'get_observability_store', lambda: store)
-    monkeypatch.setattr(projection.providers, 'session_outbox_projectors', lambda: ())
+    def projectors(*, collaboration):
+        assert collaboration._event_store.__class__.__name__ == 'RemoteSessionEventStore'
+        assert collaboration._event_store._identity is ServiceIdentity.PROJECTION_WORKER
+        return ()
+    monkeypatch.setattr(projection.providers, 'session_outbox_projectors', projectors)
     monkeypatch.setattr(projection, 'base_service_app', lambda *a, **kw: FastAPI())
     settings = _settings(storage_backend='postgres')
     projection.build_projection_app(

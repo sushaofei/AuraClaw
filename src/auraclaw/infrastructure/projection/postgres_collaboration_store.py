@@ -14,10 +14,15 @@ from auraclaw.infrastructure.persistence.postgres_common import (
     json_loads,
 )
 from auraclaw.projection.collaboration.projector import COLLABORATION_EVENTS
+from auraclaw.session.ports import EventStore
 
 
 class PostgresCollaborationProjection(LazyPool):
     """Rebuildable Child DAG and review view derived from Canonical Events."""
+
+    def __init__(self, database_url: str, *, event_store: EventStore | None = None) -> None:
+        super().__init__(database_url)
+        self._event_store = event_store
 
     async def project(self, events: Sequence[CanonicalEvent]) -> None:
         pool = await self.pool()
@@ -33,14 +38,31 @@ class PostgresCollaborationProjection(LazyPool):
                 )
                 if inserted is None:
                     continue
-                rows = await connection.fetch(
-                    """SELECT * FROM session_core.canonical_event
-                    WHERE tenant_id=$1 AND root_session_id=$2
-                    ORDER BY occurred_at, session_id, aggregate_version""",
-                    event.tenant_id,
-                    event.root_session_id,
-                )
-                canonical = [event_from_record(row) for row in rows]
+                if self._event_store is not None:
+                    # Distributed workers read facts through Session's authenticated
+                    # contract regardless of shared or scoped SQL credentials.
+                    canonical = await self._event_store.load_root(
+                        event.tenant_id, event.root_session_id,
+                        event_types=tuple(sorted(COLLABORATION_EVENTS)),
+                    )
+                    if len(canonical) >= 5000:
+                        # Root-feed is bounded. Fall back to the paginated tenant
+                        # feed instead of silently rebuilding a truncated graph.
+                        canonical = [
+                            item for item in await self._event_store.load_all(event.tenant_id)
+                            if item.root_session_id == event.root_session_id
+                            and item.type in COLLABORATION_EVENTS
+                        ]
+                else:
+                    # Shared-store topology retains its local Canonical reader.
+                    rows = await connection.fetch(
+                        """SELECT * FROM session_core.canonical_event
+                        WHERE tenant_id=$1 AND root_session_id=$2
+                        ORDER BY occurred_at, session_id, aggregate_version""",
+                        event.tenant_id,
+                        event.root_session_id,
+                    )
+                    canonical = [event_from_record(row) for row in rows]
                 graph = CollaborationAggregate.from_events(
                     event.tenant_id, event.root_session_id, canonical
                 )

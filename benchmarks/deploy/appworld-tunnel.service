@@ -1,0 +1,14 @@
+[Unit]
+Description=AuraClaw evaluation tunnel to AppWorld
+After=network-online.target
+Wants=network-online.target
+RequiresMountsFor=/data4/auraclaw-e2/ssh
+
+[Service]
+EnvironmentFile=/etc/auraclaw-eval/tunnel.env
+ExecStart=/usr/bin/ssh -N -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/data4/auraclaw-e2/ssh/known_hosts -o ExitOnForwardFailure=yes -o ServerAliveInterval=20 -o ServerAliveCountMax=3 -i /data4/auraclaw-e2/ssh/appworld_tunnel -L 127.0.0.1:18000:127.0.0.1:18000 appworld-tunnel@${APPWORLD_SSH_HOST}
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -71,7 +71,10 @@ class AppWorldEnvironment:
     def __init__(self, world: Any) -> None:
         self.instructions = (
             "Solve the task in the AppWorld Python shell using appworld_execute. "
-            "Use apis.api_docs to discover APIs; print observations as needed. "
+            "Discover APIs with print(apis.api_docs.show_app_descriptions()), "
+            "print(apis.api_docs.show_api_descriptions(app_name='APP_NAME')), then "
+            "print(apis.api_docs.show_api_doc(app_name='APP_NAME', api_name='API_NAME')). "
+            "Use keyword arguments for every API call and inspect its specification first. "
             "Variables persist between executions. Finish using apis.supervisor.complete_task. "
             "Do not access ground truth, evaluator internals, host files or external networks.\n"
             + json.dumps(

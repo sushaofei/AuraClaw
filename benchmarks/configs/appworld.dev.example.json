@@ -13,6 +13,7 @@
   },
   "upstream_root": "/replace/with/appworld-checkout",
   "model_gateway_url": "http://127.0.0.1:8083",
+  "appworld_remote_docker": true,
   "appworld_environment_url": "http://127.0.0.1:8000",
   "task_ids": ["REPLACE_WITH_OFFICIAL_DEV_TASK_ID"],
   "trials": 3

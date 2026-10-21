@@ -1,5 +1,20 @@
 # 开发阶段校验清单
 
+## Agent 任务评测 E2：两机开发部署与官方 SDK 联调（2026-10-21，Issue #106）
+
+部署与证据：[两机评测部署](../operations/agent-evaluation-deployment.md)。
+
+- [x] MASTER2/WORKER1 完成条件准入；核验容量、数据挂载 UUID、时钟和既有服务，保留升级恢复/取证不足等例外，无重启或旧业务数据操作。
+- [x] MASTER2 部署 12 进程、独立 PostgreSQL/Kafka/SeaweedFS volume；按用户要求所有 SQL 服务使用同一 auraclaw_app，迁移管理账号独立，Secret 和 Provider 密钥边界保持。
+- [x] WORKER1 独立 Podman 存储、非 root/network-none/read-only 环境；只读数据、私有输出和 Unix socket；专用受限 SSH 转发不依赖安装代理。
+- [x] 固定两个上游完整 revision、独立 Python 3.11 SDK 和兼容依赖；pip check、AppWorld Git LFS、实际镜像/数据字节指纹核验，不修改生产依赖/uv.lock。
+- [x] τ retail 2 个 dev 任务与 AppWorld 2 个不同任务族 dev 任务各 1 trial，官方 SDK 均成功；AppWorld 官方 CLI 复评通过，保留首轮预算失败，不合并轮次或宣称完整 SGC/正式榜单成绩。
+- [x] 数据校验在任务加载前执行；记录实际官方 experiment_name；公开 API 文档查询引导不含任务解答，完整轨迹和数据保留私有目录。
+- [x] 修复 replay/自身观测权限和分布式协作投影事实读取；真实角色测试、统一账号登录与实际挂载核验通过，签名入口→调度→Qwen→8 条 Canonical Events→结果投影链路完成。
+- [x] 完整回归 987 passed、74 skipped；Ruff、Mypy strict（328 文件）、23 条架构合同、release gate 通过；跳过项不作为外部环境/生产验收。
+- [x] 架构映射、方案、部署步骤、账号切换备份与回滚同步；无数据库结构迁移，环境文件、密钥、SDK 数据/答案与输出不入 Git。
+- [x] 本阶段按单一提交推送当前分支；最终 commit/镜像绑定确认、远端核验与运行标识在 #106 记录。Qwen 别名、Provider 默认采样、未知费用及既有供应链发布阻断不由 E2 解除，E3 保留集重复评测另行推进。
+
 ## Agent 任务评测 E1：τ-bench 与 AppWorld 接入基础（2026-10-21，Issue #106）
 
 方案：[Agent 任务评测](agent-evaluation.md)。

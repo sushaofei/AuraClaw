@@ -1,0 +1,9 @@
+[Unit]
+Description=AppWorld evaluation loopback HTTP socket
+
+[Socket]
+ListenStream=127.0.0.1:18000
+NoDelay=true
+
+[Install]
+WantedBy=sockets.target

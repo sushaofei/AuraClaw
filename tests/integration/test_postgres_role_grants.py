@@ -198,6 +198,25 @@ async def _assert_task_api_privileges(connection: asyncpg.Connection) -> None:
     assert not await connection.fetchval(
         "SELECT has_table_privilege($1,'observability.audit_event','UPDATE')", role
     )
+    for privilege in ("SELECT", "INSERT", "DELETE"):
+        assert await connection.fetchval(
+            "SELECT has_table_privilege($1,'security.agent_context_replay',$2)",
+            role, privilege,
+        )
+    assert not await connection.fetchval(
+        "SELECT has_table_privilege($1,'security.agent_context_replay','UPDATE')", role
+    )
+    for table in ("observability.trace_span", "observability.metric_point"):
+        assert await connection.fetchval(
+            "SELECT has_table_privilege($1,$2,'INSERT')", role, table
+        )
+        assert not await connection.fetchval(
+            "SELECT has_table_privilege($1,$2,'UPDATE')", role, table
+        )
+    assert await connection.fetchval(
+        "SELECT has_sequence_privilege($1,'observability.metric_point_metric_id_seq','USAGE')",
+        role,
+    )
     for table in ("projection.activity_state", "projection.activity_node"):
         assert await connection.fetchval(
             "SELECT has_table_privilege($1,$2,'SELECT')", role, table
@@ -216,8 +235,14 @@ async def _assert_task_api_privileges(connection: asyncpg.Connection) -> None:
         "streaming.gateway_instance",
         "model_gateway.model_call",
     ):
+        # Resolve the relation through the readable catalog. Name-based regclass
+        # lookup itself raises when this actual login lacks schema USAGE.
+        schema, relation = table.split(".", 1)
         assert not await connection.fetchval(
-            "SELECT has_table_privilege($1,$2,'SELECT')", role, table
+            """SELECT has_table_privilege($1,c.oid,'SELECT')
+            FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+            WHERE n.nspname=$2 AND c.relname=$3""",
+            role, schema, relation,
         )
 
 

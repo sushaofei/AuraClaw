@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import importlib
 import json
 import os
@@ -40,6 +41,26 @@ def revision(root: Path) -> str:
     ).stdout.strip()
 
 
+def verify_dataset(root: Path, declared: str) -> None:
+    """Bind results to the bytes actually used by the official SDK, excluding bytecode."""
+    if not declared.startswith("sha256:") or len(declared) != 71:
+        raise ValueError("Official evaluation requires a SHA-256 dataset manifest")
+    digest = hashlib.sha256()
+    files = 0
+    for path in sorted(root.rglob("*")):
+        if "__pycache__" in path.parts or path.suffix in {".pyc", ".pyo"}:
+            continue
+        if path.is_symlink():
+            raise ValueError("Dataset symlinks are not allowed")
+        if not path.is_file():
+            continue
+        digest.update(path.relative_to(root).as_posix().encode() + b"\0")
+        digest.update(hashlib.sha256(path.read_bytes()).digest())
+        files += 1
+    if not files or "sha256:" + digest.hexdigest() != declared:
+        raise ValueError("Official dataset bytes do not match the declared manifest")
+
+
 def upstream_module(root: Path, name: str, expected: str) -> Any:
     if revision(root) != expected:
         raise ValueError("Upstream checkout does not match the pinned revision")
@@ -68,6 +89,7 @@ async def worker(args: argparse.Namespace) -> None:
     delegate: ModelClient
     env: BenchmarkEnvironment | None = None
     runner_owns_environment = False
+    experiment_name: str | None = None
     try:
         if args.smoke:
             env = fixture_environment(config.benchmark)
@@ -77,6 +99,9 @@ async def worker(args: argparse.Namespace) -> None:
             sha = UPSTREAMS[config.benchmark][1]
             if config.benchmark == "tau-bench":
                 upstream_module(root, "tau_bench", sha)
+                verify_dataset(
+                    root / "tau_bench" / "envs" / str(config.domain), config.dataset_revision
+                )
                 get_env = importlib.import_module("tau_bench.envs").get_env
                 action = importlib.import_module("tau_bench.types").Action
                 raw = get_env(
@@ -90,13 +115,17 @@ async def worker(args: argparse.Namespace) -> None:
                 env = TauEnvironment(raw, int(args.task_id), action)
             else:
                 sdk = upstream_module(root, "appworld", sha)
+                paths = importlib.import_module("appworld.common.path_store").path_store
+                verify_dataset(Path(paths.data), config.dataset_revision)
                 if args.task_id not in sdk.load_task_ids(config.split):
                     raise ValueError("Task id does not belong to the requested split")
+                experiment_name = "auraclaw_" + uuid4().hex
                 env = AppWorldEnvironment(
                     sdk.AppWorld(
                         task_id=args.task_id,
-                        experiment_name="auraclaw_" + uuid4().hex,
+                        experiment_name=experiment_name,
                         remote_environment_url=manifest["appworld_environment_url"],
+                        remote_docker=manifest.get("appworld_remote_docker", True),
                         raise_on_unsafe_syntax=True,
                         raise_on_unsafe_execution=True,
                         random_seed=config.seed + args.trial,
@@ -118,8 +147,10 @@ async def worker(args: argparse.Namespace) -> None:
             task_id=args.task_id,
             trial=args.trial,
         )
+        if experiment_name is not None:
+            record["environment_experiment_name"] = experiment_name
         record["validation_scope"] = "fixture" if args.smoke else "official-sdk-adapter"
-        record["dataset_revision_verified"] = False  # E2 must verify official data provenance.
+        record["dataset_revision_verified"] = not args.smoke
         write_private(args.result.with_suffix(".trace.json"), trace)
     except Exception as error:
         record = {
@@ -167,9 +198,12 @@ def run(args: argparse.Namespace) -> None:
             "upstream_root",
             "model_gateway_url",
             "appworld_environment_url",
+            "appworld_remote_docker",
         }
         if set(manifest) - allowed:
             raise ValueError("Unknown manifest fields; credentials belong in environment variables")
+        if not isinstance(manifest.get("appworld_remote_docker", True), bool):
+            raise ValueError("appworld_remote_docker must be a boolean")
         for key in ("model_gateway_url", "appworld_environment_url"):
             if key in manifest:
                 url = urlsplit(manifest[key])

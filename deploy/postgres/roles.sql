@@ -141,3 +141,29 @@ GRANT SELECT ON auraclaw_meta.schema_migration TO auraclaw_task_api, auraclaw_se
     auraclaw_projection, auraclaw_control, auraclaw_delivery, auraclaw_hands,
     auraclaw_policy, auraclaw_credential, auraclaw_artifact, auraclaw_streaming,
     auraclaw_model;
+
+-- Task API verifies signed write assertions using the shared replay ledger.
+-- It must not gain access to the other security tables or UPDATE replay identities.
+REVOKE ALL ON SCHEMA security FROM PUBLIC;
+GRANT USAGE ON SCHEMA security TO auraclaw_task_api;
+GRANT SELECT, INSERT, DELETE ON security.agent_context_replay TO auraclaw_task_api;
+
+-- Every SQL-backed HTTP service appends its own spans and metrics. Readiness alone
+-- does not exercise these writes. Keep audit/alert mutation with the existing owners.
+GRANT USAGE ON SCHEMA observability TO auraclaw_session, auraclaw_control,
+    auraclaw_policy, auraclaw_credential, auraclaw_artifact, auraclaw_streaming;
+GRANT INSERT ON observability.trace_span, observability.metric_point TO
+    auraclaw_task_api, auraclaw_session, auraclaw_projection, auraclaw_control,
+    auraclaw_delivery, auraclaw_hands, auraclaw_policy, auraclaw_credential,
+    auraclaw_artifact, auraclaw_streaming, auraclaw_model;
+GRANT USAGE ON SEQUENCE observability.metric_point_metric_id_seq TO
+    auraclaw_task_api, auraclaw_session, auraclaw_projection, auraclaw_control,
+    auraclaw_delivery, auraclaw_hands, auraclaw_policy, auraclaw_credential,
+    auraclaw_artifact, auraclaw_streaming, auraclaw_model;
+-- ON CONFLICT targets require SELECT on their key columns, not payload access.
+GRANT SELECT (span_id) ON observability.trace_span TO
+    auraclaw_session, auraclaw_control, auraclaw_policy,
+    auraclaw_credential, auraclaw_artifact, auraclaw_streaming;
+GRANT SELECT (deduplication_key) ON observability.metric_point TO
+    auraclaw_session, auraclaw_control, auraclaw_policy,
+    auraclaw_credential, auraclaw_artifact, auraclaw_streaming;

@@ -1,0 +1,184 @@
+# Isolated development evaluation only. Merge after compose.test.yml.
+# No production readiness or official benchmark score is implied by deployment.
+name: auraclaw-eval
+
+x-eval-settings: &eval-settings
+  AURACLAW_DISABLE_ENV_FILE: "1"
+  AURACLAW_POSTGRESQL_ENV_FILE: /dev/null
+  AURACLAW_KINGBASE_ENV_FILE: /dev/null
+  AURACLAW_DEPLOYMENT_PROFILE: development
+  AURACLAW_STORAGE_BACKEND: postgres
+  AURACLAW_OBSERVABILITY_OTLP_HTTP_ENDPOINT: ""
+  AURACLAW_ALERT_RECEIVER_URL: ""
+
+x-eval-deploy: &eval-deploy
+  replicas: 1
+  resources:
+    reservations: {cpus: "0.25", memory: 256M}
+    limits: {cpus: "2.00", memory: 2G}
+
+x-eval-process: &eval-process
+  entrypoint: [python, /eval/run_service.py]
+  volumes: ["./benchmarks/deploy/run_service.py:/eval/run_service.py:ro"]
+
+services:
+  task-api:
+    <<: *eval-process
+    command: [api]
+    environment: *eval-settings
+    deploy: *eval-deploy
+  session:
+    <<: *eval-process
+    command: [session]
+    environment: *eval-settings
+    deploy: *eval-deploy
+  projection-worker:
+    <<: *eval-process
+    command: [projection]
+    environment: *eval-settings
+    deploy: *eval-deploy
+  orchestrator:
+    <<: *eval-process
+    command: [orchestrator]
+    environment: *eval-settings
+    deploy: *eval-deploy
+  agent-runtime:
+    <<: *eval-process
+    command: [runtime]
+    environment:
+      <<: *eval-settings
+      AURACLAW_STORAGE_BACKEND: memory
+    deploy: *eval-deploy
+  model-gateway:
+    <<: *eval-process
+    command: [model-gateway]
+    environment:
+      <<: *eval-settings
+      AURACLAW_MODEL_THINKING_ENABLED: "false"
+      AURACLAW_MODEL_RETRY_ATTEMPTS: "1"
+    ports: ["127.0.0.1:18005:8005"]
+    deploy: *eval-deploy
+  action-hands:
+    <<: *eval-process
+    command: [hands]
+    environment: *eval-settings
+    deploy: *eval-deploy
+  policy:
+    <<: *eval-process
+    command: [policy]
+    environment:
+      <<: *eval-settings
+      AURACLAW_MODEL_NAME: ${AURACLAW_MODEL_NAME:?required}
+      AURACLAW_MODEL_PROVIDER: ${AURACLAW_MODEL_PROVIDER:-openai_compatible}
+    deploy: *eval-deploy
+  credential-proxy:
+    <<: *eval-process
+    command: [credential-proxy]
+    environment:
+      <<: *eval-settings
+      AURACLAW_CREDENTIAL_VAULT_ADDR: ""
+    deploy: *eval-deploy
+  artifact-service:
+    <<: *eval-process
+    command: [artifact]
+    environment:
+      <<: *eval-settings
+      AURACLAW_ARTIFACT_BACKEND: seaweedfs
+      AURACLAW_ARTIFACT_SCANNER_BASE_URL: ""
+      SEAWEEDFS_HOST: seaweedfs
+      SEAWEEDFS_S3_PORT: "8333"
+      SEAWEEDFS_ACCESS_KEY_FILE: /run/secrets/obs_ak
+      SEAWEEDFS_SECRET_KEY_FILE: /run/secrets/obs_sk
+      SEAWEEDFS_BUCKET: auraclaw-eval
+      SEAWEEDFS_USE_SSL: "false"
+      SEAWEEDFS_PATH_STYLE: "true"
+    deploy: *eval-deploy
+  streaming-gateway:
+    <<: *eval-process
+    command: [streaming]
+    environment: *eval-settings
+    deploy: *eval-deploy
+  delivery-worker:
+    <<: *eval-process
+    command: [delivery]
+    environment: *eval-settings
+    deploy: *eval-deploy
+  ingress:
+    image: ${AURACLAW_EVAL_NGINX_IMAGE:?required}
+    ports: !override ["127.0.0.1:18080:8080"]
+  migrate:
+    environment:
+      AURACLAW_DEPLOYMENT_PROFILE: development
+      AURACLAW_DISABLE_ENV_FILE: "1"
+  postgres:
+    image: postgres:17.6-alpine@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94
+    environment:
+      POSTGRES_USER: auraclaw_migration
+      POSTGRES_PASSWORD_FILE: /run/secrets/eval_postgres_password
+      POSTGRES_DB: auraclaw
+    secrets: [eval_postgres_password]
+    volumes: ["eval-postgres:/var/lib/postgresql/data"]
+    networks: [platform]
+    restart: unless-stopped
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U auraclaw_migration -d auraclaw"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    mem_limit: 4g
+    cpus: 4
+  kafka-init:
+    image: apache/kafka:4.0.0@sha256:3f7b939115cd4872e9cee9369d80bd69712fde55f9902f46d793f64848dedc75
+    user: "0:0"
+    entrypoint: /bin/sh
+    command: [-c, "chown 1000:1000 /kafka-data"]
+    volumes: ["eval-kafka:/kafka-data"]
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [CHOWN]
+    security_opt: [no-new-privileges:true]
+    restart: "no"
+    mem_limit: 128m
+  kafka:
+    depends_on:
+      kafka-init: {condition: service_completed_successfully}
+    image: apache/kafka:4.0.0@sha256:3f7b939115cd4872e9cee9369d80bd69712fde55f9902f46d793f64848dedc75
+    environment:
+      KAFKA_NODE_ID: "1"
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_DIRS: /tmp/kraft-combined-logs
+    volumes: ["eval-kafka:/tmp/kraft-combined-logs"]
+    networks: [platform]
+    restart: unless-stopped
+    mem_limit: 4g
+    cpus: 4
+  seaweedfs:
+    image: chrislusf/seaweedfs:3.85@sha256:49312939c00c01e5ee6afbd7d728b18027821d3764c35a797a72acd4fdf3296a
+    command: [server, -s3, -s3.port=8333, -s3.config=/run/secrets/eval_s3_config, -dir=/data]
+    secrets: [eval_s3_config]
+    volumes: ["eval-seaweedfs:/data"]
+    networks: [platform]
+    restart: unless-stopped
+    mem_limit: 2g
+    cpus: 2
+
+volumes:
+  eval-postgres:
+  eval-kafka:
+  eval-seaweedfs:
+
+secrets:
+  eval_postgres_password:
+    file: ${AURACLAW_SECRET_DIR:?required}/eval_postgres_password
+  eval_s3_config:
+    file: ${AURACLAW_SECRET_DIR:?required}/eval_s3_config

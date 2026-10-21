@@ -18,6 +18,9 @@ from auraclaw.infrastructure.clients.session import (
     RemoteSessionOutboxSource,
 )
 from auraclaw.infrastructure.persistence.postgres_admin_store import PostgresAdminOperationStore
+from auraclaw.infrastructure.projection.postgres_collaboration_store import (
+    PostgresCollaborationProjection,
+)
 from auraclaw.infrastructure.projection.postgres_task_store import PostgresTaskProjection
 from auraclaw.internal.http import create_contract_app
 from auraclaw.internal.routes import admin_routes
@@ -37,7 +40,6 @@ def build_projection_app(
 
     task_projection = providers.get_task_projection()
     approval_projection = providers.get_approval_projection()
-    collaboration_projection = providers.get_collaboration_projection()
     activity_projection = providers.get_activity_projection()
     admin_store = PostgresAdminOperationStore(
         settings.resolved_database_url, schema="projection"
@@ -48,6 +50,9 @@ def build_projection_app(
         service_identity=ServiceIdentity.PROJECTION_WORKER,
         bearer_token=token or secrets.token_urlsafe(32),
         timeout=max(10.0, settings.worker_idle_interval + 5.0),
+    )
+    collaboration_projection = PostgresCollaborationProjection(
+        settings.resolved_database_url, event_store=remote_session
     )
     claim_wait = settings.worker_idle_interval if settings.worker_wake_enabled else 0.0
     source = RemoteSessionOutboxSource(
@@ -61,7 +66,7 @@ def build_projection_app(
         store=providers.get_observability_store(),
     )
     projector = CompositeProjection(
-        *providers.session_outbox_projectors(),
+        *providers.session_outbox_projectors(collaboration=collaboration_projection),
         ObservabilityProjector(ObservabilityService(observability_store, remote_session)),
     )
     relay = OutboxRelay(source, projector)

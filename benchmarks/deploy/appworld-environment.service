@@ -1,0 +1,19 @@
+[Unit]
+Description=Isolated AppWorld evaluation environment
+After=network-online.target
+Wants=network-online.target
+RequiresMountsFor=/data4/appworld
+ConditionPathIsMountPoint=/data4
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/auraclaw-eval/appworld.env
+ExecStartPre=/usr/local/libexec/appworld-eval-preflight
+ExecStart=/usr/bin/podman --root /data4/appworld/container-storage run --replace --name appworld-e2 --network none --user ${APPWORLD_UID}:${APPWORLD_GID} --cap-drop ALL --security-opt no-new-privileges --read-only --pids-limit 256 --memory 16g --cpus 8 --tmpfs /tmp:rw,nosuid,nodev,size=2g,mode=1777 -v /data4/appworld/data:/run/data:ro -v /data4/appworld/outputs:/run/experiments/outputs:rw -v /data4/appworld/run:/socket:rw ${APPWORLD_IMAGE}
+ExecStop=/usr/bin/podman --root /data4/appworld/container-storage stop --time 20 appworld-e2
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=40
+
+[Install]
+WantedBy=multi-user.target

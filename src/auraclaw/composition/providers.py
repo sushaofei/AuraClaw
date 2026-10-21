@@ -93,12 +93,14 @@ def get_activity_projection() -> ActivityProjection:
     return InMemoryActivityProjection()
 
 
-def session_outbox_projectors() -> tuple[ProjectionWriter, ...]:
+def session_outbox_projectors(
+    *, collaboration: ProjectionWriter | None = None
+) -> tuple[ProjectionWriter, ...]:
     """Projectors that must consume Session outbox in every topology."""
     return (
         get_task_projection(),
         get_approval_projection(),
-        get_collaboration_projection(),
+        collaboration if collaboration is not None else get_collaboration_projection(),
         get_activity_projection(),
     )
 

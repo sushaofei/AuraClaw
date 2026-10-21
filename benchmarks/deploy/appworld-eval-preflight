@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+: "${APPWORLD_DATA_UUID:?required}"
+: "${APPWORLD_IMAGE:?required}"
+test "$(findmnt -n -o UUID --target /data4)" = "$APPWORLD_DATA_UUID"
+# The reference is a locally verified image ID, never a moving registry tag.
+case "$APPWORLD_IMAGE" in sha256:*) ;; *) exit 1;; esac
+test "${#APPWORLD_IMAGE}" -eq 71
+/usr/bin/podman --root /data4/appworld/container-storage image exists "$APPWORLD_IMAGE"

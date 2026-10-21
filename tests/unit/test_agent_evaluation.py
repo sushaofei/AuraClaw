@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import subprocess
@@ -287,3 +288,148 @@ async def test_failed_later_model_call_does_not_report_partial_cost_as_total():
     assert record["usage"]["cost"] == 0.01
     assert record["cost"] is None and record["total_cost"] is None
     assert record["status"] == "runtime_error"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("remote_docker", [True, False])
+async def test_appworld_worker_preserves_remote_paths_and_official_experiment_identity(
+    tmp_path, monkeypatch, remote_docker
+):
+    spec = importlib.util.spec_from_file_location(
+        "evaluation_cli_test", ROOT / "benchmarks/run_agents.py"
+    )
+    cli = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cli)
+    captured = {}
+
+    def create_world(**kwargs):
+        captured.update(kwargs)
+        return FixtureWorld()
+
+    class Gateway(FixtureModel):
+        def __init__(self, *args, **kwargs):
+            super().__init__()
+
+        async def aclose(self):
+            pass
+
+    sdk = SimpleNamespace(load_task_ids=lambda split: ["sample"], AppWorld=create_world)
+    monkeypatch.setattr(cli, "upstream_module", lambda *args: sdk)
+    monkeypatch.setattr(cli, "RemoteModelClient", Gateway)
+    monkeypatch.setattr(cli, "verify_dataset", lambda *args: None)
+    monkeypatch.setattr(cli, "importlib", SimpleNamespace(
+        import_module=lambda name: SimpleNamespace(path_store=SimpleNamespace(data=str(tmp_path)))
+    ))
+    monkeypatch.setenv("AURACLAW_EVAL_GATEWAY_TOKEN", "fixture-token")
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({
+        "config": asdict(config("appworld")),
+        "upstream_root": str(tmp_path),
+        "model_gateway_url": "http://127.0.0.1:18005",
+        "appworld_environment_url": "http://127.0.0.1:18000",
+        "appworld_remote_docker": remote_docker,
+    }))
+    result = tmp_path / "result.json"
+    await cli.worker(SimpleNamespace(
+        manifest=manifest, smoke=False, task_id="sample", trial=0, result=result
+    ))
+    record = json.loads(result.read_text())
+    assert record["success"]
+    assert captured["remote_docker"] is remote_docker
+    assert captured["raise_on_unsafe_syntax"] and captured["raise_on_unsafe_execution"]
+    assert record["environment_experiment_name"] == captured["experiment_name"]
+    assert captured["experiment_name"].startswith("auraclaw_")
+
+
+@pytest.mark.parametrize(
+    ("profile", "owner", "sql", "kafka", "provider_key", "reason"),
+    [
+        ("production", "agent-runtime", False, True, None, "development profile"),
+        ("development", "task-api", False, True, None, "SQL storage"),
+        ("development", "agent-runtime", False, False, None, "Kafka"),
+        ("development", "agent-runtime", False, True, "provider-key", "Provider credentials"),
+    ],
+)
+def test_evaluation_deployment_rejects_wrong_profile_or_missing_boundaries(
+    monkeypatch, profile, owner, sql, kafka, provider_key, reason
+):
+    spec = importlib.util.spec_from_file_location(
+        "evaluation_service_test", ROOT / "benchmarks/deploy/run_service.py"
+    )
+    entry = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(entry)
+    monkeypatch.setattr(sys, "argv", ["run_service.py", "runtime"])
+    monkeypatch.setattr(entry, "get_settings", lambda: SimpleNamespace(
+        deployment_profile=profile, sql_storage_enabled=sql, kafka_enabled=kafka,
+        model_api_key=provider_key,
+    ))
+    monkeypatch.setattr(entry, "service_spec", lambda *args: SimpleNamespace(name=owner))
+    monkeypatch.setattr(entry, "_run_service_process", lambda *args: pytest.fail("must not start"))
+    with pytest.raises(SystemExit, match=reason):
+        entry.main()
+
+
+def test_official_dataset_verification_binds_bytes_and_rejects_links(tmp_path):
+    import hashlib
+
+    spec = importlib.util.spec_from_file_location(
+        "evaluation_provenance_test", ROOT / "benchmarks/run_agents.py"
+    )
+    cli = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cli)
+    (tmp_path / "input.json").write_bytes(b"official-data")
+    digest = hashlib.sha256(b"input.json\0" + hashlib.sha256(b"official-data").digest())
+    declared = "sha256:" + digest.hexdigest()
+    cli.verify_dataset(tmp_path, declared)
+    (tmp_path / "__pycache__").mkdir()
+    (tmp_path / "__pycache__/generated.pyc").write_bytes(b"not-input")
+    cli.verify_dataset(tmp_path, declared)
+    (tmp_path / "input.json").write_bytes(b"modified")
+    with pytest.raises(ValueError, match="do not match"):
+        cli.verify_dataset(tmp_path, declared)
+    (tmp_path / "input.json").write_bytes(b"official-data")
+    (tmp_path / "linked.json").symlink_to(tmp_path / "input.json")
+    with pytest.raises(ValueError, match="symlinks"):
+        cli.verify_dataset(tmp_path, declared)
+
+
+def test_evaluation_config_uses_one_app_login_and_keeps_migration_separate(tmp_path):
+    import tarfile
+    from urllib.parse import urlsplit
+
+    from dotenv import dotenv_values
+
+    model_env = tmp_path / "model.env"
+    model_env.write_text(
+        "AURACLAW_MODEL_API_KEY=fixture-only\n"
+        "AURACLAW_MODEL_BASE_URL=https://fixture.invalid/v1\n"
+        "AURACLAW_MODEL_NAME=fixture-model\n"
+        "AURACLAW_MODEL_PROVIDER=openai_compatible\n"
+        "UNRELATED_SECRET=must-not-copy\n"
+    )
+    out = tmp_path / "private"
+    command = [sys.executable, str(ROOT / "benchmarks/deploy/prepare_master.py"),
+               "--model-env", str(model_env), "--output-dir", str(out),
+               "--image", "auraclaw:fixture", "--nginx-image", "nginx@sha256:" + "a" * 64]
+    for _ in range(2):
+        result = subprocess.run(command, capture_output=True, text=True, check=True)
+        assert "fixture-only" not in result.stdout + result.stderr
+        with tarfile.open(out / "deployment-config.tar") as tar:
+            raw = tar.extractfile(".env.test").read().decode()
+            assert "must-not-copy" not in raw
+            env = dotenv_values(stream=__import__('io').StringIO(raw))
+            app = urlsplit(env["AURACLAW_DATABASE_URL"])
+            migration = urlsplit(env["AURACLAW_MIGRATION_DATABASE_URL"])
+            assert app.username == "auraclaw_app"
+            assert migration.username == "auraclaw_migration"
+            assert app.password != migration.password
+            assert not any(k.endswith("_DATABASE_URL") and k not in {
+                "AURACLAW_DATABASE_URL", "AURACLAW_MIGRATION_DATABASE_URL"
+            } for k in env)
+        state = (out / "deployment-credentials.json").read_text()
+        if _ == 0:
+            first = state
+        else:
+            assert state == first
+    assert (out.stat().st_mode & 0o777) == 0o700
+    assert ((out / "deployment-credentials.json").stat().st_mode & 0o777) == 0o600

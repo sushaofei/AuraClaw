@@ -30,7 +30,7 @@ ENV PATH="/app/.venv/bin:$PATH" \
 WORKDIR /app
 
 COPY --from=builder /app/.venv /app/.venv
-COPY migrations ./migrations
+COPY --chown=10001:10001 migrations ./migrations
 
 RUN rm -rf /usr/local/lib/python3.13/ensurepip \
     /usr/local/lib/python3.13/site-packages/pip \

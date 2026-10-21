@@ -80,7 +80,9 @@ AppWorld 必须使用专用于本次串行评测的隔离 Environment Server；�
 - `benchmarks/configs/appworld.dev.example.json`
 
 模板的地址只是示例，不代表当前机器存在这些服务。`harness_revision` 填 `git rev-parse HEAD`；
-`dataset_revision` 填完整数据清单摘要；模型与用户模型使用固定版本。AppWorld task id 必须从官方
+`dataset_revision` 填 `sha256:` 加实际清单摘要；模型与用户模型正式评测使用固定版本。
+清单算法对排序后的每个文件计算 relative_path + NUL + SHA256(file_bytes)，再做整体 SHA256；
+忽略 __pycache__/pyc/pyo，拒绝符号链接。τ 核验 envs/域目录，AppWorld 核验 path_store.data。AppWorld task id 必须从官方
 `dev` split 获取，不从 test 挑选样本做调优。τ-bench task id 为规范的非负整数索引。
 
 ```bash
@@ -91,8 +93,10 @@ PYTHONPATH=src /path/to/eval-env/bin/python benchmarks/run_agents.py run \
 
 CLI 验证 Harness HEAD、上游 HEAD 和 tracked 文件未修改、SDK import 路径属于指定 checkout，
 再启动每个尝试的独立子进程。禁止在 manifest URL 中嵌入认证信息、查询参数或片段。
-正式 dev 预检尚未运行：需要实际 Gateway/模型、τ 用户模拟器以及隔离 AppWorld 服务和数据。
-E1 未安装或验证这些外部依赖的兼容性，不应将此命令的存在等同于 E2 联调完成。
+E2 已在独立两机环境完成官方 SDK/dev 小样本联调，部署、实际固定项和限制见
+[两机评测部署](../operations/agent-evaluation-deployment.md)。AppWorld manifest 新增
+`appworld_remote_docker`（默认 true），与服务端执行路径一致；记录中保留官方 experiment_name。
+E1 的 fixture 证据仍不作为官方任务成绩，现有 Qwen 别名不作为已验证的不可变模型快照。
 
 ## 结果与分母
 
@@ -130,5 +134,6 @@ E3：固定 dev 协议后，在保留集上做重复评测；报告任务完成�
 增加官方场景分组指标、按需 CI 与控制变量对照。AppWorld test 仅用于最终汇总，不查看逐题评分
 来调优或进行错误分析。公开报告仅发布允许公开的汇总与配置摘要。
 
-回滚为整体回退该阶段提交；没有数据库或生产配置迁移。既有镜像安全扫描发布阻断单独跟踪，
+源码回滚为整体回退阶段提交；E2 的开发环境账号、权限和系统单位按部署手册单独管理，
+没有新增数据库结构迁移或生产配置变更。既有镜像安全扫描发布阻断单独跟踪，
 评测夹具通过不能替代生产发布门禁。
