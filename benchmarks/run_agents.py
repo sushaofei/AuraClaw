@@ -18,6 +18,7 @@ from urllib.parse import urlsplit
 from uuid import uuid4
 
 from auraclaw.composition.evaluation import run_benchmark_episode
+from auraclaw.evaluation.cohort import PROTOCOL
 from auraclaw.evaluation.contracts import UPSTREAMS, BenchmarkEnvironment, EvaluationConfig
 from auraclaw.evaluation.environments import AppWorldEnvironment, TauEnvironment
 from auraclaw.evaluation.fixtures import FixtureModel, fixture_environment
@@ -199,6 +200,7 @@ def run(args: argparse.Namespace) -> None:
             "model_gateway_url",
             "appworld_environment_url",
             "appworld_remote_docker",
+            "protocol",
         }
         if set(manifest) - allowed:
             raise ValueError("Unknown manifest fields; credentials belong in environment variables")
@@ -216,6 +218,8 @@ def run(args: argparse.Namespace) -> None:
                     or url.fragment
                 ):
                     raise ValueError("Evaluation endpoint must be a plain HTTP(S) URL")
+        if manifest.get("protocol") not in {None, PROTOCOL}:
+            raise ValueError("Unsupported evaluation protocol")
         config = EvaluationConfig(**manifest["config"])
         manifest["upstream_root"] = str(Path(manifest["upstream_root"]).resolve())
         if config.harness_revision != revision(root):
@@ -231,6 +235,8 @@ def run(args: argparse.Namespace) -> None:
         not task.isascii() or not task.isdecimal() or str(int(task)) != task for task in tasks
     ):
         raise ValueError("tau-bench task ids must be canonical nonnegative indices")
+    if manifest.get("protocol") == PROTOCOL and (trials != 3 or config.split != "dev"):
+        raise ValueError("E3 holdout protocol requires dev split and exactly three trials")
     output = args.output.resolve() / ("eval_" + uuid4().hex)
     output.mkdir(parents=True, mode=0o700)
     write_private(output / "manifest.json", manifest)
@@ -266,6 +272,11 @@ def run(args: argparse.Namespace) -> None:
                 record = json.loads(target.read_text())
             except (subprocess.TimeoutExpired, RuntimeError) as error:
                 record = {
+                    "schema_version": 1,
+                    "validation_scope": "fixture"
+                    if args.command == "smoke"
+                    else "official-sdk-adapter",
+                    "dataset_revision_verified": False,
                     "config": asdict(config),
                     "task_id": task,
                     "trial": trial,
@@ -280,7 +291,7 @@ def run(args: argparse.Namespace) -> None:
                 if not target.exists():
                     write_private(target, record)
             records.append(record)
-    report = summarize(records, trials=trials)
+    report = summarize(records, trials=trials, task_ids=tasks)
     report["validation_scope"] = "fixture" if args.command == "smoke" else "official-sdk-adapter"
     write_private(output / "summary.json", report)
     print(json.dumps({"output": str(output), **report}, ensure_ascii=False))
