@@ -20,6 +20,7 @@ from auraclaw.evaluation.runtime import (
     BenchmarkModel,
     EnvironmentTools,
     FixedToolsController,
+    ModelAdmissionRejected,
 )
 from auraclaw.infrastructure.persistence.memory_control_store import InMemoryControlStateStore
 from auraclaw.infrastructure.persistence.memory_event_store import InMemoryEventStore
@@ -96,6 +97,9 @@ async def _run_benchmark_episode(
     try:
         try:
             await harness.execute(assignment)
+        except ModelAdmissionRejected as error:
+            status, error_type = "infra_error", type(error).__name__
+            await harness.record_failure(assignment, error)
         except (ActionBudgetExceeded, BudgetExceededError) as error:
             status, error_type = "budget_exhausted", type(error).__name__
             await harness.record_failure(assignment, error)

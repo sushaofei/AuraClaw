@@ -241,6 +241,7 @@ def run(args: argparse.Namespace) -> None:
     output.mkdir(parents=True, mode=0o700)
     write_private(output / "manifest.json", manifest)
     records: list[dict[str, Any]] = []
+    abort = False
     for task in tasks:
         for trial in range(trials):
             target = output / f"attempt_{len(records):06d}.json"
@@ -291,6 +292,16 @@ def run(args: argparse.Namespace) -> None:
                 if not target.exists():
                     write_private(target, record)
             records.append(record)
+            if manifest.get("protocol") == PROTOCOL and record["status"] in {
+                "infra_error",
+                "runtime_error",
+                "evaluation_error",
+                "timeout",
+            }:
+                abort = True
+                break
+        if abort:
+            break
     report = summarize(records, trials=trials, task_ids=tasks)
     report["validation_scope"] = "fixture" if args.command == "smoke" else "official-sdk-adapter"
     write_private(output / "summary.json", report)

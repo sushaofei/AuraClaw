@@ -1,3 +1,12 @@
+## Agent 任务评测 E3.1.1：准入配额与分类修复（2026-10-21，Issue #106）
+
+- [x] 共享 Gateway 小时配额拒绝的首轮保留为无效诊断，不选取其成功任务拼入新轮，不按隐藏答案或逐题成绩调整求解器。
+- [x] 评测模型端口的外部预算拒绝独立包装为 ModelAdmissionRejected，记 infra_error/reward=null；不再冒充单题预算失败，不改生产 Gateway/Runtime 的错误策略。
+- [x] E3 遇到 infra/runtime/evaluation/timeout 首次错误即停止，剩余尝试保留在计划分母中，不自动重试；新增拒绝分类与停批回归。
+- [x] 34 项专项测试、完整 996 passed/74 skipped、Ruff、Mypy、23 条架构合同和 release gate 通过。
+- [x] 独立评测 Gateway 与现有服务使用同一固定镜像，loopback/非 root/只读/原有选定 Secret 引用，保留 5000 万 token/租户/小时上限与账本；现有业务 Gateway 100 万额度不变。数据重新校验、Gateway 健康与隔离收据已核对。
+- [x] 无新 Provider/生产依赖、数据库迁移、业务身份或调度变更；整轮重新冻结源码和同一清单后启动，原始诊断证据不覆盖。正式快照和配对对照仍未完成。
+
 ## Agent 任务评测 E3.1：预注册协议与离线门禁（2026-10-21，Issue #106）
 
 - [x] 未读任务内容的确定性 dev 保留集选择：τ 排除既有题，AppWorld 排除既有场景并选完整三题场景；运行前固定 18+18 题、每题 3 次、108 次尝试及预算。

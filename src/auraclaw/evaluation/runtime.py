@@ -7,7 +7,7 @@ import math
 from dataclasses import replace
 from typing import Any
 
-from auraclaw.contracts.errors import SchemaValidationError
+from auraclaw.contracts.errors import BudgetExceededError, SchemaValidationError
 from auraclaw.contracts.json_schema import JsonSchemaValidator
 from auraclaw.control.ports import RuntimeAssignment
 from auraclaw.evaluation.contracts import BenchmarkEnvironment, EvaluationConfig
@@ -20,6 +20,10 @@ from auraclaw.runtime.ports import (
     SkillResolutionOutcome,
     ToolCall,
 )
+
+
+class ModelAdmissionRejected(RuntimeError):
+    """An external model port rejected admission, not an episode action/token budget."""
 
 
 class ActionBudgetExceeded(RuntimeError):
@@ -201,6 +205,9 @@ class BenchmarkModel:
         self.calls += 1
         try:
             response = await self._delegate.generate(replace(request, messages=tuple(messages)))
+        except BudgetExceededError as error:
+            self.cost_known = False
+            raise ModelAdmissionRejected("Model Gateway budget admission rejected") from error
         except BaseException:
             self.cost_known = False
             raise

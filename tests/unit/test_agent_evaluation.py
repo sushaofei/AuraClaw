@@ -317,22 +317,32 @@ async def test_appworld_worker_preserves_remote_paths_and_official_experiment_id
     monkeypatch.setattr(cli, "upstream_module", lambda *args: sdk)
     monkeypatch.setattr(cli, "RemoteModelClient", Gateway)
     monkeypatch.setattr(cli, "verify_dataset", lambda *args: None)
-    monkeypatch.setattr(cli, "importlib", SimpleNamespace(
-        import_module=lambda name: SimpleNamespace(path_store=SimpleNamespace(data=str(tmp_path)))
-    ))
+    monkeypatch.setattr(
+        cli,
+        "importlib",
+        SimpleNamespace(
+            import_module=lambda name: SimpleNamespace(
+                path_store=SimpleNamespace(data=str(tmp_path))
+            )
+        ),
+    )
     monkeypatch.setenv("AURACLAW_EVAL_GATEWAY_TOKEN", "fixture-token")
     manifest = tmp_path / "manifest.json"
-    manifest.write_text(json.dumps({
-        "config": asdict(config("appworld")),
-        "upstream_root": str(tmp_path),
-        "model_gateway_url": "http://127.0.0.1:18005",
-        "appworld_environment_url": "http://127.0.0.1:18000",
-        "appworld_remote_docker": remote_docker,
-    }))
+    manifest.write_text(
+        json.dumps(
+            {
+                "config": asdict(config("appworld")),
+                "upstream_root": str(tmp_path),
+                "model_gateway_url": "http://127.0.0.1:18005",
+                "appworld_environment_url": "http://127.0.0.1:18000",
+                "appworld_remote_docker": remote_docker,
+            }
+        )
+    )
     result = tmp_path / "result.json"
-    await cli.worker(SimpleNamespace(
-        manifest=manifest, smoke=False, task_id="sample", trial=0, result=result
-    ))
+    await cli.worker(
+        SimpleNamespace(manifest=manifest, smoke=False, task_id="sample", trial=0, result=result)
+    )
     record = json.loads(result.read_text())
     assert record["success"]
     assert captured["remote_docker"] is remote_docker
@@ -359,10 +369,16 @@ def test_evaluation_deployment_rejects_wrong_profile_or_missing_boundaries(
     entry = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(entry)
     monkeypatch.setattr(sys, "argv", ["run_service.py", "runtime"])
-    monkeypatch.setattr(entry, "get_settings", lambda: SimpleNamespace(
-        deployment_profile=profile, sql_storage_enabled=sql, kafka_enabled=kafka,
-        model_api_key=provider_key,
-    ))
+    monkeypatch.setattr(
+        entry,
+        "get_settings",
+        lambda: SimpleNamespace(
+            deployment_profile=profile,
+            sql_storage_enabled=sql,
+            kafka_enabled=kafka,
+            model_api_key=provider_key,
+        ),
+    )
     monkeypatch.setattr(entry, "service_spec", lambda *args: SimpleNamespace(name=owner))
     monkeypatch.setattr(entry, "_run_service_process", lambda *args: pytest.fail("must not start"))
     with pytest.raises(SystemExit, match=reason):
@@ -408,24 +424,35 @@ def test_evaluation_config_uses_one_app_login_and_keeps_migration_separate(tmp_p
         "UNRELATED_SECRET=must-not-copy\n"
     )
     out = tmp_path / "private"
-    command = [sys.executable, str(ROOT / "benchmarks/deploy/prepare_master.py"),
-               "--model-env", str(model_env), "--output-dir", str(out),
-               "--image", "auraclaw:fixture", "--nginx-image", "nginx@sha256:" + "a" * 64]
+    command = [
+        sys.executable,
+        str(ROOT / "benchmarks/deploy/prepare_master.py"),
+        "--model-env",
+        str(model_env),
+        "--output-dir",
+        str(out),
+        "--image",
+        "auraclaw:fixture",
+        "--nginx-image",
+        "nginx@sha256:" + "a" * 64,
+    ]
     for _ in range(2):
         result = subprocess.run(command, capture_output=True, text=True, check=True)
         assert "fixture-only" not in result.stdout + result.stderr
         with tarfile.open(out / "deployment-config.tar") as tar:
             raw = tar.extractfile(".env.test").read().decode()
             assert "must-not-copy" not in raw
-            env = dotenv_values(stream=__import__('io').StringIO(raw))
+            env = dotenv_values(stream=__import__("io").StringIO(raw))
             app = urlsplit(env["AURACLAW_DATABASE_URL"])
             migration = urlsplit(env["AURACLAW_MIGRATION_DATABASE_URL"])
             assert app.username == "auraclaw_app"
             assert migration.username == "auraclaw_migration"
             assert app.password != migration.password
-            assert not any(k.endswith("_DATABASE_URL") and k not in {
-                "AURACLAW_DATABASE_URL", "AURACLAW_MIGRATION_DATABASE_URL"
-            } for k in env)
+            assert not any(
+                k.endswith("_DATABASE_URL")
+                and k not in {"AURACLAW_DATABASE_URL", "AURACLAW_MIGRATION_DATABASE_URL"}
+                for k in env
+            )
         state = (out / "deployment-credentials.json").read_text()
         if _ == 0:
             first = state
@@ -433,3 +460,71 @@ def test_evaluation_config_uses_one_app_login_and_keeps_migration_separate(tmp_p
             assert state == first
     assert (out.stat().st_mode & 0o777) == 0o700
     assert ((out / "deployment-credentials.json").stat().st_mode & 0o777) == 0o600
+
+
+@pytest.mark.asyncio
+async def test_model_gateway_budget_rejection_is_infrastructure_not_task_failure():
+    from auraclaw.contracts.errors import BudgetExceededError
+
+    class Rejected:
+        async def generate(self, request):
+            raise BudgetExceededError("tenant model token quota is exhausted")
+
+    record, _ = await run_benchmark_episode(
+        fixture_environment("tau-bench"),
+        Rejected(),
+        config(),
+        task_id="0",
+        trial=0,
+    )
+    assert record["status"] == "infra_error"
+    assert record["error_type"] == "ModelAdmissionRejected"
+    assert record["official_reward"] is None and not record["success"]
+    assert record["tool_calls"] == 0 and record["model_calls"] == 1
+
+
+def test_e3_stops_on_infrastructure_failure_and_keeps_full_planned_denominator(
+    tmp_path, monkeypatch
+):
+    spec = importlib.util.spec_from_file_location(
+        "evaluation_cli", ROOT / "benchmarks/run_agents.py"
+    )
+    cli = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cli)
+    manifest = {
+        "config": asdict(config()),
+        "task_ids": ["0", "1"],
+        "trials": 3,
+        "protocol": "e3-heldout-v1",
+        "upstream_root": str(tmp_path),
+        "model_gateway_url": "http://localhost:8005",
+    }
+    path = tmp_path / "plan.json"
+    path.write_text(json.dumps(manifest))
+    monkeypatch.setattr(cli, "revision", lambda root: "a" * 40)
+
+    def failed_worker(command, **kwargs):
+        target = Path(command[command.index("--result") + 1])
+        target.write_text(
+            json.dumps(
+                {
+                    "config": manifest["config"],
+                    "task_id": "0",
+                    "trial": 0,
+                    "status": "infra_error",
+                    "success": False,
+                    "official_reward": None,
+                    "cost": None,
+                }
+            )
+        )
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(cli.subprocess, "run", failed_worker)
+    with pytest.raises(SystemExit) as error:
+        cli.run(SimpleNamespace(command="run", manifest=path, output=tmp_path / "results"))
+    assert error.value.code == 2
+    report = json.loads(next((tmp_path / "results").glob("*/summary.json")).read_text())
+    assert report["attempts"] == 1 and report["expected_attempts"] == 6
+    assert report["error_attempts"] == 1 and not report["complete"]
+    assert report["pass_power_k"] == {}

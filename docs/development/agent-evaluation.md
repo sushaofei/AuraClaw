@@ -175,3 +175,18 @@ Python/random/PYTHONHASHSEED seed 固定为 20261021+trial；这不保证 Provid
 按需 CI：`evaluation-protocol` 的 workflow_dispatch 仅跑无模型、无官方数据的 Runtime fixture、
 负向控制和采样/分母回归，不配置模型凭据，不上传私有 artifacts。官方批处理只在隔离宿主上由
 运维人员显式启动。正式模型快照、完整最终测试集与配对模型对照仍是后续独立验收项。
+
+
+### E3 准入修正（正式批次前补充）
+
+首个扩大批次发现共享开发 Gateway 的默认租户小时总额度不足，部分请求在模型执行前即被拒绝。
+该批次原始配置/记录保留为**无效准入诊断轮**，不混入能力分数；未根据任务内容或答案调整求解器。
+修复外部模型端口的 BudgetExceededError 在评测中误记为单题 budget_exhausted 的分类，
+改为 infra_error/ModelAdmissionRejected，reward=null；不放宽 Runtime 的单题预算。
+
+修正轮完整重跑相同预注册样本和 3 次重复，不挑选此前成功的尝试。另建只绑定 loopback 的
+评测专用 Gateway，复用同一固定镜像/模型/Provider/采样与受信身份，仍使用 PostgreSQL 额度账本，
+**每租户每小时上限固定 5000 万输入+输出 token**；4 小时批次上限与 108 次/单题预算继续有效。
+共享业务 Gateway 的配置、100 万默认额度及服务不变。这个额度是评测资源分配，不是费用报价，
+费用未知继续 null。发布前记录两套 Gateway 的额度及镜像，若新批次仍发生准入错误则如实记录，
+不自动重试或静默丢失。回滚只停止新增 Gateway；保留诊断与修正轮产物。
