@@ -153,3 +153,14 @@ Runtime v2 预算治理：`domain/runtime_budget.py` 为 Canonical 事实的纯�
 EventStore 实现在根事务内调用规则。`contracts/json_schema.py` 为 Runtime 与 Action 共享的
 受限离线校验器。`model_gateway/pricing.py` 和 ModelStateStore 拥有可信价格及成本结算，
 Runtime 仅传递 Run 预算，不读取凭据。`projection/task` 以事实重建公开用量。
+
+## Agent 任务评测
+
+`evaluation/` 定义 τ-bench/AppWorld 环境端口、固定工具 profile、消息适配、记录契约与
+pass^k 汇总；不依赖 API、具体适配器或 composition。`composition/evaluation.py` 是独立、
+显式调用的评测装配，复用真实 AgentHarness、内存参考 Control/Event Store 和 FencedSessionClient。
+`benchmarks/run_agents.py` 管理官方 SDK 的可选加载、版本预检、Model Gateway 客户端、进程隔离
+和本地产物，不被生产 builder 导入。生产 Runtime/Action/API/Session 不依赖评测工具，
+两条 import-linter 合同约束上述方向。评测不新增生产依赖。
+
+方案、成绩语义和实际运行限制见 [Agent 任务评测](../development/agent-evaluation.md)。

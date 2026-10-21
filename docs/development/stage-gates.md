@@ -1,5 +1,21 @@
 # 开发阶段校验清单
 
+## Agent 任务评测 E1：τ-bench 与 AppWorld 接入基础（2026-10-21，Issue #106）
+
+方案：[Agent 任务评测](agent-evaluation.md)。
+
+- [x] 核对并固定原始 τ-bench / AppWorld 的完整上游 revision，记录 API、split、模型/模拟器和数据来源声明；生产依赖与 uv.lock 不变。
+- [x] 官方环境适配接入真实 AgentHarness、RuntimeExecutionEngine、能力预加载、Guard、Canonical Event 与检查点；不另写任务求解循环，不改变生产 API/事件格式。
+- [x] τ 自由文本/多轮用户回合与工具观察正确映射，隐藏 task/actions/reward_info 不进入模型；AppWorld 只读公开任务上下文，通过隔离环境执行与官方 TestTracker 评分。
+- [x] 固定工具、单动作 profile 明确记录；每次尝试隔离进程/Session/Run/租约，提供动作/Token/墙钟预算、错误分类和私有轨迹，未知成本不记零。
+- [x] 汇总保持完整分母，pass^k 使用全部成功估计而非 pass@k；拒绝重复/混合配置；缺失 trial 不输出重复一致性估计。
+- [x] 提供两份 dev manifest 模板与运行/冒烟 CLI，核验上游 checkout/SDK 路径；Gateway bearer 仅由外部运行器读取，不写 manifest 或 Runtime Secret 路径。
+- [x] 17 项评测专项测试通过，包含两个基准各两次独立进程冒烟、隐藏信息隔离、预算/评分错误、成本未知、幂等、统计与产物权限。
+- [x] 完整 Pytest 978 passed、74 skipped；跳过项不作为外部环境/生产验收。Ruff、Mypy strict（325 个源码文件及 CLI 共 326 文件）、23 条架构合同和仓库 release gate 通过。
+- [x] 新增两条边界合同：评测逻辑不依赖具体基础设施/装配，生产 Runtime/Action/API/Session/builders 不依赖评测工具；生产启动不导入可选官方 SDK。
+- [x] 实施方案、安装/运行限制、评分口径、架构映射同步；无数据库/部署/依赖迁移，单一阶段提交推送当前分支，远端凭据记录 Issue #106。
+- [x] E1 只验证自建协议夹具，明确不报告官方 Benchmark 成绩；E2 的 SDK/数据/镜像实测与 dev 模型联调、E3 的保留集与重复基线继续由 issue 跟踪。
+
 ## 模块重构 R4：Capability Catalog 与 Skill Admin（2026-10-15，Issue #105）
 
 方案：[模块内聚与依赖重构](implementation/modularity-refactor.md#r4目录与管理-api)。

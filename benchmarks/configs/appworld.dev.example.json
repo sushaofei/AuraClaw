@@ -1,0 +1,19 @@
+{
+  "config": {
+    "benchmark": "appworld",
+    "split": "dev",
+    "model": "REPLACE_WITH_FIXED_GATEWAY_MODEL_VERSION",
+    "harness_revision": "REPLACE_WITH_GIT_REV_PARSE_HEAD",
+    "dataset_revision": "REPLACE_WITH_DATA_MANIFEST_DIGEST",
+    "max_actions": 30,
+    "max_output_tokens": 32768,
+    "per_turn_output_tokens": 4096,
+    "timeout_seconds": 600,
+    "seed": 10
+  },
+  "upstream_root": "/replace/with/appworld-checkout",
+  "model_gateway_url": "http://127.0.0.1:8083",
+  "appworld_environment_url": "http://127.0.0.1:8000",
+  "task_ids": ["REPLACE_WITH_OFFICIAL_DEV_TASK_ID"],
+  "trials": 3
+}

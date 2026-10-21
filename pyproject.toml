@@ -35,6 +35,21 @@ dev = [
 root_package = "auraclaw"
 
 [[tool.importlinter.contracts]]
+name = "Evaluation logic uses ports rather than concrete adapters or composition"
+type = "forbidden"
+source_modules = ["auraclaw.evaluation"]
+forbidden_modules = ["auraclaw.composition", "auraclaw.infrastructure", "auraclaw.api"]
+
+[[tool.importlinter.contracts]]
+name = "Production execution does not depend on benchmark tooling"
+type = "forbidden"
+source_modules = [
+  "auraclaw.runtime", "auraclaw.action", "auraclaw.api", "auraclaw.session",
+  "auraclaw.composition.builders", "auraclaw.composition.services",
+]
+forbidden_modules = ["auraclaw.evaluation", "auraclaw.composition.evaluation"]
+
+[[tool.importlinter.contracts]]
 name = "Catalog components do not depend on the compatibility facade"
 type = "forbidden"
 source_modules = ["auraclaw.action.catalog"]

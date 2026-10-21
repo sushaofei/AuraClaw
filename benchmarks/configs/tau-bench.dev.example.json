@@ -1,0 +1,21 @@
+{
+  "config": {
+    "benchmark": "tau-bench",
+    "split": "dev",
+    "domain": "retail",
+    "model": "REPLACE_WITH_FIXED_GATEWAY_MODEL_VERSION",
+    "harness_revision": "REPLACE_WITH_GIT_REV_PARSE_HEAD",
+    "dataset_revision": "REPLACE_WITH_DATA_MANIFEST_DIGEST",
+    "max_actions": 30,
+    "max_output_tokens": 32768,
+    "per_turn_output_tokens": 4096,
+    "timeout_seconds": 600,
+    "seed": 10,
+    "user_model": "REPLACE_WITH_FIXED_USER_SIMULATOR_MODEL",
+    "user_provider": "REPLACE_WITH_USER_SIMULATOR_PROVIDER"
+  },
+  "upstream_root": "/replace/with/tau-bench-checkout",
+  "model_gateway_url": "http://127.0.0.1:8083",
+  "task_ids": ["0"],
+  "trials": 3
+}
