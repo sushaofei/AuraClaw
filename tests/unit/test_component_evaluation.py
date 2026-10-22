@@ -277,3 +277,23 @@ def test_plan_is_deterministic_stratified_and_never_claims_a_score():
         select_tasks({"a": ["duplicate"], "b": ["duplicate"]}, 2)
     with pytest.raises(ValueError):
         build_plan("skillsbench", ["a", "a"])
+
+
+@pytest.mark.asyncio
+async def test_reference_memory_is_question_local_and_ranks_history_without_gold():
+    from auraclaw.evaluation.components.reference_memory import LexicalReferenceMemory
+
+    memory = LexicalReferenceMemory(top_k=1)
+    sessions = [
+        {"session_id": "unrelated", "turns": [{"role": "user", "content": "banana"}]},
+        {"session_id": "relevant", "turns": [{"role": "user", "content": "Paris city"}]},
+    ]
+    await memory.ingest(sessions)
+    sessions[1]["turns"][0]["content"] = "mutated"
+    result = json.loads(await memory.search("city"))
+    assert len(result) == 1 and result[0]["session_id"] == "relevant"
+    assert result[0]["turns"][0]["content"] == "Paris city"
+    with pytest.raises(RuntimeError):
+        await memory.ingest(sessions)
+    await memory.close()
+    assert await memory.search("city") == "[]"

@@ -92,3 +92,13 @@ AuraX 已开始增加三套基准名称、简介、官方链接及正确的子�
 - B2：具体网关/记忆/官方 sandbox 和 grader，逐项 canary；真实准入而非只判断工具存在。
 - B3：冻结协议后执行全部受控样本，保留失败、原始产物和评分回执。
 - B4：报告合同、界面配对展示、受限部署及实际浏览器核验后更新 issue。
+
+### LongMemEval canary worker
+
+`benchmarks/run_longmemeval.py` 提供单进程、单问题真实 canary：检查固定 cleaned S 摘要，
+从固定上游代码只提取官方纯评分提示函数，经同一 Model Gateway 调用已授权 Qwen judge。
+严格接收 yes/no；其他输出为评分异常。结果标为 reference-adapter / custom-judge-not-official-comparable，
+不满足当前 AuraX official-sdk-adapter 发布合同，不自动发布。
+检索条件使用独立词法参考 Memory（top-5），不是生产 Memory 服务；不依赖额外 embedding 模型。
+输入字节上限仅用于准入拒绝，不是 token 计数，不静默截断；full-history 仍需额外模型窗口核验。
+600 秒超时由 worker 和外部进程监督共同限制。canary 选用候选 cohort 之外的题目，不回填正式成绩。

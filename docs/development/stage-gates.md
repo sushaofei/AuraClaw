@@ -3814,3 +3814,10 @@ Ruff、Mypy（248 文件）、10 条架构合同通过。迁移不适用，部�
 
 B1 最终验证：完整回归 1016 passed / 74 skipped；54 项评测专项；Mypy 334 源码文件（含计划 CLI）通过。
 源码与 fixture 验证完成；B2/B3/B4 均未完成，无官方任务成绩。
+
+## LongMemEval canary 工具准备（#107）
+
+- [x] 单问题真实 worker 复用 Runtime/Gateway，不导入上游直接 Provider 客户端；固定数据摘要及官方评分提示函数。
+- [x] 用户确认 Qwen 替代 judge，结果保留 custom-judge 标记；词法 Memory 明确是参考实现，不能冒充生产服务。
+- [x] 新增参考 Memory 排序、深拷贝和 namespace 单次写入测试；专项测试、Mypy 和 Ruff 通过。
+- [ ] 真实 canary 完成及产物复核；不等于 B2/B3/B4 完成。
