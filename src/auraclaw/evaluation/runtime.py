@@ -235,6 +235,21 @@ class BenchmarkModel:
                 {"content": response.completed_output},
             )
             return replace(response, tool_calls=(call,), finish_reason="tool_calls")
+        if (
+            self._tools.config.benchmark in {"longmemeval", "mcp-universe", "skillsbench"}
+            and not response.tool_calls
+            and response.finish_reason == "stop"
+            and response.completed_output.strip()
+        ):
+            # These upstreams consume the final assistant response. Represent submission
+            # as a canonical local action, without an extra model call or hidden answer.
+            skill = self._tools.config.benchmark == "skillsbench"
+            call = ToolCall(
+                "submit_" + hashlib.sha256(request.model_call_id.encode()).hexdigest(),
+                "finish_task" if skill else "submit_answer",
+                {} if skill else {"answer": response.completed_output},
+            )
+            return replace(response, tool_calls=(call,), finish_reason="tool_calls")
         # Match upstream tau's single-action protocol; AppWorld uses the same serialized profile.
         if response.tool_calls:
             return replace(response, tool_calls=response.tool_calls[:1])

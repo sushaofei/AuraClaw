@@ -333,3 +333,25 @@ def test_official_integer_gold_uses_reference_string_formatting():
     raw["answer"] = True
     with pytest.raises(ValueError, match="answer"):
         MemoryCase.from_official(raw)
+
+
+@pytest.mark.asyncio
+async def test_natural_final_answer_is_submitted_without_an_extra_model_call():
+    class AnswerModel:
+        calls = 0
+
+        async def generate(self, request):
+            self.calls += 1
+            return ModelResponse(
+                request.model_call_id, "fixture", "scripted", "Paris", usage={"output_tokens": 1}
+            )
+
+    env = LongMemEvalEnvironment(memory_case(), memory=None, grade=grade_memory)
+    await env.initialize()
+    model = AnswerModel()
+    record, trace = await run_benchmark_episode(
+        env, model, config("longmemeval"), task_id="q1", trial=0
+    )
+    assert record["success"] and model.calls == 1
+    calls = [e for e in trace if e["type"] == "tool.call.requested"]
+    assert len(calls) == 1
