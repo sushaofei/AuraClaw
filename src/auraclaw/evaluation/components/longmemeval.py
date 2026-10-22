@@ -52,12 +52,14 @@ class MemoryCase:
                 # Deliberate allowlist: has_answer and future annotations must never reach memory.
                 safe_turns.append({"role": turn["role"], "content": turn["content"]})
             projected.append({"session_id": session_id, "date": date, "turns": safe_turns})
-        fields = [
-            raw[k] for k in ("question_id", "question_type", "question", "question_date", "answer")
-        ]
+        fields = [raw[k] for k in ("question_id", "question_type", "question", "question_date")]
         if any(not isinstance(value, str) or not value for value in fields):
             raise ValueError("Invalid LongMemEval question")
-        return cls(fields[0], fields[1], fields[2], fields[3], tuple(projected), fields[4])
+        answer = raw["answer"]
+        if isinstance(answer, bool) or not isinstance(answer, (str, int)):
+            raise ValueError("Invalid LongMemEval answer")
+        # Match official str.format for integer gold answers, without changing source data.
+        return cls(fields[0], fields[1], fields[2], fields[3], tuple(projected), str(answer))
 
 
 class LongMemEvalEnvironment:

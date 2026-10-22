@@ -316,3 +316,20 @@ def test_official_repeated_session_ids_are_preserved_without_deduplication():
     raw["haystack_dates"].pop()
     with pytest.raises(ValueError, match="coverage"):
         MemoryCase.from_official(raw)
+
+
+def test_official_integer_gold_uses_reference_string_formatting():
+    raw = {
+        "question_id": "numeric",
+        "question_type": "temporal-reasoning",
+        "question": "How many?",
+        "question_date": "2026-01-01",
+        "answer": 42,
+        "haystack_session_ids": ["s"],
+        "haystack_dates": ["2025-01-01"],
+        "haystack_sessions": [[{"role": "user", "content": "history"}]],
+    }
+    assert MemoryCase.from_official(raw).answer == "42"
+    raw["answer"] = True
+    with pytest.raises(ValueError, match="answer"):
+        MemoryCase.from_official(raw)
