@@ -190,3 +190,45 @@ Python/random/PYTHONHASHSEED seed 固定为 20261021+trial；这不保证 Provid
 共享业务 Gateway 的配置、100 万默认额度及服务不变。这个额度是评测资源分配，不是费用报价，
 费用未知继续 null。发布前记录两套 Gateway 的额度及镜像，若新批次仍发生准入错误则如实记录，
 不自动重试或静默丢失。回滚只停止新增 Gateway；保留诊断与修正轮产物。
+
+## E3 最终评分：执行诊断与官方终态裁决分离
+
+扩大批次已完成原计划的 108 次尝试。AppWorld 的运行中读数曾为 24/54，但关闭环境后，
+官方 evaluator 在独立宿主进程和同一固定镜像的只读进程中对全部最终状态评分，**54/54 逐次一致，
+最终仅 9/54 通过**。运行中与终态读数存在 15 次差异；运行中评分不能替代正式结束后评分。
+本阶段修复报告将运行态读数直接当最终成绩的口径，不依靠修改模型、挑题或重试来提高成绩。
+尚未把底层活动状态/落盘差异归因于某个上游缺陷，保留两次核验与诊断证据。
+
+`evaluation/official.py` 只负责最终裁决：校验两份独立官方参考的版本、完整 task/trial 分母和
+逐次奖励一致后，生成新记录投影，保留 episode_reward/episode_success，按官方终态目标与
+Runtime 正常结束共同计算严格成功。原始记录、Canonical trace、失败状态和未知成本不改写。
+有运行异常的尝试即使最终目标已满足也不计严格成功；官方 TGC/SGC 则另按最终目标状态计算。
+
+```bash
+PYTHONPATH=src .venv/bin/python benchmarks/finalize_agents.py \
+  --run /private/run-directory \
+  --reference /private/host-official-reference.json \
+  --reference /private/pinned-image-official-reference.json \
+  --output /private/run-directory/official-metrics.json
+```
+
+该命令没有 SDK/model 调用，不执行解题代码；只读原记录和两个评分参考，输出 0600 的新收据，
+拒绝覆盖旧裁决。没有完整独立证据时不能出最终成绩。CLI 执行阶段的 AppWorld summary
+新增 `grading_stage=live-diagnostic`，必须经过上述终态裁决后再对外报告。
+
+### 本轮受控基线（18 题/基准、每题 3 次）
+
+| 基准 | 最终严格成功 | pass^1 / pass^2 / pass^3 | 平均执行耗时 | 执行异常 |
+|---|---|---|---|---|
+| τ-bench retail dev | 50/54（92.6%） | 92.6% / 87.0% / 83.3% | 126.4 秒 | 0 |
+| AppWorld dev，6 个完整场景 | 9/54（16.7%） | 16.7% / 16.7% / 16.7% | 51.9 秒 | 1 次模型服务异常 |
+
+AppWorld 各 trial 的官方子集 TGC/SGC 均为 16.7%；不是完整 dev/test 指标。
+τ 有 1 次动作/输出预算耗尽；AppWorld 有 3 次预算耗尽，另有上述 1 次模型服务异常。
+AppWorld 原停批后仅补齐尚未启动的 3 次尝试，原先 51 次文件哈希校验不变，没有重试失败记录。
+首个总租户额度不足的诊断批次独立保留并排除；不与本表拼接。
+
+本轮模型仍是用户确认的服务别名，固定快照未核验、采样含 Provider 默认值、费用未知；
+没有跨模型配对对照，三次重复不是稳定性保证。因此交付为**E3 受控子集基线**，
+不声称完整正式榜单或严格可复现模型排名。按需离线 CI 文件已在工作分支提供，
+workflow_dispatch 在合入默认分支后启用；当前 push 质量 CI 已覆盖同样的离线协议测试。

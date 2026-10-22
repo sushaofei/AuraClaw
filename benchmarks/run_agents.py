@@ -304,6 +304,9 @@ def run(args: argparse.Namespace) -> None:
             break
     report = summarize(records, trials=trials, task_ids=tasks)
     report["validation_scope"] = "fixture" if args.command == "smoke" else "official-sdk-adapter"
+    report["grading_stage"] = (
+        "live-diagnostic" if config.benchmark == "appworld" else "official-environment"
+    )
     write_private(output / "summary.json", report)
     print(json.dumps({"output": str(output), **report}, ensure_ascii=False))
     if report["error_attempts"]:
