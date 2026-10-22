@@ -297,3 +297,22 @@ async def test_reference_memory_is_question_local_and_ranks_history_without_gold
         await memory.ingest(sessions)
     await memory.close()
     assert await memory.search("city") == "[]"
+
+
+def test_official_repeated_session_ids_are_preserved_without_deduplication():
+    raw = {
+        "question_id": "q1",
+        "question_type": "multi-session",
+        "question": "Question?",
+        "question_date": "2026-01-01",
+        "answer": "hidden",
+        "haystack_session_ids": ["repeat", "repeat"],
+        "haystack_dates": ["2025-01-01", "2025-01-01"],
+        "haystack_sessions": [[{"role": "user", "content": "history", "has_answer": True}]] * 2,
+    }
+    case = MemoryCase.from_official(raw)
+    assert len(case.sessions) == 2 and case.sessions[0] == case.sessions[1]
+    assert "has_answer" not in json.dumps(case.sessions)
+    raw["haystack_dates"].pop()
+    with pytest.raises(ValueError, match="coverage"):
+        MemoryCase.from_official(raw)

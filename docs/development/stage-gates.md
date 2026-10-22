@@ -3821,3 +3821,9 @@ B1 最终验证：完整回归 1016 passed / 74 skipped；54 项评测专项；M
 - [x] 用户确认 Qwen 替代 judge，结果保留 custom-judge 标记；词法 Memory 明确是参考实现，不能冒充生产服务。
 - [x] 新增参考 Memory 排序、深拷贝和 namespace 单次写入测试；专项测试、Mypy 和 Ruff 通过。
 - [ ] 真实 canary 完成及产物复核；不等于 B2/B3/B4 完成。
+
+### LongMemEval 官方数据兼容修复
+
+- [x] 首次真实 canary 在模型调用前拒绝重复 session id；确认官方 cleaned S 中 13 条记录具有重复 id，保留每次历史出现，不去重或改写数据。
+- [x] 新增重复 id/字段对齐回归；冻结计划阶段校验全部 500 条数据结构，专项测试及 Mypy/Ruff 通过。
+- [ ] 同一 canary 用修正后的适配器重启，首次准入诊断独立保留，不计正式尝试或换题。

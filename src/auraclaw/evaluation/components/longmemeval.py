@@ -37,7 +37,9 @@ class MemoryCase:
             raw["haystack_dates"],
             raw["haystack_sessions"],
         )
-        if not ids or len(ids) != len(set(ids)) or not len(ids) == len(dates) == len(sessions):
+        # Official cleaned S includes repeated session IDs. Preserve every occurrence,
+        # just as the reference reader does; only aligned coverage is required.
+        if not ids or not len(ids) == len(dates) == len(sessions):
             raise ValueError("Invalid LongMemEval session coverage")
         projected = []
         for session_id, date, turns in zip(ids, dates, sessions, strict=True):

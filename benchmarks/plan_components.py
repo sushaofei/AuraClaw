@@ -15,6 +15,7 @@ from auraclaw.evaluation.components.catalog import (
     LONGMEMEVAL_DATA_REVISION,
     LONGMEMEVAL_DATA_SHA256,
 )
+from auraclaw.evaluation.components.longmemeval import MemoryCase
 from auraclaw.evaluation.components.plan import build_plan, select_tasks
 
 
@@ -39,6 +40,7 @@ def freeze(benchmark: str, root: Path, dataset: Path | None) -> dict[str, Any]:
         records = json.loads(raw)
         groups: dict[str, list[str]] = {}
         for item in records:
+            MemoryCase.from_official(item)
             group = "abstention" if item["question_id"].endswith("_abs") else item["question_type"]
             groups.setdefault(group, []).append(item["question_id"])
         plan = build_plan(benchmark, select_tasks(groups, 12))
