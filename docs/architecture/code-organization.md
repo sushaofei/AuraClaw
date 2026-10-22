@@ -171,3 +171,11 @@ E2 的 `benchmarks/deploy/` 是显式选择的开发评测部署入口，不被�
 `run_service.py` 调用既有 composition 子进程生命周期，生产 CLI 的部署 profile 约束不变。
 分布式 Collaboration 投影从 Session root-feed 获取 Canonical Events，SQL 只维护可重建视图；
 单库参考拓扑保留本地事件读取。评测环境统一 SQL 账号不改变上述组件职责。
+
+### Component benchmark adapters
+
+`evaluation/components` isolates LongMemEval, SkillsBench and MCP-Universe input projection,
+ports and cohort planning. `benchmarks/plan_components.py` freezes private candidate plans only.
+Optional concrete SDK/Gateway/sandbox adapters belong to evaluation composition, never production
+builders or domain/contracts. The legacy benchmark CLI rejects these names until a dedicated
+runner supplies validated environments and graders. See development/component-evaluation.md.

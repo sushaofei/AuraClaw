@@ -85,6 +85,8 @@ def upstream_module(root: Path, name: str, expected: str) -> Any:
 async def worker(args: argparse.Namespace) -> None:
     manifest = json.loads(args.manifest.read_text())
     config = EvaluationConfig(**manifest["config"])
+    if config.benchmark not in UPSTREAMS:
+        raise ValueError("Component benchmarks require their dedicated adapter composition")
     random.seed(config.seed + args.trial)
     model: RemoteModelClient | None = None
     delegate: ModelClient

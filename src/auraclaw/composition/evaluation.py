@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import math
 import time
@@ -14,6 +15,7 @@ from uuid import uuid4
 from auraclaw.contracts.errors import BudgetExceededError
 from auraclaw.contracts.events import NewEvent
 from auraclaw.control.ports import RuntimeAssignment, RuntimeBudget
+from auraclaw.evaluation.components.catalog import COMPONENT_BENCHMARKS
 from auraclaw.evaluation.contracts import UPSTREAMS, BenchmarkEnvironment, EvaluationConfig
 from auraclaw.evaluation.runtime import (
     ActionBudgetExceeded,
@@ -36,6 +38,7 @@ async def _run_benchmark_episode(
     *,
     task_id: str,
     trial: int,
+    profile: str,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     started = time.monotonic()
     key = "eval_" + uuid4().hex
@@ -111,7 +114,8 @@ async def _run_benchmark_episode(
             status = "incomplete"
         if status in {"completed", "budget_exhausted", "incomplete"}:
             try:
-                reward = env.evaluate()
+                grade = env.evaluate()
+                reward = await grade if inspect.isawaitable(grade) else grade
                 if not math.isfinite(reward) or not 0 <= reward <= 1:
                     raise ValueError("Invalid official reward")
             except Exception as error:
@@ -123,8 +127,12 @@ async def _run_benchmark_episode(
             "task_id": task_id,
             "trial": trial,
             "config": asdict(config),
-            "upstream_revision": UPSTREAMS[config.benchmark][1],
-            "profile": "auraclaw-fixed-tools-single-action-v1",
+            "upstream_revision": (
+                UPSTREAMS[config.benchmark][1]
+                if config.benchmark in UPSTREAMS
+                else COMPONENT_BENCHMARKS[config.benchmark].revision
+            ),
+            "profile": profile,
             "validation_scope": "adapter-run",
             "status": status,
             "error_type": error_type,
@@ -157,8 +165,13 @@ async def run_benchmark_episode(
     *,
     task_id: str,
     trial: int,
+    profile: str = "auraclaw-fixed-tools-single-action-v1",
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     try:
-        return await _run_benchmark_episode(env, model, config, task_id=task_id, trial=trial)
+        return await _run_benchmark_episode(
+            env, model, config, task_id=task_id, trial=trial, profile=profile
+        )
     finally:
-        env.close()
+        closed = env.close()
+        if inspect.isawaitable(closed):
+            await closed

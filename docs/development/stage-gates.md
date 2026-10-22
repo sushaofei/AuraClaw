@@ -3800,3 +3800,17 @@ Ruff、Mypy（248 文件）、10 条架构合同通过。迁移不适用，部�
 - [x] Projection poison 映射 quarantined，Delivery DLQ 映射 dead_lettered/reconciling，Skill 广播映射 retry_wait；Runtime Event 明确无 DLQ，最终结果回到 Canonical API。
 - [x] 运维手册固定 tenant 隔离、owner redrive、未知副作用先对账、Projection 可重建而业务事实不可改写的处置顺序。
 - [x] Release gate、Ruff、Mypy、62 项针对性测试及完整测试（923 passed、70 skipped）通过；本阶段作为单一 intentional commit 提交并 push，Issue #104 更新验证证据。
+
+## Component evaluation B1（#107，2026-10-22）
+
+- [x] 固定 LongMemEval/SkillsBench/MCP-Universe 官方源码提交与源码许可；cleaned S 数据取得固定版本，计划保存其内容摘要，数据不入库。
+- [x] 三种独立端口适配接入现有 Runtime，支持异步工具/评分/清理；旧评测 CLI 拒绝误用新基准。
+- [x] 净化长期历史隔离 gold，Skill 元数据/按需读取与准入路径校验，MCP Server/tool 命名空间隔离。
+- [x] 候选样本按元数据确定且分母完整，计划 0600/禁止覆盖；未准入明确 not_started、无成绩。
+- [x] 新增专项 Runtime 与边界测试通过，类型、格式/静态检查、23 条架构合同和 release gate 通过；完整回归另记实际输出。
+- [x] 设计与限制写入 component-evaluation.md；无需数据库迁移、生产配置或网络权限变更，未扩大官方成绩声明。
+- [ ] B2：真实 Memory/Skill/MCP 具体适配与官方环境、评分器准入及 canary。
+- [ ] B3/B4：受控评测、严格报告发布与 AuraX 真实结果部署。
+
+B1 最终验证：完整回归 1016 passed / 74 skipped；54 项评测专项；Mypy 334 源码文件（含计划 CLI）通过。
+源码与 fixture 验证完成；B2/B3/B4 均未完成，无官方任务成绩。

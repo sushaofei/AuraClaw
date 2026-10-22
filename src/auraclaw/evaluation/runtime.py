@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import inspect
 import json
 import math
 from dataclasses import replace
@@ -93,6 +94,8 @@ class EnvironmentTools:
         # Deliberately synchronous: official environments can patch process state / clocks.
         # Each trial runs in a dedicated process; no background invocation can outlive close().
         observation = self.env.invoke(call.name, copy.deepcopy(call.arguments))
+        if inspect.isawaitable(observation):
+            observation = await observation
         result = {
             "status": "success",
             "content": {"observation": observation},
