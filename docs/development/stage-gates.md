@@ -3820,13 +3820,13 @@ B1 最终验证：完整回归 1016 passed / 74 skipped；54 项评测专项；M
 - [x] 单问题真实 worker 复用 Runtime/Gateway，不导入上游直接 Provider 客户端；固定数据摘要及官方评分提示函数。
 - [x] 用户确认 Qwen 替代 judge，结果保留 custom-judge 标记；词法 Memory 明确是参考实现，不能冒充生产服务。
 - [x] 新增参考 Memory 排序、深拷贝和 namespace 单次写入测试；专项测试、Mypy 和 Ruff 通过。
-- [ ] 真实 canary 完成及产物复核；不等于 B2/B3/B4 完成。
+- [x] 真实 LongMemEval canary 完成及产物复核；不等于 B2/B3/B4 完成。
 
 ### LongMemEval 官方数据兼容修复
 
 - [x] 首次真实 canary 在模型调用前拒绝重复 session id；确认官方 cleaned S 中 13 条记录具有重复 id，保留每次历史出现，不去重或改写数据。
 - [x] 新增重复 id/字段对齐回归；冻结计划阶段校验全部 500 条数据结构，专项测试及 Mypy/Ruff 通过。
-- [ ] 同一 canary 用修正后的适配器重启，首次准入诊断独立保留，不计正式尝试或换题。
+- [x] 同一 canary 用修正后的适配器重启，首次准入诊断独立保留，不计正式尝试或换题。
 
 追加核验：官方 32 条 gold 为整数；适配器现按官方 str.format 语义转字符串，拒绝布尔类型。
 全部 500 条官方记录已实际通过输入投影，未修改源文件；新增数字 gold 回归通过。
@@ -3836,3 +3836,9 @@ B1 最终验证：完整回归 1016 passed / 74 skipped；54 项评测专项；M
 - [x] LongMemEval canary 实际完成检索后返回自然语言最终答案；适配器现将正常 stop 的最终文本映射到规范提交动作，不增加模型调用。
 - [x] 同样支持 MCP 最终回答与 Skill 完成信号；保留已执行 canary 原始 incomplete 记录，不改判或并入正式批次。
 - [x] 追加自然语言回答 Runtime 回归，类型/静态检查通过；下一轮只验证完整评分链路。
+
+LongMemEval canary 最终回执：completed，2 次 solver 调用、2 次规范动作，Qwen judge usage 已记录。
+参考 Memory / 非官方 judge 标记保留，单题不作为正式基准成绩。初次格式与归属准入诊断、
+首次自然回答 incomplete 记录全部保留；临时 Gateway 已停止，原 Gateway 与 AuraX 健康。
+SkillsBench 六个任务包已取得固定版本并审阅官方时限（600–2700 秒），未执行 oracle。
+MCP-Universe 隔离 Blender 尚未部署；全候选批次与 AuraX 新成绩发布未完成。
