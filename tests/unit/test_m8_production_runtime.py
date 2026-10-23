@@ -54,9 +54,7 @@ def test_remote_runtime_records_canonical_failure_before_acking_assignment() -> 
             del assignment
             raise RuntimeError("provider unavailable")
 
-        async def record_failure(
-            self, assignment: Assignment, error: Exception
-        ) -> None:
+        async def record_failure(self, assignment: Assignment, error: Exception) -> None:
             assert assignment.run_id == "run-m8"
             assert isinstance(error, RuntimeError)
             self.failure_recorded = True
@@ -68,9 +66,7 @@ def test_remote_runtime_records_canonical_failure_before_acking_assignment() -> 
         with pytest.raises(RuntimeError, match="provider unavailable"):
             await worker.tick()
         assert harness.failure_recorded is True
-        assert control.finished == [
-            ("tenant-m8:session-m8:run-m8", "failed")
-        ]
+        assert control.finished == [("tenant-m8:session-m8:run-m8", "failed")]
 
     asyncio.run(scenario())
 
@@ -101,9 +97,7 @@ def test_remote_runtime_does_not_ack_when_canonical_failure_cannot_be_written() 
             del assignment
             raise RuntimeError("provider unavailable")
 
-        async def record_failure(
-            self, assignment: Assignment, error: Exception
-        ) -> None:
+        async def record_failure(self, assignment: Assignment, error: Exception) -> None:
             del assignment, error
             raise ConnectionError("session unavailable")
 
@@ -172,9 +166,7 @@ def test_remote_runtime_abandons_stale_assignment_when_lease_is_lost() -> None:
 
             raise FencingTokenError("stale fencing token")
 
-        async def record_failure(
-            self, assignment: Assignment, error: Exception
-        ) -> None:
+        async def record_failure(self, assignment: Assignment, error: Exception) -> None:
             del assignment, error
             raise AssertionError("record_failure must not run for stale lease")
 
@@ -217,9 +209,7 @@ def test_abandon_stale_assignment_requeues_superseded_running_rows() -> None:
         claimed = await control.claim("orch", limit=1)
         assert claimed
         resource_id = "session:tenant:session"
-        lease = await control.acquire_lease(
-            resource_id, "orch", ttl=timedelta(milliseconds=5)
-        )
+        lease = await control.acquire_lease(resource_id, "orch", ttl=timedelta(milliseconds=5))
         assert lease is not None
         assignment = RuntimeAssignment(
             tenant_id="tenant",
@@ -245,9 +235,7 @@ def test_abandon_stale_assignment_requeues_superseded_running_rows() -> None:
         assert await control.assign(task_id, assignment, claim_token=claimed[0].claim_token)
         await control.claim_assignments("runtime-1", "agent", limit=1)
         await asyncio.sleep(0.01)
-        new_lease = await control.acquire_lease(
-            resource_id, "orch", ttl=timedelta(seconds=30)
-        )
+        new_lease = await control.acquire_lease(resource_id, "orch", ttl=timedelta(seconds=30))
         assert new_lease is not None
         assert new_lease.fencing_token > lease.fencing_token
 
@@ -306,12 +294,8 @@ def test_named_env_files_select_resources_without_environment_label(
 
     development = tmp_path / ".env.development"
     production = tmp_path / ".env.prod"
-    development.write_text(
-        "DB_NAME=auraclaw_development\nAURACLAW_STORAGE_BACKEND=memory\n"
-    )
-    production.write_text(
-        "DB_NAME=auraclaw_production\nAURACLAW_STORAGE_BACKEND=postgres\n"
-    )
+    development.write_text("DB_NAME=auraclaw_development\nAURACLAW_STORAGE_BACKEND=memory\n")
+    production.write_text("DB_NAME=auraclaw_production\nAURACLAW_STORAGE_BACKEND=postgres\n")
 
     development_settings = Settings(_env_file=development)
     production_settings = Settings(_env_file=production)
@@ -434,9 +418,7 @@ def test_openai_compatible_provider_streams_usage_and_tools() -> None:
                 "choices": [
                     {
                         "delta": {
-                            "tool_calls": [
-                                {"index": 0, "function": {"arguments": '"state"}'}}
-                            ]
+                            "tool_calls": [{"index": 0, "function": {"arguments": '"state"}'}}]
                         },
                         "finish_reason": "tool_calls",
                     }
@@ -848,5 +830,42 @@ def test_openai_compatible_provider_cancels_active_stream_by_model_call() -> Non
             await running
         assert not (await provider.cancel("model-cancel")).stopped
         await provider.aclose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("arguments", ['{"command":"unfinished', '{"command":"echo complete"}'])
+def test_length_terminated_tools_are_not_parsed_or_executed(arguments: str) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        chunk = {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call-1",
+                                "function": {"name": "shell", "arguments": arguments},
+                            }
+                        ]
+                    },
+                    "finish_reason": "length",
+                }
+            ],
+            "usage": {"completion_tokens": 4096},
+        }
+        return httpx.Response(200, text=f"data: {json.dumps(chunk)}\n\ndata: [DONE]\n\n")
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            provider = OpenAICompatibleProvider(
+                base_url="https://models.example/v1", model="example", client=client
+            )
+            response = await provider.generate(
+                ModelRequest("call", "tenant", "run", ()), credential="test-only"
+            )
+            assert response.tool_calls == ()
+            assert response.finish_reason == "length"
+            assert response.usage["output_tokens"] == 4096
 
     asyncio.run(scenario())

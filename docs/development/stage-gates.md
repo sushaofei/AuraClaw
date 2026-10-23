@@ -3856,3 +3856,25 @@ MCP-Universe 隔离 Blender 尚未部署；全候选批次与 AuraX 新成绩发
 - [x] CLI 退出成功不再作为准入依据；独立校验官方单次 oracle summary、reward=1 及 CTRF 非零通过测试。
 - [x] 缺失测试报告、reward=0 负例与完整正例校验通过；真实 verifier 下载失败产物被拒绝。
 - [ ] 六个官方 oracle 全部通过；B2 整体仍未完成，正式批次尚未开始。
+
+### B2 依赖供应与真实 Runtime 连接器（#107，2026-10-23）
+
+- [x] uv 0.9.7 官方归档 SHA-256 校验，使用 BenchFlow 0.6.3 预执行钩子及本地归档下载地址；原始任务、oracle、verifier 字节未修改。
+- [x] bike-rebalance 20/20、shock-analysis-supply 9/9、weighted-gdp-calc 27/27 官方测试通过，reward 均为 1；此前环境失败保留。
+- [x] 门禁兼容官方 SDK result.json、CLI summary.json、小数 reward 和 Scala 专有日志；拒绝缺报告、身份不符、评分器错误及非满分 oracle。
+- [x] MCP 真实 Runtime → Gateway → Qwen → 隔离 Blender → 独立官方 grader 联调完成。task_0002 位于正式 cohort 外；两次联调分别 reward=0、1，均保留，后者保存场景及 grader 摘要。不计正式成绩。
+- [x] SkillsBench RPC 沙箱实际验证 UID=1000，移除 SDK 默认上传的隐藏 oracle 后再开放 shell；正式 verifier 仅评分阶段上传。
+- [x] 25 项适配器及准入回归通过，新增工具不进入生产依赖。
+- [ ] SkillsBench 其余三项 oracle 和真实 Runtime 评分联调完成；B2 尚未完成。
+- [ ] 三项正式批次、报告合同与 AuraX 发布完成；目前没有正式新成绩。
+
+SkillsBench bike-rebalance 被用于开发联调，后续报告须披露样本暴露，不宣称全体样本为未见保留集。
+Skill 工具当前为固定任务文件的参考端口，不等于生产 Skill 服务；LongMemEval 同样保留参考 Memory、
+非官方 Qwen judge、模型快照未锁定的限制说明。任务和条件不得因联调成绩更换。
+
+### 模型工具参数截断修复（B2 联调发现）
+
+- [x] Qwen 长命令达到 4096 输出 token 时，不再将 length 结束的工具碎片解析为完整 JSON。
+- [x] 保留 finish_reason=length 与用量，交由现有 Runtime 截断恢复；截断响应中的工具一律不执行。
+- [x] 未截断响应仍严格校验 JSON 参数；部分 JSON 和完整 JSON 但 length 结束两种回归均通过。
+- [x] 模型生产 Runtime 与 JSON schema 合同专项回归通过；未改变生产依赖或公开 API。

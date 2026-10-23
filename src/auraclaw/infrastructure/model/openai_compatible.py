@@ -306,7 +306,13 @@ class OpenAICompatibleProvider:
                     model=model,
                     completed_output="".join(deltas),
                     deltas=tuple(deltas),
-                    tool_calls=self._tool_calls(request, tool_fragments),
+                    # Truncated argument fragments are never executable calls. Preserve
+                    # the finish reason and usage so Runtime can recover within its budget.
+                    tool_calls=(
+                        ()
+                        if finish_reason == "length"
+                        else self._tool_calls(request, tool_fragments)
+                    ),
                     finish_reason=finish_reason,
                     usage=usage,
                 ),
