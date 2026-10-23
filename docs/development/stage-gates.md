@@ -3842,3 +3842,11 @@ LongMemEval canary 最终回执：completed，2 次 solver 调用、2 次规范�
 首次自然回答 incomplete 记录全部保留；临时 Gateway 已停止，原 Gateway 与 AuraX 健康。
 SkillsBench 六个任务包已取得固定版本并审阅官方时限（600–2700 秒），未执行 oracle。
 MCP-Universe 隔离 Blender 尚未部署；全候选批次与 AuraX 新成绩发布未完成。
+
+## Component evaluation B2 环境准备（#107，2026-10-23）
+
+- [x] 官方 BenchFlow 0.6.3 在独立 Python 3.12 环境安装；六个冻结任务通过官方结构检查及 task_digest 校验。
+- [x] 官方 Blender 4.4.3 安装包校验；专用镜像采用固定上游插件、MCP SDK 与兼容依赖，Agent 镜像不包含评分器。
+- [x] 非 root、无网络、只读根文件系统下真实 MCP 创建/查询/保存场景探针通过（13 个工具），仅环境准入，无 benchmark score。
+- [ ] SkillsBench oracle/verifier、MCP 官方评分及 Runtime canary 全部通过后完成 B2。
+- [ ] 冻结正式预算/执行顺序，执行三项完整批次并同步 AuraX；目前没有新正式成绩。

@@ -1,0 +1,25 @@
+# Build context contains the checked official Blender archive, addon.py and server.py.
+# BASE_IMAGE must be an admitted immutable image ID or digest, never a floating tag.
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    xvfb xauth xz-utils libgl1 libegl1 libglx-mesa0 libgl1-mesa-dri \
+    libglib2.0-0 libxrender1 libxext6 libxi6 libxfixes3 libxkbcommon0 \
+    libsm6 libice6 libxxf86vm1 libxrandr2 libxcursor1 libxinerama1 \
+    && rm -rf /var/lib/apt/lists/*
+COPY blender-4.4.3-linux-x64.tar.xz /tmp/blender.tar.xz
+RUN mkdir -p /opt/blender && tar -xJf /tmp/blender.tar.xz --strip-components=1 -C /opt/blender \
+    && rm /tmp/blender.tar.xz && /opt/blender/blender --version
+# Dependencies are installed from a predownloaded wheelhouse, with no build network.
+COPY wheels /tmp/wheels
+COPY requirements.txt /tmp/requirements.txt
+RUN pip install --no-index --find-links=/tmp/wheels -r /tmp/requirements.txt \
+    && /opt/blender/4.4/python/bin/python3.11 -m ensurepip \
+    && /opt/blender/4.4/python/bin/python3.11 -m pip install --no-index --find-links=/tmp/wheels requests==2.32.4 \
+    && rm -rf /tmp/wheels
+COPY addon.py server.py start.py /opt/adapter/
+RUN chmod 0444 /opt/adapter/*.py && mkdir -p /workspace && chown 10001:10001 /workspace
+ENV HOME=/tmp/home DISPLAY=:99 LIBGL_ALWAYS_SOFTWARE=1 PYTHONUNBUFFERED=1
+USER 10001:10001
+WORKDIR /workspace
+ENTRYPOINT ["python", "/opt/adapter/start.py"]

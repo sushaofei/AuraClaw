@@ -102,3 +102,16 @@ AuraX 已开始增加三套基准名称、简介、官方链接及正确的子�
 检索条件使用独立词法参考 Memory（top-5），不是生产 Memory 服务；不依赖额外 embedding 模型。
 输入字节上限仅用于准入拒绝，不是 token 计数，不静默截断；full-history 仍需额外模型窗口核验。
 600 秒超时由 worker 和外部进程监督共同限制。canary 选用候选 cohort 之外的题目，不回填正式成绩。
+
+### Blender 独立环境
+
+`benchmarks/containers/blender/` 提供专用镜像及真实 MCP 环境探针。
+固定 Blender 4.4.3、上游 addon/server 和 MCP SDK；镜像仅包含任务执行依赖。
+评分器、oracle、模型凭据和宿主目录不进入容器。运行默认非 root、只读根、
+无网络、无 capabilities，并限制 CPU/内存/进程数；工作区为每次新建的 tmpfs。
+MCP initialize / list_tools / 创建与读取物体 / 保存场景通过只能证明环境准入，
+仍须完成官方 Task/evaluator 与 AuraClaw Runtime canary 后才能开启正式批次。
+
+SkillsBench 的固定 BenchFlow 0.6.3 要求 Python >=3.12；官方本地后端使用
+Docker Engine 与 Docker Compose。Podman 能运行 Blender 不代表其已满足该后端。
+正式执行前需运行官方结构检查、官方 task_digest 比对，再执行 oracle/verifier。
