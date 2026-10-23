@@ -3850,3 +3850,9 @@ MCP-Universe 隔离 Blender 尚未部署；全候选批次与 AuraX 新成绩发
 - [x] 非 root、无网络、只读根文件系统下真实 MCP 创建/查询/保存场景探针通过（13 个工具），仅环境准入，无 benchmark score。
 - [ ] SkillsBench oracle/verifier、MCP 官方评分及 Runtime canary 全部通过后完成 B2。
 - [ ] 冻结正式预算/执行顺序，执行三项完整批次并同步 AuraX；目前没有新正式成绩。
+
+### SkillsBench oracle 回执门禁（#107）
+
+- [x] CLI 退出成功不再作为准入依据；独立校验官方单次 oracle summary、reward=1 及 CTRF 非零通过测试。
+- [x] 缺失测试报告、reward=0 负例与完整正例校验通过；真实 verifier 下载失败产物被拒绝。
+- [ ] 六个官方 oracle 全部通过；B2 整体仍未完成，正式批次尚未开始。
