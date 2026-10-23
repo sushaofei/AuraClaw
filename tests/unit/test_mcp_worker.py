@@ -1,4 +1,5 @@
 """MCP grader transport errors must not become model failures."""
+
 import importlib.util
 import json
 import sys
@@ -44,3 +45,15 @@ async def test_missing_artifact_records_official_file_check_failure(worker, tmp_
     port.process = absent
     assert await port.grade(tmp_path, 2) == 0.0
     assert json.loads((tmp_path / "attempt.grader.json").read_text()) == {"file_exists": False}
+
+
+def test_public_assets_do_not_grant_grader_network_or_inherit_host_proxy(worker, tmp_path):
+    port = worker.BlenderTransport([], "sha256:" + "a" * 64, tmp_path / "attempt.json")
+    flags = port.agent_isolation("eval-assets", "http://192.168.254.1:8080")
+    assert "--network=eval-assets" in flags
+    assert "--http-proxy=false" in flags
+    assert port.isolation()[0] == "--network=none"
+    with pytest.raises(ValueError):
+        port.agent_isolation("eval-assets", "http://secret@192.168.254.1:8080")
+    with pytest.raises(ValueError):
+        port.agent_isolation("eval-assets", None)

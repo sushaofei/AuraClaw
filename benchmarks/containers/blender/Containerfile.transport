@@ -1,0 +1,8 @@
+# Extend an already admitted immutable Blender image; no package downloads.
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+USER 0
+# Official MCP socket timeout is 15s, shorter than a multi-map 2K download.
+# Change only transport waiting; task/tool schemas and graders stay unchanged.
+RUN python -c 'from pathlib import Path; import hashlib,json; p=Path("/opt/adapter/server.py"); s=p.read_text(); assert s.count("settimeout(15.0)")==2; t=s.replace("settimeout(15.0)","settimeout(120.0)"); p.write_text(t); p.chmod(0o444); Path("/opt/adapter/transport-receipt.json").write_text(json.dumps({"source_sha256":hashlib.sha256(s.encode()).hexdigest(),"runtime_sha256":hashlib.sha256(t.encode()).hexdigest(),"socket_timeout_seconds":120,"task_or_grader_modified":False}))'
+USER 10001:10001

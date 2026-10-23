@@ -35,7 +35,7 @@ async def run_job(job):
         record = json.loads(await asyncio.to_thread(output.read_text))
         if any(record[k] != job["record"][k] for k in ("task_id", "trial", "config")):
             raise ValueError("Existing attempt differs from frozen schedule")
-        return
+        return record
     if started.exists():
         # A crash after dispatch may already have consumed a model attempt.
         # Do not silently rerun it or replace its incomplete evidence.
@@ -77,22 +77,44 @@ async def run_job(job):
         ),
         flush=True,
     )
+    return record
 
 
 async def execute(path):
+    hold = path.parent / "publication-hold.json"
+    if hold.exists():
+        raise RuntimeError("Batch is held for operator review; preserve its evidence")
     plan = json.loads(path.read_text())
     jobs = plan["jobs"]
     if len({j["output"] for j in jobs}) != len(jobs):
         raise ValueError("Duplicate output in schedule")
 
+    stopped = asyncio.Event()
+
     # Each lane is serial; independent benchmark lanes may share the Gateway.
     async def lane(name):
         for job in jobs:
+            if stopped.is_set():
+                return
             if job["lane"] == name:
-                await run_job(job)
+                record = await run_job(job)
+                if record.get("error_type") == "ModelAuthenticationError":
+                    if not stopped.is_set():
+                        stopped.set()
+                        write_private(
+                            hold,
+                            {
+                                "publication_allowed": False,
+                                "reason": "ModelAuthenticationError",
+                                "first_failed_output": job["output"],
+                            },
+                        )
+                    return
                 await asyncio.sleep(plan["between_attempts_seconds"])
 
     await asyncio.gather(*(lane(name) for name in sorted({j["lane"] for j in jobs})))
+    if stopped.is_set():
+        raise RuntimeError("Model authentication failed; no further attempts dispatched")
     print("Complete scheduled attempts: " + str(len(jobs)), flush=True)
 
 

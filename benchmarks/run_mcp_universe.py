@@ -8,9 +8,11 @@ import base64
 import hashlib
 import json
 import os
+import re
 import shlex
 from dataclasses import asdict
 from pathlib import Path
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from mcp import ClientSession, StdioServerParameters
@@ -65,6 +67,38 @@ class BlenderTransport:
             "--pids-limit=256",
             "--tmpfs=/tmp:rw,nosuid,nodev,size=1g,mode=1777",
             "--tmpfs=/workspace:rw,nosuid,nodev,size=512m,mode=1777",
+        ]
+
+    def agent_isolation(self, network: str | None, proxy: str | None) -> list[str]:
+        flags = self.isolation() + ["--http-proxy=false"]
+        if network is None and proxy is None:
+            return flags
+        endpoint = urlsplit(proxy or "")
+        if (
+            not network
+            or not re.fullmatch(r"[a-z][a-z0-9-]{0,62}", network)
+            or endpoint.scheme != "http"
+            or not endpoint.hostname
+            or not endpoint.port
+            or endpoint.username
+            or endpoint.password
+            or endpoint.query
+            or endpoint.fragment
+            or endpoint.path not in ("", "/")
+        ):
+            raise ValueError(
+                "Asset access requires an admitted internal network and credential-free proxy"
+            )
+        # Host admission must prove this network has no direct egress and only
+        # permits the domain-allowlisted proxy. Grading always remains offline.
+        flags[0] = "--network=" + network
+        return flags + [
+            "--env=http_proxy=" + proxy,
+            "--env=https_proxy=" + proxy,
+            "--env=HTTP_PROXY=" + proxy,
+            "--env=HTTPS_PROXY=" + proxy,
+            "--env=NO_PROXY=127.0.0.1,localhost",
+            "--env=no_proxy=127.0.0.1,localhost",
         ]
 
     async def call(self, server: str, tool: str, arguments: dict) -> str:
@@ -170,7 +204,7 @@ async def execute(args: argparse.Namespace) -> None:
             "-i",
             "--name",
             transport.name,
-            *transport.isolation(),
+            *transport.agent_isolation(args.asset_network, args.asset_proxy),
             args.image,
         ]
     )
@@ -235,6 +269,7 @@ async def execute(args: argparse.Namespace) -> None:
                     config=asdict(config),
                     run_scope=args.scope,
                     model_snapshot_locked=False,
+                    network_scope="restricted-public-assets" if args.asset_network else "offline",
                 )
                 write_private(args.output.with_suffix(".trace.json"), trace)
                 write_private(args.output, record)
@@ -258,6 +293,8 @@ def main() -> None:
         p.add_argument("--" + name, type=Path, required=True)
     p.add_argument("--plan", type=Path)
     p.add_argument("--transport", type=Path)
+    p.add_argument("--asset-network")
+    p.add_argument("--asset-proxy")
     for name in ("image", "model", "revision", "gateway-url"):
         p.add_argument("--" + name, required=True)
     p.add_argument("--task-id", type=int, required=True)
