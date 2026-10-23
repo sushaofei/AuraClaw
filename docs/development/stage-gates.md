@@ -3840,22 +3840,25 @@ B1 最终验证：完整回归 1016 passed / 74 skipped；54 项评测专项；M
 LongMemEval canary 最终回执：completed，2 次 solver 调用、2 次规范动作，Qwen judge usage 已记录。
 参考 Memory / 非官方 judge 标记保留，单题不作为正式基准成绩。初次格式与归属准入诊断、
 首次自然回答 incomplete 记录全部保留；临时 Gateway 已停止，原 Gateway 与 AuraX 健康。
-SkillsBench 六个任务包已取得固定版本并审阅官方时限（600–2700 秒），未执行 oracle。
-MCP-Universe 隔离 Blender 尚未部署；全候选批次与 AuraX 新成绩发布未完成。
+SkillsBench 六项固定任务包的官方 oracle/verifier 已通过；MCP-Universe 隔离 Blender 与三个
+Runtime canary 均已完成。全量正式批次及本轮结果发布仍未完成。
 
 ## Component evaluation B2 环境准备（#107，2026-10-23）
 
 - [x] 官方 BenchFlow 0.6.3 在独立 Python 3.12 环境安装；六个冻结任务通过官方结构检查及 task_digest 校验。
 - [x] 官方 Blender 4.4.3 安装包校验；专用镜像采用固定上游插件、MCP SDK 与兼容依赖，Agent 镜像不包含评分器。
 - [x] 非 root、无网络、只读根文件系统下真实 MCP 创建/查询/保存场景探针通过（13 个工具），仅环境准入，无 benchmark score。
-- [ ] SkillsBench oracle/verifier、MCP 官方评分及 Runtime canary 全部通过后完成 B2。
-- [ ] 冻结正式预算/执行顺序，执行三项完整批次并同步 AuraX；目前没有新正式成绩。
+- [x] SkillsBench oracle/verifier、MCP 官方评分及三项 Runtime canary 全部通过，B2 完成。
+- [x] 冻结正式预算、执行顺序、样本和条件；原计划为完整 162 次。
+- [ ] 完成三项有效完整批次、审计覆盖与评分，并将报告同步 AuraX。
 
 ### SkillsBench oracle 回执门禁（#107）
 
 - [x] CLI 退出成功不再作为准入依据；独立校验官方单次 oracle summary、reward=1 及 CTRF 非零通过测试。
 - [x] 缺失测试报告、reward=0 负例与完整正例校验通过；真实 verifier 下载失败产物被拒绝。
-- [ ] 六个官方 oracle 全部通过；B2 整体仍未完成，正式批次尚未开始。
+- [x] 六个官方 oracle 全部通过：bike-rebalance 20/20、shock-analysis-supply 9/9、
+  weighted-gdp-calc 27/27、dialogue-parser 6/6、data-to-d3 15/15、
+  python-scala-translation 10/10；官方 reward 均为 1，固定任务摘要未变。
 
 ### B2 依赖供应与真实 Runtime 连接器（#107，2026-10-23）
 
@@ -3865,7 +3868,8 @@ MCP-Universe 隔离 Blender 尚未部署；全候选批次与 AuraX 新成绩发
 - [x] MCP 真实 Runtime → Gateway → Qwen → 隔离 Blender → 独立官方 grader 联调完成。task_0002 位于正式 cohort 外；两次联调分别 reward=0、1，均保留，后者保存场景及 grader 摘要。不计正式成绩。
 - [x] SkillsBench RPC 沙箱实际验证 UID=1000，移除 SDK 默认上传的隐藏 oracle 后再开放 shell；正式 verifier 仅评分阶段上传。
 - [x] 25 项适配器及准入回归通过，新增工具不进入生产依赖。
-- [ ] SkillsBench 其余三项 oracle 和真实 Runtime 评分联调完成；B2 尚未完成。
+- [x] 六项 SkillsBench oracle 及真实 Runtime 评分联调完成；Bike、Shock、GDP 的
+  环境超时/依赖失败均保留，修复后以当前官方准入门复核到完整 reward 与 verifier 证据。
 - [ ] 三项正式批次、报告合同与 AuraX 发布完成；目前没有正式新成绩。
 
 SkillsBench bike-rebalance 被用于开发联调，后续报告须披露样本暴露，不宣称全体样本为未见保留集。
@@ -3886,7 +3890,7 @@ Skill 工具当前为固定任务文件的参考端口，不等于生产 Skill �
 - [x] 固定预算、样本暴露、参考端口、替代 judge 和模型别名限制写入执行协议。
 - [x] 单次调度保留进程失败分母，拒绝不确定重复派发；Skill 路径隔离、oracle 和调度回归通过。
 - [ ] B3：执行冻结的 162 次完整批次并审计覆盖与评分。
-- [ ] B4：AuraX schema v3 条件结果发布、浏览器验证与 issue 更新完成。
+- [ ] B4：将有效完整批次结果发布到已部署的 AuraX schema v3，并完成浏览器核验与 issue 更新。
 
 ### B3 故障止损与环境修正（#107）
 
@@ -3896,3 +3900,9 @@ Skill 工具当前为固定任务文件的参考端口，不等于生产 Skill �
 - [x] 内部网络实际验证 PolyHaven API 与下载成功，其他域名、直接外网和宿主 SSH 被拒绝。
 - [ ] 模型服务侧恢复现有 Qwen 推理权限后重做准入，完成有效的完整批次及结果发布。
 - [x] 官方 MCP 经受限代理完成 1K HDRI 与 2K 多贴图真实下载和 Blender 导入；120 秒 socket 传输镜像复验通过，无模型成绩。
+
+AuraX schema v3、条件对照展示和 held-batch 发布拒绝已部署并通过浏览器/发布器验证；
+由于当前正式批次被模型服务权限错误熔断，尚无可发布的本轮正式成绩。原 91/162
+执行记录作为停用诊断保留；权限恢复后须重新准入并运行新的完整 162 次批次，不拼接旧批次。
+2026-10-23 16:33 +08:00 再次进行最小推理准入检查：模型列表返回 200，但推理仍返回
+403 `AccessDenied.Unpurchased`。因此维持 publication hold，未继续消耗正式任务预算或发布结果。
