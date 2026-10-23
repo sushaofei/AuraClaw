@@ -7,9 +7,11 @@ import asyncio
 import hashlib
 import importlib.metadata
 import json
+import re
 from pathlib import Path
 
 from benchflow._utils.task_authoring import task_digest
+from benchflow.environment.manifest import EnvironmentManifest
 from benchflow.sdk import SDK
 from verify_skill_oracle import verify
 
@@ -53,6 +55,8 @@ def dependency_hook(archive: Path, task_name: str):
 
 
 async def execute(args):
+    if args.image and not re.fullmatch(r"sha256:[0-9a-f]{64}", args.image):
+        raise ValueError("Prebuilt admission requires an immutable image ID")
     plan = json.loads(args.plan.read_text())
     item = next(i for i in plan["task_packages"] if i["name"] == args.task.name)
     if task_digest(args.task) != item["digest"]:
@@ -60,6 +64,9 @@ async def execute(args):
     args.output.mkdir(exist_ok=False, parents=True, mode=0o700)
     hooks = [dependency_hook(args.uv_archive, args.task.name)] if args.task.name in UV_TASKS else []
     await SDK().run(
+        environment_manifest=EnvironmentManifest(name="skillsbench-admitted", image=args.image)
+        if args.image
+        else None,
         task_path=args.task,
         agent="oracle",
         environment="docker",
@@ -83,6 +90,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     for name in ("plan", "task", "uv-archive", "output"):
         p.add_argument("--" + name, required=True, type=Path)
+    p.add_argument("--image")
     asyncio.run(execute(p.parse_args()))
 
 

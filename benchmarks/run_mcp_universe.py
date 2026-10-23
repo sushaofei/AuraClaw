@@ -148,6 +148,17 @@ async def execute(args: argparse.Namespace) -> None:
         f"mcpuniverse/benchmark/configs/mcpuniverse/3d_design/blender_task_{args.task_id:04d}.json"
     )
     spec = json.loads(task.read_text())
+    if args.scope == "controlled-batch" and args.plan is None:
+        raise ValueError("Controlled batches require the frozen task plan")
+    if args.plan:
+        plan = json.loads(args.plan.read_text())
+        if hashlib.sha256(task.read_bytes()).hexdigest() != plan["task_sha256"].get(task.stem):
+            raise ValueError("Task differs from frozen MCP cohort")
+        fingerprint = hashlib.sha256(
+            json.dumps(plan["task_sha256"], sort_keys=True).encode()
+        ).hexdigest()
+    else:
+        fingerprint = hashlib.sha256(task.read_bytes()).hexdigest()
     transport = BlenderTransport(
         json.loads(args.transport.read_text()) if args.transport else [], args.image, args.output
     )
@@ -171,7 +182,7 @@ async def execute(args: argparse.Namespace) -> None:
         "mcpuniverse",
         args.model,
         args.revision,
-        revision,
+        "sha256:" + fingerprint,
         max_actions=30,
         max_output_tokens=32768,
         timeout_seconds=600,
@@ -245,6 +256,7 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     for name in ("upstream-root", "output"):
         p.add_argument("--" + name, type=Path, required=True)
+    p.add_argument("--plan", type=Path)
     p.add_argument("--transport", type=Path)
     for name in ("image", "model", "revision", "gateway-url"):
         p.add_argument("--" + name, required=True)

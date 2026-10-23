@@ -3878,3 +3878,12 @@ Skill 工具当前为固定任务文件的参考端口，不等于生产 Skill �
 - [x] 保留 finish_reason=length 与用量，交由现有 Runtime 截断恢复；截断响应中的工具一律不执行。
 - [x] 未截断响应仍严格校验 JSON 参数；部分 JSON 和完整 JSON 但 length 结束两种回归均通过。
 - [x] 模型生产 Runtime 与 JSON schema 合同专项回归通过；未改变生产依赖或公开 API。
+
+### B2 官方评分与 Runtime 闭环（#107）
+
+- [x] 六个冻结任务 oracle 全部通过（20/9/27/6/15/10 项官方测试），任务和 verifier 原文不变。
+- [x] SkillsBench Runtime canary 完成并保留 reward=0；MCP 正负评分与真实 canary 完成；LongMemEval 全历史输入及同答案 judge 恢复完成。
+- [x] 固定预算、样本暴露、参考端口、替代 judge 和模型别名限制写入执行协议。
+- [x] 单次调度保留进程失败分母，拒绝不确定重复派发；Skill 路径隔离、oracle 和调度回归通过。
+- [ ] B3：执行冻结的 162 次完整批次并审计覆盖与评分。
+- [ ] B4：AuraX schema v3 条件结果发布、浏览器验证与 issue 更新完成。

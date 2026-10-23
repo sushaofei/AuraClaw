@@ -16,6 +16,7 @@ from uuid import uuid4
 from plan_components import checked_checkout
 
 from auraclaw.composition.evaluation import run_benchmark_episode
+from auraclaw.contracts.errors import ModelRateLimitError
 from auraclaw.evaluation.components.catalog import (
     COMPONENT_BENCHMARKS,
     LONGMEMEVAL_DATA_SHA256,
@@ -80,16 +81,39 @@ async def execute(args: argparse.Namespace) -> None:
             abstention=item.question_id.endswith("_abs"),
         )
         key = "judge_" + uuid4().hex
-        response = await client.generate(
-            ModelRequest(
-                key,
-                "benchmark",
-                key,
-                ({"role": "user", "content": prompt},),
-                policy=ModelPolicy(preferred_model=args.judge),
-                max_output_tokens=64,
-            )
+        request = ModelRequest(
+            key,
+            "benchmark",
+            key,
+            ({"role": "user", "content": prompt},),
+            policy=ModelPolicy(preferred_model=args.judge),
+            max_output_tokens=64,
         )
+        # Persist the fixed answer before judging. Retry only rate-limited judge
+        # requests, never regenerate the solver answer or select a better verdict.
+        write_private(
+            args.output.with_suffix(".judge-input.json"),
+            {
+                "question_id": item.question_id,
+                "answer": answer,
+                "answer_sha256": hashlib.sha256(answer.encode()).hexdigest(),
+            },
+        )
+        for attempt in range(3):
+            try:
+                response = await client.generate(request)
+                break
+            except ModelRateLimitError:
+                write_private(
+                    args.output.with_suffix(f".judge-rate-limit-{attempt}.json"),
+                    {
+                        "attempt": attempt,
+                        "retry_delay_seconds": 45 if attempt < 2 else None,
+                    },
+                )
+                if attempt == 2:
+                    raise
+                await asyncio.sleep(45)
         judge_usage.update(response.usage)
         label = response.completed_output.strip().lower().rstrip(".")
         if label not in {"yes", "no"}:
@@ -110,7 +134,7 @@ async def execute(args: argparse.Namespace) -> None:
                 client,
                 config,
                 task_id=case.question_id,
-                trial=0,
+                trial=args.trial,
                 profile="auraclaw-longmemeval-reference-" + args.condition + "-v1",
             ),
             timeout=600,
@@ -118,6 +142,8 @@ async def execute(args: argparse.Namespace) -> None:
         record.update(
             {
                 "validation_scope": "reference-adapter",
+                "run_scope": args.scope,
+                "model_snapshot_locked": False,
                 "dataset_revision_verified": True,
                 "condition": args.condition,
                 "judge": args.judge,
@@ -157,6 +183,8 @@ def main() -> None:
     p.add_argument(
         "--condition", choices=COMPONENT_BENCHMARKS["longmemeval"].conditions, required=True
     )
+    p.add_argument("--trial", type=int, default=0)
+    p.add_argument("--scope", choices=("canary", "controlled-batch"), default="canary")
     p.add_argument("--max-input-bytes", type=int, default=800000)
     asyncio.run(execute(p.parse_args()))
 

@@ -115,3 +115,24 @@ MCP initialize / list_tools / 创建与读取物体 / 保存场景通过只能�
 SkillsBench 的固定 BenchFlow 0.6.3 要求 Python >=3.12；官方本地后端使用
 Docker Engine 与 Docker Compose。Podman 能运行 Blender 不代表其已满足该后端。
 正式执行前需运行官方结构检查、官方 task_digest 比对，再执行 oracle/verifier。
+
+## B2 验收与首轮执行冻结（2026-10-23）
+
+六项官方 oracle 全部通过：bike 20/20、shock 9/9、GDP 27/27、dialogue 6/6、
+data-to-d3 15/15、Scala 10/10。固定任务 digest 不变；Scala 镜像仅替换依赖传输
+（已校验 Coursier 归档、Maven/JVM 代理配置），不改任务或评分器。环境失败独立保留。
+SkillsBench Runtime canary 完成，19/20 测试通过而任务 reward=0，验证评分链路，
+不计正式成绩；bike-rebalance 标记为 development-exposed。
+
+首轮仍为原计划 162 次，不换题、不按成绩重抽：LongMemEval 108、SkillsBench 36、MCP 18。
+各基准串行执行、基准之间最多三个并行通道，每次间隔 3 秒；每个样本独立环境。
+LongMemEval 600 秒/30 动作/24576 总输出/4096 单轮；SkillsBench 遵循任务官方
+600–2700 秒/30 动作/49152 总输出/8192 单轮；MCP 600 秒/30 动作/32768 总输出/4096 单轮。
+SkillsBench shell 每条限时 120 秒、输出 32000 字符；参考 Skill 文本每部分上限 256KB。
+LongMemEval 输入超过 800000 字节时拒绝，不截断；已实测最长候选之外的全历史输入
+117518 input tokens 成功进入模型。Qwen 仍为可变别名，不能视为不可变上下文配置保证。
+
+LongMemEval 独立 judge 限流最多重试两次、间隔 45 秒，只评同一个已保存答案；不重跑 solver。
+正式调度在发出任务前记录 started，完成后保留退出状态；崩溃未决任务拒绝自动重复，
+子进程失败保留 infra_error/null reward，不能从分母删除。全部原始 trace/回答/评分日志
+只留在私有评测目录，公开报告仅包含白名单汇总字段。无新生产依赖。
